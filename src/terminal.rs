@@ -1,0 +1,334 @@
+//! A real terminal inside the app: a shell in a pseudo-terminal (portable-pty), its output
+//! decoded into a screen grid (vt100), so full-screen programs such as Claude Code or Codex
+//! run in it as they would in Terminal.app. The window draws the grid (app/term_ui.rs) and
+//! sends the keys typed into it.
+
+use portable_pty::{Child, CommandBuilder, MasterPty, PtySize, native_pty_system};
+use std::io::{Read, Write};
+use std::num::NonZeroU16;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex, OnceLock};
+
+/// The person's shell PATH, looked up once (see `sync::shell_path`).
+pub fn path() -> &'static str {
+    static P: OnceLock<String> = OnceLock::new();
+    P.get_or_init(crate::sync::shell_path)
+}
+
+pub struct Term {
+    pub title: String,
+    pub cwd: String,
+    /// What the shell was asked to run first (None: a plain shell).
+    pub cmd: Option<String>,
+    /// Mouse selection, in screen cells: (row, col) where it started and where it ends.
+    pub selection: Option<((u16, u16), (u16, u16))>,
+    /// Text to type once the program had time to start (sent from the side panel).
+    pub pending: Option<(std::time::Instant, String)>,
+    parser: Arc<Mutex<vt100::Parser>>,
+    writer: Box<dyn Write + Send>,
+    master: Box<dyn MasterPty + Send>,
+    child: Box<dyn Child + Send + Sync>,
+    exited: Arc<AtomicBool>,
+    size: (u16, u16),
+}
+
+fn nz(n: u16) -> NonZeroU16 {
+    NonZeroU16::new(n.max(1)).unwrap()
+}
+
+impl Term {
+    /// A login shell in `cwd`; with `cmd`, the shell runs it first, then stays open.
+    pub fn spawn(title: &str, cwd: &str, cmd: Option<&str>, on_output: impl Fn() + Send + 'static) -> Result<Term, String> {
+        let (rows, cols) = (24u16, 80u16);
+        let pair = native_pty_system()
+            .openpty(PtySize { rows, cols, pixel_width: 0, pixel_height: 0 })
+            .map_err(|e| e.to_string())?;
+        #[cfg(windows)]
+        let c = {
+            // PowerShell; with a command, it runs it then stays open.
+            let mut c = CommandBuilder::new("powershell.exe");
+            c.arg("-NoLogo");
+            if let Some(cmd) = cmd {
+                c.args(["-NoExit", "-Command", cmd]);
+            }
+            c
+        };
+        #[cfg(not(windows))]
+        let c = {
+            let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".into());
+            let mut c = CommandBuilder::new(&shell);
+            match cmd {
+                Some(cmd) => {
+                    c.args(["-l", "-c", &format!("{cmd}; exec {} -l", crate::sessions::shell_quote(&shell))]);
+                }
+                None => c.arg("-l"),
+            }
+            c
+        };
+        let mut c = c;
+        let dir = crate::project::normalize_folder(cwd);
+        if dir.is_dir() {
+            c.cwd(&dir);
+        } else if let Some(h) = dirs::home_dir() {
+            c.cwd(h);
+        }
+        c.env("TERM", "xterm-256color");
+        c.env("COLORTERM", "truecolor");
+        c.env("PATH", path());
+        c.env("TERM_PROGRAM", "orchestra");
+        if cmd.is_some() {
+            // The agents use the account the person logged in with, not stray API keys.
+            for k in crate::sync::API_KEY_VARS {
+                c.env_remove(k);
+            }
+        }
+        let child = pair.slave.spawn_command(c).map_err(|e| e.to_string())?;
+        drop(pair.slave);
+        let mut reader = pair.master.try_clone_reader().map_err(|e| e.to_string())?;
+        let writer = pair.master.take_writer().map_err(|e| e.to_string())?;
+        let parser = Arc::new(Mutex::new(vt100::Parser::new(nz(rows), nz(cols), 5000)));
+        let exited = Arc::new(AtomicBool::new(false));
+        let (p2, e2) = (parser.clone(), exited.clone());
+        std::thread::Builder::new()
+            .name("pty".into())
+            .spawn(move || {
+                let mut buf = [0u8; 16 * 1024];
+                loop {
+                    match reader.read(&mut buf) {
+                        Ok(0) | Err(_) => break,
+                        Ok(n) => {
+                            p2.lock().unwrap().process(&buf[..n]);
+                            on_output();
+                        }
+                    }
+                }
+                e2.store(true, Ordering::Relaxed);
+                on_output();
+            })
+            .map_err(|e| e.to_string())?;
+        Ok(Term {
+            title: title.to_string(),
+            cwd: cwd.to_string(),
+            cmd: cmd.map(String::from),
+            selection: None,
+            pending: None,
+            parser,
+            writer,
+            master: pair.master,
+            child,
+            exited,
+            size: (rows, cols),
+        })
+    }
+
+    /// The selected text, if any.
+    pub fn selected_text(&self) -> Option<String> {
+        let ((r0, c0), (r1, c1)) = ordered(self.selection?);
+        if (r0, c0) == (r1, c1) {
+            return None;
+        }
+        Some(self.with_screen(|s| s.contents_between(r0, c0, r1, c1 + 1)))
+    }
+
+    pub fn write(&mut self, bytes: &[u8]) {
+        self.selection = None;
+        // Typing brings the view back to the live screen.
+        self.parser.lock().unwrap().screen_mut().set_scrollback(0);
+        let _ = self.writer.write_all(bytes);
+        let _ = self.writer.flush();
+    }
+
+    /// Paste text, wrapped in bracketed-paste markers when the program asked for them.
+    pub fn paste(&mut self, text: &str) {
+        let bracketed = self.parser.lock().unwrap().screen().bracketed_paste();
+        let text = text.replace("\r\n", "\n").replace('\n', "\r");
+        if bracketed {
+            self.write(format!("\x1b[200~{text}\x1b[201~").as_bytes());
+        } else {
+            self.write(text.as_bytes());
+        }
+    }
+
+    pub fn resize(&mut self, rows: u16, cols: u16) {
+        let (rows, cols) = (rows.max(2), cols.max(10));
+        if (rows, cols) == self.size {
+            return;
+        }
+        self.size = (rows, cols);
+        self.parser.lock().unwrap().set_size(nz(rows), nz(cols));
+        let _ = self.master.resize(PtySize { rows, cols, pixel_width: 0, pixel_height: 0 });
+    }
+
+    pub fn with_screen<R>(&self, f: impl FnOnce(&vt100::Screen) -> R) -> R {
+        f(self.parser.lock().unwrap().screen())
+    }
+
+    /// Move through the history: positive goes back in time.
+    pub fn scroll(&mut self, rows: i32) {
+        self.selection = None;
+        let mut p = self.parser.lock().unwrap();
+        let cur = p.screen().scrollback() as i32;
+        p.screen_mut().set_scrollback((cur + rows).max(0) as usize);
+    }
+
+    pub fn exited(&self) -> bool {
+        self.exited.load(Ordering::Relaxed)
+    }
+
+    /// The whole screen as text (for "copy").
+    pub fn text(&self) -> String {
+        self.with_screen(|s| s.contents())
+    }
+}
+
+/// A selection from its start to its end, whichever way it was dragged.
+pub fn ordered(sel: ((u16, u16), (u16, u16))) -> ((u16, u16), (u16, u16)) {
+    if sel.0 <= sel.1 { sel } else { (sel.1, sel.0) }
+}
+
+/// What to run to bring a saved terminal back: agents resume their conversation
+/// (`claude --resume <id>` keeps its id; a plain `claude` continues the folder's latest one).
+pub fn restore_cmd(cmd: Option<&str>) -> Option<String> {
+    let c = cmd?.trim();
+    let first = c.split_whitespace().next().unwrap_or("");
+    Some(match first {
+        "claude" if c.contains("--resume") || c.contains("--continue") => c.to_string(),
+        "claude" => "claude --continue".to_string(),
+        "codex" if c.starts_with("codex resume") => c.to_string(),
+        "codex" => "codex resume --last".to_string(),
+        _ => c.to_string(),
+    })
+}
+
+impl Drop for Term {
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+    }
+}
+
+/// The bytes a key sends, as xterm does. `app_cursor`: the program asked for the
+/// "application" arrow keys (`ESC O A` instead of `ESC [ A`).
+pub fn key_bytes(key: egui_keys::Key, ctrl: bool, alt: bool, shift: bool, app_cursor: bool) -> Option<Vec<u8>> {
+    use egui_keys::Key as K;
+    let arrow = |c: char| {
+        let mods = 1 + (shift as u8) + 2 * (alt as u8) + 4 * (ctrl as u8);
+        if mods > 1 {
+            format!("\x1b[1;{mods}{c}").into_bytes()
+        } else if app_cursor {
+            format!("\x1bO{c}").into_bytes()
+        } else {
+            format!("\x1b[{c}").into_bytes()
+        }
+    };
+    let b: Vec<u8> = match key {
+        K::Enter => {
+            if alt || shift {
+                // Newline inside the prompt (Claude Code: Option+Entrée).
+                b"\x1b\r".to_vec()
+            } else {
+                b"\r".to_vec()
+            }
+        }
+        K::Tab => if shift { b"\x1b[Z".to_vec() } else { b"\t".to_vec() },
+        K::Backspace => if alt { b"\x1b\x7f".to_vec() } else { b"\x7f".to_vec() },
+        K::Escape => b"\x1b".to_vec(),
+        K::ArrowUp => arrow('A'),
+        K::ArrowDown => arrow('B'),
+        K::ArrowRight => arrow('C'),
+        K::ArrowLeft => arrow('D'),
+        K::Home => b"\x1b[H".to_vec(),
+        K::End => b"\x1b[F".to_vec(),
+        K::PageUp => b"\x1b[5~".to_vec(),
+        K::PageDown => b"\x1b[6~".to_vec(),
+        K::Delete => b"\x1b[3~".to_vec(),
+        K::Insert => b"\x1b[2~".to_vec(),
+        other if ctrl => {
+            // Ctrl+letter → 0x01..0x1a.
+            let name = other.name();
+            let c = name.chars().next()?;
+            if name.len() == 1 && c.is_ascii_alphabetic() {
+                vec![(c.to_ascii_uppercase() as u8) - b'A' + 1]
+            } else {
+                return None;
+            }
+        }
+        _ => return None,
+    };
+    Some(b)
+}
+
+/// Re-exported so the key table above can be tested without a window.
+pub mod egui_keys {
+    pub use eframe::egui::Key;
+}
+
+/// A colour of the 256-colour palette, as RGB.
+pub fn palette(i: u8, dark: bool) -> (u8, u8, u8) {
+    const BASE_DARK: [(u8, u8, u8); 16] = [
+        (40, 40, 40), (229, 83, 75), (110, 190, 112), (230, 190, 90), (88, 150, 230), (190, 120, 220), (80, 190, 200), (210, 210, 210),
+        (110, 110, 110), (255, 120, 110), (140, 220, 140), (250, 215, 120), (120, 175, 255), (215, 150, 240), (110, 215, 225), (245, 245, 245),
+    ];
+    const BASE_LIGHT: [(u8, u8, u8); 16] = [
+        (30, 30, 30), (200, 40, 40), (40, 140, 60), (170, 120, 0), (30, 90, 200), (150, 60, 180), (20, 140, 150), (190, 190, 190),
+        (100, 100, 100), (230, 70, 60), (60, 170, 80), (200, 150, 20), (60, 120, 230), (180, 90, 210), (40, 170, 180), (250, 250, 250),
+    ];
+    match i {
+        0..=15 => if dark { BASE_DARK[i as usize] } else { BASE_LIGHT[i as usize] },
+        16..=231 => {
+            let n = i - 16;
+            let v = |x: u8| if x == 0 { 0 } else { 55 + x * 40 };
+            (v(n / 36), v((n / 6) % 6), v(n % 6))
+        }
+        _ => {
+            let g = 8 + (i - 232) * 10;
+            (g, g, g)
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use egui_keys::Key;
+
+    #[test]
+    fn keys() {
+        assert_eq!(key_bytes(Key::Enter, false, false, false, false), Some(b"\r".to_vec()));
+        assert_eq!(key_bytes(Key::Tab, false, false, true, false), Some(b"\x1b[Z".to_vec()));
+        assert_eq!(key_bytes(Key::ArrowUp, false, false, false, false), Some(b"\x1b[A".to_vec()));
+        assert_eq!(key_bytes(Key::ArrowUp, false, false, false, true), Some(b"\x1bOA".to_vec()));
+        assert_eq!(key_bytes(Key::ArrowLeft, false, true, false, false), Some(b"\x1b[1;3D".to_vec()));
+        assert_eq!(key_bytes(Key::C, true, false, false, false), Some(vec![3]));
+        assert_eq!(key_bytes(Key::C, false, false, false, false), None);
+    }
+
+    #[test]
+    fn restore() {
+        assert_eq!(restore_cmd(None), None);
+        assert_eq!(restore_cmd(Some("claude")).as_deref(), Some("claude --continue"));
+        assert_eq!(restore_cmd(Some("claude --resume abc")).as_deref(), Some("claude --resume abc"));
+        assert_eq!(restore_cmd(Some("codex")).as_deref(), Some("codex resume --last"));
+        assert_eq!(restore_cmd(Some("codex resume x")).as_deref(), Some("codex resume x"));
+        assert_eq!(ordered(((3, 1), (1, 5))), ((1, 5), (3, 1)));
+    }
+
+    #[test]
+    fn colours() {
+        assert_eq!(palette(16, true), (0, 0, 0));
+        assert_eq!(palette(231, true), (255, 255, 255));
+        assert_eq!(palette(232, true), (8, 8, 8));
+    }
+
+    #[test]
+    fn shell_runs_in_a_pty() {
+        let dir = std::env::temp_dir();
+        let mut t = Term::spawn("test", &dir.display().to_string(), Some("printf 'bonjour %s' tableau; exit 0"), || {}).unwrap();
+        t.resize(10, 40);
+        let start = std::time::Instant::now();
+        while !t.text().contains("bonjour tableau") && start.elapsed().as_secs() < 5 {
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        assert!(t.text().contains("bonjour tableau"), "écran : {:?}", t.text());
+        t.write(b"exit\r");
+    }
+}
