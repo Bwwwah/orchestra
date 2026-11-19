@@ -253,9 +253,29 @@ pub fn switch(root: &str, branch: &str, create: bool) -> Result<String, String> 
         git(&rd, &["switch", "-c", b])?;
         Ok(crate::trf!("Nouvelle branche « {b} », vous y êtes.", "New branch « {b} », you're on it."))
     } else {
+        if let Some(at) = worktree_of(&rd, b) {
+            return Err(crate::trf!(
+                "« {b} » est la copie d'une session autonome, ouverte dans {at}. Pour la récupérer, fusionnez-la depuis l'historique d'Orchestration ; pour la consulter, ouvrez ce dossier ou la branche sur GitHub",
+                "« {b} » is an autonomous session's copy, open in {at}. To bring it in, merge it from the Orchestration history; to look at it, open that folder or the branch on GitHub"
+            ));
+        }
         git(&rd, &["switch", b])?;
         Ok(crate::trf!("Vous travaillez maintenant sur « {b} ».", "You're now working on « {b} »."))
     }
+}
+
+/// The folder of another worktree that has `branch` checked out (git refuses to switch to it).
+fn worktree_of(rd: &Path, branch: &str) -> Option<String> {
+    let list = git(rd, &["worktree", "list", "--porcelain"]).ok()?;
+    let mut path = None;
+    for l in list.lines() {
+        if let Some(p) = l.strip_prefix("worktree ") {
+            path = Some(p.to_string());
+        } else if l.strip_prefix("branch refs/heads/") == Some(branch) {
+            return path.filter(|p| Path::new(p) != rd);
+        }
+    }
+    None
 }
 
 pub fn valid_branch(b: &str) -> bool {

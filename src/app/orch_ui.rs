@@ -274,6 +274,7 @@ impl NotesApp {
                             continue;
                         }
                         r.turns += 1;
+                        auto::push_copy_later(r.worktree.clone());
                         let sig = auto::signal(&r.reader.last_text);
                         r.last_line = crate::richtext::one_line(&auto::strip_markers(&r.reader.last_text), 140);
                         let five = self.orch.five;
@@ -389,6 +390,7 @@ impl NotesApp {
         rec.steps_done = newly;
         let rec = rec.clone();
         let (commits, dirty) = auto::work_done(&rec, &base);
+        auto::push_copy_later(rec.worktree.clone());
         let md = auto::session_report(&rec, &commits, dirty, summary);
         let day = auto::local_day(rec.ended);
         let page = self.report_page(&day, &format!("{} · {}", rec.title, auto::hm(rec.started)), &md);
@@ -635,7 +637,7 @@ impl NotesApp {
                 row(ui, crate::tr!("Part par projet", "Share per project"), crate::tr!("Par défaut, modifiable au lancement", "By default, can be changed at start"), &mut |ui| {
                     ui.add(egui::DragValue::new(&mut o.default_limit).range(1.0..=100.0).speed(0.5).suffix(" %"));
                 });
-                row(ui, crate::tr!("Commits autorisés", "Commits allowed"), crate::tr!("Sur leur branche, jamais de push", "On their branch, never a push"), &mut |ui| {
+                row(ui, crate::tr!("Commits autorisés", "Commits allowed"), crate::tr!("Sur leur branche, envoyée sur GitHub par Orchestra", "On their branch, pushed to GitHub by Orchestra"), &mut |ui| {
                     super::settings::switch(ui, &mut o.allow_commits, &lk);
                 });
             };
@@ -828,7 +830,7 @@ impl NotesApp {
                                 start.push(id.clone());
                             }
                             ui.add_space(4.0);
-                            super::settings::switch(ui, &mut d.commits, &lk).on_hover_text(crate::tr!("L'IA peut faire des commits sur sa branche (jamais de push)", "The AI may commit on its branch (never push)"));
+                            super::settings::switch(ui, &mut d.commits, &lk).on_hover_text(crate::tr!("L'IA peut faire des commits sur sa branche (Orchestra l'envoie sur GitHub après chaque tour)", "The AI may commit on its branch (Orchestra pushes it to GitHub after each turn)"));
                             ui.label(RichText::new("commits").size(12.0).color(t.tertiary));
                             ui.add_space(6.0);
                             ui.add(egui::DragValue::new(&mut d.limit).range(1.0..=100.0).speed(0.5).suffix(" %")).on_hover_text(crate::tr!("Part de la session de 5 h que ce projet peut utiliser", "Share of the 5-hour window this project may use"));

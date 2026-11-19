@@ -134,6 +134,46 @@ pub fn make_copy(folder: &str, title: &str) -> Result<Copy, String> {
     Ok(Copy { root, worktree: wt.display().to_string(), branch, base })
 }
 
+/// Send the session's branch to the remote (`origin`), so its work shows on GitHub as it
+/// goes. Nothing to do without a remote or without new commits. Network: call it off the
+/// interface's thread.
+pub fn push_copy(worktree: &str) -> Result<bool, String> {
+    let wt = PathBuf::from(worktree);
+    if !wt.is_dir() || git(&wt, &["remote", "get-url", "origin"]).is_err() {
+        return Ok(false);
+    }
+    let branch = git(&wt, &["rev-parse", "--abbrev-ref", "HEAD"])?.trim().to_string();
+    if branch.is_empty() || branch == "HEAD" {
+        return Ok(false);
+    }
+    let local = git(&wt, &["rev-parse", "HEAD"])?.trim().to_string();
+    let remote = git(&wt, &["rev-parse", "--verify", "--quiet", &format!("refs/remotes/origin/{branch}")]).unwrap_or_default().trim().to_string();
+    if local == remote {
+        return Ok(false);
+    }
+    git(&wt, &["push", "-u", "origin", &format!("HEAD:refs/heads/{branch}")])?;
+    Ok(true)
+}
+
+/// The same, in the background.
+pub fn push_copy_later(worktree: String) {
+    std::thread::spawn(move || {
+        if let Err(e) = push_copy(&worktree) {
+            eprintln!("orchestra: push of {worktree} failed: {e}");
+        }
+    });
+}
+
+/// The branch on the remote too, once merged or thrown away (in the background).
+fn delete_remote_later(root: String, branch: String) {
+    std::thread::spawn(move || {
+        let rd = PathBuf::from(&root);
+        if git(&rd, &["rev-parse", "--verify", "--quiet", &format!("refs/remotes/origin/{branch}")]).is_ok() {
+            let _ = git(&rd, &["push", "origin", "--delete", &branch]);
+        }
+    });
+}
+
 /// Bring the session's work into the branch checked out in the project's folder.
 pub fn merge(r: &crate::model::RunRecord) -> Result<String, String> {
     let wt = PathBuf::from(&r.worktree);
@@ -149,6 +189,7 @@ pub fn merge(r: &crate::model::RunRecord) -> Result<String, String> {
     }
     let _ = git(&rd, &["worktree", "remove", "--force", &r.worktree]);
     let _ = git(&rd, &["branch", "-d", &r.branch]);
+    delete_remote_later(r.root.clone(), r.branch.clone());
     Ok(crate::trf!("Travail fusionné dans « {into} ».", "Work merged into « {into} »."))
 }
 
@@ -158,6 +199,7 @@ pub fn discard(r: &crate::model::RunRecord) -> Result<String, String> {
     let _ = git(&rd, &["worktree", "remove", "--force", &r.worktree]);
     let _ = git(&rd, &["worktree", "prune"]);
     git(&rd, &["branch", "-D", &r.branch])?;
+    delete_remote_later(r.root.clone(), r.branch.clone());
     Ok(crate::tr!("Copie et branche supprimées.", "Copy and branch deleted.").into())
 }
 

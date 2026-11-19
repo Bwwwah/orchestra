@@ -19,6 +19,13 @@ bloquée ou qu'une limite soit atteinte. Le code est dans `src/auto.rs` et
 5. À la fin, un **rapport** est écrit dans la page « Rapports des IA » et un message arrive
    dans la boîte de réception. Vous **fusionnez** la branche ou l'**abandonnez**.
 
+La branche est **envoyée sur GitHub** (`origin`) après chaque tour qui a produit des commits,
+et en fin de session : on peut suivre le travail sur GitHub pendant qu'il avance. Fusionner
+ou abandonner supprime aussi la branche sur GitHub. Tant que la session n'est ni fusionnée
+ni abandonnée, sa branche est ouverte dans la copie : git refuse d'y passer depuis votre
+dossier (« already used by worktree »), l'encadré Versions l'explique et indique où se
+trouve la copie.
+
 ## Les étapes : la matière première
 
 Le mode autonome ne fait que les étapes du projet : leur qualité décide de celle du travail.
@@ -42,7 +49,7 @@ ajouté sans votre clic. Le texte de la consigne est dans `sync::ask_tasks`.
 | Limite globale | 60 % | part de la fenêtre de 5 h de l'abonnement, tous projets confondus |
 | Limite par projet | 20 % | part qu'un seul projet peut utiliser |
 | Tours au plus | 30 | nombre de tours d'une session |
-| Commits | non | l'IA peut faire des commits sur sa branche (jamais de push) |
+| Commits | non | l'IA peut faire des commits sur sa branche ; Orchestra envoie la branche sur GitHub après chaque tour et en fin de session |
 | Rapport du jour | 19 h | heure du rapport d'ensemble quand plusieurs projets ont tourné |
 
 L'utilisation est relevée par la ligne d'état de Claude Code (`orchestra statusline`, voir
