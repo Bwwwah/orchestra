@@ -165,12 +165,6 @@ impl NotesApp {
             }
         });
         ui.add_space(12.0);
-        if side_item(ui, SideIcon::Line(Icon::Compose), crate::tr!("Nouvelle page", "New page"), false, 0.0, &t).clicked() {
-            actions.push(Action::NewPage(None));
-        }
-        if side_item(ui, SideIcon::Line(Icon::Database), crate::tr!("Nouvelle base de données", "New database"), false, 0.0, &t).clicked() {
-            actions.push(Action::NewDatabase(None));
-        }
         if side_item(ui, SideIcon::Line(Icon::Library), crate::tr!("Bibliothèque", "Library"), self.view == View::Library, 0.0, &t).clicked() {
             self.view = View::Library;
         }
@@ -365,6 +359,10 @@ impl NotesApp {
                 actions.push(Action::NewPage(Some(id.to_string())));
                 ui.close();
             }
+            if ui.button(crate::tr!("Ajouter une base de données", "Add a database")).clicked() {
+                actions.push(Action::NewDatabase(Some(id.to_string())));
+                ui.close();
+            }
             if ui.button(crate::tr!("Dupliquer", "Duplicate")).clicked() {
                 actions.push(Action::Duplicate(id.to_string()));
                 ui.close();
@@ -393,7 +391,7 @@ impl NotesApp {
         }
     }
 
-    /// The tab strip: back/forward, tabs separated by thin lines (the open one joins the page),
+    /// The tab strip: back/forward, Firefox-like tabs (the open one is a rounded card joining the page),
     /// "+", and the rest of the strip moves the window.
     pub(super) fn tab_strip(&mut self, ui: &mut egui::Ui) {
         let t = tone(ui.visuals().dark_mode);
@@ -424,7 +422,9 @@ impl NotesApp {
             let n = self.tabs.len().max(1) as f32;
             let avail = (ui.available_width() - 60.0).max(40.0);
             let w = (avail / n).clamp(original::TAB_MIN_WIDTH, original::TAB_MAX_WIDTH);
-            let line = egui::Stroke::new(1.0, t.border);
+            // Firefox-like tabs: the open one is a card with rounded top corners that
+            // joins the page; the others stay flat, with short separators between them.
+            let mut spans: Vec<(egui::Rect, bool)> = Vec::new();
             for i in 0..self.tabs.len() {
                 let page = if i == self.active_tab { self.current.clone() } else { self.tabs[i].page.clone() };
                 let (icon, title) = page
@@ -432,25 +432,30 @@ impl NotesApp {
                     .unwrap_or_else(|| ("".into(), crate::tr!("Nouvel onglet", "New tab").into()));
                 let (rect, resp) = ui.allocate_exact_size(egui::vec2(w, full.height()), egui::Sense::click());
                 let active = i == self.active_tab;
-                if active {
-                    ui.painter().rect_filled(rect, 0.0, ui.visuals().panel_fill);
-                    active_span = Some(rect.x_range());
-                } else if resp.hovered() {
-                    ui.painter().rect_filled(rect.shrink2(egui::vec2(2.0, 5.0)), 6.0, t.hover);
-                }
-                ui.painter().vline(rect.left() - 1.0, rect.y_range(), line);
-                ui.painter().vline(rect.right() + 1.0, rect.y_range(), line);
-                let color = if active { t.text } else { t.secondary };
-                let label = if icon.is_empty() { title.clone() } else { format!("{icon}  {title}") };
-                let mut job = egui::text::LayoutJob::single_section(label, egui::TextFormat::simple(FontId::proportional(14.0), color));
-                job.wrap = egui::text::TextWrapping::truncate_at_width(w - 44.0);
-                let g = ui.fonts_mut(|f| f.layout_job(job));
-                ui.painter().galley(egui::pos2(rect.center().x - g.size().x / 2.0, rect.center().y - g.size().y / 2.0), g, color);
                 // The close button covers part of the tab: the tab itself is no longer
                 // "hovered" under it, so test the pointer against the tab's rect.
                 let over = ui.rect_contains_pointer(rect);
+                let card = egui::Rect::from_min_max(egui::pos2(rect.left(), full.top() + 6.0), egui::pos2(rect.right(), full.bottom()));
+                // Text sits in the middle of the card; quiet tabs centre it above the gap left at the bottom.
+                let mid_y = if active { card.center().y } else { card.center().y - 2.5 };
+                if active {
+                    ui.painter().rect_filled(card, egui::CornerRadius { nw: 8, ne: 8, sw: 0, se: 0 }, t.border);
+                    let inner = egui::Rect::from_min_max(card.min + egui::vec2(1.0, 1.0), egui::pos2(card.right() - 1.0, card.bottom() + 1.0));
+                    ui.painter().rect_filled(inner, egui::CornerRadius { nw: 7, ne: 7, sw: 0, se: 0 }, ui.visuals().panel_fill);
+                    active_span = Some(card.x_range());
+                } else if over {
+                    let pill = egui::Rect::from_min_max(card.min + egui::vec2(2.0, 0.0), egui::pos2(card.right() - 2.0, card.bottom() - 5.0));
+                    ui.painter().rect_filled(pill, 7.0, t.hover);
+                }
+                spans.push((card, active || over));
+                let color = if active { t.text } else { t.secondary };
+                let label = if icon.is_empty() { title.clone() } else { format!("{icon}  {title}") };
+                let mut job = egui::text::LayoutJob::single_section(label, egui::TextFormat::simple(FontId::proportional(14.0), color));
+                job.wrap = egui::text::TextWrapping::truncate_at_width(w - 40.0);
+                let g = ui.fonts_mut(|f| f.layout_job(job));
+                ui.painter().galley(egui::pos2(rect.left() + 12.0, mid_y - g.size().y / 2.0), g, color);
                 if over && (self.tabs.len() > 1 || self.current.is_some()) {
-                    let cr = egui::Rect::from_center_size(egui::pos2(rect.right() - 16.0, rect.center().y), egui::vec2(18.0, 18.0));
+                    let cr = egui::Rect::from_center_size(egui::pos2(rect.right() - 16.0, mid_y), egui::vec2(18.0, 18.0));
                     let c = ui.interact(cr, ui.scope_id().with(("tab-close", i)), egui::Sense::click());
                     if c.hovered() {
                         ui.painter().rect_filled(cr, 4.0, t.hover);
@@ -466,6 +471,14 @@ impl NotesApp {
                     select = Some(i);
                 }
                 resp.on_hover_text(title);
+            }
+            // Separators only between two quiet tabs, as in Firefox.
+            for pair in spans.windows(2) {
+                let ((a, a_lit), (_, b_lit)) = (pair[0], pair[1]);
+                if !a_lit && !b_lit {
+                    let c = a.center().y - 2.5;
+                    ui.painter().vline(a.right() + 1.0, egui::Rangef::new(c - 8.0, c + 8.0), egui::Stroke::new(1.0, t.border));
+                }
             }
             ui.add_space(6.0);
             if icons::button(ui, Icon::Plus, 28.0, t.secondary, t.hover, crate::tr!("Nouvel onglet (Cmd/Ctrl+T)", "New tab (Cmd/Ctrl+T)")).clicked() {

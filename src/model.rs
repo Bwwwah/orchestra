@@ -583,6 +583,8 @@ impl Workspace {
 pub struct OrchSettings {
     /// Never go past this share of the 5-hour window (all projects together).
     pub global_limit: f32,
+    /// No session starts or goes on once the week's use reaches this.
+    pub week_limit: f32,
     /// Default share one project may use.
     pub default_limit: f32,
     /// The AI may commit on its own branch.
@@ -603,6 +605,7 @@ impl Default for OrchSettings {
     fn default() -> Self {
         OrchSettings {
             global_limit: 60.0,
+            week_limit: 95.0,
             default_limit: 20.0,
             allow_commits: false,
             report_hour: 19,

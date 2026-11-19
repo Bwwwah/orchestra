@@ -155,6 +155,10 @@ pub struct Project {
     /// Shared with the team (collaboration): only shared projects leave this computer.
     #[serde(default)]
     pub shared: bool,
+    /// Autonomous sessions may land their work on the main branch: at the end of a
+    /// session, its copy is merged into main by itself (Orchestration page).
+    #[serde(default)]
+    pub commit_to_main: bool,
     /// "Regard extérieur": a short outside view asked to an AI (Markdown), by whom, when.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub review: Option<Review>,

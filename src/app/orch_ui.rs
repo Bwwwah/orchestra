@@ -79,6 +79,8 @@ pub struct Orch {
     daily_checked: Option<Instant>,
     confirm: Option<(String, &'static str)>,
     started: bool,
+    /// Finished sessions to merge into main by themselves, once their terminal is closed.
+    to_main: Vec<String>,
 }
 
 fn default_mission() -> &'static str {
@@ -111,6 +113,19 @@ impl NotesApp {
         if let Some(f) = self.orch.five {
             if f >= self.ws.settings.orch.global_limit {
                 return Err(crate::trf!("la limite globale ({:.0} %) est déjà atteinte", "the global limit ({:.0} %) is already reached", self.ws.settings.orch.global_limit));
+            }
+        }
+        let taken: f32 = self.orch.runs.iter().map(|r| r.limit).sum();
+        if taken + limit > self.ws.settings.orch.global_limit + 0.01 {
+            return Err(crate::trf!(
+                "{limit:.0} % pour ce projet dépasserait la limite globale ({:.0} %), dont {taken:.0} % sont déjà pris",
+                "{limit:.0} % for this project would go past the global limit ({:.0} %), {taken:.0} % of which is already taken",
+                self.ws.settings.orch.global_limit
+            ));
+        }
+        if let Some(w) = self.orch.week {
+            if w >= self.ws.settings.orch.week_limit {
+                return Err(crate::trf!("la limite de la semaine ({:.0} %) est déjà atteinte", "the weekly limit ({:.0} %) is already reached", self.ws.settings.orch.week_limit));
             }
         }
         // The limits are checked with Claude Code's own figures: they come through the status line.
@@ -196,6 +211,7 @@ impl NotesApp {
         }
         let now = Instant::now();
         let global = self.ws.settings.orch.global_limit;
+        let week_limit = self.ws.settings.orch.week_limit;
         let mut finished: Vec<(usize, String, String)> = vec![];
         for (i, r) in self.orch.runs.iter_mut().enumerate() {
             // How the screen moves (idle = nothing drawn for a while).
@@ -290,8 +306,8 @@ impl NotesApp {
                             Some(crate::trf!("limite du projet atteinte ({:.0} %)", "project limit reached ({:.0} %)", r.limit))
                         } else if five.is_some_and(|f| f >= global) {
                             Some(crate::trf!("limite globale atteinte ({global:.0} %)", "global limit reached ({global:.0} %)"))
-                        } else if self.orch.week.is_some_and(|w| w >= 95.0) {
-                            Some(crate::tr!("limite de la semaine presque atteinte", "weekly limit almost reached").into())
+                        } else if self.orch.week.is_some_and(|w| w >= week_limit) {
+                            Some(crate::trf!("limite de la semaine atteinte ({week_limit:.0} %)", "weekly limit reached ({week_limit:.0} %)"))
                         } else if !r.measured && r.turns >= 2 {
                             Some(crate::tr!("utilisation de l'abonnement impossible à mesurer", "subscription use can't be measured").into())
                         } else if r.turns >= r.max_turns {
@@ -325,6 +341,7 @@ impl NotesApp {
             }
             self.finish_run(i, &why, &summary);
         }
+        self.merge_to_main();
         if !self.orch.runs.is_empty() {
             ctx.request_repaint_after(Duration::from_millis(500));
         }
@@ -366,6 +383,29 @@ impl NotesApp {
         }
     }
 
+    /// Merge into main the finished sessions of projects that allow it, once closed.
+    fn merge_to_main(&mut self) {
+        let ready: Vec<String> = self.orch.to_main.iter().filter(|id| !self.orch.runs.iter().any(|r| &r.id == *id)).cloned().collect();
+        if ready.is_empty() {
+            return;
+        }
+        self.orch.to_main.retain(|id| !ready.contains(id));
+        for id in ready {
+            let Some(rec) = self.ws.runs.iter().find(|x| x.id == id).cloned() else { continue };
+            match auto::merge_into_main(&rec) {
+                Ok(m) => {
+                    if let Some(x) = self.ws.runs.iter_mut().find(|x| x.id == id) {
+                        x.closed = crate::tr!("fusionné", "merged").into();
+                    }
+                    self.dirty_since.get_or_insert_with(Instant::now);
+                    self.info(format!("{} : {m}", rec.title));
+                }
+                Err(e) => self.fail(format!("{} : {e}", rec.title)),
+            }
+        }
+        self.detect_changes();
+    }
+
     fn finish_run(&mut self, i: usize, why: &str, summary: &str) {
         let r = &mut self.orch.runs[i];
         let why = if why.is_empty() { r.stop.clone().unwrap_or_else(|| crate::tr!("terminée", "finished").into()) } else { why.to_string() };
@@ -398,6 +438,11 @@ impl NotesApp {
             x.report = Some(page.clone());
         }
         let text = crate::trf!("{why} · {} étape(s) · ≈ {:.0} % · {} commit(s)", "{why} · {} step(s) · ≈ {:.0} % · {} commit(s)", rec.steps_done.len(), rec.pct, commits.len());
+        // Commits on main allowed for this project: merge once Claude Code has closed.
+        let to_main = self.ws.page(&project).and_then(|p| p.project.as_ref()).is_some_and(|p| p.commit_to_main);
+        if to_main && (!commits.is_empty() || dirty > 0) {
+            self.orch.to_main.push(id.clone());
+        }
         self.ws.notify("fin", &project, &crate::trf!("Fin de session sur {}", "End of session on {}", rec.title), &text, Some(page));
         self.detect_changes();
         self.ack(crate::trf!("Session autonome terminée sur {} : {why}.", "Autonomous session finished on {}: {why}.", rec.title));
@@ -488,6 +533,8 @@ impl NotesApp {
                 ui.label(RichText::new(crate::tr!("Orchestration", "Orchestration")).font(bold(30.0)).color(t.text));
                 ui.label(RichText::new(crate::tr!("Des IA qui avancent seules sur vos projets, chacune dans une copie à part, dans les limites de votre abonnement.", "AIs that move your projects forward on their own, each in a separate copy, within your subscription's limits.")).color(t.secondary));
                 ui.add_space(14.0);
+                self.week_bar(ui, &t);
+                ui.add_space(14.0);
                 self.stats_row(ui, &t);
                 ui.add_space(14.0);
                 self.running_card(ui, &t);
@@ -504,6 +551,46 @@ impl NotesApp {
                 ui.add_space(40.0);
             });
         });
+    }
+
+    /// The bar at the very top: the week's use of the subscription, with its own limit
+    /// (set right here) past which no session starts or goes on.
+    fn week_bar(&mut self, ui: &mut egui::Ui, t: &Tone) {
+        let week = self.orch.week;
+        let before = self.ws.settings.orch.week_limit;
+        let red = Color32::from_rgb(224, 62, 62);
+        super::projects::card(ui, t, 0.0, |ui| {
+            ui.horizontal(|ui| {
+                ui.label(RichText::new(crate::tr!("CETTE SEMAINE", "THIS WEEK")).font(semibold(11.5)).color(t.tertiary));
+                let used = match week {
+                    Some(w) => crate::trf!("{w:.0} % de l'abonnement utilisés", "{w:.0} % of the subscription used"),
+                    None => crate::tr!("utilisation inconnue pour l'instant", "usage unknown for now").into(),
+                };
+                ui.label(RichText::new(used).font(semibold(14.0)).color(t.text));
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    ui.add(egui::DragValue::new(&mut self.ws.settings.orch.week_limit).range(5.0..=100.0).speed(0.5).suffix(" %"))
+                        .on_hover_text(crate::tr!("Au-delà, aucune session ne démarre ni ne continue", "Past it, no session starts or goes on"));
+                    ui.label(RichText::new(crate::tr!("Limite de la semaine", "Weekly limit")).size(13.0).color(t.secondary));
+                });
+            });
+            ui.add_space(4.0);
+            let limit = self.ws.settings.orch.week_limit;
+            let w = ui.available_width();
+            let (bar, _) = ui.allocate_exact_size(egui::vec2(w, 12.0), egui::Sense::hover());
+            let p = ui.painter();
+            p.rect_filled(bar, 6.0, t.fill);
+            let lx = bar.left() + bar.width() * limit / 100.0;
+            p.rect_filled(egui::Rect::from_min_max(egui::pos2(lx, bar.top()), bar.max), egui::CornerRadius { nw: 0, sw: 0, ne: 6, se: 6 }, red.gamma_multiply(0.12));
+            if let Some(f) = week {
+                let frac = super::projects::smooth(ui, "orch-week", (f / 100.0).clamp(0.0, 1.0));
+                let color = if f >= limit { red } else if f >= limit * 0.85 { super::projects::ORANGE } else { super::projects::BLUE };
+                ui.painter().rect_filled(egui::Rect::from_min_size(bar.min, egui::vec2(bar.width() * frac, bar.height())), 6.0, color);
+            }
+            ui.painter().vline(lx, egui::Rangef::new(bar.top() - 3.0, bar.bottom() + 3.0), egui::Stroke::new(2.0, super::projects::ORANGE));
+        });
+        if self.ws.settings.orch.week_limit != before {
+            self.dirty_since.get_or_insert_with(Instant::now);
+        }
     }
 
     /// Three tiles at the top: the subscription, the AIs at work, today's work.
@@ -633,9 +720,6 @@ impl NotesApp {
                 ui.set_width(col_w);
                 row(ui, crate::tr!("Limite globale", "Global limit"), crate::tr!("Aucune session ne va au-delà, tous projets confondus", "No session goes past it, all projects together"), &mut |ui| {
                     ui.add(egui::DragValue::new(&mut o.global_limit).range(5.0..=100.0).speed(0.5).suffix(" %"));
-                });
-                row(ui, crate::tr!("Part par projet", "Share per project"), crate::tr!("Par défaut, modifiable au lancement", "By default, can be changed at start"), &mut |ui| {
-                    ui.add(egui::DragValue::new(&mut o.default_limit).range(1.0..=100.0).speed(0.5).suffix(" %"));
                 });
                 row(ui, crate::tr!("Commits autorisés", "Commits allowed"), crate::tr!("Sur leur branche, envoyée sur GitHub par Orchestra", "On their branch, pushed to GitHub by Orchestra"), &mut |ui| {
                     super::settings::switch(ui, &mut o.allow_commits, &lk);
@@ -783,10 +867,18 @@ impl NotesApp {
         let picked: Vec<String> = projects.iter().filter(|(id, _, _)| self.orch.drafts.get(id).is_some_and(|d| d.pick) && !running.contains(id)).map(|(id, _, _)| id.clone()).collect();
         let picked_sum: f32 = picked.iter().filter_map(|id| self.orch.drafts.get(id)).map(|d| d.limit).sum();
         let global = self.ws.settings.orch.global_limit;
+        // Shares add up: the sessions running and the projects picked together never
+        // get more than the global limit.
+        let running_sum: f32 = self.orch.runs.iter().map(|r| r.limit).sum();
         let open_steps: HashMap<String, usize> = projects
             .iter()
             .map(|(id, _, _)| (id.clone(), self.ws.page(id).and_then(|p| p.project.as_ref()).map(|x| x.steps.iter().filter(|s| s.status != crate::project::StepStatus::Done).count()).unwrap_or(0)))
             .collect();
+        let mut to_main: HashMap<String, bool> = projects
+            .iter()
+            .map(|(id, _, _)| (id.clone(), self.ws.page(id).and_then(|p| p.project.as_ref()).is_some_and(|x| x.commit_to_main)))
+            .collect();
+        let to_main_before = to_main.clone();
         let lk = super::settings::look(ui.visuals().dark_mode);
         let drafts = &mut self.orch.drafts;
         super::projects::card(ui, t, 0.0, |ui| {
@@ -802,6 +894,8 @@ impl NotesApp {
                 let busy = running.contains(id);
                 let bg = super::projects::hover_begin(ui);
                 let open = open_steps.get(id).copied().unwrap_or(0);
+                let others = running_sum + if d.pick { picked_sum - d.limit } else { picked_sum };
+                let room = (global - others).floor().max(0.0);
                 let row = ui.vertical(|ui| {
                     ui.horizontal(|ui| {
                         ui.add_enabled(!busy, egui::Checkbox::without_text(&mut d.pick)).on_hover_text(crate::tr!("Sélectionner pour lancer plusieurs projets ensemble", "Select to start several projects together"));
@@ -826,14 +920,35 @@ impl NotesApp {
                             if busy {
                                 let (r, _) = ui.allocate_exact_size(egui::vec2(16.0, 16.0), egui::Sense::hover());
                                 super::projects::pulse_dot(ui, r.center(), super::projects::GREEN);
-                            } else if start_button(ui, plugged, t).on_disabled_hover_text(crate::tr!("Branchez d'abord Claude Code", "Plug in Claude Code first")).clicked() {
+                            } else if !plugged {
+                                start_button(ui, false, t).on_disabled_hover_text(crate::tr!("Branchez d'abord Claude Code", "Plug in Claude Code first"));
+                            } else if room < 1.0 {
+                                start_button(ui, false, t).on_disabled_hover_text(crate::trf!("La limite globale ({global:.0} %) est déjà répartie entre les autres projets", "The global limit ({global:.0} %) is already shared among the other projects"));
+                            } else if start_button(ui, true, t).clicked() {
                                 start.push(id.clone());
                             }
                             ui.add_space(4.0);
                             super::settings::switch(ui, &mut d.commits, &lk).on_hover_text(crate::tr!("L'IA peut faire des commits sur sa branche (Orchestra l'envoie sur GitHub après chaque tour)", "The AI may commit on its branch (Orchestra pushes it to GitHub after each turn)"));
                             ui.label(RichText::new("commits").size(12.0).color(t.tertiary));
                             ui.add_space(6.0);
-                            ui.add(egui::DragValue::new(&mut d.limit).range(1.0..=100.0).speed(0.5).suffix(" %")).on_hover_text(crate::tr!("Part de la session de 5 h que ce projet peut utiliser", "Share of the 5-hour window this project may use"));
+                            if let Some(m) = to_main.get_mut(id) {
+                                ui.checkbox(m, RichText::new(crate::tr!("sur main", "on main")).size(12.0).color(t.tertiary)).on_hover_text(crate::tr!(
+                                    "À la fin de chaque session, son travail est fusionné tout seul dans main (seulement si le dossier du projet est sur main ou master)",
+                                    "At the end of each session, its work is merged into main by itself (only when the project's folder is on main or master)"
+                                ));
+                                ui.add_space(6.0);
+                            }
+                            // A picked project keeps its share within the room left; the others
+                            // only show it capped, so unpicking one doesn't shrink the rest for good.
+                            if d.pick && !busy {
+                                d.limit = d.limit.clamp(1.0, room.max(1.0));
+                            }
+                            let mut shown = if busy { d.limit } else { d.limit.clamp(1.0, room.max(1.0)) };
+                            let dv = ui.add_enabled(!busy && room >= 1.0, egui::DragValue::new(&mut shown).range(1.0..=room.max(1.0)).speed(0.5).suffix(" %"));
+                            if dv.changed() {
+                                d.limit = shown;
+                            }
+                            dv.on_hover_text(crate::trf!("Part de la session de 5 h que ce projet peut utiliser : {room:.0} % au plus, le reste de la limite globale ({global:.0} %) étant pris par les autres", "Share of the 5-hour window this project may use: {room:.0} % at most, the rest of the global limit ({global:.0} %) being taken by the others"));
                         });
                     });
                     ui.horizontal(|ui| {
@@ -855,11 +970,21 @@ impl NotesApp {
                 });
             }
         });
+        if to_main != to_main_before {
+            for (id, on) in &to_main {
+                if let Some(p) = self.ws.page_mut(id).and_then(|p| p.project.as_mut()) {
+                    p.commit_to_main = *on;
+                }
+            }
+            self.dirty_since.get_or_insert_with(Instant::now);
+        }
         start.dedup();
         for id in start {
             let d = self.orch.drafts.get(&id).cloned().unwrap();
             let title = self.ws.page(&id).map(|p| p.display_title()).unwrap_or_default();
-            match self.launch_run(ctx, &id, &d.mission, d.limit, d.commits) {
+            let taken: f32 = self.orch.runs.iter().map(|r| r.limit).sum();
+            let limit = d.limit.min((global - taken).floor()).max(1.0);
+            match self.launch_run(ctx, &id, &d.mission, limit, d.commits) {
                 Ok(()) => {
                     if let Some(x) = self.orch.drafts.get_mut(&id) {
                         x.pick = false;

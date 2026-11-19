@@ -193,6 +193,17 @@ pub fn merge(r: &crate::model::RunRecord) -> Result<String, String> {
     Ok(crate::trf!("Travail fusionné dans « {into} ».", "Work merged into « {into} »."))
 }
 
+/// Merge the session's work by itself, but only when the project's folder is on its
+/// main branch (main or master): the person allowed commits on main, not elsewhere.
+pub fn merge_into_main(r: &crate::model::RunRecord) -> Result<String, String> {
+    let rd = PathBuf::from(&r.root);
+    let into = git(&rd, &["rev-parse", "--abbrev-ref", "HEAD"]).unwrap_or_default().trim().to_string();
+    if into != "main" && into != "master" {
+        return Err(crate::trf!("le dossier du projet est sur « {into} », pas sur main : fusion laissée à faire à la main", "the project's folder is on « {into} », not main: merge left to do by hand"));
+    }
+    merge(r)
+}
+
 /// Throw the session's copy and branch away.
 pub fn discard(r: &crate::model::RunRecord) -> Result<String, String> {
     let rd = PathBuf::from(&r.root);
@@ -552,6 +563,11 @@ mod tests {
         assert!(!wt.exists());
         let c2 = make_copy(&repo.display().to_string(), "Essai deux").unwrap();
         let rec2 = crate::model::RunRecord { root: c2.root.clone(), worktree: c2.worktree.clone(), branch: c2.branch.clone(), ..Default::default() };
+        // Merging by itself only goes onto main.
+        assert!(ok(&repo, &["switch", "-c", "ailleurs"]));
+        assert!(merge_into_main(&rec2).is_err());
+        assert!(PathBuf::from(&c2.worktree).exists());
+        assert!(ok(&repo, &["switch", "main"]));
         discard(&rec2).unwrap();
         assert!(!git(&repo, &["branch"]).unwrap().contains("orchestra/"));
         let _ = std::fs::remove_dir_all(repo);
