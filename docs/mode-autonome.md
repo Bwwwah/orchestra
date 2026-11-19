@@ -17,7 +17,9 @@ bloquée ou qu'une limite soit atteinte. Le code est dans `src/auto.rs` et
 4. Si une décision humaine est nécessaire, elle pose la question dans la boîte de réception
    (`ask_human`) et continue sur autre chose.
 5. À la fin, un **rapport** est écrit dans la page « Rapports des IA » et un message arrive
-   dans la boîte de réception. Vous **fusionnez** la branche ou l'**abandonnez**.
+   dans la boîte de réception. Vous **fusionnez** la branche ou l'**abandonnez**. Si la case
+   **sur main** du projet est cochée, la fusion se fait toute seule une fois Claude Code fermé,
+   et seulement si le dossier du projet est sur `main` ou `master` (`auto::merge_into_main`).
 
 ## Les étapes : la matière première
 
@@ -40,7 +42,8 @@ ajouté sans votre clic. Le texte de la consigne est dans `sync::ask_tasks`.
 | Réglage | Par défaut | Effet |
 |---|---|---|
 | Limite globale | 60 % | part de la fenêtre de 5 h de l'abonnement, tous projets confondus |
-| Limite par projet | 20 % | part qu'un seul projet peut utiliser |
+| Limite de la semaine | 95 % | au-delà, aucune session ne démarre ni ne continue (barre en haut de la page) |
+| Part par projet | 20 % | part qu'un seul projet peut utiliser ; les parts ensemble ne dépassent jamais la limite globale |
 | Tours au plus | 30 | nombre de tours d'une session |
 | Commits | non | l'IA peut faire des commits sur sa branche (jamais de push) |
 | Rapport du jour | 19 h | heure du rapport d'ensemble quand plusieurs projets ont tourné |

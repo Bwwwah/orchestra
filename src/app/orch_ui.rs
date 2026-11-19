@@ -79,6 +79,8 @@ pub struct Orch {
     daily_checked: Option<Instant>,
     confirm: Option<(String, &'static str)>,
     started: bool,
+    /// Finished sessions to merge into main by themselves, once their terminal is closed.
+    to_main: Vec<String>,
 }
 
 fn default_mission() -> &'static str {
@@ -338,6 +340,7 @@ impl NotesApp {
             }
             self.finish_run(i, &why, &summary);
         }
+        self.merge_to_main();
         if !self.orch.runs.is_empty() {
             ctx.request_repaint_after(Duration::from_millis(500));
         }
@@ -379,6 +382,29 @@ impl NotesApp {
         }
     }
 
+    /// Merge into main the finished sessions of projects that allow it, once closed.
+    fn merge_to_main(&mut self) {
+        let ready: Vec<String> = self.orch.to_main.iter().filter(|id| !self.orch.runs.iter().any(|r| &r.id == *id)).cloned().collect();
+        if ready.is_empty() {
+            return;
+        }
+        self.orch.to_main.retain(|id| !ready.contains(id));
+        for id in ready {
+            let Some(rec) = self.ws.runs.iter().find(|x| x.id == id).cloned() else { continue };
+            match auto::merge_into_main(&rec) {
+                Ok(m) => {
+                    if let Some(x) = self.ws.runs.iter_mut().find(|x| x.id == id) {
+                        x.closed = crate::tr!("fusionné", "merged").into();
+                    }
+                    self.dirty_since.get_or_insert_with(Instant::now);
+                    self.info(format!("{} : {m}", rec.title));
+                }
+                Err(e) => self.fail(format!("{} : {e}", rec.title)),
+            }
+        }
+        self.detect_changes();
+    }
+
     fn finish_run(&mut self, i: usize, why: &str, summary: &str) {
         let r = &mut self.orch.runs[i];
         let why = if why.is_empty() { r.stop.clone().unwrap_or_else(|| crate::tr!("terminée", "finished").into()) } else { why.to_string() };
@@ -410,6 +436,11 @@ impl NotesApp {
             x.report = Some(page.clone());
         }
         let text = crate::trf!("{why} · {} étape(s) · ≈ {:.0} % · {} commit(s)", "{why} · {} step(s) · ≈ {:.0} % · {} commit(s)", rec.steps_done.len(), rec.pct, commits.len());
+        // Commits on main allowed for this project: merge once Claude Code has closed.
+        let to_main = self.ws.page(&project).and_then(|p| p.project.as_ref()).is_some_and(|p| p.commit_to_main);
+        if to_main && (!commits.is_empty() || dirty > 0) {
+            self.orch.to_main.push(id.clone());
+        }
         self.ws.notify("fin", &project, &crate::trf!("Fin de session sur {}", "End of session on {}", rec.title), &text, Some(page));
         self.detect_changes();
         self.ack(crate::trf!("Session autonome terminée sur {} : {why}.", "Autonomous session finished on {}: {why}.", rec.title));
@@ -844,6 +875,11 @@ impl NotesApp {
             .iter()
             .map(|(id, _, _)| (id.clone(), self.ws.page(id).and_then(|p| p.project.as_ref()).map(|x| x.steps.iter().filter(|s| s.status != crate::project::StepStatus::Done).count()).unwrap_or(0)))
             .collect();
+        let mut to_main: HashMap<String, bool> = projects
+            .iter()
+            .map(|(id, _, _)| (id.clone(), self.ws.page(id).and_then(|p| p.project.as_ref()).is_some_and(|x| x.commit_to_main)))
+            .collect();
+        let to_main_before = to_main.clone();
         let lk = super::settings::look(ui.visuals().dark_mode);
         let drafts = &mut self.orch.drafts;
         super::projects::card(ui, t, 0.0, |ui| {
@@ -896,6 +932,13 @@ impl NotesApp {
                             super::settings::switch(ui, &mut d.commits, &lk).on_hover_text(crate::tr!("L'IA peut faire des commits sur sa branche (jamais de push)", "The AI may commit on its branch (never push)"));
                             ui.label(RichText::new("commits").size(12.0).color(t.tertiary));
                             ui.add_space(6.0);
+                            if let Some(m) = to_main.get_mut(id) {
+                                ui.checkbox(m, RichText::new(crate::tr!("sur main", "on main")).size(12.0).color(t.tertiary)).on_hover_text(crate::tr!(
+                                    "À la fin de chaque session, son travail est fusionné tout seul dans main (seulement si le dossier du projet est sur main ou master)",
+                                    "At the end of each session, its work is merged into main by itself (only when the project's folder is on main or master)"
+                                ));
+                                ui.add_space(6.0);
+                            }
                             // A picked project keeps its share within the room left; the others
                             // only show it capped, so unpicking one doesn't shrink the rest for good.
                             if d.pick && !busy {
@@ -928,6 +971,14 @@ impl NotesApp {
                 });
             }
         });
+        if to_main != to_main_before {
+            for (id, on) in &to_main {
+                if let Some(p) = self.ws.page_mut(id).and_then(|p| p.project.as_mut()) {
+                    p.commit_to_main = *on;
+                }
+            }
+            self.dirty_since.get_or_insert_with(Instant::now);
+        }
         start.dedup();
         for id in start {
             let d = self.orch.drafts.get(&id).cloned().unwrap();
