@@ -1113,11 +1113,46 @@ impl NotesApp {
                     });
                 });
                 ui.label(RichText::new(crate::tr!("Les questions des IA, la fin de leurs sessions de travail, les rapports (rangés dans la page « Rapports des IA ») et les messages de l'application, dont les erreurs.", "The AIs' questions, the end of their work sessions, the reports (kept in the « AI reports » page) and the app's messages, errors included.")).color(t.secondary));
+                ui.add_space(14.0);
+                // Filters: everything, the questions still waiting for an answer, the unread.
+                let filter_id = egui::Id::unique("inbox-filter");
+                let mut filter = ui.data(|d| d.get_temp::<u8>(filter_id)).unwrap_or(0);
+                let waiting = self.ws.inbox.iter().filter(|m| m.kind == "question" && m.answer.trim().is_empty()).count();
+                let unread = self.ws.unread();
+                ui.horizontal(|ui| {
+                    for (k, label, n) in [
+                        (0u8, crate::tr!("Tout", "All"), self.ws.inbox.len()),
+                        (1, crate::tr!("À répondre", "To answer"), waiting),
+                        (2, crate::tr!("Non lus", "Unread"), unread),
+                    ] {
+                        if filter_chip(ui, label, n, filter == k, &t).clicked() {
+                            filter = k;
+                        }
+                    }
+                });
+                ui.data_mut(|d| d.insert_temp(filter_id, filter));
                 ui.add_space(12.0);
-                if self.ws.inbox.is_empty() {
-                    ui.label(RichText::new(crate::tr!("Rien pour l'instant.", "Nothing yet.")).color(t.tertiary).italics());
+                let shown: Vec<usize> = (0..self.ws.inbox.len())
+                    .rev()
+                    .filter(|&i| {
+                        let m = &self.ws.inbox[i];
+                        match filter {
+                            1 => m.kind == "question" && m.answer.trim().is_empty(),
+                            2 => !m.read,
+                            _ => true,
+                        }
+                    })
+                    .collect();
+                if shown.is_empty() {
+                    let empty = match filter {
+                        1 => crate::tr!("Aucune question en attente de réponse.", "No question waiting for an answer."),
+                        2 => crate::tr!("Tout est lu.", "Everything is read."),
+                        _ => crate::tr!("Rien pour l'instant.", "Nothing yet."),
+                    };
+                    ui.label(RichText::new(empty).color(t.tertiary).italics());
                 }
-                for (i, m) in self.ws.inbox.iter().enumerate().rev() {
+                for i in shown {
+                    let m = &self.ws.inbox[i];
                     let (accent, kind) = match m.kind.as_str() {
                         "question" => (Color32::from_rgb(144, 101, 176), crate::tr!("Question", "Question")),
                         "fin" => (super::projects::GREEN, crate::tr!("Session", "Session")),
@@ -1125,41 +1160,65 @@ impl NotesApp {
                         "erreur" => (Color32::from_rgb(224, 62, 62), crate::tr!("Erreur", "Error")),
                         _ => (t.tertiary, crate::tr!("Info", "Info")),
                     };
+                    let project = (!m.project.is_empty()).then(|| self.ws.page(&m.project).map(|p| p.display_title())).flatten();
                     let bg = super::projects::hover_begin(ui);
-                    let row = ui.horizontal_top(|ui| {
-                        let (dot, _) = ui.allocate_exact_size(egui::vec2(12.0, 22.0), egui::Sense::hover());
-                        if !m.read {
-                            ui.painter().circle_filled(dot.center(), 4.0, super::projects::BLUE);
-                        }
-                        ui.vertical(|ui| {
-                            ui.set_width(ui.available_width() - 30.0);
-                            ui.horizontal(|ui| {
-                                ui.label(RichText::new(kind).size(11.5).color(accent));
-                                ui.label(RichText::new(&m.title).font(if m.read { FontId::proportional(14.0) } else { semibold(14.0) }).color(t.text));
-                                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                                    ui.label(RichText::new(super::chrome::relative_time(m.at)).size(12.0).color(t.tertiary));
+                    let card = egui::Frame::new()
+                        .fill(if m.read { Color32::TRANSPARENT } else { t.card })
+                        .stroke(egui::Stroke::new(1.0, t.border))
+                        .corner_radius(10.0)
+                        .inner_margin(egui::Margin { left: 16, right: 10, top: 10, bottom: 10 })
+                        .show(ui, |ui| {
+                            ui.set_width(ui.available_width());
+                            let head = ui.horizontal_top(|ui| {
+                                ui.vertical(|ui| {
+                                    ui.set_width(ui.available_width() - 30.0);
+                                    ui.horizontal(|ui| {
+                                        kind_badge(ui, kind, accent);
+                                        if let Some(p) = &project {
+                                            ui.label(RichText::new(p).size(12.0).color(t.tertiary));
+                                        }
+                                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                            ui.label(RichText::new(super::chrome::relative_time(m.at)).size(12.0).color(t.tertiary));
+                                            if !m.read {
+                                                let (dot, _) = ui.allocate_exact_size(egui::vec2(10.0, 10.0), egui::Sense::hover());
+                                                ui.painter().circle_filled(dot.center(), 3.5, super::projects::BLUE);
+                                            }
+                                        });
+                                    });
+                                    ui.add_space(3.0);
+                                    ui.add(egui::Label::new(RichText::new(&m.title).font(if m.read { FontId::proportional(14.5) } else { semibold(14.5) }).color(t.text)).wrap());
+                                    if !m.text.is_empty() {
+                                        ui.add_space(2.0);
+                                        ui.add(egui::Label::new(RichText::new(&m.text).size(13.0).color(t.secondary)).wrap());
+                                    }
                                 });
+                                let x = ui.add(egui::Button::new(RichText::new("×").color(t.tertiary)).frame(false)).on_hover_text(crate::tr!("Supprimer", "Delete"));
+                                if x.clicked() {
+                                    remove = Some(i);
+                                }
                             });
-                            if !m.text.is_empty() {
-                                ui.add(egui::Label::new(RichText::new(&m.text).size(13.0).color(t.secondary)).wrap());
+                            // Only the head opens the page: the answer box below stays free to type in.
+                            let resp = ui.interact(head.response.rect, egui::Id::unique(("inbox", &m.id)), egui::Sense::click());
+                            let resp = if m.page.is_some() || !m.project.is_empty() { resp.on_hover_cursor(egui::CursorIcon::PointingHand) } else { resp };
+                            if resp.clicked() && remove.is_none() {
+                                open = Some(i);
+                            }
+                            if m.kind == "question" {
+                                ui.add_space(6.0);
+                                if let Some(text) = answer_box(ui, m, &t) {
+                                    answer = Some((i, text));
+                                }
                             }
                         });
-                        let x = ui.add(egui::Button::new(RichText::new("×").color(t.tertiary)).frame(false)).on_hover_text(crate::tr!("Supprimer", "Delete"));
-                        if x.clicked() {
-                            remove = Some(i);
-                        }
-                    });
-                    let resp = ui.interact(row.response.rect, egui::Id::unique(("inbox", &m.id)), egui::Sense::click());
-                    super::projects::hover_end(ui, bg, row.response.rect, egui::Id::unique(("inbox-h", &m.id)), &t);
-                    if resp.clicked() && remove.is_none() {
-                        open = Some(i);
-                    }
-                    if m.kind == "question" {
-                        if let Some(text) = answer_box(ui, m, &t) {
-                            answer = Some((i, text));
-                        }
-                    }
-                    ui.add_space(6.0);
+                    let rect = card.response.rect;
+                    // A coloured edge on the left: the kind at a glance.
+                    ui.painter().rect_filled(
+                        egui::Rect::from_min_max(rect.left_top() + egui::vec2(0.0, 8.0), egui::pos2(rect.left() + 3.0, rect.bottom() - 8.0)),
+                        2.0,
+                        accent.gamma_multiply(if m.read { 0.45 } else { 1.0 }),
+                    );
+                    super::projects::hover_end(ui, bg, rect.shrink2(egui::vec2(6.0, 2.0)), egui::Id::unique(("inbox-h", &m.id)), &t);
+                    ui.add_space(8.0);
                 }
             });
         });
@@ -1194,6 +1253,30 @@ impl NotesApp {
 }
 
 
+/// The kind of an inbox message, as a small tinted pill.
+fn kind_badge(ui: &mut egui::Ui, text: &str, accent: Color32) {
+    let g = ui.painter().layout_no_wrap(text.to_string(), semibold(11.0), accent);
+    let (rect, _) = ui.allocate_exact_size(g.size() + egui::vec2(14.0, 6.0), egui::Sense::hover());
+    ui.painter().rect_filled(rect, 6.0, accent.gamma_multiply(0.14));
+    ui.painter().galley(rect.center() - g.size() / 2.0, g, accent);
+}
+
+/// A filter of the inbox: its name and how many messages it holds.
+fn filter_chip(ui: &mut egui::Ui, text: &str, count: usize, on: bool, t: &Tone) -> egui::Response {
+    let label = if count > 0 { format!("{text}  {count}") } else { text.to_string() };
+    let color = if on { t.text } else { t.secondary };
+    let g = ui.painter().layout_no_wrap(label, if on { semibold(12.5) } else { FontId::proportional(12.5) }, color);
+    let (rect, resp) = ui.allocate_exact_size(g.size() + egui::vec2(20.0, 10.0), egui::Sense::click());
+    let a = ui.ctx().animate_bool_with_time(resp.id.with("hov"), resp.hovered(), 0.14);
+    let fill = if on { t.selected } else { t.hover.gamma_multiply(a) };
+    ui.painter().rect_filled(rect, 8.0, fill);
+    if on {
+        ui.painter().rect_stroke(rect, 8.0, egui::Stroke::new(1.0, t.border), egui::StrokeKind::Inside);
+    }
+    ui.painter().galley(rect.center() - g.size() / 2.0, g, color);
+    resp.on_hover_cursor(egui::CursorIcon::PointingHand)
+}
+
 /// Under a question of the inbox: the answer given, or a box to type one.
 /// Returns the answer when the person sends it (button, or Cmd/Ctrl+Enter).
 fn answer_box(ui: &mut egui::Ui, m: &crate::model::InboxMsg, t: &Tone) -> Option<String> {
@@ -1202,7 +1285,6 @@ fn answer_box(ui: &mut egui::Ui, m: &crate::model::InboxMsg, t: &Tone) -> Option
     let editing = ui.data(|d| d.get_temp::<bool>(edit_id)).unwrap_or(false);
     let mut out = None;
     ui.horizontal_top(|ui| {
-        ui.add_space(12.0);
         ui.vertical(|ui| {
             ui.set_width(ui.available_width() - 30.0);
             if !m.answer.is_empty() && !editing {
