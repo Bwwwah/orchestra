@@ -168,9 +168,6 @@ impl NotesApp {
         if side_item(ui, SideIcon::Line(Icon::Compose), crate::tr!("Nouvelle page", "New page"), false, 0.0, &t).clicked() {
             actions.push(Action::NewPage(None));
         }
-        if side_item(ui, SideIcon::Line(Icon::Database), crate::tr!("Nouvelle base de données", "New database"), false, 0.0, &t).clicked() {
-            actions.push(Action::NewDatabase(None));
-        }
         if side_item(ui, SideIcon::Line(Icon::Library), crate::tr!("Bibliothèque", "Library"), self.view == View::Library, 0.0, &t).clicked() {
             self.view = View::Library;
         }
@@ -363,6 +360,10 @@ impl NotesApp {
             row.context_menu(|ui| {
             if ui.button(crate::tr!("Ajouter une sous-page", "Add a subpage")).clicked() {
                 actions.push(Action::NewPage(Some(id.to_string())));
+                ui.close();
+            }
+            if ui.button(crate::tr!("Ajouter une base de données", "Add a database")).clicked() {
+                actions.push(Action::NewDatabase(Some(id.to_string())));
                 ui.close();
             }
             if ui.button(crate::tr!("Dupliquer", "Duplicate")).clicked() {
