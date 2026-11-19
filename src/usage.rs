@@ -356,6 +356,12 @@ pub fn daily_pct(week_used: f32) -> f32 {
     week_used * 7.0
 }
 
+/// The reserve is near: one more turn, as big as the biggest so far (at least half a
+/// point of the week), would reach `limit` (100 − reserve).
+pub fn near_reserve(week: f32, limit: f32, turn: f32) -> bool {
+    week + turn.max(0.5) >= limit
+}
+
 // ---------------------------------------------------------------- status line
 
 fn settings_file() -> PathBuf {
@@ -542,5 +548,13 @@ mod tests {
         assert!((used - 8.0).abs() < 0.01);
         assert_eq!(span, 10 * HOUR);
         assert_eq!(day_week_used(&[], now), None);
+    }
+
+    #[test]
+    fn pause_before_the_reserve() {
+        assert!(!near_reserve(80.0, 95.0, 3.0));
+        assert!(near_reserve(92.5, 95.0, 3.0), "the next turn would bite into it");
+        assert!(near_reserve(94.6, 95.0, 0.0), "half a point of margin at least");
+        assert!(near_reserve(96.0, 95.0, 0.0));
     }
 }

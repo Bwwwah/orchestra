@@ -58,6 +58,10 @@ pub struct LiveRun {
     measured: bool,
     /// Stopped by the 5-hour or weekly limit: when that window resets (to start again).
     quota_reset: Option<u64>,
+    /// The week's figure when the running turn began.
+    week_at_turn: Option<f32>,
+    /// The most one turn took from the week so far (percentage points).
+    week_turn: f32,
 }
 
 #[derive(Clone)]
@@ -138,10 +142,10 @@ impl NotesApp {
             ));
         }
         if let Some(w) = self.orch.week {
-            if w >= self.ws.settings.orch.week_limit {
+            if crate::usage::near_reserve(w, self.ws.settings.orch.week_limit, 0.0) {
                 return Err(crate::trf!(
-                    "la réserve minimum de la semaine ({:.0} %) est atteinte",
-                    "the week's minimum reserve ({:.0} %) is reached",
+                    "la réserve minimum de la semaine ({:.0} %) est atteinte ou trop proche",
+                    "the week's minimum reserve ({:.0} %) is reached or too near",
                     self.ws.settings.orch.reserve()
                 ));
             }
@@ -190,6 +194,8 @@ impl NotesApp {
             phase: Phase::Starting(Instant::now()),
             next: Some(auto::mission_prompt(&self.ws.page(project).map(|p| p.display_title()).unwrap_or_default(), project, &copy.branch, &mission, commits)),
             quota_reset: None,
+            week_at_turn: None,
+            week_turn: 0.0,
             reader: auto::Reader::default(),
             since: std::time::SystemTime::now() - Duration::from_secs(2),
             base: copy.base,
@@ -278,6 +284,7 @@ impl NotesApp {
                         r.term.write(b"\r");
                         r.reader.turn_over = false;
                         r.nudged = false;
+                        r.week_at_turn = self.orch.week;
                         r.phase = if r.summarizing { Phase::Summary(now) } else { Phase::Working(now) };
                         r.last_line = if r.summarizing { crate::tr!("Rédige son compte rendu…", "Writing its summary…").into() } else { crate::trf!("Tour {} en cours…", "Turn {} running…", r.turns + 1) };
                     }
@@ -316,6 +323,12 @@ impl NotesApp {
                             continue;
                         }
                         r.turns += 1;
+                        // What this turn took from the week (a reset in between counts for nothing).
+                        if let (Some(a), Some(b)) = (r.week_at_turn, self.orch.week) {
+                            if b >= a {
+                                r.week_turn = r.week_turn.max(b - a);
+                            }
+                        }
                         auto::push_copy_later(r.worktree.clone());
                         let sig = auto::signal(&r.reader.last_text);
                         r.last_line = crate::richtext::one_line(&auto::strip_markers(&r.reader.last_text), 140);
@@ -333,9 +346,10 @@ impl NotesApp {
                         } else if five.is_some_and(|f| f >= global) {
                             r.quota_reset = self.orch.five_reset;
                             Some(crate::trf!("limite globale atteinte ({global:.0} %)", "global limit reached ({global:.0} %)"))
-                        } else if self.orch.week.is_some_and(|w| w >= week_limit) {
+                        } else if self.orch.week.is_some_and(|w| crate::usage::near_reserve(w, week_limit, r.week_turn)) {
+                            // Paused before the next turn bites into the reserve; starts again once the week resets.
                             r.quota_reset = self.orch.week_reset;
-                            Some(crate::trf!("réserve minimum de la semaine atteinte ({:.0} %)", "week's minimum reserve reached ({:.0} %)", 100.0 - week_limit))
+                            Some(crate::trf!("pause : la réserve minimum de la semaine ({:.0} %) approche", "paused: the week's minimum reserve ({:.0} %) is near", 100.0 - week_limit))
                         } else if !r.measured && r.turns >= 2 {
                             Some(crate::tr!("utilisation de l'abonnement impossible à mesurer", "subscription use can't be measured").into())
                         } else if r.turns >= r.max_turns {
