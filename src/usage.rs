@@ -327,6 +327,35 @@ pub fn day_total(h: &[Sample], now: u64) -> Option<f32> {
     Some(total)
 }
 
+/// How much of the week went in the last 24 hours (percentage points of the week), and
+/// over how long the readings go back (24 h at most). None without any weekly reading.
+pub fn day_week_used(h: &[Sample], now: u64) -> Option<(f32, u64)> {
+    let from = now.saturating_sub(DAY);
+    let readings: Vec<&Sample> = h.iter().filter(|s| s.week.is_some() && s.at <= now).collect();
+    // Starting point: the last reading before the 24 hours, or else the first one.
+    let start = readings.iter().rposition(|s| s.at <= from).unwrap_or(0);
+    let first = readings.get(start)?;
+    let (mut prev, mut reset) = (first.week?, first.week_reset);
+    let mut used = 0.0;
+    for s in &readings[start + 1..] {
+        let p = s.week?;
+        let same = match (reset, s.week_reset) {
+            (Some(a), Some(b)) => a.abs_diff(b) < SAME_RESET,
+            _ => p + 0.5 >= prev,
+        };
+        used += if same { (p - prev).max(0.0) } else { p };
+        prev = p;
+        reset = s.week_reset.or(if same { reset } else { None });
+    }
+    Some((used, now - first.at.max(from)))
+}
+
+/// The day's share of the subscription: what went from the week in the last 24 hours,
+/// against a seventh of the week (100 % = on pace to use exactly the whole week).
+pub fn daily_pct(week_used: f32) -> f32 {
+    week_used * 7.0
+}
+
 // ---------------------------------------------------------------- status line
 
 fn settings_file() -> PathBuf {
@@ -497,5 +526,21 @@ mod tests {
         let h = vec![s(30, 10.0, None), s(31, 25.0, None), s(33, 5.0, None), s(34, 15.0, None)];
         assert_eq!(day_total(&h, now), Some(25.0 + 15.0));
         assert_eq!(day_total(&[], now), None);
+    }
+
+    #[test]
+    fn week_used_over_a_day() {
+        let w = |at_h: u64, pct: f32, reset_h: u64| Sample { at: at_h * HOUR, week: Some(pct), week_reset: Some(reset_h * HOUR), ..Default::default() };
+        let now = 40 * HOUR;
+        // 30 % before the day, 34 % then 36 %: 6 points over a full day.
+        let (used, span) = day_week_used(&[w(10, 28.0, 100), w(15, 30.0, 100), w(20, 34.0, 100), w(39, 36.0, 100)], now).unwrap();
+        assert!((used - 6.0).abs() < 0.01);
+        assert_eq!(span, 24 * HOUR);
+        assert!((daily_pct(used) - 42.0).abs() < 0.01);
+        // The week starts again: what came before the reset, then the new figure.
+        let (used, span) = day_week_used(&[w(30, 90.0, 32), w(31, 95.0, 32), w(35, 3.0, 200)], now).unwrap();
+        assert!((used - 8.0).abs() < 0.01);
+        assert_eq!(span, 10 * HOUR);
+        assert_eq!(day_week_used(&[], now), None);
     }
 }
