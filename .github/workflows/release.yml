@@ -55,30 +55,49 @@ jobs:
           targets: ${{ matrix.name == 'macOS' && 'aarch64-apple-darwin,x86_64-apple-darwin' || '' }}
       - uses: Swatinem/rust-cache@v2
 
-      - name: macOS (app universelle)
+      - name: macOS (app universelle, .dmg et .zip)
         if: matrix.name == 'macOS'
         run: |
           sh packaging/build-macos.sh
-          mkdir -p out && cp dist/*.zip out/Orchestra-${GITHUB_REF_NAME}-macOS.zip
+          mkdir -p out
+          # .dmg to install (drag onto Applications), .zip for the app's own updates.
+          cp dist/*.dmg out/Orchestra-${GITHUB_REF_NAME}-macOS.dmg
+          cp dist/*.zip out/Orchestra-${GITHUB_REF_NAME}-macOS.zip
 
-      - name: Windows
+      - name: Windows (installateur .exe, .exe portable et .zip)
         if: matrix.name == 'Windows'
         shell: pwsh
         run: |
           cargo build --release
           New-Item -ItemType Directory -Force out | Out-Null
-          Compress-Archive -Path target/release/orchestra.exe -DestinationPath "out/Orchestra-$env:GITHUB_REF_NAME-Windows.zip"
+          $tag = $env:GITHUB_REF_NAME
+          Copy-Item target/release/orchestra.exe "out/Orchestra-$tag-Windows-portable.exe"
+          Compress-Archive -Path target/release/orchestra.exe -DestinationPath "out/Orchestra-$tag-Windows.zip"
 
-      - name: Linux
+      - name: Windows installer (Inno Setup)
+        if: matrix.name == 'Windows'
+        continue-on-error: true
+        shell: pwsh
+        run: |
+          choco install innosetup -y --no-progress
+          $v = $env:GITHUB_REF_NAME.TrimStart('v')
+          & "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe" "/DAppVersion=$v" "/DSourceExe=$PWD\target\release\orchestra.exe" "/DOutDir=$PWD\out" packaging\orchestra.iss
+
+      - name: Linux (.deb et .tar.gz)
         if: matrix.name == 'Linux'
         run: |
           sudo apt-get update && sudo apt-get install -y libxkbcommon-dev libwayland-dev libx11-dev libxcursor-dev libxrandr-dev libxi-dev libgl1-mesa-dev
           cargo build --release
           mkdir -p out/orchestra && cp target/release/orchestra out/orchestra/
           tar -C out -czf out/Orchestra-${GITHUB_REF_NAME}-Linux.tar.gz orchestra
+          cargo install cargo-deb --locked
+          cargo deb --no-build --output out/Orchestra-${GITHUB_REF_NAME}-Linux.deb || echo "paquet .deb non fabriqué"
 
       - uses: softprops/action-gh-release@v2
         with:
           files: |
+            out/*.dmg
             out/*.zip
+            out/*.exe
+            out/*.deb
             out/*.tar.gz

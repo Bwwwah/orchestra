@@ -1,7 +1,8 @@
 #!/bin/sh
 # Builds "Orchestra.app" for every recent Mac (Apple chip and Intel) and a .zip to send.
 # Usage, from the app folder:  sh packaging/build-macos.sh
-# Result: dist/Orchestra-<version>-macOS.zip
+# Result: dist/Orchestra-<version>-macOS.dmg (to install: open, drag onto Applications)
+#         dist/Orchestra-<version>-macOS.zip (what the app's own updates download)
 set -e
 cd "$(dirname "$0")/.."
 
@@ -42,4 +43,13 @@ codesign --force --deep --sign - "$APP"
 codesign --verify --deep --strict "$APP"
 
 ditto -c -k --norsrc --keepParent "dist/Orchestra" "dist/Orchestra-$VERSION-macOS.zip"
-echo "Prêt : dist/Orchestra-$VERSION-macOS.zip"
+
+# Disk image: the app next to a shortcut to Applications.
+DMG_DIR="dist/dmg"
+mkdir -p "$DMG_DIR"
+cp -R "$APP" "$DMG_DIR/"
+ln -s /Applications "$DMG_DIR/Applications"
+hdiutil create -volname Orchestra -srcfolder "$DMG_DIR" -ov -format UDZO "dist/Orchestra-$VERSION-macOS.dmg" >/dev/null
+rm -rf "$DMG_DIR"
+
+echo "Prêt : dist/Orchestra-$VERSION-macOS.dmg (et .zip)"

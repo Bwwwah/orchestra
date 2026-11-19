@@ -2,6 +2,10 @@
 //! with no account and no subscription. AI comes through MCP; collaboration
 //! through a connector you choose (see collab.rs).
 
+// No console window behind the app on Windows (the MCP server still talks through the
+// pipes its AI gives it).
+#![cfg_attr(windows, windows_subsystem = "windows")]
+
 #[macro_use]
 mod i18n;
 mod app;

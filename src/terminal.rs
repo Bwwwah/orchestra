@@ -168,32 +168,12 @@ impl Term {
     /// screen without it gets arrow keys, like in most terminals; otherwise our history moves.
     pub fn wheel(&mut self, lines: i32, row: u16, col: u16) {
         let (mode, enc, alt) = self.with_screen(|s| (s.mouse_protocol_mode(), s.mouse_protocol_encoding(), s.alternate_screen()));
-        let n = lines.unsigned_abs().min(10);
-        if mode != vt100::MouseProtocolMode::None {
-            let button = if lines > 0 { 64u8 } else { 65u8 };
-            let (x, y) = (col as u32 + 1, row as u32 + 1);
-            let mut out = Vec::new();
-            for _ in 0..n {
-                match enc {
-                    vt100::MouseProtocolEncoding::Sgr => out.extend_from_slice(format!("\x1b[<{button};{x};{y}M").as_bytes()),
-                    _ => {
-                        out.extend_from_slice(b"\x1b[M");
-                        out.push(32 + button);
-                        out.push((32 + x).min(255) as u8);
-                        out.push((32 + y).min(255) as u8);
-                    }
-                }
+        match wheel_bytes(mode != vt100::MouseProtocolMode::None, enc == vt100::MouseProtocolEncoding::Sgr, alt, lines, row, col) {
+            Some(out) => {
+                let _ = self.writer.write_all(&out);
+                let _ = self.writer.flush();
             }
-            let _ = self.writer.write_all(&out);
-            let _ = self.writer.flush();
-        } else if alt {
-            let key: &[u8] = if lines > 0 { b"\x1b[A" } else { b"\x1b[B" };
-            for _ in 0..n {
-                let _ = self.writer.write_all(key);
-            }
-            let _ = self.writer.flush();
-        } else {
-            self.scroll(lines);
+            None => self.scroll(lines),
         }
     }
 
@@ -237,6 +217,35 @@ pub fn restore_cmd(cmd: Option<&str>) -> Option<String> {
 impl Drop for Term {
     fn drop(&mut self) {
         let _ = self.child.kill();
+    }
+}
+
+/// What the wheel sends to the program: mouse events when it tracks the mouse (SGR or
+/// classic encoding), arrow keys on the alternate screen; None: move our own history.
+pub fn wheel_bytes(tracking: bool, sgr: bool, alt: bool, lines: i32, row: u16, col: u16) -> Option<Vec<u8>> {
+    let n = lines.unsigned_abs().min(10);
+    let mut out = Vec::new();
+    if tracking {
+        let button = if lines > 0 { 64u8 } else { 65u8 };
+        let (x, y) = (col as u32 + 1, row as u32 + 1);
+        for _ in 0..n {
+            if sgr {
+                out.extend_from_slice(format!("\x1b[<{button};{x};{y}M").as_bytes());
+            } else {
+                out.extend_from_slice(b"\x1b[M");
+                out.push(32 + button);
+                out.push((32 + x).min(255) as u8);
+                out.push((32 + y).min(255) as u8);
+            }
+        }
+        Some(out)
+    } else if alt {
+        for _ in 0..n {
+            out.extend_from_slice(if lines > 0 { b"\x1b[A" } else { b"\x1b[B" });
+        }
+        Some(out)
+    } else {
+        None
     }
 }
 
@@ -383,13 +392,10 @@ mod wheel_tests {
 
     #[test]
     fn wheel_goes_to_a_program_that_tracks_the_mouse() {
-        let dir = std::env::temp_dir().display().to_string();
-        // Turns on mouse tracking (SGR), then shows what it receives.
-        let mut t = Term::spawn("t", &dir, Some("printf '\\033[?1000h\\033[?1006hpret\\n'; stty raw -echo; od -c"), || {}).unwrap();
-        assert!(wait_for(&t, "pret"));
-        std::thread::sleep(std::time::Duration::from_millis(300));
-        t.wheel(2, 2, 3);
-        assert!(wait_for(&t, "<   6   4   ;   4   ;   3   M"), "{}", t.text());
+        assert_eq!(wheel_bytes(true, true, false, 2, 2, 3).unwrap(), b"\x1b[<64;4;3M\x1b[<64;4;3M".to_vec());
+        assert_eq!(wheel_bytes(true, false, false, -1, 0, 0).unwrap(), vec![0x1b, b'[', b'M', 32 + 65, 33, 33]);
+        assert_eq!(wheel_bytes(false, false, true, -2, 0, 0).unwrap(), b"\x1b[B\x1b[B".to_vec());
+        assert!(wheel_bytes(false, false, false, 3, 0, 0).is_none());
     }
 
     #[test]

@@ -119,6 +119,16 @@ pub fn install(repo: &str, rel: &Release) -> Result<PathBuf, String> {
 
 fn install_to(target: &Path, repo: &str, rel: &Release) -> Result<PathBuf, String> {
     let target = target.to_path_buf();
+    // Installed by a package (/usr/bin…) or in a folder we can't write: say so first.
+    let probe = target.with_file_name(".orchestra-ecriture");
+    if std::fs::write(&probe, b"").is_err() {
+        return Err(crate::trf!(
+            "l'app est installée dans un dossier protégé ({}) : téléchargez la nouvelle version depuis la page GitHub du projet (.deb, installateur…)",
+            "the app is installed in a protected folder ({}): download the new version from the project's GitHub page (.deb, installer…)",
+            target.parent().map(|p| p.display().to_string()).unwrap_or_default()
+        ));
+    }
+    let _ = std::fs::remove_file(&probe);
     let (name, url) = rel.asset().ok_or(crate::tr!("cette version n'a pas de fichier pour ce système", "this version has no file for this system"))?.clone();
     let tmp = std::env::temp_dir().join(format!("orchestra-maj-{}", rel.tag));
     let _ = std::fs::remove_dir_all(&tmp);

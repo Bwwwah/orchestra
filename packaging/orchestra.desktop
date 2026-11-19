@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=Orchestra
+Comment=Tableau de bord de projets IA
+Comment[en]=AI project dashboard
+Exec=orchestra %U
+Icon=orchestra
+Terminal=false
+Categories=Development;Office;
+MimeType=x-scheme-handler/orchestra;

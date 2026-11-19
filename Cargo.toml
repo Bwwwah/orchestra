@@ -2,6 +2,8 @@
 name = "orchestra"
 version = "0.1.0"
 edition = "2024"
+description = "Tableau de bord de projets IA : vos projets, vos sessions Claude Code / Codex et leur orchestration"
+license = "MIT"
 
 [dependencies]
 chacha20poly1305 = "0.10"
@@ -25,3 +27,14 @@ egui_kittest = "0.37"
 lto = "thin"
 codegen-units = 4
 strip = true
+
+# Linux package (cargo deb), built by the release workflow.
+[package.metadata.deb]
+maintainer = "Orchestra"
+section = "utils"
+priority = "optional"
+assets = [
+    ["target/release/orchestra", "usr/bin/", "755"],
+    ["packaging/orchestra.desktop", "usr/share/applications/", "644"],
+    ["assets/icon-512.png", "usr/share/icons/hicolor/512x512/apps/orchestra.png", "644"],
+]
