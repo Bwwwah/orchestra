@@ -56,6 +56,8 @@ pub struct LiveRun {
     nudged: bool,
     started_wall: u64,
     measured: bool,
+    /// Stopped by the 5-hour or weekly limit: when that window resets (to start again).
+    quota_reset: Option<u64>,
 }
 
 #[derive(Clone)]
@@ -79,6 +81,7 @@ pub struct Orch {
     pub five_reset: Option<u64>,
     pub week_reset: Option<u64>,
     usage_polled: Option<Instant>,
+    resume_checked: Option<Instant>,
     daily_checked: Option<Instant>,
     confirm: Option<(String, &'static str)>,
     started: bool,
@@ -158,8 +161,14 @@ impl NotesApp {
             branch: copy.branch.clone(),
             started: crate::model::now_ms(),
             commits_allowed: commits,
+            mission: mission.clone(),
+            limit,
             ..Default::default()
         };
+        // A new session replaces any planned restart of this project.
+        for x in self.ws.runs.iter_mut().filter(|x| x.project == project) {
+            x.resume_at = 0;
+        }
         self.ws.runs.push(rec);
         self.dirty_since.get_or_insert_with(Instant::now);
         self.orch.runs.push(LiveRun {
@@ -170,6 +179,7 @@ impl NotesApp {
             term,
             phase: Phase::Starting(Instant::now()),
             next: Some(auto::mission_prompt(&self.ws.page(project).map(|p| p.display_title()).unwrap_or_default(), project, &copy.branch, &mission, commits)),
+            quota_reset: None,
             reader: auto::Reader::default(),
             since: std::time::SystemTime::now() - Duration::from_secs(2),
             base: copy.base,
@@ -205,6 +215,7 @@ impl NotesApp {
             }
         }
         self.usage_tick();
+        self.resume_tick(ctx);
         // Developer aid: ORCHESTRA_AUTO_RUN=<project id> starts a session once Claude Code is seen.
         if let Ok(pid) = std::env::var("ORCHESTRA_AUTO_RUN") {
             if !pid.is_empty() && self.orch.runs.is_empty() && !self.ws.runs.iter().any(|r| r.project == pid) && self.ais.plugged().contains(&crate::setup::Ai::ClaudeCode) {
@@ -310,8 +321,10 @@ impl NotesApp {
                         } else if r.pct >= r.limit {
                             Some(crate::trf!("limite du projet atteinte ({:.0} %)", "project limit reached ({:.0} %)", r.limit))
                         } else if five.is_some_and(|f| f >= global) {
+                            r.quota_reset = self.orch.five_reset;
                             Some(crate::trf!("limite globale atteinte ({global:.0} %)", "global limit reached ({global:.0} %)"))
                         } else if self.orch.week.is_some_and(|w| w >= week_limit) {
+                            r.quota_reset = self.orch.week_reset;
                             Some(crate::trf!("limite de la semaine atteinte ({week_limit:.0} %)", "weekly limit reached ({week_limit:.0} %)"))
                         } else if !r.measured && r.turns >= 2 {
                             Some(crate::tr!("utilisation de l'abonnement impossible à mesurer", "subscription use can't be measured").into())
@@ -353,6 +366,45 @@ impl NotesApp {
         self.daily_tick();
     }
 
+    /// Sessions stopped by a quota start again by themselves once it has reset.
+    fn resume_tick(&mut self, ctx: &egui::Context) {
+        if self.orch.resume_checked.is_some_and(|t| t.elapsed() < Duration::from_secs(20)) {
+            return;
+        }
+        self.orch.resume_checked = Some(Instant::now());
+        let now = crate::model::now_ms();
+        if !self.ws.settings.orch.auto_resume {
+            return;
+        }
+        let running: Vec<&str> = self.orch.runs.iter().map(|r| r.project.as_str()).collect();
+        let due = crate::model::due_resumes(&self.ws.runs, now, &running);
+        for i in due {
+            let rec = self.ws.runs[i].clone();
+            // Once only: a failure doesn't try again every 20 seconds.
+            for x in self.ws.runs.iter_mut().filter(|x| x.project == rec.project) {
+                x.resume_at = 0;
+            }
+            self.dirty_since.get_or_insert_with(Instant::now);
+            let limit = if rec.limit > 0.0 { rec.limit } else { self.ws.settings.orch.default_limit };
+            match self.launch_run(ctx, &rec.project, &rec.mission, limit, rec.commits_allowed) {
+                Ok(()) => self.ws.notify(
+                    "info",
+                    &rec.project,
+                    &crate::trf!("Reprise automatique sur {}", "Automatic restart on {}", rec.title),
+                    crate::tr!("Le quota est revenu : la session autonome repart avec la même mission.", "The quota is back: the autonomous session starts again with the same mission."),
+                    None,
+                ),
+                Err(e) => self.ws.notify(
+                    "erreur",
+                    &rec.project,
+                    &crate::trf!("Reprise automatique impossible sur {}", "Couldn't restart {} automatically", rec.title),
+                    &e,
+                    None,
+                ),
+            }
+        }
+    }
+
     /// Follow Claude Code's figures; share each rise of the 5-hour window between the
     /// running sessions by the tokens each used since the last reading.
     fn usage_tick(&mut self) {
@@ -360,12 +412,20 @@ impl NotesApp {
             return;
         }
         self.orch.usage_polled = Some(Instant::now());
-        let Some(u) = crate::usage::read() else { return };
+        // A window that has reset is dropped by read(): forget its old figure too, so a
+        // limit reached before the reset doesn't block what follows.
+        let Some(u) = crate::usage::read() else {
+            (self.orch.five, self.orch.week, self.orch.five_reset, self.orch.week_reset) = (None, None, None, None);
+            return;
+        };
         let five = u.five().cloned();
         self.orch.week = u.week().map(|w| w.pct);
         self.orch.week_reset = u.week().and_then(|w| w.resets_at);
         self.orch.five_reset = five.as_ref().and_then(|w| w.resets_at);
-        let Some(five) = five else { return };
+        let Some(five) = five else {
+            self.orch.five = None;
+            return;
+        };
         self.orch.five = Some(five.pct);
         let prev = self.orch.last_reading;
         if prev.is_some_and(|(at, _, _)| at == u.at) {
@@ -420,6 +480,9 @@ impl NotesApp {
         r.term.write(b"\r");
         r.phase = Phase::Closing(Instant::now());
         let (id, project, base, pct, tokens, turns) = (r.id.clone(), r.project.clone(), r.base.clone(), r.pct, r.reader.tokens, r.turns);
+        // Stopped by a quota: start again by itself once it resets (if that is allowed).
+        let now = crate::model::now_ms();
+        let resume_at = r.quota_reset.filter(|&reset| self.ws.settings.orch.auto_resume && reset > now).map(crate::model::resume_time).unwrap_or(0);
         let before = r.steps_at_start.clone();
         let done_now: Vec<String> = self
             .ws
@@ -435,6 +498,7 @@ impl NotesApp {
         rec.tokens = tokens;
         rec.turns = turns;
         rec.steps_done = newly;
+        rec.resume_at = resume_at;
         let rec = rec.clone();
         let (commits, dirty) = auto::work_done(&rec, &base);
         auto::push_copy_later(rec.worktree.clone());
@@ -444,7 +508,14 @@ impl NotesApp {
         if let Some(x) = self.ws.runs.iter_mut().find(|x| x.id == id) {
             x.report = Some(page.clone());
         }
-        let text = crate::trf!("{why} · {} étape(s) · ≈ {:.0} % · {} commit(s)", "{why} · {} step(s) · ≈ {:.0} % · {} commit(s)", rec.steps_done.len(), rec.pct, commits.len());
+        let mut text = crate::trf!("{why} · {} étape(s) · ≈ {:.0} % · {} commit(s)", "{why} · {} step(s) · ≈ {:.0} % · {} commit(s)", rec.steps_done.len(), rec.pct, commits.len());
+        if resume_at > 0 {
+            text.push_str(&crate::trf!(
+                " · reprendra seule dans {} (après la remise à zéro du quota)",
+                " · will start again by itself in {} (after the quota resets)",
+                crate::usage::left_text(resume_at.saturating_sub(now))
+            ));
+        }
         // Commits on main allowed for this project: merge once Claude Code has closed.
         let to_main = self.ws.page(&project).and_then(|p| p.project.as_ref()).is_some_and(|p| p.commit_to_main);
         if to_main && (!commits.is_empty() || dirty > 0) {
@@ -749,6 +820,9 @@ impl NotesApp {
                 });
                 row(ui, crate::tr!("Commits autorisés", "Commits allowed"), crate::tr!("Sur leur branche, envoyée sur GitHub par Orchestra", "On their branch, pushed to GitHub by Orchestra"), &mut |ui| {
                     super::settings::switch(ui, &mut o.allow_commits, &lk);
+                });
+                row(ui, crate::tr!("Reprise automatique", "Automatic restart"), crate::tr!("Une session arrêtée par la limite globale ou de la semaine repart seule après la remise à zéro du quota", "A session stopped by the global or weekly limit starts again by itself once the quota resets"), &mut |ui| {
+                    super::settings::switch(ui, &mut o.auto_resume, &lk);
                 });
             };
             let mut right = |ui: &mut egui::Ui| {

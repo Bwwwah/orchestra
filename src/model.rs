@@ -560,6 +560,35 @@ pub struct RunRecord {
     /// "fusionné" or "abandonné" once dealt with.
     #[serde(default)]
     pub closed: String,
+    /// The mission and the project's share it was given, to start it again.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub mission: String,
+    #[serde(default)]
+    pub limit: f32,
+    /// Stopped by a quota: starts again by itself at this time (ms); 0 = no.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub resume_at: u64,
+}
+
+/// When a session stopped by a quota may start again: one minute after the window
+/// resets (Claude Code's figures need a moment to follow).
+pub fn resume_time(resets_at: u64) -> u64 {
+    resets_at + 60_000
+}
+
+/// The sessions due to start again at `now`: the latest per project, none whose project
+/// already has a session running.
+pub fn due_resumes(runs: &[RunRecord], now: u64, running: &[&str]) -> Vec<usize> {
+    let mut out: Vec<usize> = vec![];
+    for (i, r) in runs.iter().enumerate().rev() {
+        if r.resume_at == 0 || r.resume_at > now || running.contains(&r.project.as_str()) {
+            continue;
+        }
+        if !out.iter().any(|&j| runs[j].project == r.project) {
+            out.push(i);
+        }
+    }
+    out
 }
 
 impl Workspace {
@@ -629,6 +658,9 @@ pub struct OrchSettings {
     pub last_daily: String,
     /// The "Rapports des IA" page.
     pub reports_page: String,
+    /// A session stopped by the 5-hour or weekly limit starts again by itself once that
+    /// window resets.
+    pub auto_resume: bool,
 }
 
 impl Default for OrchSettings {
@@ -643,6 +675,7 @@ impl Default for OrchSettings {
             extra_tools: String::new(),
             last_daily: String::new(),
             reports_page: String::new(),
+            auto_resume: true,
         }
     }
 }
@@ -913,6 +946,18 @@ mod tests {
         assert_eq!(clamp_zoom(9.0), ZOOM_MAX);
         assert_eq!(clamp_zoom(ZOOM_DEFAULT + ZOOM_STEP), 1.1);
         assert_eq!(clamp_zoom(1.0 - 5.0 * ZOOM_STEP), 0.5);
+    }
+
+    #[test]
+    fn stopped_sessions_resume_once_per_project() {
+        use super::{RunRecord, due_resumes, resume_time};
+        let run = |p: &str, at: u64| RunRecord { project: p.into(), resume_at: at, ..Default::default() };
+        let runs = vec![run("a", resume_time(1_000)), run("a", resume_time(2_000)), run("b", 0), run("c", 999_999_999), run("d", 10)];
+        // Due: the latest of "a" and "d"; "b" has none, "c" not yet.
+        assert_eq!(due_resumes(&runs, 100_000, &[]), vec![4, 1]);
+        // A project already at work isn't started twice.
+        assert_eq!(due_resumes(&runs, 100_000, &["a"]), vec![4]);
+        assert!(due_resumes(&runs, 5, &[]).is_empty());
     }
 
     #[test]
