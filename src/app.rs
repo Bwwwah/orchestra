@@ -60,6 +60,8 @@ pub struct NotesApp {
     settings_snapshot: String,
     dirty_since: Option<Instant>,
     known_mtime: Option<SystemTime>,
+    /// Inbox messages deleted here: a merge with the file on disk must not bring them back.
+    inbox_removed: HashSet<String>,
     last_poll: Instant,
     last_sync: Instant,
     sync_log: Vec<String>,
@@ -159,6 +161,7 @@ impl NotesApp {
             settings_snapshot: String::new(),
             dirty_since: None,
             known_mtime: None,
+            inbox_removed: HashSet::new(),
             last_poll: Instant::now(),
             last_sync: Instant::now(),
             sync_log: vec![],
@@ -368,7 +371,7 @@ impl NotesApp {
             let disk = store::load();
             crate::collab::merge(&mut self.ws, &disk);
             for m in &disk.inbox {
-                if !self.ws.inbox.iter().any(|x| x.id == m.id) {
+                if !self.inbox_removed.contains(&m.id) && !self.ws.inbox.iter().any(|x| x.id == m.id) {
                     self.ws.inbox.push(m.clone());
                 }
             }

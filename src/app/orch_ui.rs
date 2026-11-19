@@ -1351,7 +1351,7 @@ impl NotesApp {
                         .show(ui, |ui| {
                             ui.set_width(ui.available_width());
                             let head = ui.horizontal_top(|ui| {
-                                ui.vertical(|ui| {
+                                let text = ui.vertical(|ui| {
                                     ui.set_width(ui.available_width() - 30.0);
                                     ui.horizontal(|ui| {
                                         kind_badge(ui, kind, accent);
@@ -1373,13 +1373,15 @@ impl NotesApp {
                                         ui.add(egui::Label::new(RichText::new(&m.text).size(13.0).color(t.secondary)).wrap());
                                     }
                                 });
-                                let x = ui.add(egui::Button::new(RichText::new("×").color(t.tertiary)).frame(false)).on_hover_text(crate::tr!("Supprimer", "Delete"));
+                                let x = ui.add(egui::Button::new(RichText::new("×").size(16.0).color(t.tertiary)).frame(false)).on_hover_text(crate::tr!("Supprimer", "Delete"));
                                 if x.clicked() {
                                     remove = Some(i);
                                 }
+                                text.response.rect
                             });
-                            // Only the head opens the page: the answer box below stays free to type in.
-                            let resp = ui.interact(head.response.rect, egui::Id::unique(("inbox", &m.id)), egui::Sense::click());
+                            // Only the text of the head opens the page: the answer box below stays free to
+                            // type in, and the × keeps its click (a zone over it would take it).
+                            let resp = ui.interact(head.inner, egui::Id::unique(("inbox", &m.id)), egui::Sense::click());
                             let resp = if m.page.is_some() || !m.project.is_empty() { resp.on_hover_cursor(egui::CursorIcon::PointingHand) } else { resp };
                             if resp.clicked() && remove.is_none() {
                                 open = Some(i);
@@ -1418,7 +1420,8 @@ impl NotesApp {
             self.ack(crate::tr!("Réponse enregistrée : l'IA la verra au prochain état des lieux du projet.", "Answer saved: the AI will see it in the project's next state of play."));
         }
         if let Some(i) = remove {
-            self.ws.inbox.remove(i);
+            let m = self.ws.inbox.remove(i);
+            self.inbox_removed.insert(m.id);
             self.dirty_since.get_or_insert_with(Instant::now);
         } else if let Some(i) = open {
             let m = &mut self.ws.inbox[i];
