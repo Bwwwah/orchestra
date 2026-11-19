@@ -17,8 +17,9 @@ pub enum AiReq {
     Fill { page_id: String, folder: String, prefer: Option<Tool> },
     /// Fill the project that holds this folder, once it exists (just created).
     FillFolder { folder: String },
-    /// Propose steps: from the project (`text` None) or from a pasted text.
-    Tasks { page_id: String, folder: String, existing: Vec<String>, prefer: Option<Tool>, text: Option<String> },
+    /// Propose steps: from the project (`text` None) or from a pasted text and its joined
+    /// images (file paths).
+    Tasks { page_id: String, folder: String, existing: Vec<String>, prefer: Option<Tool>, text: Option<String>, images: Vec<String> },
 }
 
 fn req_key() -> egui::Id {
@@ -81,12 +82,12 @@ impl NotesApp {
             match r {
                 AiReq::Fill { page_id, folder, prefer } => self.start_fill(ctx, page_id, folder, prefer),
                 AiReq::FillFolder { folder } => self.ai.pending.push((folder, Instant::now())),
-                AiReq::Tasks { page_id, folder, existing, prefer, text } => {
+                AiReq::Tasks { page_id, folder, existing, prefer, text, images } => {
                     if self.ai.tasks.contains_key(&page_id) {
                         continue;
                     }
                     let slot = spawn(ctx, move || match text {
-                        Some(t) => crate::sync::text_to_tasks(&folder, &t, prefer),
+                        Some(t) => crate::sync::text_to_tasks(&folder, &t, &images, prefer),
                         None => crate::sync::ask_tasks(&folder, &existing, prefer),
                     });
                     self.ai.tasks.insert(page_id, slot);

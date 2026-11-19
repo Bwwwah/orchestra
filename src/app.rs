@@ -254,7 +254,7 @@ impl NotesApp {
                 "fill" | "tasks" => {
                     if let Some(c) = app.current.clone() {
                         let folder = app.ws.page(&c).and_then(|p| p.project.as_ref()).map(|p| p.folder.clone()).unwrap_or_default();
-                        let r = if demo.starts_with("fill") { ai_fill::AiReq::Fill { page_id: c, folder, prefer: None } } else { ai_fill::AiReq::Tasks { page_id: c, folder, existing: vec![], prefer: None, text: None } };
+                        let r = if demo.starts_with("fill") { ai_fill::AiReq::Fill { page_id: c, folder, prefer: None } } else { ai_fill::AiReq::Tasks { page_id: c, folder, existing: vec![], prefer: None, text: None, images: vec![] } };
                         ai_fill::request(&cc.egui_ctx, r);
                     }
                 }
