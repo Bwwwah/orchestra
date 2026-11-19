@@ -485,72 +485,182 @@ impl NotesApp {
                 ui.spacing_mut().item_spacing.y = 8.0;
                 ui.label(RichText::new(crate::tr!("Orchestration", "Orchestration")).font(bold(30.0)).color(t.text));
                 ui.label(RichText::new(crate::tr!("Des IA qui avancent seules sur vos projets, chacune dans une copie à part, dans les limites de votre abonnement.", "AIs that move your projects forward on their own, each in a separate copy, within your subscription's limits.")).color(t.secondary));
-                ui.add_space(8.0);
-                self.limits_card(ui, &t);
-                ui.add_space(8.0);
+                ui.add_space(14.0);
+                self.stats_row(ui, &t);
+                ui.add_space(14.0);
                 self.running_card(ui, &t);
-                ui.add_space(8.0);
+                if !self.orch.runs.is_empty() {
+                    ui.add_space(14.0);
+                }
                 if let Some(msg) = self.launch_card(ui, &ctx, &t) {
                     self.status = msg;
                 }
-                ui.add_space(8.0);
+                ui.add_space(14.0);
                 self.history_card(ui, &t, actions);
+                ui.add_space(14.0);
+                self.limits_card(ui, &t);
                 ui.add_space(40.0);
             });
         });
     }
 
-    fn limits_card(&mut self, ui: &mut egui::Ui, t: &Tone) {
+    /// Three tiles at the top: the subscription, the AIs at work, today's work.
+    fn stats_row(&mut self, ui: &mut egui::Ui, t: &Tone) {
         let five = self.orch.five;
         let week = self.orch.week;
+        let global = self.ws.settings.orch.global_limit;
+        let running = self.orch.runs.len();
+        let ready = self.ws.projects().iter().filter(|p| p.project.as_ref().is_some_and(|x| !x.folder.trim().is_empty())).count();
+        let today = auto::local_day(crate::model::now_ms());
+        let todays: Vec<&crate::model::RunRecord> = self.ws.runs.iter().filter(|r| !r.outcome.is_empty() && auto::local_day(r.started) == today).collect();
+        let steps: usize = todays.iter().map(|r| r.steps_done.len()).sum();
+        let used_today: f32 = todays.iter().map(|r| r.pct).sum();
+        let hour = self.ws.settings.orch.report_hour;
+        let w = ui.available_width();
+        let gap = 14.0;
+        let cols = if w >= 520.0 { 3 } else { 1 };
+        let tw = if cols == 3 { (w - 2.0 * gap) / 3.0 } else { w };
+        let h = if cols == 3 { 112.0 } else { 92.0 };
+        let draw = |ui: &mut egui::Ui, i: usize| {
+            let (rect, resp) = ui.allocate_exact_size(egui::vec2(tw, h), egui::Sense::hover());
+            let a = ui.ctx().animate_bool_with_time(resp.id.with("hov"), resp.hovered(), 0.18);
+            let accent = [Color32::from_rgb(212, 76, 125), super::projects::GREEN, super::projects::BLUE][i];
+            let p = ui.painter();
+            p.add(egui::epaint::RectShape::new(rect, 14.0, t.card, egui::Stroke::new(1.0, t.border.lerp_to_gamma(accent, 0.35 * a)), egui::StrokeKind::Inside));
+            // A soft wash of the accent in the corner.
+            p.with_clip_rect(rect.shrink(1.0)).circle_filled(rect.right_top() + egui::vec2(-10.0, 10.0), 52.0 + 6.0 * a, accent.gamma_multiply(0.07));
+            let x = rect.left() + 18.0;
+            let label = [crate::tr!("ABONNEMENT · 5 H", "SUBSCRIPTION · 5 H"), crate::tr!("IA AU TRAVAIL", "AIS AT WORK"), crate::tr!("AUJOURD'HUI", "TODAY")][i];
+            p.text(egui::pos2(x, rect.top() + 16.0), egui::Align2::LEFT_TOP, label, semibold(11.5), t.tertiary);
+            let (big, sub): (String, String) = match i {
+                0 => (
+                    five.map(|f| format!("{f:.0} %")).unwrap_or_else(|| "—".into()),
+                    match (five, week) {
+                        (Some(_), Some(wk)) => crate::trf!("limite {global:.0} % · semaine {wk:.0} %", "limit {global:.0} % · week {wk:.0} %"),
+                        (Some(_), None) => crate::trf!("limite globale {global:.0} %", "global limit {global:.0} %"),
+                        _ => crate::tr!("inconnu pour l'instant", "unknown for now").into(),
+                    },
+                ),
+                1 => (running.to_string(), if running == 0 { crate::trf!("{ready} projet(s) prêt(s) à lancer", "{ready} project(s) ready to start") } else { crate::trf!("sur {ready} projet(s) prêt(s)", "of {ready} project(s) ready") }),
+                _ => (
+                    todays.len().to_string(),
+                    if todays.is_empty() { crate::trf!("session terminée · bilan à {hour} h", "finished session · summary at {hour} h") } else { crate::trf!("session(s) · {steps} étape(s) faite(s) · ≈ {used_today:.0} %", "session(s) · {steps} step(s) done · ≈ {used_today:.0} %") },
+                ),
+            };
+            p.text(egui::pos2(x, rect.top() + 36.0), egui::Align2::LEFT_TOP, &big, bold(30.0), t.text);
+            let mut job = egui::text::LayoutJob::single_section(sub, egui::TextFormat::simple(FontId::proportional(12.5), t.secondary));
+            job.wrap = egui::text::TextWrapping::truncate_at_width(tw - 36.0 - if i == 0 && tw >= 240.0 { 70.0 } else { 0.0 });
+            let g = ui.fonts_mut(|f| f.layout_job(job));
+            ui.painter().galley(egui::pos2(x, rect.bottom() - 28.0), g, t.secondary);
+            match i {
+                0 if tw >= 240.0 => {
+                    // A ring: the 5-hour use, the global limit as a tick.
+                    let c = egui::pos2(rect.right() - 50.0, rect.center().y + 4.0);
+                    ring(ui, c, 28.0, five.map(|f| f / 100.0), global / 100.0, accent, t);
+                }
+                1 if running > 0 => {
+                    super::projects::pulse_dot(ui, egui::pos2(rect.right() - 30.0, rect.top() + 24.0), super::projects::GREEN);
+                }
+                _ => {}
+            }
+        };
+        if cols == 3 {
+            ui.horizontal(|ui| {
+                ui.spacing_mut().item_spacing.x = gap;
+                for i in 0..3 {
+                    draw(ui, i);
+                }
+            });
+        } else {
+            for i in 0..3 {
+                draw(ui, i);
+                ui.add_space(8.0);
+            }
+        }
+    }
+
+    fn limits_card(&mut self, ui: &mut egui::Ui, t: &Tone) {
+        let five = self.orch.five;
         let o = &mut self.ws.settings.orch;
         let before = o.clone();
         super::projects::card(ui, t, 0.0, |ui| {
-            super::projects::card_title(ui, crate::tr!("LIMITES", "LIMITS"), "", t);
-            // The 5-hour window, with the global limit marked on it.
+            super::projects::card_title(ui, crate::tr!("RÉGLAGES ET LIMITES", "SETTINGS AND LIMITS"), "", t);
+            // The 5-hour window: what is used, and up to where the AIs may go.
             let w = ui.available_width();
-            let (bar, _) = ui.allocate_exact_size(egui::vec2(w, 10.0), egui::Sense::hover());
-            ui.painter().rect_filled(bar, 5.0, t.fill);
+            let (area, _) = ui.allocate_exact_size(egui::vec2(w, 34.0), egui::Sense::hover());
+            let bar = egui::Rect::from_min_size(egui::pos2(area.left(), area.top() + 18.0), egui::vec2(w, 10.0));
+            let p = ui.painter();
+            p.rect_filled(bar, 5.0, t.fill);
+            let lx = bar.left() + bar.width() * o.global_limit / 100.0;
+            // Beyond the limit: hatched-looking darker zone.
+            p.rect_filled(egui::Rect::from_min_max(egui::pos2(lx, bar.top()), bar.max), egui::CornerRadius { nw: 0, sw: 0, ne: 5, se: 5 }, Color32::from_rgb(224, 62, 62).gamma_multiply(0.12));
             if let Some(f) = five {
                 let frac = super::projects::smooth(ui, "orch-five", f / 100.0);
                 let color = if f >= o.global_limit { Color32::from_rgb(224, 62, 62) } else { super::projects::GREEN };
                 ui.painter().rect_filled(egui::Rect::from_min_size(bar.min, egui::vec2(bar.width() * frac, bar.height())), 5.0, color);
             }
-            let x = bar.left() + bar.width() * o.global_limit / 100.0;
-            ui.painter().vline(x, egui::Rangef::new(bar.top() - 4.0, bar.bottom() + 4.0), egui::Stroke::new(2.0, super::projects::ORANGE));
-            ui.horizontal_wrapped(|ui| {
-                let s = match five {
-                    Some(f) => crate::trf!("Session de 5 h : {f:.0} % utilisés", "5-hour session: {f:.0} % used"),
-                    None => crate::tr!("Utilisation inconnue pour l'instant (elle arrive avec la prochaine réponse de Claude Code)", "Usage unknown for now (it arrives with Claude Code's next answer)").into(),
-                };
-                ui.label(RichText::new(s).size(13.0).color(t.secondary));
-                if let Some(w) = week {
-                    ui.label(RichText::new(crate::trf!("· semaine {w:.0} %", "· week {w:.0} %")).size(13.0).color(t.tertiary));
-                }
-            });
-            ui.add_space(4.0);
-            ui.horizontal_wrapped(|ui| {
-                ui.spacing_mut().item_spacing.x = 8.0;
-                ui.label(RichText::new(crate::tr!("Limite globale", "Global limit")).size(13.0));
-                ui.add(egui::DragValue::new(&mut o.global_limit).range(5.0..=100.0).speed(0.5).suffix(" %")).on_hover_text(crate::tr!("Aucune session ne continue au-delà de ce niveau de la session de 5 h (tous projets confondus).", "No session goes on past this level of the 5-hour window (all projects together)."));
-                ui.add_space(12.0);
-                ui.label(RichText::new(crate::tr!("Par projet, par défaut", "Per project, by default")).size(13.0));
-                ui.add(egui::DragValue::new(&mut o.default_limit).range(1.0..=100.0).speed(0.5).suffix(" %"));
-                ui.add_space(12.0);
-                ui.checkbox(&mut o.allow_commits, RichText::new(crate::tr!("Commits autorisés par défaut", "Commits allowed by default")).size(13.0));
-            });
-            ui.horizontal_wrapped(|ui| {
-                ui.spacing_mut().item_spacing.x = 8.0;
-                ui.label(RichText::new(crate::tr!("Bilan de la journée à", "Daily summary at")).size(13.0));
-                let mut h = o.report_hour as u32;
-                if ui.add(egui::DragValue::new(&mut h).range(0..=23).suffix(" h")).changed() {
-                    o.report_hour = h as u8;
-                }
-                ui.label(RichText::new(crate::tr!("(quand plusieurs projets ont travaillé)", "(when several projects worked)")).size(12.5).color(t.tertiary));
-                ui.add_space(12.0);
-                ui.label(RichText::new(crate::tr!("Tours au plus", "Turns at most")).size(13.0));
-                ui.add(egui::DragValue::new(&mut o.max_turns).range(1..=200));
-            });
+            let p = ui.painter();
+            p.vline(lx, egui::Rangef::new(bar.top() - 3.0, bar.bottom() + 3.0), egui::Stroke::new(2.0, super::projects::ORANGE));
+            let lab = crate::trf!("limite {:.0} %", "limit {:.0} %", o.global_limit);
+            let align = if lx > bar.right() - 60.0 { egui::Align2::RIGHT_BOTTOM } else { egui::Align2::CENTER_BOTTOM };
+            p.text(egui::pos2(lx, bar.top() - 4.0), align, lab, FontId::proportional(11.5), super::projects::ORANGE);
+            let used = match five {
+                Some(f) => crate::trf!("{f:.0} % utilisés", "{f:.0} % used"),
+                None => crate::tr!("utilisation inconnue", "usage unknown").into(),
+            };
+            p.text(egui::pos2(bar.left(), bar.top() - 4.0), egui::Align2::LEFT_BOTTOM, used, FontId::proportional(11.5), t.secondary);
+            ui.add_space(10.0);
+            let lk = super::settings::look(ui.visuals().dark_mode);
+            let row = |ui: &mut egui::Ui, label: &str, hint: &str, add: &mut dyn FnMut(&mut egui::Ui)| {
+                ui.horizontal(|ui| {
+                    ui.set_min_height(32.0);
+                    ui.vertical(|ui| {
+                        ui.set_width((ui.available_width() - 150.0).max(120.0));
+                        ui.label(RichText::new(label).size(13.5).color(t.text));
+                        if !hint.is_empty() {
+                            ui.add(egui::Label::new(RichText::new(hint).size(12.0).color(t.tertiary)).wrap());
+                        }
+                    });
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| add(ui));
+                });
+                ui.add_space(4.0);
+            };
+            let two = w >= 640.0;
+            let col_w = if two { (w - 28.0) / 2.0 } else { w };
+            let mut left = |ui: &mut egui::Ui| {
+                ui.set_width(col_w);
+                row(ui, crate::tr!("Limite globale", "Global limit"), crate::tr!("Aucune session ne va au-delà, tous projets confondus", "No session goes past it, all projects together"), &mut |ui| {
+                    ui.add(egui::DragValue::new(&mut o.global_limit).range(5.0..=100.0).speed(0.5).suffix(" %"));
+                });
+                row(ui, crate::tr!("Part par projet", "Share per project"), crate::tr!("Par défaut, modifiable au lancement", "By default, can be changed at start"), &mut |ui| {
+                    ui.add(egui::DragValue::new(&mut o.default_limit).range(1.0..=100.0).speed(0.5).suffix(" %"));
+                });
+                row(ui, crate::tr!("Commits autorisés", "Commits allowed"), crate::tr!("Sur leur branche, jamais de push", "On their branch, never a push"), &mut |ui| {
+                    super::settings::switch(ui, &mut o.allow_commits, &lk);
+                });
+            };
+            let mut right = |ui: &mut egui::Ui| {
+                ui.set_width(col_w);
+                row(ui, crate::tr!("Bilan de la journée", "Daily summary"), crate::tr!("Quand plusieurs projets ont travaillé", "When several projects worked"), &mut |ui| {
+                    let mut h = o.report_hour as u32;
+                    if ui.add(egui::DragValue::new(&mut h).range(0..=23).suffix(" h")).changed() {
+                        o.report_hour = h as u8;
+                    }
+                });
+                row(ui, crate::tr!("Tours au plus", "Turns at most"), crate::tr!("Par session", "Per session"), &mut |ui| {
+                    ui.add(egui::DragValue::new(&mut o.max_turns).range(1..=200));
+                });
+            };
+            if two {
+                ui.horizontal_top(|ui| {
+                    ui.spacing_mut().item_spacing.x = 28.0;
+                    ui.vertical(|ui| left(ui));
+                    ui.vertical(|ui| right(ui));
+                });
+            } else {
+                left(ui);
+                right(ui);
+            }
             ui.collapsing(RichText::new(crate::tr!("Commandes autorisées", "Allowed commands")).size(13.0).color(t.secondary), |ui| {
                 ui.label(
                     RichText::new(crate::tr!("Déjà permis : lire et modifier les fichiers de la copie, git status / diff / log, cargo, npm, pnpm, yarn, node, python, pytest, make, go (et git add / commit si les commits sont autorisés). Toujours refusés : git push, reset, checkout, switch, rm -rf, sudo, curl, wget. Une autre commande est refusée, l'IA continue sans.", "Already allowed: reading and editing the copy's files, git status / diff / log, cargo, npm, pnpm, yarn, node, python, pytest, make, go (and git add / commit when commits are allowed). Always refused: git push, reset, checkout, switch, rm -rf, sudo, curl, wget. Any other command is refused and the AI goes on without it."))
@@ -577,6 +687,8 @@ impl NotesApp {
         super::projects::card(ui, t, 0.0, |ui| {
             super::projects::card_title(ui, crate::tr!("EN COURS", "RUNNING"), &n.to_string(), t);
             for (i, r) in self.orch.runs.iter_mut().enumerate() {
+                egui::Frame::new().fill(super::projects::GREEN.gamma_multiply(0.06)).stroke(egui::Stroke::new(1.0, super::projects::GREEN.gamma_multiply(0.3))).corner_radius(10.0).inner_margin(egui::Margin::same(12)).show(ui, |ui| {
+                ui.set_width(ui.available_width());
                 ui.horizontal(|ui| {
                     let (dot, _) = ui.allocate_exact_size(egui::vec2(12.0, 18.0), egui::Sense::hover());
                     super::projects::pulse_dot(ui, dot.center(), super::projects::GREEN);
@@ -605,10 +717,10 @@ impl NotesApp {
                 ui.horizontal(|ui| {
                     ui.add_space(20.0);
                     let w = (ui.available_width() - 150.0).max(80.0);
-                    let (bar, _) = ui.allocate_exact_size(egui::vec2(w, 6.0), egui::Sense::hover());
-                    ui.painter().rect_filled(bar, 3.0, t.fill);
+                    let (bar, _) = ui.allocate_exact_size(egui::vec2(w, 8.0), egui::Sense::hover());
+                    ui.painter().rect_filled(bar, 4.0, t.fill);
                     let frac = super::projects::smooth(ui, ("run-pct", &r.id), (r.pct / r.limit.max(0.1)).clamp(0.0, 1.0));
-                    ui.painter().rect_filled(egui::Rect::from_min_size(bar.min, egui::vec2(bar.width() * frac, 6.0)), 3.0, super::projects::BLUE);
+                    ui.painter().rect_filled(egui::Rect::from_min_size(bar.min, egui::vec2(bar.width() * frac, 8.0)), 4.0, if frac > 0.85 { super::projects::ORANGE } else { super::projects::GREEN });
                     ui.label(RichText::new(format!("{:.1} / {:.0} %", r.pct, r.limit)).size(12.5).color(t.secondary));
                 });
                 ui.horizontal(|ui| {
@@ -630,6 +742,7 @@ impl NotesApp {
                         super::term_ui::terminal_view(ui, &mut r.term, Color32::from_rgb(20, 20, 20), dark || true, false);
                     });
                 }
+                });
                 ui.add_space(8.0);
             }
         });
@@ -668,9 +781,14 @@ impl NotesApp {
         let picked: Vec<String> = projects.iter().filter(|(id, _, _)| self.orch.drafts.get(id).is_some_and(|d| d.pick) && !running.contains(id)).map(|(id, _, _)| id.clone()).collect();
         let picked_sum: f32 = picked.iter().filter_map(|id| self.orch.drafts.get(id)).map(|d| d.limit).sum();
         let global = self.ws.settings.orch.global_limit;
+        let open_steps: HashMap<String, usize> = projects
+            .iter()
+            .map(|(id, _, _)| (id.clone(), self.ws.page(id).and_then(|p| p.project.as_ref()).map(|x| x.steps.iter().filter(|s| s.status != crate::project::StepStatus::Done).count()).unwrap_or(0)))
+            .collect();
+        let lk = super::settings::look(ui.visuals().dark_mode);
         let drafts = &mut self.orch.drafts;
         super::projects::card(ui, t, 0.0, |ui| {
-            super::projects::card_title(ui, crate::tr!("LANCER", "START"), "Claude Code", t);
+            super::projects::card_title(ui, crate::tr!("LANCER UNE SESSION", "START A SESSION"), "Claude Code", t);
             if !plugged {
                 ui.label(RichText::new(crate::tr!("Branchez d'abord Claude Code (Réglages › IA).", "Plug in Claude Code first (Settings › AI).")).color(super::projects::ORANGE));
             }
@@ -681,28 +799,48 @@ impl NotesApp {
                 let d = drafts.get_mut(id).unwrap();
                 let busy = running.contains(id);
                 let bg = super::projects::hover_begin(ui);
+                let open = open_steps.get(id).copied().unwrap_or(0);
                 let row = ui.vertical(|ui| {
                     ui.horizontal(|ui| {
-                        ui.add_enabled(!busy, egui::Checkbox::without_text(&mut d.pick));
-                        ui.label(RichText::new(title).font(semibold(14.0)).color(t.text));
-                        ui.label(RichText::new(folder).font(FontId::monospace(11.5)).color(t.tertiary));
+                        ui.add_enabled(!busy, egui::Checkbox::without_text(&mut d.pick)).on_hover_text(crate::tr!("Sélectionner pour lancer plusieurs projets ensemble", "Select to start several projects together"));
+                        // A round badge with the project's initial.
+                        let (r, _) = ui.allocate_exact_size(egui::vec2(32.0, 32.0), egui::Sense::hover());
+                        let hue = project_color(title);
+                        ui.painter().circle_filled(r.center(), 16.0, hue.gamma_multiply(0.18));
+                        let initial: String = title.chars().next().map(|c| c.to_uppercase().collect()).unwrap_or_default();
+                        ui.painter().text(r.center(), egui::Align2::CENTER_CENTER, initial, semibold(15.0), hue);
+                        ui.vertical(|ui| {
+                            ui.spacing_mut().item_spacing.y = 1.0;
+                            ui.horizontal(|ui| {
+                                ui.label(RichText::new(title).font(semibold(14.5)).color(t.text));
+                                let (txt, col) = if busy { (crate::tr!("au travail", "at work").to_string(), super::projects::GREEN) } else if open == 0 { (crate::tr!("aucune étape ouverte", "no open step").to_string(), t.tertiary) } else { (crate::trf!("{open} étape(s) ouverte(s)", "{open} open step(s)"), t.secondary) };
+                                ui.label(RichText::new(txt).size(12.0).color(col));
+                            });
+                            let mut job = egui::text::LayoutJob::single_section(folder.clone(), egui::TextFormat::simple(FontId::monospace(11.0), t.tertiary));
+                            job.wrap = egui::text::TextWrapping::truncate_at_width((ui.available_width() - 250.0).max(80.0));
+                            super::projects::cut_label(ui, job);
+                        });
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                             if busy {
-                                ui.label(RichText::new("en cours").size(12.5).color(super::projects::GREEN));
-                            } else if ui.add_enabled(plugged, egui::Button::new(RichText::new(crate::tr!("Lancer", "Start")).size(13.0))).clicked() {
+                                let (r, _) = ui.allocate_exact_size(egui::vec2(16.0, 16.0), egui::Sense::hover());
+                                super::projects::pulse_dot(ui, r.center(), super::projects::GREEN);
+                            } else if start_button(ui, plugged, t).on_disabled_hover_text(crate::tr!("Branchez d'abord Claude Code", "Plug in Claude Code first")).clicked() {
                                 start.push(id.clone());
                             }
-                            ui.checkbox(&mut d.commits, RichText::new("commits").size(12.5)).on_hover_text(crate::tr!("L'IA peut faire des commits sur sa branche (jamais de push)", "The AI may commit on its branch (never push)"));
+                            ui.add_space(4.0);
+                            super::settings::switch(ui, &mut d.commits, &lk).on_hover_text(crate::tr!("L'IA peut faire des commits sur sa branche (jamais de push)", "The AI may commit on its branch (never push)"));
+                            ui.label(RichText::new("commits").size(12.0).color(t.tertiary));
+                            ui.add_space(6.0);
                             ui.add(egui::DragValue::new(&mut d.limit).range(1.0..=100.0).speed(0.5).suffix(" %")).on_hover_text(crate::tr!("Part de la session de 5 h que ce projet peut utiliser", "Share of the 5-hour window this project may use"));
                         });
                     });
                     ui.horizontal(|ui| {
-                        ui.add_space(26.0);
-                        ui.add(egui::TextEdit::singleline(&mut d.mission).hint_text(default_mission()).desired_width(f32::INFINITY).font(FontId::proportional(13.0)));
+                        ui.add_space(70.0);
+                        ui.add(egui::TextEdit::singleline(&mut d.mission).hint_text(default_mission()).desired_width(f32::INFINITY).font(FontId::proportional(13.0)).margin(egui::Margin::symmetric(8, 5)));
                     });
                 });
                 super::projects::hover_end(ui, bg, row.response.rect, egui::Id::unique(("orch-row", id)), t);
-                ui.add_space(4.0);
+                ui.add_space(10.0);
             }
             if !picked.is_empty() {
                 ui.add_space(4.0);
@@ -740,10 +878,15 @@ impl NotesApp {
         let mut act: Option<(String, &'static str)> = None;
         let confirm = self.orch.confirm.clone();
         super::projects::card(ui, t, 0.0, |ui| {
-            super::projects::card_title(ui, crate::tr!("TERMINÉES", "FINISHED"), "", t);
+            super::projects::card_title(ui, crate::tr!("SESSIONS TERMINÉES", "FINISHED SESSIONS"), &done.len().to_string(), t);
             for r in &done {
                 let bg = super::projects::hover_begin(ui);
-                let row = ui.vertical(|ui| {
+                let row = ui.horizontal_top(|ui| {
+                    let (b, _) = ui.allocate_exact_size(egui::vec2(26.0, 26.0), egui::Sense::hover());
+                    let (mark, col) = outcome_mark(&r.outcome, &r.closed, t);
+                    ui.painter().circle_filled(b.center(), 12.0, col.gamma_multiply(0.15));
+                    ui.painter().text(b.center(), egui::Align2::CENTER_CENTER, mark, FontId::proportional(13.0), col);
+                    ui.vertical(|ui| {
                     ui.horizontal_wrapped(|ui| {
                         ui.spacing_mut().item_spacing.x = 8.0;
                         ui.label(RichText::new(&r.title).font(semibold(14.0)).color(t.text));
@@ -788,9 +931,10 @@ impl NotesApp {
                             }
                         }
                     });
+                    });
                 });
                 super::projects::hover_end(ui, bg, row.response.rect, egui::Id::unique(("orch-done", &r.id)), t);
-                ui.add_space(4.0);
+                ui.add_space(8.0);
             }
         });
         if let Some((id, a)) = act {
@@ -905,4 +1049,76 @@ impl NotesApp {
             self.dirty_since.get_or_insert_with(Instant::now);
         }
     }
+}
+
+
+/// A ring gauge: `value` (0..1, None when unknown) and a tick at `limit`.
+fn ring(ui: &egui::Ui, c: egui::Pos2, r: f32, value: Option<f32>, limit: f32, color: Color32, t: &Tone) {
+    let p = ui.painter();
+    let arc = |from: f32, to: f32, col: Color32, w: f32| {
+        let n = 48;
+        let pts: Vec<egui::Pos2> = (0..=n)
+            .map(|i| {
+                let a = -std::f32::consts::FRAC_PI_2 + std::f32::consts::TAU * (from + (to - from) * i as f32 / n as f32);
+                c + egui::vec2(a.cos(), a.sin()) * r
+            })
+            .collect();
+        p.add(egui::Shape::line(pts, egui::Stroke::new(w, col)));
+    };
+    arc(0.0, 1.0, t.fill, 6.0);
+    if let Some(v) = value {
+        let v = super::projects::smooth(ui, "orch-ring", v.clamp(0.0, 1.0));
+        if v > 0.001 {
+            arc(0.0, v, if v >= limit { Color32::from_rgb(224, 62, 62) } else { color }, 6.0);
+        }
+    }
+    let a = -std::f32::consts::FRAC_PI_2 + std::f32::consts::TAU * limit.clamp(0.0, 1.0);
+    let d = egui::vec2(a.cos(), a.sin());
+    p.line_segment([c + d * (r - 6.0), c + d * (r + 6.0)], egui::Stroke::new(2.0, super::projects::ORANGE));
+}
+
+/// A colour per project, stable (from its name).
+fn project_color(title: &str) -> Color32 {
+    const HUES: [Color32; 6] = [
+        Color32::from_rgb(35, 131, 226),
+        Color32::from_rgb(68, 160, 110),
+        Color32::from_rgb(212, 76, 125),
+        Color32::from_rgb(217, 115, 13),
+        Color32::from_rgb(144, 101, 176),
+        Color32::from_rgb(0, 150, 160),
+    ];
+    HUES[(hash(title) % HUES.len() as u64) as usize]
+}
+
+/// The mark and colour of a finished session: done, stopped on a limit or a block, failed.
+fn outcome_mark(outcome: &str, closed: &str, t: &Tone) -> (&'static str, Color32) {
+    let o = outcome.to_lowercase();
+    if !closed.is_empty() {
+        return ("✔", t.tertiary);
+    }
+    if o.contains("termin") || o.contains("finish") || o.contains("fini") || o.contains("done") {
+        ("✔", super::projects::GREEN)
+    } else if o.contains("bloq") || o.contains("block") || o.contains("limit") {
+        ("!", super::projects::ORANGE)
+    } else if o.contains("erreur") || o.contains("error") || o.contains("interromp") || o.contains("interrupt") {
+        ("×", Color32::from_rgb(224, 62, 62))
+    } else {
+        ("■", t.tertiary)
+    }
+}
+
+/// "▶ Lancer": a filled button.
+fn start_button(ui: &mut egui::Ui, enabled: bool, t: &Tone) -> egui::Response {
+    let text = crate::tr!("▶ Lancer", "▶ Start");
+    let g = ui.painter().layout_no_wrap(text.to_string(), semibold(13.0), Color32::WHITE);
+    let sense = if enabled { egui::Sense::click() } else { egui::Sense::hover() };
+    let (rect, resp) = ui.allocate_exact_size(g.size() + egui::vec2(24.0, 12.0), sense);
+    let a = ui.ctx().animate_bool_with_time(resp.id.with("hov"), resp.hovered() && enabled, 0.15);
+    let base = if enabled { super::projects::BLUE } else { t.fill };
+    let fill = base.lerp_to_gamma(Color32::WHITE, 0.12 * a);
+    ui.painter().rect_filled(rect, 8.0, fill);
+    ui.painter().galley(rect.center() - g.size() / 2.0, g, if enabled { Color32::WHITE } else { t.tertiary });
+    let resp = if enabled { resp.on_hover_cursor(egui::CursorIcon::PointingHand) } else { resp };
+    // Disabled: report it so on_disabled_hover_text works.
+    if enabled { resp } else { resp.on_hover_text(crate::tr!("Branchez d'abord Claude Code", "Plug in Claude Code first")) }
 }

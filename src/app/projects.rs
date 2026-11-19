@@ -176,7 +176,7 @@ impl NotesApp {
                         let folder_ok = crate::project::normalize_folder(folder.trim()).is_dir();
                         ui.add_space(4.0);
                         ui.add_enabled_ui(folder_ok, |ui| {
-                            if ui.checkbox(&mut analyse, crate::tr!("Faire analyser le dossier par une IA (Claude Code ou Codex, lecture seule)", "Have an AI analyse the folder (Claude Code or Codex, read-only)")).changed() {
+                            if ui.checkbox(&mut analyse, crate::tr!("Faire remplir le projet par une IA : état des lieux, statut, regard extérieur (lecture seule ; pas les étapes)", "Have an AI fill in the project: current state, status, outside view (read-only; not the steps)")).changed() {
                                 ui.ctx().data_mut(|d| d.insert_temp(analyse_key, analyse));
                             }
                         });
@@ -207,15 +207,7 @@ impl NotesApp {
                     actions.push(Action::NewProject(title, folder.clone()));
                     self.new_project = None;
                     if analyse {
-                        let busy = self.sync_run.as_ref().is_some_and(|r| !r.finished.load(std::sync::atomic::Ordering::Relaxed));
-                        if busy {
-                            self.status = crate::tr!("Une analyse est déjà en cours : le projet est créé, lancez « Synchroniser avec les IA » ensuite.", "An analysis is already running: the project is created, run « Sync with the AIs » afterwards.").into();
-                        } else {
-                            let ctx = ui.ctx().clone();
-                            let root = crate::project::normalize_folder(&folder).display().to_string();
-                            self.sync_dialog = None;
-                            self.sync_run = Some(crate::sync::SyncRun::start(vec![(root, crate::sessions::Tool::ClaudeCode)], move || ctx.request_repaint()));
-                        }
+                        super::ai_fill::request(ui.ctx(), super::ai_fill::AiReq::FillFolder { folder });
                     }
                 } else if cancel {
                     self.new_project = None;
@@ -353,8 +345,9 @@ impl NotesApp {
                         ui.label(RichText::new(crate::trf!("{} session(s) · {} · {}", "{} session(s) · {} · {}", list.len(), tools.join(", "), relative_time(last))).size(12.0).color(t.secondary));
                     });
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        if ui.button(crate::tr!("Créer le projet", "Create the project")).clicked() {
+                        if ui.button(crate::tr!("Créer le projet", "Create the project")).on_hover_text(crate::tr!("Une IA le remplit ensuite : état des lieux, statut, regard extérieur", "An AI then fills it in: current state, status, outside view")).clicked() {
                             actions.push(Action::NewProject(name.clone(), folder.clone()));
+                            super::ai_fill::request(ui.ctx(), super::ai_fill::AiReq::FillFolder { folder: folder.clone() });
                         }
                     });
                 });
@@ -401,7 +394,7 @@ pub(super) fn card(ui: &mut egui::Ui, t: &Tone, extra: f32, add: impl FnOnce(&mu
 }
 
 /// Accent of each card, shown as a small bar before its title.
-fn accent_of(title: &str) -> Color32 {
+pub(super) fn accent_of(title: &str) -> Color32 {
     match title {
         "ÉTAT DES LIEUX" | "CURRENT STATE" => Color32::from_rgb(144, 101, 176),
         "ÉTAPES" | "STEPS" => GREEN,
@@ -654,6 +647,8 @@ pub(super) struct Cx<'a> {
     pub vers: &'a mut super::versions::Versions,
     /// "Nouvelle session" buttons: the plugged AIs that run in a terminal, then the shell.
     pub launchers: Vec<(&'static str, Option<&'static str>, Color32)>,
+    /// The AI filling the cards, proposing steps.
+    pub ai: &'a mut super::ai_fill::AiJobs,
 }
 
 #[derive(Clone, Copy)]
@@ -792,6 +787,8 @@ pub(super) fn project_panel(ui: &mut egui::Ui, cx: &mut Cx) -> Option<String> {
     {
         let (page_id, t, live) = (cx.page_id, cx.t, cx.live);
         let peers = cx.peers.clone();
+        let filling = cx.ai.filling(page_id);
+        let prefer = live.first().map(|s| s.tool);
         let pr = &mut *cx.pr;
         // ---- Header: status, progress, activity, tokens; folder below, small.
         let (done, total) = pr.progress();
@@ -833,6 +830,44 @@ pub(super) fn project_panel(ui: &mut egui::Ui, cx: &mut Cx) -> Option<String> {
                 let working: Vec<&str> = peers.iter().filter(|(_, ai)| *ai).map(|(n, _)| n.as_str()).collect();
                 let text = if working.is_empty() { crate::trf!("{} ici", "{} here", names.join(", ")) } else { crate::trf!("IA au travail chez {}", "AI at work at {}", working.join(", ")) };
                 ui.label(RichText::new(text).size(12.5).color(if working.is_empty() { t.secondary } else { GREEN }));
+            }
+            // Fill (again) the cards with the AI: after a warning, since it replaces them.
+            if filling {
+                ui.add(egui::Spinner::new().size(12.0));
+                ui.label(RichText::new(crate::tr!("L'IA remplit le projet… (1 à 3 min)", "The AI is filling in the project… (1 to 3 min)")).size(12.5).color(BLUE));
+            } else if !pr.read_only {
+                let folder = pr.folder.trim().to_string();
+                let ok = !folder.is_empty() && crate::project::normalize_folder(&folder).is_dir();
+                let r = ui.add_enabled_ui(ok, |ui| action_link(ui, crate::tr!("✦ Remplir avec l'IA", "✦ Fill in with the AI"))).inner;
+                let r = r.on_disabled_hover_text(crate::tr!("Indiquez d'abord le dossier du projet", "Set the project's folder first"));
+                egui::Popup::menu(&r).show(|ui| {
+                    ui.set_max_width(300.0);
+                    ui.label(RichText::new(crate::tr!("Tout faire remplir par l'IA ?", "Have the AI fill everything in?")).font(semibold(14.0)).color(t.text));
+                    ui.add_space(2.0);
+                    let has = !pr.summary.trim().is_empty() || pr.review.is_some();
+                    ui.add(
+                        egui::Label::new(
+                            RichText::new(if has {
+                                crate::tr!("⚠ L'état des lieux, le statut et le regard extérieur actuels seront remplacés. Les étapes ne sont pas touchées.", "⚠ The current state, status and outside view will be replaced. The steps aren't touched.")
+                            } else {
+                                crate::tr!("L'IA lit le projet sans rien modifier et écrit l'état des lieux, le statut et un regard extérieur. Les étapes ne sont pas touchées.", "The AI reads the project without changing anything and writes the current state, the status and an outside view. The steps aren't touched.")
+                            })
+                            .size(12.5)
+                            .color(if has { ORANGE } else { t.secondary }),
+                        )
+                        .wrap(),
+                    );
+                    ui.add_space(6.0);
+                    ui.horizontal(|ui| {
+                        if ui.button(if has { crate::tr!("Remplacer", "Replace") } else { crate::tr!("Remplir", "Fill in") }).clicked() {
+                            super::ai_fill::request(ui.ctx(), super::ai_fill::AiReq::Fill { page_id: page_id.to_string(), folder: folder.clone(), prefer });
+                            ui.close();
+                        }
+                        if ui.button(crate::tr!("Annuler", "Cancel")).clicked() {
+                            ui.close();
+                        }
+                    });
+                });
             }
         });
         let editing_folder = !pr.read_only && (flag(ui, ("edit-folder", page_id)) || pr.folder.trim().is_empty());
@@ -914,8 +949,17 @@ fn summary_card(ui: &mut egui::Ui, cx: &mut Cx, folded_h: f32, extra: f32) -> f3
     card(ui, t, extra, |ui| {
         let by = if pr.summary_by.is_empty() { String::new() } else { format!("{} · {}", pr.summary_by, relative_time(pr.summary_updated)) };
         card_title(ui, crate::tr!("ÉTAT DES LIEUX", "CURRENT STATE"), &by, t);
+        if cx.ai.filling(page_id) {
+            ui.horizontal(|ui| {
+                ui.add(egui::Spinner::new().size(12.0));
+                ui.label(RichText::new(crate::tr!("L'IA lit le projet et écrit l'état des lieux…", "The AI is reading the project and writing its state…")).size(13.0).color(t.secondary));
+            });
+            ui.add_space(4.0);
+        }
         if pr.summary.trim().is_empty() {
-            ui.label(RichText::new(crate::tr!("Pas encore écrit. Demandez à votre IA : « fais l'état des lieux de ce projet dans le tableau de bord ».", "Not written yet. Ask your AI: « write the current state of this project in the dashboard ».")).color(t.tertiary).italics());
+            if !cx.ai.filling(page_id) {
+                ui.label(RichText::new(crate::tr!("Pas encore écrit. Cliquez sur « ✦ Remplir avec l'IA » en haut, ou demandez à votre IA : « fais l'état des lieux de ce projet dans le tableau de bord ».", "Not written yet. Click « ✦ Fill in with the AI » at the top, or ask your AI: « write the current state of this project in the dashboard ».")).color(t.tertiary).italics());
+            }
             return;
         }
         let key = ("summary-open", page_id);
@@ -962,6 +1006,8 @@ fn steps_card(ui: &mut egui::Ui, cx: &mut Cx, extra: f32) -> f32 {
     let (page_id, t, ro) = (cx.page_id, cx.t, cx.pr.read_only);
     let pr = &mut *cx.pr;
     let new_step = &mut *cx.new_step;
+    let ai = &mut *cx.ai;
+    let prefer = cx.live.first().map(|s| s.tool);
     // ---- Steps: open ones first, one line each; done ones folded.
     let (done, total) = pr.progress();
     card(ui, t, extra, |ui| {
@@ -974,7 +1020,7 @@ fn steps_card(ui: &mut egui::Ui, cx: &mut Cx, extra: f32) -> f32 {
             .chain((0..pr.steps.len()).filter(|&i| show_done && pr.steps[i].status == StepStatus::Done))
             .collect();
         if pr.steps.is_empty() {
-            ui.label(RichText::new(crate::tr!("Aucune étape. Ajoutez-en une, ou demandez à votre IA de les lister.", "No step. Add one, or ask your AI to list them.")).color(t.tertiary).italics());
+            ui.label(RichText::new(crate::tr!("Aucune étape. Ajoutez-en une, demandez des suggestions à l'IA, ou collez un texte à transformer en étapes.", "No step. Add one, ask the AI for suggestions, or paste a text to turn into steps.")).color(t.tertiary).italics());
         }
         for i in rows {
             let s = &pr.steps[i];
@@ -1083,7 +1129,105 @@ fn steps_card(ui: &mut egui::Ui, cx: &mut Cx, extra: f32) -> f32 {
                 }
             }
         });
+        ai_steps(ui, page_id, pr, ai, prefer, t);
     })
+}
+
+/// Under the steps: ask the AI for steps (from the project or from a pasted text), and
+/// the proposals to tick before they become steps. Nothing is added without a click.
+fn ai_steps(ui: &mut egui::Ui, page_id: &str, pr: &mut Project, ai: &mut super::ai_fill::AiJobs, prefer: Option<crate::sessions::Tool>, t: &Tone) {
+    let folder = pr.folder.trim().to_string();
+    let folder_ok = !folder.is_empty() && crate::project::normalize_folder(&folder).is_dir();
+    let existing: Vec<String> = pr.steps.iter().filter(|s| s.status != StepStatus::Done).map(|s| s.title.clone()).collect();
+    ui.add_space(6.0);
+    if let Some(list) = ai.proposals.get_mut(page_id) {
+        let mut add = false;
+        let mut drop = false;
+        egui::Frame::new().fill(BLUE.gamma_multiply(0.05)).stroke(egui::Stroke::new(1.0, BLUE.gamma_multiply(0.25))).corner_radius(8.0).inner_margin(egui::Margin::same(10)).show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            ui.label(RichText::new(crate::tr!("Proposées par l'IA — cochez celles à garder", "Proposed by the AI — tick the ones to keep")).size(12.5).color(BLUE));
+            ui.add_space(2.0);
+            for (title, keep) in list.iter_mut() {
+                ui.horizontal(|ui| {
+                    ui.checkbox(keep, "");
+                    let room = ui.available_width();
+                    ui.allocate_ui_with_layout(egui::vec2(room, 0.0), egui::Layout::top_down(egui::Align::Min), |ui| {
+                        ui.set_width(room);
+                        ui.add(egui::Label::new(RichText::new(title.as_str()).size(13.5).color(if *keep { t.text } else { t.tertiary })).wrap());
+                    });
+                });
+            }
+            ui.add_space(4.0);
+            let n = list.iter().filter(|(_, k)| *k).count();
+            ui.horizontal(|ui| {
+                if ui.add_enabled(n > 0, egui::Button::new(RichText::new(crate::trf!("Ajouter ({n})", "Add ({n})")).size(13.0))).clicked() {
+                    add = true;
+                }
+                if ui.add(egui::Button::new(RichText::new(crate::tr!("Ignorer", "Dismiss")).size(13.0).color(t.tertiary)).frame(false)).clicked() {
+                    drop = true;
+                }
+            });
+        });
+        if add {
+            for (title, keep) in list.iter() {
+                if *keep {
+                    pr.add_step(title, "IA");
+                }
+            }
+        }
+        if add || drop {
+            ai.proposals.remove(page_id);
+        }
+        return;
+    }
+    if ai.tasking(page_id) {
+        ui.horizontal(|ui| {
+            ui.add(egui::Spinner::new().size(12.0));
+            ui.label(RichText::new(crate::tr!("L'IA prépare des étapes…", "The AI is preparing steps…")).size(13.0).color(t.secondary));
+        });
+        return;
+    }
+    let paste_key = ("paste-open", page_id);
+    if flag(ui, paste_key) {
+        let text_key = egui::Id::unique(("paste-text", page_id));
+        let mut text: String = ui.ctx().data(|d| d.get_temp(text_key)).unwrap_or_default();
+        ui.add(
+            egui::TextEdit::multiline(&mut text)
+                .hint_text(crate::tr!("Collez des notes, un mail, une liste en vrac… l'IA en fait des étapes claires.", "Paste notes, an email, a rough list… the AI turns it into clear steps."))
+                .desired_rows(5)
+                .desired_width(f32::INFINITY)
+                .font(FontId::proportional(13.0)),
+        );
+        let mut close = false;
+        ui.horizontal(|ui| {
+            if ui.add_enabled(!text.trim().is_empty(), egui::Button::new(RichText::new(crate::tr!("✦ Transformer en étapes", "✦ Turn into steps")).size(13.0))).clicked() {
+                super::ai_fill::request(ui.ctx(), super::ai_fill::AiReq::Tasks { page_id: page_id.to_string(), folder: folder.clone(), existing: existing.clone(), prefer, text: Some(text.clone()) });
+                close = true;
+            }
+            if ui.add(egui::Button::new(RichText::new(crate::tr!("Annuler", "Cancel")).size(13.0).color(t.tertiary)).frame(false)).clicked() {
+                close = true;
+            }
+        });
+        if close {
+            text.clear();
+            toggle_flag(ui, paste_key);
+        }
+        ui.ctx().data_mut(|d| d.insert_temp(text_key, text));
+        return;
+    }
+    ui.horizontal_wrapped(|ui| {
+        ui.spacing_mut().item_spacing.x = 8.0;
+        let r = ui.add_enabled_ui(folder_ok, |ui| action_link(ui, crate::tr!("✦ Suggérer des étapes", "✦ Suggest steps"))).inner;
+        let r = r
+            .on_hover_text(crate::tr!("L'IA lit le projet sans rien modifier et propose les prochaines étapes ; vous choisissez celles à garder.", "The AI reads the project without changing anything and proposes the next steps; you choose which to keep."))
+            .on_disabled_hover_text(crate::tr!("Indiquez d'abord le dossier du projet", "Set the project's folder first"));
+        if r.clicked() && folder_ok {
+            super::ai_fill::request(ui.ctx(), super::ai_fill::AiReq::Tasks { page_id: page_id.to_string(), folder: folder.clone(), existing: existing.clone(), prefer, text: None });
+        }
+        if action_link(ui, crate::tr!("Depuis un texte", "From a text")).on_hover_text(crate::tr!("Collez un texte : l'IA le réorganise en étapes", "Paste a text: the AI reorganises it into steps")).clicked() {
+            toggle_flag(ui, paste_key);
+        }
+    });
 }
 
 fn sessions_card(ui: &mut egui::Ui, cx: &mut Cx, extra: f32) -> f32 {
@@ -1674,7 +1818,7 @@ fn review_card(ui: &mut egui::Ui, cx: &mut Cx) {
     let (page_id, t) = (cx.page_id, cx.t);
     let pr = &*cx.pr;
     let prefer = cx.live.first().map(|s| s.tool);
-    let reviewing = cx.reviewing;
+    let reviewing = cx.reviewing || cx.ai.filling(page_id);
     card(ui, t, 0.0, |ui| {
         let by = pr.review.as_ref().map(|r| format!("{} · {}", r.by, relative_time(r.at))).unwrap_or_default();
         card_title(ui, crate::tr!("REGARD EXTÉRIEUR", "OUTSIDE VIEW"), &by, t);

@@ -60,7 +60,7 @@ pub(super) struct Look {
     switch_off: Color32,
 }
 
-fn look(dark: bool) -> Look {
+pub(super) fn look(dark: bool) -> Look {
     if dark {
         Look {
             window: Color32::from_rgb(25, 25, 25),

@@ -101,6 +101,7 @@ pub struct NotesApp {
     docs_checked: Option<Instant>,
     /// "Regard extérieur" asked to an AI, per project page, while it runs.
     reviews: HashMap<String, projects::ReviewJob>,
+    ai: ai_fill::AiJobs,
     /// Discussion messages already sent to the others (real time).
     chat_sent: HashSet<String>,
     /// Right-hand panel (discussion / AI conversation) open, and which tab.
@@ -189,6 +190,7 @@ impl NotesApp {
             versions: Default::default(),
             docs_checked: None,
             reviews: HashMap::new(),
+            ai: ai_fill::AiJobs::default(),
             chat_sent: HashSet::new(),
             side_open: false,
             side_tab: 0,
@@ -240,6 +242,18 @@ impl NotesApp {
                 "orchestra" => app.view = View::Orchestra,
                 "inbox" => app.view = View::Inbox,
                 "side" => app.side_open = true,
+                "fill" | "tasks" => {
+                    if let Some(c) = app.current.clone() {
+                        let folder = app.ws.page(&c).and_then(|p| p.project.as_ref()).map(|p| p.folder.clone()).unwrap_or_default();
+                        let r = if demo.starts_with("fill") { ai_fill::AiReq::Fill { page_id: c, folder, prefer: None } } else { ai_fill::AiReq::Tasks { page_id: c, folder, existing: vec![], prefer: None, text: None } };
+                        ai_fill::request(&cc.egui_ctx, r);
+                    }
+                }
+                "proposals" => {
+                    if let Some(c) = app.current.clone() {
+                        app.ai.proposals.insert(c, vec![("UI : refaire la page d'accueil".into(), true), ("Écrire les tests de l'API".into(), true), ("Publier la version 1.0".into(), false)]);
+                    }
+                }
                 "search" => {
                     app.search_open = true;
                     app.search_focus = true;
@@ -883,7 +897,7 @@ impl NotesApp {
                                 let reviewing = self.reviews.contains_key(&page_id);
                                 let peers = peers.clone();
                                 let launchers = self.ais.launchers();
-                                let mut cx = projects::Cx { page_id: &page_id, pr, new_step: &mut self.new_step, t: &t, live, pages: &tree, actions, msg: None, reviewing, peers, vers: &mut self.versions, launchers, title: page_title.clone() };
+                                let mut cx = projects::Cx { page_id: &page_id, pr, new_step: &mut self.new_step, t: &t, live, pages: &tree, actions, msg: None, reviewing, peers, vers: &mut self.versions, launchers, title: page_title.clone(), ai: &mut self.ai };
                                 let _p = Section::start("panneau projet");
                                 if let Some(msg) = projects::project_panel(ui, &mut cx) {
                                     self.status = msg;
@@ -1021,6 +1035,7 @@ impl eframe::App for NotesApp {
         let mut actions = vec![];
         self.take_term_request(&ctx);
         self.review_tick(&ctx);
+        self.ai_tick(&ctx);
         self.ais_tick();
         self.orch_tick(&ctx);
         self.update_tick(&ctx);
@@ -1917,6 +1932,7 @@ fn apply_kind(
 
 // -------------------------------------------------------------------- databases
 
+mod ai_fill;
 mod ai_ui;
 mod chrome;
 mod projects;

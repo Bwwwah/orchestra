@@ -41,6 +41,8 @@ pub struct GitState {
     /// Local branches, then those only on the remote (without "origin/").
     pub branches: Vec<String>,
     pub remote_branches: Vec<String>,
+    /// Full hash of HEAD (to find its GitHub Actions runs).
+    pub head: String,
 }
 
 fn path() -> String {
@@ -107,6 +109,7 @@ pub fn state(folder: &str) -> Result<GitState, String> {
     st.last_tag = git(&rd, &["describe", "--tags", "--abbrev=0"]).ok().map(|s| s.trim().to_string()).filter(|s| !s.is_empty());
     let range = st.last_tag.as_ref().map(|t| format!("{t}..HEAD")).unwrap_or_else(|| "HEAD".into());
     st.since_tag = git(&rd, &["rev-list", "--count", &range]).ok().and_then(|s| s.trim().parse().ok()).unwrap_or(0);
+    st.head = git(&rd, &["rev-parse", "HEAD"]).map(|h| h.trim().to_string()).unwrap_or_default();
     st.remote = git(&rd, &["remote", "get-url", "origin"]).ok().map(|s| s.trim().to_string()).filter(|s| !s.is_empty());
     st.github = st.remote.as_deref().and_then(github_page);
     st.gh = run_in(&rd, "gh", &["auth", "status"]).is_ok();
@@ -265,9 +268,125 @@ pub fn valid_branch(b: &str) -> bool {
         && !b.chars().any(|c| c.is_whitespace() || "~^:?*[\\".contains(c) || c.is_control())
 }
 
-pub fn pull(root: &str) -> Result<String, String> {
-    git(&PathBuf::from(root), &["pull", "--ff-only"])?;
+/// Bring the remote's new commits. Behind only: fast-forward. Diverged (commits on both
+/// sides): replay ours on top of theirs; on a conflict, undo and say so. Unsaved changes
+/// are set aside and put back (autostash).
+pub fn pull(root: &str, diverged: bool) -> Result<String, String> {
+    let rd = PathBuf::from(root);
+    if diverged {
+        if let Err(e) = git(&rd, &["pull", "--rebase", "--autostash"]) {
+            let _ = git(&rd, &["rebase", "--abort"]);
+            return Err(crate::trf!("conflit entre vos commits et ceux de GitHub, rien n'a changé ({e}). Réglez-le dans le terminal (git pull --rebase).", "conflict between your commits and GitHub's, nothing changed ({e}). Sort it out in the terminal (git pull --rebase)."));
+        }
+        return Ok(crate::tr!("Récupéré : vos commits sont replacés après ceux de GitHub. Envoyez-les quand vous voulez.", "Pulled: your commits now come after GitHub's. Push them when you want.").into());
+    }
+    git(&rd, &["pull", "--ff-only", "--autostash"])?;
     Ok(crate::tr!("À jour avec le dépôt distant.", "Up to date with the remote repository.").into())
+}
+
+/// Ask the remote what changed (`git fetch`), then say where the folder stands.
+pub fn check(root: &str) -> Result<String, String> {
+    let rd = PathBuf::from(root);
+    git(&rd, &["fetch", "--prune", "--tags", "origin"])?;
+    let st = state(root)?;
+    Ok(describe(&st))
+}
+
+/// One sentence: saved or not, and ahead / behind / diverged against the remote.
+pub fn describe(st: &GitState) -> String {
+    let local = if st.changes.is_empty() { String::new() } else { crate::trf!(" ({} fichier(s) modifié(s) en local)", " ({} file(s) changed locally)", st.changes.len()) };
+    let remote = match (st.upstream.is_some(), st.ahead, st.behind) {
+        (false, _, _) => crate::tr!("Branche pas encore envoyée sur le dépôt distant", "Branch not pushed to the remote yet").to_string(),
+        (true, 0, 0) => crate::tr!("À jour avec le dépôt distant", "Up to date with the remote").to_string(),
+        (true, a, 0) => crate::trf!("{a} commit(s) à envoyer", "{a} commit(s) to push"),
+        (true, 0, b) => crate::trf!("{b} nouveauté(s) sur le dépôt distant à récupérer", "{b} new commit(s) on the remote to pull"),
+        (true, a, b) => crate::trf!("Divergé : {a} commit(s) ici et {b} sur le dépôt distant", "Diverged: {a} commit(s) here and {b} on the remote"),
+    };
+    format!("{remote}{local}.")
+}
+
+/// A GitHub Actions run (from `gh run list`).
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Run {
+    pub workflow: String,
+    pub title: String,
+    /// The branch, or the tag for a release build.
+    pub branch: String,
+    pub sha: String,
+    /// queued, in_progress, completed…
+    pub status: String,
+    /// success, failure, cancelled… (when completed)
+    pub conclusion: String,
+    pub url: String,
+    /// ms since epoch.
+    pub at: u64,
+}
+
+impl Run {
+    pub fn running(&self) -> bool {
+        self.status != "completed"
+    }
+}
+
+/// The repository's latest workflow runs (needs `gh`, signed in).
+pub fn runs(root: &str) -> Result<Vec<Run>, String> {
+    let out = run_in(&PathBuf::from(root), "gh", &["run", "list", "--limit", "15", "--json", "workflowName,displayTitle,headBranch,headSha,status,conclusion,url,createdAt"])?;
+    Ok(parse_runs(&out))
+}
+
+fn parse_runs(json: &str) -> Vec<Run> {
+    let v: serde_json::Value = serde_json::from_str(json).unwrap_or_default();
+    let s = |r: &serde_json::Value, k: &str| r.get(k).and_then(|x| x.as_str()).unwrap_or("").to_string();
+    v.as_array()
+        .map(|a| {
+            a.iter()
+                .map(|r| Run {
+                    workflow: s(r, "workflowName"),
+                    title: s(r, "displayTitle"),
+                    branch: s(r, "headBranch"),
+                    sha: s(r, "headSha"),
+                    status: s(r, "status"),
+                    conclusion: s(r, "conclusion"),
+                    url: s(r, "url"),
+                    at: iso_ms(&s(r, "createdAt")),
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// The runs worth showing: for the current commit, the latest one per branch or tag (a
+/// push to main and the release tag on the same commit give two), else the latest run of
+/// the branch. Two at most.
+pub fn runs_to_show(all: &[Run], st: &GitState) -> Vec<Run> {
+    let mut out: Vec<Run> = vec![];
+    for r in all.iter().filter(|r| !st.head.is_empty() && r.sha == st.head) {
+        if !out.iter().any(|o| o.branch == r.branch) {
+            out.push(r.clone());
+        }
+    }
+    if out.is_empty() {
+        if let Some(r) = all.iter().find(|r| r.branch == st.branch) {
+            out.push(r.clone());
+        }
+    }
+    out.sort_by_key(|r| std::cmp::Reverse(r.at));
+    out.truncate(2);
+    out
+}
+
+/// "2026-11-19T08:30:05Z" → ms since epoch (0 when unreadable).
+pub fn iso_ms(s: &str) -> u64 {
+    let n = |a: usize, b: usize| s.get(a..b).and_then(|x| x.parse::<i64>().ok());
+    let (Some(y), Some(mo), Some(d), Some(h), Some(mi), Some(se)) = (n(0, 4), n(5, 7), n(8, 10), n(11, 13), n(14, 16), n(17, 19)) else { return 0 };
+    // Days from civil (Howard Hinnant).
+    let y2 = if mo <= 2 { y - 1 } else { y };
+    let era = y2.div_euclid(400);
+    let yoe = y2 - era * 400;
+    let doy = (153 * (mo + if mo > 2 { -3 } else { 9 }) + 2) / 5 + d - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    let days = era * 146097 + doe - 719468;
+    ((days * 86400 + h * 3600 + mi * 60 + se).max(0) as u64) * 1000
 }
 
 /// Tag, push the tag, then the GitHub release with its notes (when `gh` is there).
@@ -431,6 +550,25 @@ mod tests {
         assert!(valid_version("v1.2.3") && valid_version("1.0.0-beta") && !valid_version("v1.2"));
         assert_eq!(github_page("git@github.com:bwwwah/orchestra.git").as_deref(), Some("https://github.com/bwwwah/orchestra"));
         assert_eq!(repo_name("Bind — app mobile"), "bind-app-mobile");
+    }
+
+    #[test]
+    fn runs_and_dates() {
+        assert_eq!(iso_ms("1970-01-02T00:00:01Z"), 86_401_000);
+        assert_eq!(iso_ms("2026-11-19T00:00:00Z"), 1_795_046_400_000);
+        let json = r#"[{"workflowName":"Release","displayTitle":"v0.3.0","headBranch":"v0.3.0","headSha":"abc","status":"in_progress","conclusion":"","url":"u1","createdAt":"2026-11-19T09:00:00Z"},
+            {"workflowName":"Release","displayTitle":"Ajoute x","headBranch":"main","headSha":"abc","status":"completed","conclusion":"success","url":"u2","createdAt":"2026-11-19T08:59:00Z"},
+            {"workflowName":"Release","displayTitle":"Ancien","headBranch":"main","headSha":"old","status":"completed","conclusion":"failure","url":"u3","createdAt":"2026-11-18T08:00:00Z"}]"#;
+        let all = parse_runs(json);
+        assert_eq!(all.len(), 3);
+        let st = GitState { head: "abc".into(), branch: "main".into(), ..Default::default() };
+        let shown = runs_to_show(&all, &st);
+        assert_eq!(shown.iter().map(|r| r.url.as_str()).collect::<Vec<_>>(), ["u1", "u2"]);
+        assert!(shown[0].running());
+        let st = GitState { head: "new".into(), branch: "main".into(), ..Default::default() };
+        assert_eq!(runs_to_show(&all, &st)[0].url, "u2");
+        let st = GitState { upstream: Some("origin/main".into()), ahead: 1, behind: 2, ..Default::default() };
+        assert!(describe(&st).contains('1'));
     }
 
     #[test]

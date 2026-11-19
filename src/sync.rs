@@ -103,13 +103,11 @@ pub fn prompt(folder: &str) -> String {
          2. Examine rapidement le projet SANS RIEN MODIFIER : README, structure des dossiers, `git log --oneline -20`, `git status`.\n\
          3. S'il n'existe pas, appelle create_project (title : nom court et lisible du projet, folder : « {folder} ») ; sinon update_project.\n\
             Donne status, et l'état des lieux avec les listes done, in_progress et blockers : 3 à 6 éléments chacune au plus, une phrase courte par élément, sans Markdown.\n\
-         4. Avec add_steps, ajoute les 3 à 7 prochaines étapes concrètes qui ne sont pas déjà dans le projet (une action courte par étape).\n\
          Ne modifie aucun fichier, ne lance aucune autre commande. Termine en répondant seulement « ok ».", "You are connected to the « orchestra » dashboard through MCP. The project is in the folder « {folder} ».\n\
          1. Call get_project_state with folder = « {folder} » to see if it already exists.\n\
          2. Look quickly at the project WITHOUT CHANGING ANYTHING: README, folder structure, `git log --oneline -20`, `git status`.\n\
          3. If it doesn't exist, call create_project (title: short readable name of the project, folder: « {folder} »); otherwise update_project.\n\
             Give the status, and the current state with the done, in_progress and blockers lists: 3 to 6 items each at most, one short sentence per item, no Markdown. Write in English.\n\
-         4. With add_steps, add the next 3 to 7 concrete steps that aren't in the project yet (one short action per step).\n\
          Don't change any file, don't run any other command. End by answering only « ok »."
     )
 }
@@ -126,6 +124,9 @@ fn agent_args(tool: Tool, prompt: &str) -> Vec<String> {
             // Read-only: reading tools, two git commands, and the dashboard's MCP tools.
             "--allowedTools".into(),
             "mcp__orchestra,Read,Glob,Grep,Bash(git log:*),Bash(git status:*),Bash(ls:*)".into(),
+            // The steps are the person's: the AI proposes them only when asked.
+            "--disallowedTools".into(),
+            "mcp__orchestra__add_steps".into(),
         ],
         Tool::Codex => vec!["exec".into(), "--sandbox".into(), "read-only".into(), "--skip-git-repo-check".into(), prompt.into()],
     }
@@ -246,6 +247,127 @@ pub fn review_prompt(folder: &str) -> String {
          ### Similar projects\n- 2 or 3 bullets: name — how it is alike or different (write « nothing notable » if you see none)\n\
          ### Suggestions\n- 3 or 4 bullets: concrete features or actions for what's next, the most useful first"
     )
+}
+
+/// What an AI writes into a project's cards (all but the steps).
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Fill {
+    pub status: Option<crate::project::ProjectStatus>,
+    pub done: Vec<String>,
+    pub doing: Vec<String>,
+    pub blockers: Vec<String>,
+    pub notes: String,
+    /// "Regard extérieur" Markdown.
+    pub review: String,
+}
+
+pub fn fill_prompt(folder: &str) -> String {
+    crate::trf!("Remplis la fiche du projet du dossier « {folder} » dans un tableau de bord. Lis-le rapidement SANS RIEN MODIFIER \
+         (README, structure des dossiers, `git log --oneline -20`, `git status`). Si tu peux chercher sur le web, regarde quels \
+         projets ou produits similaires existent.\n\
+         Réponds UNIQUEMENT avec un objet JSON, en français, sans bloc de code :\n\
+         {{\"status\": \"idea|active|paused|done\", \"done\": [\"…\"], \"in_progress\": [\"…\"], \"blockers\": [\"…\"], \"notes\": \"…\", \"review\": \"…\"}}\n\
+         - done / in_progress / blockers : l'état des lieux, 0 à 6 éléments chacun, une phrase courte par élément, sans Markdown ;\n\
+         - notes : une ou deux phrases sur ce qu'est le projet (peut être vide) ;\n\
+         - review : un regard extérieur en Markdown, 900 caractères au plus, avec exactement ces sections : « ### Avis » (2 ou 3 puces, forces et faiblesses, sans complaisance), \
+         « ### Projets similaires » (2 ou 3 puces « nom — en quoi il ressemble ou diffère », ou « rien de notable »), « ### Suggestions » (3 ou 4 puces, la plus utile d'abord).\n\
+         Ne propose pas de liste de tâches.", "Fill in the card of the project in the folder « {folder} » in a dashboard. Read it quickly WITHOUT CHANGING ANYTHING \
+         (README, folder structure, `git log --oneline -20`, `git status`). If you can search the web, look at which \
+         similar projects or products exist.\n\
+         Answer ONLY with a JSON object, in English, no code block:\n\
+         {{\"status\": \"idea|active|paused|done\", \"done\": [\"…\"], \"in_progress\": [\"…\"], \"blockers\": [\"…\"], \"notes\": \"…\", \"review\": \"…\"}}\n\
+         - done / in_progress / blockers: the current state, 0 to 6 items each, one short sentence per item, no Markdown;\n\
+         - notes: one or two sentences on what the project is (may be empty);\n\
+         - review: an outside view in Markdown, 900 characters at most, with exactly these sections: « ### Opinion » (2 or 3 bullets, strengths and weaknesses, frankly), \
+         « ### Similar projects » (2 or 3 bullets « name — how it is alike or different », or « nothing notable »), « ### Suggestions » (3 or 4 bullets, the most useful first).\n\
+         Don't propose a task list."
+    )
+}
+
+/// The JSON object in an answer (a code block or words around it are tolerated).
+pub fn parse_fill(answer: &str) -> Result<Fill, String> {
+    let (Some(a), Some(b)) = (answer.find('{'), answer.rfind('}')) else {
+        return Err(crate::tr!("réponse de l'IA illisible", "unreadable AI answer").into());
+    };
+    let v: serde_json::Value = serde_json::from_str(&answer[a..=b]).map_err(|_| crate::tr!("réponse de l'IA illisible", "unreadable AI answer").to_string())?;
+    let list = |k: &str| -> Vec<String> {
+        v.get(k).and_then(|x| x.as_array()).map(|a| a.iter().filter_map(|x| x.as_str()).map(|x| x.trim().to_string()).filter(|x| !x.is_empty()).take(8).collect()).unwrap_or_default()
+    };
+    let text = |k: &str| v.get(k).and_then(|x| x.as_str()).unwrap_or("").trim().to_string();
+    Ok(Fill {
+        status: crate::project::ProjectStatus::from_name(&text("status")),
+        done: list("done"),
+        doing: list("in_progress"),
+        blockers: list("blockers"),
+        notes: text("notes"),
+        review: text("review"),
+    })
+}
+
+/// Ask an agent to fill in a project's cards (read-only, web search allowed).
+pub fn ask_fill(folder: &str, prefer: Option<Tool>) -> Result<(Fill, Tool), String> {
+    let (answer, tool) = ask(folder, fill_prompt(folder), "Read,Glob,Grep,Bash(git log:*),Bash(git status:*),Bash(ls:*),WebSearch,WebFetch", 30, prefer)?;
+    Ok((parse_fill(&answer)?, tool))
+}
+
+/// Task titles from an answer: one per "- " / "* " / "1. " line.
+pub fn parse_tasks(answer: &str) -> Vec<String> {
+    let mut out: Vec<String> = vec![];
+    for l in answer.lines() {
+        let l = l.trim();
+        let rest = l
+            .strip_prefix("- [ ] ")
+            .or_else(|| l.strip_prefix("- "))
+            .or_else(|| l.strip_prefix("* "))
+            .or_else(|| l.strip_prefix("• "))
+            .or_else(|| {
+                let d = l.find(|c: char| !c.is_ascii_digit())?;
+                (d > 0).then(|| l[d..].strip_prefix(". ").or_else(|| l[d..].strip_prefix(") "))).flatten()
+            });
+        if let Some(t) = rest {
+            let t = t.trim().trim_matches('*').trim();
+            if !t.is_empty() && !out.iter().any(|o| o == t) {
+                out.push(crate::richtext::one_line(t, crate::project::STEP_MAX));
+            }
+        }
+    }
+    out.truncate(25);
+    out
+}
+
+/// Next tasks for a project, proposed by an AI that reads it (read-only). `existing`: the
+/// steps already there, not to repeat.
+pub fn ask_tasks(folder: &str, existing: &[String], prefer: Option<Tool>) -> Result<Vec<String>, String> {
+    let have = if existing.is_empty() { crate::tr!("(aucune)", "(none)").to_string() } else { existing.iter().map(|e| format!("- {e}")).collect::<Vec<_>>().join("\n") };
+    let prompt = crate::trf!("Propose les 3 à 7 prochaines tâches concrètes du projet du dossier « {folder} ». Lis-le rapidement SANS RIEN MODIFIER \
+         (README, structure, `git log --oneline -15`, `git status`). Ne répète pas les tâches déjà là :\n{have}\n\n\
+         Réponds UNIQUEMENT par la liste, une tâche par ligne commençant par « - », une action courte à l'infinitif \
+         (tu peux la préfixer d'un domaine court suivi de « : », ex. « UI : … »), la plus utile d'abord.", "Propose the next 3 to 7 concrete tasks of the project in the folder « {folder} ». Read it quickly WITHOUT CHANGING ANYTHING \
+         (README, structure, `git log --oneline -15`, `git status`). Don't repeat the tasks already there:\n{have}\n\n\
+         Answer ONLY with the list, one task per line starting with « - », a short action \
+         (you may prefix it with a short area followed by « : », e.g. « UI: … »), the most useful first.");
+    let (answer, _) = ask(folder, prompt, "Read,Glob,Grep,Bash(git log:*),Bash(git status:*),Bash(ls:*)", 20, prefer)?;
+    let tasks = parse_tasks(&answer);
+    if tasks.is_empty() {
+        return Err(crate::tr!("l'IA n'a proposé aucune tâche", "the AI proposed no task").into());
+    }
+    Ok(tasks)
+}
+
+/// A pasted text (notes, an email, a list…) turned into tasks by an AI. It reads nothing.
+pub fn text_to_tasks(folder: &str, text: &str, prefer: Option<Tool>) -> Result<Vec<String>, String> {
+    let prompt = crate::trf!("Transforme ce texte en tâches claires et actionnables pour un projet : regroupe ce qui va ensemble, retire les doublons \
+         et le bavardage, garde l'ordre logique. Une tâche = une action courte à l'infinitif (tu peux la préfixer d'un domaine court suivi de « : »).\n\
+         Réponds UNIQUEMENT par la liste, une tâche par ligne commençant par « - ». N'utilise aucun outil.\n\nTexte :\n{text}", "Turn this text into clear, actionable tasks for a project: group what belongs together, drop duplicates \
+         and chatter, keep a logical order. One task = one short action (you may prefix it with a short area followed by « : »).\n\
+         Answer ONLY with the list, one task per line starting with « - ». Don't use any tool.\n\nText:\n{text}");
+    let dir = if !folder.trim().is_empty() && crate::project::normalize_folder(folder).is_dir() { folder.to_string() } else { dirs::home_dir().unwrap_or_default().display().to_string() };
+    let (answer, _) = ask(&dir, prompt, "Read", 3, prefer)?;
+    let tasks = parse_tasks(&answer);
+    if tasks.is_empty() {
+        return Err(crate::tr!("l'IA n'a trouvé aucune tâche dans ce texte", "the AI found no task in this text").into());
+    }
+    Ok(tasks)
 }
 
 /// Ask an agent one question in `folder` and return its answer. Claude Code may use only
@@ -418,6 +540,17 @@ impl SyncRun {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn fill_and_tasks_are_parsed() {
+        let f = parse_fill("Voici :\n```json\n{\"status\":\"active\",\"done\":[\"A\",\"\"],\"in_progress\":[\"B\"],\"blockers\":[],\"notes\":\"N\",\"review\":\"### Avis\\n- x\"}\n```").unwrap();
+        assert_eq!(f.status, Some(crate::project::ProjectStatus::Active));
+        assert_eq!((f.done.len(), f.doing.len(), f.notes.as_str()), (1, 1, "N"));
+        assert!(f.review.starts_with("### Avis"));
+        assert!(parse_fill("pas de json").is_err());
+        let t = parse_tasks("Voici :\n- UI : refaire la page\n* Écrire les tests\n2. Publier\n- [ ] Coller\n- UI : refaire la page\ntexte");
+        assert_eq!(t, vec!["UI : refaire la page", "Écrire les tests", "Publier", "Coller"]);
+    }
 
     #[test]
     fn repo_root_finds_git() {
