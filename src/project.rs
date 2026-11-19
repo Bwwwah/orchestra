@@ -209,6 +209,17 @@ impl Project {
     }
 
     /// (done, total)
+    /// Delete every finished step; returns how many went.
+    pub fn remove_done_steps(&mut self) -> usize {
+        let before = self.steps.len();
+        self.steps.retain(|s| s.status != StepStatus::Done);
+        let n = before - self.steps.len();
+        if n > 0 {
+            self.touch();
+        }
+        n
+    }
+
     pub fn progress(&self) -> (usize, usize) {
         (self.steps.iter().filter(|s| s.status == StepStatus::Done).count(), self.steps.len())
     }
@@ -466,6 +477,10 @@ mod tests {
         p.set_step_status(&a, StepStatus::Done);
         assert_eq!(p.progress(), (1, 2));
         assert!(!p.set_step_status("nope", StepStatus::Done));
+        assert_eq!(p.remove_done_steps(), 1);
+        assert_eq!(p.progress(), (0, 1));
+        assert_eq!(p.steps[0].id, b);
+        assert_eq!(p.remove_done_steps(), 0);
     }
 
     #[test]

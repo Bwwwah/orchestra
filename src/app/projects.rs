@@ -1071,8 +1071,35 @@ fn steps_card(ui: &mut egui::Ui, cx: &mut Cx, extra: f32) -> f32 {
             }
             ui.add_space(2.0);
         }
-        if done > 0 && link(ui, &if show_done { crate::tr!("Masquer les étapes terminées", "Hide finished steps").to_string() } else { if done == 1 { crate::tr!("Voir l'étape terminée", "Show the finished step").to_string() } else { crate::trf!("Voir les {done} étapes terminées", "Show the {done} finished steps") } }) {
-            toggle_flag(ui, ("done-open", page_id));
+        if done > 0 {
+            // "Supprimer les terminées": a second click confirms, nothing goes on one slip.
+            let confirm_key = ("clear-done", page_id);
+            let confirming = flag(ui, confirm_key);
+            let mut clear = false;
+            ui.horizontal(|ui| {
+                if link(ui, &if show_done { crate::tr!("Masquer les étapes terminées", "Hide finished steps").to_string() } else { if done == 1 { crate::tr!("Voir l'étape terminée", "Show the finished step").to_string() } else { crate::trf!("Voir les {done} étapes terminées", "Show the {done} finished steps") } }) {
+                    toggle_flag(ui, ("done-open", page_id));
+                }
+                if ro {
+                    return;
+                }
+                ui.label(RichText::new("·").color(t.tertiary));
+                if confirming {
+                    let sure = if done == 1 { crate::tr!("Confirmer : supprimer 1 étape terminée", "Confirm: delete 1 finished step").to_string() } else { crate::trf!("Confirmer : supprimer {done} étapes terminées", "Confirm: delete {done} finished steps") };
+                    if ui.add(egui::Label::new(RichText::new(sure).size(13.0).color(Color32::from_rgb(224, 62, 62))).sense(egui::Sense::click())).on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
+                        clear = true;
+                        toggle_flag(ui, confirm_key);
+                    }
+                    if link(ui, crate::tr!("Annuler", "Cancel")) {
+                        toggle_flag(ui, confirm_key);
+                    }
+                } else if link(ui, crate::tr!("Supprimer les terminées", "Delete finished ones")) {
+                    toggle_flag(ui, confirm_key);
+                }
+            });
+            if clear {
+                pr.remove_done_steps();
+            }
         }
         if let Some(id) = cycle {
             let cur = pr.steps.iter().find(|s| s.id == id).map(|s| s.status).unwrap_or_default();
