@@ -833,8 +833,8 @@ impl NotesApp {
                         .map(|r| ui.rect_contains_pointer(r))
                         .unwrap_or(false);
                     let header_top = ui.cursor().top();
-                    // Measured on the reference: ~95 px from the page bar to the icon, ~36 px to the title.
-                    ui.add_space(if page.icon.is_empty() { 80.0 } else { 94.0 });
+                    // A short gap from the page bar to the icon (the 78 px glyph already has room above it).
+                    ui.add_space(if page.icon.is_empty() { 40.0 } else { 32.0 });
                     // Icon (78 px), or "Ajouter une icône" shown on hover.
                     ui.horizontal(|ui| {
                         ui.add_space(gutter);
