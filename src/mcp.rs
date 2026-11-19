@@ -477,7 +477,11 @@ fn call_tool(name: &str, args: &Value) -> Result<String, ToolError> {
                 out.push('\n');
             }
             if !folder.is_empty() {
-                let found = crate::sessions::sessions_in(std::path::Path::new(&folder));
+                let mut found = crate::sessions::sessions_in(std::path::Path::new(&folder));
+                // Not those hidden by "Effacer l'historique".
+                if let Some(pr) = p.project.as_ref() {
+                    found.retain(|se| pr.session_shown(se.last_activity));
+                }
                 if !found.is_empty() {
                     out.push_str("\n## Sessions détectées sur cette machine\n\n");
                     for se in found.iter().take(10) {

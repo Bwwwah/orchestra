@@ -523,7 +523,7 @@ pub struct InboxMsg {
     pub answered_at: u64,
 }
 
-fn is_zero(x: &u64) -> bool {
+pub(crate) fn is_zero(x: &u64) -> bool {
     *x == 0
 }
 

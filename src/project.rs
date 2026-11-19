@@ -5,7 +5,7 @@
 //! A project lives inside its page (`Page::project`), so it is saved, synced, merged and
 //! exported like any page, and the AIs reach it through the MCP tools in mcp.rs.
 
-use crate::model::{Page, Workspace, new_id, now_ms};
+use crate::model::{Page, Workspace, is_zero, new_id, now_ms};
 use serde::{Deserialize, Serialize};
 use std::path::{Component, Path, PathBuf};
 
@@ -146,6 +146,10 @@ pub struct Project {
     pub steps: Vec<Step>,
     #[serde(default)]
     pub sessions: Vec<SessionRef>,
+    /// "Effacer l'historique": sessions whose last activity is before this are no longer
+    /// shown with the project (their files are left alone; a resumed one comes back).
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub sessions_cleared: u64,
     /// Last thing that happened on the project (step, summary, session…).
     #[serde(default)]
     pub last_activity: u64,
@@ -209,6 +213,18 @@ impl Project {
     }
 
     /// (done, total)
+    /// Clear the sessions history: forget the linked sessions and hide the ones found on
+    /// disk up to now. Nothing is deleted from disk.
+    pub fn clear_sessions(&mut self) {
+        self.sessions.clear();
+        self.sessions_cleared = now_ms();
+    }
+
+    /// Whether a session last active at `last_activity` still shows with the project.
+    pub fn session_shown(&self, last_activity: u64) -> bool {
+        last_activity > self.sessions_cleared
+    }
+
     /// Delete every finished step; returns how many went.
     pub fn remove_done_steps(&mut self) -> usize {
         let before = self.steps.len();
@@ -481,6 +497,17 @@ mod tests {
         assert_eq!(p.progress(), (0, 1));
         assert_eq!(p.steps[0].id, b);
         assert_eq!(p.remove_done_steps(), 0);
+    }
+
+    #[test]
+    fn clearing_sessions_hides_the_past_ones() {
+        let mut p = Project::new("/tmp/x");
+        p.link_session(SessionRef { tool: "claude-code".into(), id: "s1".into(), title: String::new(), location: String::new(), started: 1, last_activity: 1 });
+        assert!(p.session_shown(1));
+        p.clear_sessions();
+        assert!(p.sessions.is_empty());
+        assert!(!p.session_shown(1));
+        assert!(p.session_shown(now_ms() + 1000));
     }
 
     #[test]

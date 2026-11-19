@@ -36,7 +36,14 @@ impl LiveIndex {
     }
 
     pub fn refresh(&mut self, ws: &Workspace, live: Arc<Vec<SessionInfo>>) {
-        let sig: String = ws.projects().iter().map(|p| format!("{}={};", p.id, p.project.as_ref().map(|x| x.folder.as_str()).unwrap_or(""))).collect();
+        let sig: String = ws
+            .projects()
+            .iter()
+            .map(|p| {
+                let pr = p.project.as_ref();
+                format!("{}={}@{};", p.id, pr.map(|x| x.folder.as_str()).unwrap_or(""), pr.map(|x| x.sessions_cleared).unwrap_or(0))
+            })
+            .collect();
         if Arc::ptr_eq(&self.src, &live) && sig == self.sig {
             return;
         }
@@ -44,7 +51,12 @@ impl LiveIndex {
         let mut loose: Vec<(String, Vec<SessionInfo>)> = vec![];
         for s in live.iter() {
             match ws.project_for_path(std::path::Path::new(&s.cwd)) {
-                Some(p) => self.by_project.entry(p.id.clone()).or_default().push(s.clone()),
+                Some(p) => {
+                    // Hidden by "Effacer l'historique" until it is used again.
+                    if p.project.as_ref().is_none_or(|pr| pr.session_shown(s.last_activity)) {
+                        self.by_project.entry(p.id.clone()).or_default().push(s.clone());
+                    }
+                }
                 None => match loose.iter_mut().find(|(f, _)| *f == s.cwd) {
                     Some((_, v)) => v.push(s.clone()),
                     None => loose.push((s.cwd.clone(), vec![s.clone()])),
@@ -1261,6 +1273,7 @@ fn sessions_card(ui: &mut egui::Ui, cx: &mut Cx, extra: f32) -> f32 {
     let (page_id, pr, t, live) = (cx.page_id, &*cx.pr, cx.t, cx.live);
     // ---- Sessions: live ones read from disk, plus those an AI linked itself.
     let mut msg = None;
+    let mut clear = false;
     let h = card(ui, t, extra, |ui| {
         let others: Vec<&crate::project::SessionRef> = pr.sessions.iter().filter(|x| !live.iter().any(|l| l.id == x.id)).collect();
         let n = live.len() + others.len();
@@ -1313,9 +1326,39 @@ fn sessions_card(ui: &mut egui::Ui, cx: &mut Cx, extra: f32) -> f32 {
         } else if n > 0 {
             ui.label(RichText::new(crate::tr!("Cliquer sur une session pour la reprendre.", "Click a session to resume it.")).size(12.0).color(t.tertiary));
         }
+        // "Effacer l'historique": a second click confirms. The sessions' files stay on disk.
+        if n > 0 && !pr.read_only {
+            let key = ("clear-sessions", page_id);
+            ui.add_space(4.0);
+            if flag(ui, key) {
+                ui.horizontal_wrapped(|ui| {
+                    let sure = crate::tr!("Confirmer : effacer l'historique", "Confirm: clear the history");
+                    if ui
+                        .add(egui::Label::new(RichText::new(sure).size(13.0).color(Color32::from_rgb(224, 62, 62))).sense(egui::Sense::click()))
+                        .on_hover_cursor(egui::CursorIcon::PointingHand)
+                        .clicked()
+                    {
+                        clear = true;
+                        toggle_flag(ui, key);
+                    }
+                    if link(ui, crate::tr!("Annuler", "Cancel")) {
+                        toggle_flag(ui, key);
+                    }
+                });
+                ui.label(RichText::new(crate::tr!("Les sessions disparaissent de ce projet ; leurs fichiers restent sur le disque et une session reprise réapparaît.", "The sessions leave this project; their files stay on disk and a resumed session shows up again.")).size(12.0).color(t.tertiary));
+            } else if action_link(ui, crate::tr!("Effacer l'historique", "Clear the history"))
+                .on_hover_text(crate::tr!("Retire les sessions passées de ce projet, sans supprimer leurs fichiers", "Removes the past sessions from this project, without deleting their files"))
+                .clicked()
+            {
+                toggle_flag(ui, key);
+            }
+        }
     });
     if msg.is_some() {
         cx.msg = msg;
+    }
+    if clear {
+        cx.pr.clear_sessions();
     }
     h
 }
