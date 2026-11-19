@@ -200,6 +200,133 @@ pub fn left_text(ms: u64) -> String {
     }
 }
 
+// ---------------------------------------------------------------- last 24 hours
+//
+// Claude Code only gives the current 5-hour window and the week. Orchestra keeps the
+// readings of the last day, to add up the 5-hour windows of the last 24 hours.
+
+const HOUR: u64 = 3_600_000;
+const DAY: u64 = 24 * HOUR;
+/// Two `resets_at` this close are the same window (Claude Code rounds them its own way).
+const SAME_RESET: u64 = 120_000;
+
+/// One reading of the 5-hour and weekly windows.
+#[derive(Clone, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
+pub struct Sample {
+    pub at: u64,
+    pub five: Option<f32>,
+    pub five_reset: Option<u64>,
+    pub week: Option<f32>,
+    pub week_reset: Option<u64>,
+}
+
+fn history_file() -> PathBuf {
+    crate::store::data_dir().join("claude-usage-history.json")
+}
+
+impl Usage {
+    pub fn sample(&self) -> Sample {
+        Sample {
+            at: self.at,
+            five: self.five().map(|w| w.pct),
+            five_reset: self.five().and_then(|w| w.resets_at),
+            week: self.week().map(|w| w.pct),
+            week_reset: self.week().and_then(|w| w.resets_at),
+        }
+    }
+}
+
+fn near(a: Option<u64>, b: Option<u64>) -> bool {
+    match (a, b) {
+        (Some(a), Some(b)) => a.abs_diff(b) < SAME_RESET,
+        (None, None) => true,
+        _ => false,
+    }
+}
+
+/// Add a reading when it says something new, and forget what is too old to matter (more
+/// than 30 hours, keeping one earlier reading as a starting point). True when `h` changed.
+pub fn push_sample(h: &mut Vec<Sample>, s: Sample) -> bool {
+    if s.five.is_none() && s.week.is_none() {
+        return false;
+    }
+    if let Some(l) = h.last() {
+        if s.at <= l.at || (l.five == s.five && l.week == s.week && near(l.five_reset, s.five_reset) && near(l.week_reset, s.week_reset)) {
+            return false;
+        }
+    }
+    let cut = s.at.saturating_sub(30 * HOUR);
+    h.push(s);
+    let first_kept = h.iter().position(|x| x.at >= cut).unwrap_or(h.len());
+    if first_kept > 1 {
+        h.drain(..first_kept - 1);
+    }
+    true
+}
+
+/// The readings kept so far, oldest first.
+pub fn history() -> Vec<Sample> {
+    std::fs::read_to_string(history_file()).ok().and_then(|t| serde_json::from_str(&t).ok()).unwrap_or_default()
+}
+
+/// Keep this reading in the history; returns the history with it.
+pub fn record(u: &Usage) -> Vec<Sample> {
+    let mut h = history();
+    if push_sample(&mut h, u.sample()) {
+        let _ = std::fs::create_dir_all(crate::store::data_dir());
+        let tmp = history_file().with_extension("json.tmp");
+        if std::fs::write(&tmp, serde_json::to_string(&h).unwrap_or_default()).is_ok() {
+            let _ = std::fs::rename(&tmp, history_file());
+        }
+    }
+    h
+}
+
+/// The 5-hour windows of the last 24 hours, added up (each one counted at its highest
+/// reading). A window is counted when it was still running at some point of the last 24
+/// hours. None without any reading of the 5-hour window.
+pub fn day_total(h: &[Sample], now: u64) -> Option<f32> {
+    let from = now.saturating_sub(DAY);
+    // The window being read: highest figure, last figure, its reset, last reading.
+    struct Win {
+        max: f32,
+        last: f32,
+        reset: Option<u64>,
+        at: u64,
+    }
+    let counts = |w: &Win| w.at >= from || w.reset.is_some_and(|r| r > from);
+    let mut total = 0.0;
+    let mut cur: Option<Win> = None;
+    for s in h.iter().filter(|s| s.at <= now) {
+        let Some(p) = s.five else { continue };
+        let same = cur.as_ref().is_some_and(|w| match (w.reset, s.five_reset) {
+            (Some(a), Some(b)) => a.abs_diff(b) < SAME_RESET,
+            // Without a reset time: same window while the figure doesn't drop and less than 5 h went by.
+            _ => p + 0.5 >= w.last && s.at - w.at < 5 * HOUR,
+        });
+        match cur.as_mut() {
+            Some(w) if same => {
+                w.max = w.max.max(p);
+                w.last = p;
+                w.at = s.at;
+                w.reset = w.reset.or(s.five_reset);
+            }
+            _ => {
+                if let Some(w) = cur.take().filter(counts) {
+                    total += w.max;
+                }
+                cur = Some(Win { max: p, last: p, reset: s.five_reset, at: s.at });
+            }
+        }
+    }
+    let w = cur?;
+    if counts(&w) {
+        total += w.max;
+    }
+    Some(total)
+}
+
 // ---------------------------------------------------------------- status line
 
 fn settings_file() -> PathBuf {
@@ -274,6 +401,11 @@ pub fn statusline_main() {
         if std::fs::write(&tmp, out.to_string()).is_ok() {
             let _ = std::fs::rename(&tmp, captured_file());
         }
+        // The 24-hour figures need every reading, Orchestra open or not.
+        let windows = from_rate_limits(&v["rate_limits"]);
+        if !windows.is_empty() {
+            record(&Usage { windows, at: crate::model::now_ms() });
+        }
     }
     // The person's own status line, unchanged.
     if let Ok(prev) = std::fs::read_to_string(previous_file()) {
@@ -334,5 +466,36 @@ mod tests {
         let u = Usage { windows: from_rate_limits(&json!({"seven_day": {"used_percentage": 41.0}, "five_hour": {"used_percentage": 23.0}})), at: 0 };
         assert_eq!(u.five().unwrap().pct, 23.0);
         assert_eq!(u.week().unwrap().pct, 41.0);
+    }
+
+    fn s(at_h: u64, five: f32, reset_h: Option<u64>) -> Sample {
+        Sample { at: at_h * HOUR, five: Some(five), five_reset: reset_h.map(|r| r * HOUR), week: None, week_reset: None }
+    }
+
+    #[test]
+    fn history_kept_short_and_without_repeats() {
+        let mut h = vec![];
+        assert!(push_sample(&mut h, s(1, 10.0, Some(5))));
+        assert!(!push_sample(&mut h, s(2, 10.0, Some(5))), "same figures");
+        assert!(!push_sample(&mut h, Sample { at: 3 * HOUR, ..Default::default() }), "nothing in it");
+        assert!(push_sample(&mut h, s(3, 20.0, Some(5))));
+        for i in 4..40 {
+            push_sample(&mut h, s(i, i as f32, Some(i + 4)));
+        }
+        // 30 hours kept, plus one reading before as a starting point.
+        assert!(h[0].at < 9 * HOUR && h[1].at >= 9 * HOUR);
+    }
+
+    #[test]
+    fn five_hour_windows_added_over_a_day() {
+        let now = 40 * HOUR;
+        // Window ended 30 h ago (too old), one that ended 18 h after its start before now - 24 h
+        // but was still running then, two inside the day.
+        let h = vec![s(8, 50.0, Some(10)), s(14, 30.0, Some(17)), s(16, 40.0, Some(17)), s(25, 20.0, Some(29)), s(28, 35.0, Some(29)), s(36, 10.0, Some(40))];
+        assert_eq!(day_total(&h, now), Some(40.0 + 35.0 + 10.0));
+        // Without reset times: a drop starts a new window.
+        let h = vec![s(30, 10.0, None), s(31, 25.0, None), s(33, 5.0, None), s(34, 15.0, None)];
+        assert_eq!(day_total(&h, now), Some(25.0 + 15.0));
+        assert_eq!(day_total(&[], now), None);
     }
 }

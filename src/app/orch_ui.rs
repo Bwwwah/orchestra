@@ -80,6 +80,10 @@ pub struct Orch {
     /// When the 5-hour and the weekly windows start again (ms since epoch).
     pub five_reset: Option<u64>,
     pub week_reset: Option<u64>,
+    /// The 5-hour windows of the last 24 hours, added up.
+    pub day_total: Option<f32>,
+    /// Time of the reading the 24-hour figures were worked out from.
+    history_at: u64,
     usage_polled: Option<Instant>,
     resume_checked: Option<Instant>,
     daily_checked: Option<Instant>,
@@ -418,6 +422,11 @@ impl NotesApp {
             (self.orch.five, self.orch.week, self.orch.five_reset, self.orch.week_reset) = (None, None, None, None);
             return;
         };
+        if self.orch.history_at != u.at {
+            self.orch.history_at = u.at;
+            let h = crate::usage::record(&u);
+            self.orch.day_total = crate::usage::day_total(&h, crate::model::now_ms());
+        }
         let five = u.five().cloned();
         self.orch.week = u.week().map(|w| w.pct);
         self.orch.week_reset = u.week().and_then(|w| w.resets_at);
@@ -675,6 +684,7 @@ impl NotesApp {
     fn stats_row(&mut self, ui: &mut egui::Ui, t: &Tone) {
         let five = self.orch.five;
         let week = self.orch.week;
+        let day = self.orch.day_total;
         let global = self.ws.settings.orch.global_limit;
         let now_ms = crate::model::now_ms();
         let five_left = self.orch.five_reset.and_then(|r| crate::usage::until(r, now_ms));
@@ -700,16 +710,15 @@ impl NotesApp {
             // A soft wash of the accent in the corner.
             p.with_clip_rect(rect.shrink(1.0)).circle_filled(rect.right_top() + egui::vec2(-10.0, 10.0), 52.0 + 6.0 * a, accent.gamma_multiply(0.07));
             let x = rect.left() + 18.0;
-            let label = [crate::tr!("ABONNEMENT · 5 H", "SUBSCRIPTION · 5 H"), crate::tr!("IA AU TRAVAIL", "AIS AT WORK"), crate::tr!("AUJOURD'HUI", "TODAY")][i];
+            let label = [crate::tr!("ABONNEMENT · 24 H", "SUBSCRIPTION · 24 H"), crate::tr!("IA AU TRAVAIL", "AIS AT WORK"), crate::tr!("AUJOURD'HUI", "TODAY")][i];
             p.text(egui::pos2(x, rect.top() + 16.0), egui::Align2::LEFT_TOP, label, semibold(11.5), t.tertiary);
             let (big, sub): (String, String) = match i {
+                // The last 24 hours up front; the current 5-hour window below and in the ring.
                 0 => (
-                    five.map(|f| format!("{f:.0} %")).unwrap_or_else(|| "—".into()),
-                    match (five, week, five_left) {
-                        (Some(_), Some(wk), Some(l)) => crate::trf!("à zéro dans {} · semaine {wk:.0} %", "resets in {} · week {wk:.0} %", crate::usage::left_text(l)),
-                        (Some(_), None, Some(l)) => crate::trf!("limite {global:.0} % · à zéro dans {}", "limit {global:.0} % · resets in {}", crate::usage::left_text(l)),
-                        (Some(_), Some(wk), None) => crate::trf!("limite {global:.0} % · semaine {wk:.0} %", "limit {global:.0} % · week {wk:.0} %"),
-                        (Some(_), None, None) => crate::trf!("limite globale {global:.0} %", "global limit {global:.0} %"),
+                    day.or(five).map(|f| format!("{f:.0} %")).unwrap_or_else(|| "—".into()),
+                    match (five, five_left) {
+                        (Some(f), Some(l)) => crate::trf!("5 h : {f:.0} % · à zéro dans {}", "5 h: {f:.0} % · resets in {}", crate::usage::left_text(l)),
+                        (Some(f), None) => crate::trf!("5 h : {f:.0} % · limite {global:.0} %", "5 h: {f:.0} % · limit {global:.0} %"),
                         _ => crate::tr!("inconnu pour l'instant", "unknown for now").into(),
                     },
                 ),
@@ -732,7 +741,14 @@ impl NotesApp {
                         ring(ui, c, 28.0, five.map(|f| f / 100.0), global / 100.0, accent, t);
                     }
                     // The details: limits and when each window starts again.
-                    let mut tip = vec![crate::trf!("Limite globale : {global:.0} % de la fenêtre de 5 h", "Global limit: {global:.0} % of the 5-hour window")];
+                    let mut tip = vec![];
+                    if let Some(d) = day {
+                        tip.push(crate::trf!(
+                            "Dernières 24 h : {d:.0} % (les fenêtres de 5 h de la journée, additionnées)",
+                            "Last 24 hours: {d:.0} % (the day's 5-hour windows, added up)"
+                        ));
+                    }
+                    tip.push(crate::trf!("Limite globale : {global:.0} % de la fenêtre de 5 h", "Global limit: {global:.0} % of the 5-hour window"));
                     if let Some(l) = five_left {
                         tip.push(crate::trf!("Fenêtre de 5 h : repart à zéro dans {}", "5-hour window: resets in {}", crate::usage::left_text(l)));
                     }
