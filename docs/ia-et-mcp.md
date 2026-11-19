@@ -27,6 +27,7 @@ rebranchée. Le bouton rond en bas à droite n'apparaît que tant qu'aucune IA n
 | `add_steps`, `update_step` | les étapes |
 | `link_session` | rattacher une session de travail au projet |
 | `ask_human` | poser une question dans la boîte de réception |
+| `take_screenshot` | capture de l'écran entier ou de la fenêtre d'une app (`app` = « Orchestra », « Safari »…), pour vérifier une interface. Sur macOS, l'app qui lance l'IA (Terminal, Orchestra…) doit avoir la permission « Enregistrement de l'écran », et System Events la permission « Accessibilité » pour ne capturer qu'une fenêtre |
 
 Habitude conseillée à une IA : `get_project_state` (avec `folder` = son dossier) au début,
 `update_step` pendant le travail, `update_project` et `link_session` à la fin.

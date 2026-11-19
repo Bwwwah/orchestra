@@ -19,6 +19,7 @@ mod mcp;
 mod model;
 mod project;
 mod richtext;
+mod screen;
 mod secure;
 mod sessions;
 mod setup;
