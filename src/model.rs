@@ -642,8 +642,11 @@ impl Workspace {
 pub struct OrchSettings {
     /// Never go past this share of the 5-hour window (all projects together).
     pub global_limit: f32,
-    /// No session starts or goes on once the week's use reaches this.
+    /// No session starts or goes on once the week's use reaches this. Shown as the reserve
+    /// to keep (100 − this): see `reserve`.
     pub week_limit: f32,
+    /// The person chose the reserve (until then, the Orchestration page asks for it).
+    pub reserve_asked: bool,
     /// Default share one project may use.
     pub default_limit: f32,
     /// The AI may commit on its own branch.
@@ -668,6 +671,7 @@ impl Default for OrchSettings {
         OrchSettings {
             global_limit: 60.0,
             week_limit: 95.0,
+            reserve_asked: false,
             default_limit: 20.0,
             allow_commits: false,
             report_hour: 19,
@@ -677,6 +681,17 @@ impl Default for OrchSettings {
             reports_page: String::new(),
             auto_resume: true,
         }
+    }
+}
+
+impl OrchSettings {
+    /// Share of the week's subscription kept for the person, never used by the AIs.
+    pub fn reserve(&self) -> f32 {
+        (100.0 - self.week_limit).clamp(0.0, 95.0)
+    }
+
+    pub fn set_reserve(&mut self, reserve: f32) {
+        self.week_limit = 100.0 - reserve.clamp(0.0, 95.0);
     }
 }
 

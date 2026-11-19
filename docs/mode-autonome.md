@@ -49,7 +49,7 @@ ajouté sans votre clic. Le texte de la consigne est dans `sync::ask_tasks`.
 | Réglage | Par défaut | Effet |
 |---|---|---|
 | Limite globale | 60 % | part de la fenêtre de 5 h de l'abonnement, tous projets confondus |
-| Limite de la semaine | 95 % | au-delà, aucune session ne démarre ni ne continue (barre en haut de la page) |
+| Réserve minimum | 5 % | part de la semaine gardée pour vous, demandée à la première visite de la page : les sessions s'arrêtent avant de l'entamer (barre en haut de la page) |
 | Part par projet | 20 % | réglée sur la ligne de chaque projet au lancement ; les parts ensemble ne dépassent jamais la limite globale |
 | Tours au plus | 30 | nombre de tours d'une session |
 | Commits | non | l'IA peut faire des commits sur sa branche ; Orchestra envoie la branche sur GitHub après chaque tour et en fin de session |

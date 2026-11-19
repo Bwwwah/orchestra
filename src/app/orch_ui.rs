@@ -139,7 +139,11 @@ impl NotesApp {
         }
         if let Some(w) = self.orch.week {
             if w >= self.ws.settings.orch.week_limit {
-                return Err(crate::trf!("la limite de la semaine ({:.0} %) est déjà atteinte", "the weekly limit ({:.0} %) is already reached", self.ws.settings.orch.week_limit));
+                return Err(crate::trf!(
+                    "la réserve minimum de la semaine ({:.0} %) est atteinte",
+                    "the week's minimum reserve ({:.0} %) is reached",
+                    self.ws.settings.orch.reserve()
+                ));
             }
         }
         // The limits are checked with Claude Code's own figures: they come through the status line.
@@ -331,7 +335,7 @@ impl NotesApp {
                             Some(crate::trf!("limite globale atteinte ({global:.0} %)", "global limit reached ({global:.0} %)"))
                         } else if self.orch.week.is_some_and(|w| w >= week_limit) {
                             r.quota_reset = self.orch.week_reset;
-                            Some(crate::trf!("limite de la semaine atteinte ({week_limit:.0} %)", "weekly limit reached ({week_limit:.0} %)"))
+                            Some(crate::trf!("réserve minimum de la semaine atteinte ({:.0} %)", "week's minimum reserve reached ({:.0} %)", 100.0 - week_limit))
                         } else if !r.measured && r.turns >= 2 {
                             Some(crate::tr!("utilisation de l'abonnement impossible à mesurer", "subscription use can't be measured").into())
                         } else if r.turns >= r.max_turns {
@@ -644,13 +648,38 @@ impl NotesApp {
         });
     }
 
-    /// The bar at the very top: the week's use of the subscription, with its own limit
-    /// (set right here) past which no session starts or goes on.
+    /// The bar at the very top: the week's use of the subscription, with the reserve kept
+    /// for the person (set right here): past 100 − reserve, no session starts or goes on.
     fn week_bar(&mut self, ui: &mut egui::Ui, t: &Tone) {
         let week = self.orch.week;
-        let before = self.ws.settings.orch.week_limit;
+        let before = (self.ws.settings.orch.week_limit, self.ws.settings.orch.reserve_asked);
         let red = Color32::from_rgb(224, 62, 62);
         super::projects::card(ui, t, 0.0, |ui| {
+            // Until the person has chosen it: the question, with a few ready answers.
+            if !self.ws.settings.orch.reserve_asked {
+                ui.label(RichText::new(crate::tr!("Quelle part de l'abonnement garder pour vous ?", "How much of the subscription should be kept for you?")).font(semibold(14.0)).color(t.text));
+                ui.label(
+                    RichText::new(crate::tr!(
+                        "Les IA s'arrêtent avant d'entamer cette réserve de la semaine, et reprennent quand la semaine repart à zéro. Modifiable ensuite à droite de la barre.",
+                        "The AIs stop before touching this reserve of the week, and start again once the week resets. You can change it later, right of the bar."
+                    ))
+                    .size(12.5)
+                    .color(t.secondary),
+                );
+                ui.horizontal(|ui| {
+                    for r in [5.0, 10.0, 20.0, 30.0] {
+                        if ui.button(format!("{r:.0} %")).clicked() {
+                            self.ws.settings.orch.set_reserve(r);
+                            self.ws.settings.orch.reserve_asked = true;
+                        }
+                    }
+                    let keep = self.ws.settings.orch.reserve();
+                    if ui.button(RichText::new(crate::trf!("Garder {keep:.0} %", "Keep {keep:.0} %")).color(t.secondary)).clicked() {
+                        self.ws.settings.orch.reserve_asked = true;
+                    }
+                });
+                ui.add_space(8.0);
+            }
             ui.horizontal(|ui| {
                 ui.label(RichText::new(crate::tr!("CETTE SEMAINE", "THIS WEEK")).font(semibold(11.5)).color(t.tertiary));
                 let used = match week {
@@ -659,9 +688,16 @@ impl NotesApp {
                 };
                 ui.label(RichText::new(used).font(semibold(14.0)).color(t.text));
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    ui.add(egui::DragValue::new(&mut self.ws.settings.orch.week_limit).range(5.0..=100.0).speed(0.5).suffix(" %"))
-                        .on_hover_text(crate::tr!("Au-delà, aucune session ne démarre ni ne continue", "Past it, no session starts or goes on"));
-                    ui.label(RichText::new(crate::tr!("Limite de la semaine", "Weekly limit")).size(13.0).color(t.secondary));
+                    let mut reserve = self.ws.settings.orch.reserve();
+                    let r = ui.add(egui::DragValue::new(&mut reserve).range(0.0..=95.0).speed(0.5).suffix(" %")).on_hover_text(crate::tr!(
+                        "Part de la semaine gardée pour vous : les IA s'arrêtent avant de l'entamer",
+                        "Share of the week kept for you: the AIs stop before touching it"
+                    ));
+                    if r.changed() {
+                        self.ws.settings.orch.set_reserve(reserve);
+                        self.ws.settings.orch.reserve_asked = true;
+                    }
+                    ui.label(RichText::new(crate::tr!("Réserve minimum", "Minimum reserve")).size(13.0).color(t.secondary));
                 });
             });
             ui.add_space(4.0);
@@ -690,7 +726,7 @@ impl NotesApp {
                 ));
             }
         });
-        if self.ws.settings.orch.week_limit != before {
+        if (self.ws.settings.orch.week_limit, self.ws.settings.orch.reserve_asked) != before {
             self.dirty_since.get_or_insert_with(Instant::now);
         }
     }
@@ -852,7 +888,7 @@ impl NotesApp {
                 row(ui, crate::tr!("Commits autorisés", "Commits allowed"), crate::tr!("Sur leur branche, envoyée sur GitHub par Orchestra", "On their branch, pushed to GitHub by Orchestra"), &mut |ui| {
                     super::settings::switch(ui, &mut o.allow_commits, &lk);
                 });
-                row(ui, crate::tr!("Reprise automatique", "Automatic restart"), crate::tr!("Une session arrêtée par la limite globale ou de la semaine repart seule après la remise à zéro du quota", "A session stopped by the global or weekly limit starts again by itself once the quota resets"), &mut |ui| {
+                row(ui, crate::tr!("Reprise automatique", "Automatic restart"), crate::tr!("Une session arrêtée par la limite globale ou la réserve de la semaine repart seule après la remise à zéro du quota", "A session stopped by the global limit or the week's reserve starts again by itself once the quota resets"), &mut |ui| {
                     super::settings::switch(ui, &mut o.auto_resume, &lk);
                 });
             };
