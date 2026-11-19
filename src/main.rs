@@ -21,6 +21,7 @@ mod sync;
 mod terminal;
 mod shot;
 mod store;
+mod update;
 mod usage;
 
 const HELP: &str = "Orchestra — pages, blocs et bases de données, sur votre ordinateur.
@@ -40,9 +41,11 @@ Utilisation :
 Lancée sans argument hors d'un terminal (Finder, raccourci), elle ouvre la fenêtre.
 Données : $ORCHESTRA_DIR, sinon le dossier de données de l'utilisateur.";
 
-/// Run from a terminal with no arguments, `--help` or `--version`, the program prints
-/// nothing and exits with code 1; help and version live under `aide` / `version`.
-const CONSOLE_EXIT: i32 = 1;
+/// The original's console behaviour (capture/runs): run from a terminal with no
+/// arguments, `--help` or `--version`, it prints nothing and exits with code 1
+/// (the launcher at entry 0x100000460 hands everything to Electron, which has no
+/// such options). Kept as-is; help and version live under `aide` / `version`.
+const ORIGINAL_CONSOLE_EXIT: i32 = 1;
 
 fn in_terminal() -> bool {
     use std::io::IsTerminal;
@@ -52,11 +55,11 @@ fn in_terminal() -> bool {
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let code = match args.first().map(String::as_str) {
-        // From a terminal: nothing printed, exit 1.
-        // From Finder or a shortcut: the window opens.
-        None if in_terminal() => CONSOLE_EXIT,
+        // From a terminal, like the original: nothing printed, exit 1.
+        // From Finder, a shortcut or Craft Anything's Play: the window opens.
+        None if in_terminal() => ORIGINAL_CONSOLE_EXIT,
         None => run_window(None),
-        Some("--help") | Some("--version") => CONSOLE_EXIT,
+        Some("--help") | Some("--version") => ORIGINAL_CONSOLE_EXIT,
         Some("ouvrir") | Some("open") => run_window(None),
         Some("-h") | Some("aide") | Some("help") => {
             println!("{HELP}");
@@ -201,9 +204,9 @@ fn usage(msg: &str) -> i32 {
     2
 }
 
-/// 1320×860 by default; ORCHESTRA_WINDOW=WxH overrides it (developer aid).
+/// 1320×860 as in the original; ORCHESTRA_WINDOW=WxH overrides it (developer aid).
 fn window_size() -> [f32; 2] {
-    use model::design::*;
+    use model::original::*;
     std::env::var("ORCHESTRA_WINDOW")
         .ok()
         .and_then(|v| v.split_once('x').and_then(|(w, h)| Some([w.trim().parse().ok()?, h.trim().parse().ok()?])))
@@ -216,14 +219,14 @@ fn app_icon() -> eframe::egui::IconData {
 }
 
 fn run_window(open: Option<String>) -> i32 {
-    use model::design::*;
+    use model::original::*;
     let options = eframe::NativeOptions {
         viewport: eframe::egui::ViewportBuilder::default()
             .with_title("Orchestra")
             .with_icon(std::sync::Arc::new(app_icon()))
             .with_inner_size(window_size())
             .with_min_inner_size([MIN_WINDOW_WIDTH, MIN_WINDOW_HEIGHT])
-            // Content runs under a transparent
+            // Like the original (titleBarStyle "hiddenInset"): content runs under a transparent
             // title bar, with the window buttons over the sidebar. No effect off macOS.
             .with_fullsize_content_view(true)
             .with_titlebar_shown(false)

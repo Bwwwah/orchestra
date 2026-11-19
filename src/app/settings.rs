@@ -50,7 +50,7 @@ fn groups() -> [(&'static str, &'static [SettingsTab]); 3] { [
 ] }
 
 /// Colours of the settings window for the current theme.
-struct Look {
+pub(super) struct Look {
     window: Color32,
     nav: Color32,
     nav_selected: Color32,
@@ -72,7 +72,7 @@ fn look(dark: bool) -> Look {
             switch_off: Color32::from_rgb(78, 79, 79),
         }
     } else {
-        // Light values from the design tokens.
+        // Light values estimated from the design tokens.
         Look {
             window: Color32::WHITE,
             nav: Color32::from_rgb(249, 248, 247),
@@ -97,7 +97,7 @@ fn page_title(ui: &mut egui::Ui, title: &str, subtitle: &str, t: &Tone) {
 }
 
 /// A section title with its line under it.
-fn section(ui: &mut egui::Ui, title: &str, t: &Tone, l: &Look) {
+pub(super) fn section(ui: &mut egui::Ui, title: &str, t: &Tone, l: &Look) {
     ui.add_space(32.0);
     ui.label(RichText::new(title).font(semibold(16.0)).color(t.text));
     ui.add_space(10.0);
@@ -110,7 +110,7 @@ fn section(ui: &mut egui::Ui, title: &str, t: &Tone, l: &Look) {
 /// One setting: name and description on the left, its control on the right.
 /// On a wide window the control sits at the right and the text wraps in the room left of it;
 /// on a narrow one (half a screen) the control goes under the text.
-fn row(ui: &mut egui::Ui, name: &str, desc: &str, t: &Tone, control: impl FnOnce(&mut egui::Ui)) {
+pub(super) fn row(ui: &mut egui::Ui, name: &str, desc: &str, t: &Tone, control: impl FnOnce(&mut egui::Ui)) {
     let w = ui.available_width();
     let text = |ui: &mut egui::Ui| {
         ui.spacing_mut().item_spacing.y = 4.0;
@@ -159,7 +159,7 @@ fn dropdown(ui: &mut egui::Ui, id: &str, choices: &[&str], current: usize, t: &T
     picked
 }
 
-/// A menu row: optional icon, label, a tick when chosen, a rounded hover.
+/// A menu row like Notion's: optional icon, label, a tick when chosen, a rounded hover.
 pub(super) fn menu_item(ui: &mut egui::Ui, icon: Option<Icon>, label: &str, checked: bool, t: &Tone) -> egui::Response {
     let w = ui.available_width().max(160.0);
     let (rect, resp) = ui.allocate_exact_size(egui::vec2(w, 30.0), egui::Sense::click());
@@ -183,7 +183,7 @@ pub(super) fn menu_item(ui: &mut egui::Ui, icon: Option<Icon>, label: &str, chec
 }
 
 /// On/off switch: grey when off, blue when on, white knob.
-fn switch(ui: &mut egui::Ui, on: &mut bool, l: &Look) -> egui::Response {
+pub(super) fn switch(ui: &mut egui::Ui, on: &mut bool, l: &Look) -> egui::Response {
     let (rect, mut resp) = ui.allocate_exact_size(egui::vec2(34.0, 20.0), egui::Sense::click());
     if resp.clicked() {
         *on = !*on;
@@ -203,7 +203,7 @@ fn lerp_color(a: Color32, b: Color32, k: f32) -> Color32 {
     Color32::from_rgb(m(a.r(), b.r()), m(a.g(), b.g()), m(a.b(), b.b()))
 }
 
-/// Text field with a soft fill and border.
+/// Text field with Notion's soft fill and border.
 fn field<'a>(text: &'a mut String, hint: &str, width: f32, t: &Tone, l: &Look) -> egui::TextEdit<'a> {
     egui::TextEdit::singleline(text)
         .hint_text(RichText::new(hint.to_string()).color(t.tertiary))
@@ -214,7 +214,7 @@ fn field<'a>(text: &'a mut String, hint: &str, width: f32, t: &Tone, l: &Look) -
 }
 
 /// Flat button with a border.
-fn button(ui: &mut egui::Ui, text: &str, t: &Tone, l: &Look) -> egui::Response {
+pub(super) fn button(ui: &mut egui::Ui, text: &str, t: &Tone, l: &Look) -> egui::Response {
     let g = ui.painter().layout_no_wrap(text.to_string(), FontId::proportional(14.0), t.text);
     let (rect, resp) = ui.allocate_exact_size(egui::vec2(g.size().x + 24.0, 30.0), egui::Sense::click());
     if resp.hovered() {
@@ -418,7 +418,7 @@ impl NotesApp {
     }
 
     fn tab_shortcuts(&mut self, ui: &mut egui::Ui, t: &Tone, l: &Look) {
-        page_title(ui, crate::tr!("Raccourcis clavier", "Keyboard shortcuts"), crate::tr!("Les raccourcis du menu et ceux de l'éditeur", "The menu's shortcuts, and the editor's"), t);
+        page_title(ui, crate::tr!("Raccourcis clavier", "Keyboard shortcuts"), crate::tr!("Les raccourcis du menu de Notion, et ceux de l'éditeur", "Notion's menu shortcuts, and the editor's"), t);
         for (title, list) in [
             (
                 crate::tr!("Fenêtre et onglets", "Window and tabs"),
@@ -500,6 +500,7 @@ impl NotesApp {
             }
         });
         row(ui, crate::tr!("Changer de dossier", "Change folder"), crate::tr!("Lancez l'application avec la variable ORCHESTRA_DIR pour utiliser un autre dossier.", "Launch the app with the ORCHESTRA_DIR variable to use another folder."), t, |_| {});
+        self.update_settings(ui, t, l);
     }
 
     fn tab_sidebar(&mut self, ui: &mut egui::Ui, t: &Tone, l: &Look) {

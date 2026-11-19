@@ -1,6 +1,6 @@
-//! The window's frame, laid out with the sidebar running the
+//! The window's frame, drawn after the reference picture of Notion: the sidebar running the
 //! full height beside the window buttons, the tab strip above the page only, the page bar
-//! ("Privée", "Partager", link, star, •••), the home and library views.
+//! ("Privée", "Partager", link, star, •••), the home and library views and the round AI button.
 
 use super::icons::{self, Icon};
 use super::*;
@@ -102,7 +102,7 @@ impl NotesApp {
         ui.spacing_mut().item_spacing.y = 2.0;
         // First row, level with the tab strip: window buttons, sidebar toggle, new page.
         let w = ui.available_width();
-        let (row, _) = ui.allocate_exact_size(egui::vec2(w, design::TAB_BAR_HEIGHT), egui::Sense::hover());
+        let (row, _) = ui.allocate_exact_size(egui::vec2(w, original::TAB_BAR_HEIGHT), egui::Sense::hover());
         let lights = lights_room(ui.ctx());
         let mut child = ui.new_child(egui::UiBuilder::new().max_rect(row).layout(egui::Layout::left_to_right(egui::Align::Center)));
         child.add_space(lights);
@@ -301,6 +301,7 @@ impl NotesApp {
                 self.view = View::Trash;
             }
             self.usage_widget(ui, &t);
+            self.update_card(ui, &t);
         });
         let h = bottom.response.rect.height();
         ui.data_mut(|d| d.insert_temp(bottom_key, h));
@@ -422,7 +423,7 @@ impl NotesApp {
             ui.add_space(8.0);
             let n = self.tabs.len().max(1) as f32;
             let avail = (ui.available_width() - 60.0).max(40.0);
-            let w = (avail / n).clamp(design::TAB_MIN_WIDTH, design::TAB_MAX_WIDTH);
+            let w = (avail / n).clamp(original::TAB_MIN_WIDTH, original::TAB_MAX_WIDTH);
             let line = egui::Stroke::new(1.0, t.border);
             for i in 0..self.tabs.len() {
                 let page = if i == self.active_tab { self.current.clone() } else { self.tabs[i].page.clone() };
@@ -798,5 +799,29 @@ impl NotesApp {
                 }
             });
         });
+    }
+
+    /// The round button at the bottom right that opens the AI (MCP) panel.
+    pub(super) fn ai_button(&mut self, ctx: &egui::Context) {
+        let dark = ctx.global_style().visuals.dark_mode;
+        let t = tone(dark);
+        egui::Area::new(egui::Id::unique("ai-fab"))
+            // Kept clear of the side panel and the terminal dock.
+            .anchor(egui::Align2::RIGHT_BOTTOM, egui::vec2(-22.0 - self.side_w, -22.0 - self.dock_h))
+            .order(egui::Order::Foreground)
+            .show(ctx, |ui| {
+                let (rect, resp) = ui.allocate_exact_size(egui::vec2(46.0, 46.0), egui::Sense::click());
+                let p = ui.painter();
+                p.add(egui::Shape::Rect(egui::epaint::RectShape::filled(rect.translate(egui::vec2(0.0, 3.0)), 23.0, Color32::from_black_alpha(if dark { 90 } else { 18 }))));
+                p.circle_filled(rect.center(), 23.0, if dark { t.card } else { Color32::WHITE });
+                p.circle_stroke(rect.center(), 23.0, egui::Stroke::new(1.0, t.border));
+                if resp.hovered() {
+                    p.circle_filled(rect.center(), 23.0, t.hover);
+                }
+                icons::paint(p, rect.shrink(12.0), Icon::Sparkle, t.text);
+                if resp.on_hover_text(crate::tr!("IA par MCP", "AI through MCP")).clicked() {
+                    self.open_settings(SettingsTab::Ai);
+                }
+            });
     }
 }

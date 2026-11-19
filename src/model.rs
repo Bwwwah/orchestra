@@ -379,7 +379,7 @@ pub struct Settings {
     pub collab: CollabSettings,
     #[serde(default)]
     pub workspace_name: String,
-    /// Pages open in tabs, restored at start (the default).
+    /// Pages open in tabs, restored at start ("continue", the original's default `onStartup`).
     #[serde(default)]
     pub open_tabs: Vec<String>,
     #[serde(default)]
@@ -389,14 +389,14 @@ pub struct Settings {
     pub zoom: f32,
     #[serde(default)]
     pub sidebar_hidden: bool,
-    /// "system" (default, follows the system), "light" or "dark".
+    /// "system" (default, like Notion's "Use system setting"), "light" or "dark".
     #[serde(default)]
     pub theme: String,
     #[serde(default)]
     pub hide_connect_card: bool,
     #[serde(default)]
     pub sidebar_width: f32,
-    /// Start with no tabs restored.
+    /// Start with no tabs restored (the original's onStartup "default_page").
     #[serde(default)]
     pub start_fresh: bool,
     /// Terminals open in the dock, reopened at start (agents resume their conversation).
@@ -410,6 +410,11 @@ pub struct Settings {
     pub ai_off: Vec<String>,
     #[serde(default)]
     pub orch: OrchSettings,
+    /// Repository the updates come from (owner/name); empty: the one built in.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub update_repo: String,
+    #[serde(default)]
+    pub no_update_check: bool,
     /// "" or "auto" (the system's language), "fr", "en".
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub language: String,
@@ -423,30 +428,32 @@ pub struct SavedTerm {
     pub cmd: Option<String>,
 }
 
-/// The app's design values: window, zoom, tabs and colours.
-pub mod design {
-    /// Default window size.
+/// Values read from the original Notion 7.44.0 desktop code (app.asar, .webpack/main/index.js;
+/// offsets are byte positions in that file). See MECHANICS.md.
+pub mod original {
+    /// DEFAULT_WINDOW_WIDTH / HEIGHT, module 772, offset 0xde480.
     pub const DEFAULT_WINDOW_WIDTH: f32 = 1320.0;
     pub const DEFAULT_WINDOW_HEIGHT: f32 = 860.0;
-    /// Minimum window size.
+    /// MIN_WINDOW_WIDTH / HEIGHT (gt, mt), offset 0x9c8c.
     pub const MIN_WINDOW_WIDTH: f32 = 640.0;
     pub const MIN_WINDOW_HEIGHT: f32 = 480.0;
-    /// Zoom range, step and default.
+    /// ELECTRON_ZOOM_MINIMUM / MAXIMUM / INCREMENT / DEFAULT, offset 0x1be424.
     pub const ZOOM_MIN: f32 = 0.5;
     pub const ZOOM_MAX: f32 = 4.9;
     pub const ZOOM_STEP: f32 = 0.1;
     pub const ZOOM_DEFAULT: f32 = 1.0;
-    /// Tab strip height and tab width range.
+    /// TAB_BAR_HEIGHT_PX, MAX_TAB_WIDTH_PX, MIN_TAB_WIDTH_PX, offset 0x2c73.
     pub const TAB_BAR_HEIGHT: f32 = 36.0;
     pub const TAB_MAX_WIDTH: f32 = 200.0;
     pub const TAB_MIN_WIDTH: f32 = 36.0;
 
-    /// Clamp a zoom factor to the range, rounding to one decimal.
+    /// Clamp a zoom factor the way setZoom does, rounding to one decimal.
     pub fn clamp_zoom(z: f32) -> f32 {
         ((z.clamp(ZOOM_MIN, ZOOM_MAX)) * 10.0).round() / 10.0
     }
 
-    /// Colour tokens (rgb) for the light and dark themes.
+    /// Colour tokens (rgba) from the design tokens table, offsets 0x1a332e (text),
+    /// 0x1a3a2e (light background), 0x1a3bf2 (dark background).
     pub mod light {
         pub const BACKGROUND: [u8; 3] = [255, 255, 255];
         pub const SIDEBAR: [u8; 3] = [249, 248, 247]; // background.secondary
@@ -465,7 +472,7 @@ pub mod design {
         pub const TEXT: [u8; 3] = [240, 239, 237];
         pub const TEXT_SECONDARY: [u8; 3] = [173, 169, 163];
         pub const TEXT_TERTIARY: [u8; 3] = [125, 122, 117];
-        pub const BORDER: [u8; 3] = [56, 56, 54];
+        pub const BORDER: [u8; 3] = [56, 56, 54]; // border.dark.primary, offset 0x1a3bf2-0x1c4
     }
 }
 
@@ -651,7 +658,7 @@ Drag the ⋯ handle left of a block to move it.\n\
 Cmd/Ctrl+P or K to search all pages.").into();
                 b
             },
-            Block::new(BlockKind::Callout, crate::tr!("L'IA passe par MCP : Paramètres → IA (MCP) explique comment brancher l'assistant de votre choix.", "AI goes through MCP: Settings → AI (MCP) explains how to plug in the assistant of your choice.")),
+            Block::new(BlockKind::Callout, crate::tr!("L'IA passe par MCP : le bouton rond en bas à droite explique comment brancher l'assistant de votre choix.", "AI goes through MCP: the round button at the bottom right explains how to plug in the assistant of your choice.")),
             Block::new(BlockKind::Callout, crate::tr!("La collaboration passe par un branchement que vous choisissez : dossier partagé ou votre propre commande.", "Collaboration goes through a connection you choose: live, a shared folder or your own command.")),
         ];
         let welcome_id = welcome.id.clone();
@@ -865,10 +872,10 @@ fn snippet(text: &str, q: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::design::*;
+    use super::original::*;
 
     #[test]
-    fn zoom_is_clamped() {
+    fn zoom_is_clamped_like_the_original() {
         assert_eq!(clamp_zoom(0.3), ZOOM_MIN);
         assert_eq!(clamp_zoom(9.0), ZOOM_MAX);
         assert_eq!(clamp_zoom(ZOOM_DEFAULT + ZOOM_STEP), 1.1);

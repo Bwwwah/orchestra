@@ -1,0 +1,84 @@
+# Builds Orchestra for macOS, Windows and Linux when a version tag (v1.2.3) is pushed —
+# which is what "Publier une version" does — and attaches the three files to the GitHub
+# release of that tag. Also runs the tests on every push to main.
+name: Versions
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  test:
+    if: github.ref_type != 'tag'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: sudo apt-get update && sudo apt-get install -y libxkbcommon-dev libwayland-dev libx11-dev libxcursor-dev libxrandr-dev libxi-dev libgl1-mesa-dev
+      - run: |
+          git config --global user.email ci@example.com
+          git config --global user.name CI
+          cargo test --release
+
+  build:
+    if: github.ref_type == 'tag'
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-latest
+            name: macOS
+          - os: windows-latest
+            name: Windows
+          - os: ubuntu-22.04
+            name: Linux
+    runs-on: ${{ matrix.os }}
+    env:
+      # The app checks this repository's releases for updates.
+      ORCHESTRA_UPDATE_REPO: ${{ github.repository }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Version from the tag
+        shell: bash
+        run: |
+          v="${GITHUB_REF_NAME#v}"
+          perl -0pi -e 's/^version = "[^"]*"/version = "'"$v"'"/m' Cargo.toml
+          grep -m1 '^version' Cargo.toml
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.name == 'macOS' && 'aarch64-apple-darwin,x86_64-apple-darwin' || '' }}
+      - uses: Swatinem/rust-cache@v2
+
+      - name: macOS (app universelle)
+        if: matrix.name == 'macOS'
+        run: |
+          sh packaging/build-macos.sh
+          mkdir -p out && cp dist/*.zip out/Orchestra-${GITHUB_REF_NAME}-macOS.zip
+
+      - name: Windows
+        if: matrix.name == 'Windows'
+        shell: pwsh
+        run: |
+          cargo build --release
+          New-Item -ItemType Directory -Force out | Out-Null
+          Compress-Archive -Path target/release/orchestra.exe -DestinationPath "out/Orchestra-$env:GITHUB_REF_NAME-Windows.zip"
+
+      - name: Linux
+        if: matrix.name == 'Linux'
+        run: |
+          sudo apt-get update && sudo apt-get install -y libxkbcommon-dev libwayland-dev libx11-dev libxcursor-dev libxrandr-dev libxi-dev libgl1-mesa-dev
+          cargo build --release
+          mkdir -p out/orchestra && cp target/release/orchestra out/orchestra/
+          tar -C out -czf out/Orchestra-${GITHUB_REF_NAME}-Linux.tar.gz orchestra
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            out/*.zip
+            out/*.tar.gz

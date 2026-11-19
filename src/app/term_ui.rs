@@ -239,15 +239,17 @@ pub(super) fn terminal_view(ui: &mut egui::Ui, term: &mut Term, bg: Color32, dar
             }
         }
     }
-    // Wheel: history.
-    if resp.hovered() {
-        let dy = ui.input(|i| i.smooth_scroll_delta.y);
+    // Wheel: to the program when it handles the mouse (Claude Code), else our history.
+    // Taken from the input so that a page around doesn't scroll as well.
+    if ui.rect_contains_pointer(rect) {
+        let dy = ui.input_mut(|i| std::mem::take(&mut i.smooth_scroll_delta.y));
         if dy.abs() > 0.5 {
             let acc = ui.ctx().data(|d| d.get_temp::<f32>(id).unwrap_or(0.0)) + dy;
             let lines = (acc / rh).trunc();
             ui.ctx().data_mut(|d| d.insert_temp(id, acc - lines * rh));
             if lines != 0.0 {
-                term.scroll(lines as i32);
+                let (r, c) = ui.input(|i| i.pointer.hover_pos()).map(cell_at).unwrap_or((0, 0));
+                term.wheel(lines as i32, r, c);
             }
         }
     }

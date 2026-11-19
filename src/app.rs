@@ -95,6 +95,7 @@ pub struct NotesApp {
     mcp_report_shown: bool,
     ais: ai_ui::Ais,
     orch: orch_ui::Orch,
+    upd: update_ui::Upd,
     versions: versions::Versions,
     /// Last look at the projects' documentation files.
     docs_checked: Option<Instant>,
@@ -115,7 +116,7 @@ pub struct NotesApp {
 }
 
 /// One tab: the page it shows and its back/forward history
-/// (on by default).
+/// (isNavigationHistoryEnabled is on by default in the original).
 #[derive(Clone, Default)]
 struct Tab {
     page: Option<String>,
@@ -184,6 +185,7 @@ impl NotesApp {
             mcp_report_shown: false,
             ais: Default::default(),
             orch: Default::default(),
+            upd: Default::default(),
             versions: Default::default(),
             docs_checked: None,
             reviews: HashMap::new(),
@@ -273,7 +275,7 @@ impl NotesApp {
             app.start_live();
         }
         cc.egui_ctx.options_mut(|o| o.zoom_with_keyboard = false);
-        let z = if app.ws.settings.zoom <= 0.0 { design::ZOOM_DEFAULT } else { design::clamp_zoom(app.ws.settings.zoom) };
+        let z = if app.ws.settings.zoom <= 0.0 { original::ZOOM_DEFAULT } else { original::clamp_zoom(app.ws.settings.zoom) };
         cc.egui_ctx.set_zoom_factor(z);
         if !store::workspace_path().exists() {
             app.save_now();
@@ -397,7 +399,7 @@ impl NotesApp {
         self.save_now();
     }
 
-    /// "system" (default), "light" or "dark"; older files only had `dark`.
+    /// "system" (default, like Notion), "light" or "dark"; older files only had `dark`.
     fn theme_preference(&self) -> egui::ThemePreference {
         match self.ws.settings.theme.as_str() {
             "light" => egui::ThemePreference::Light,
@@ -513,13 +515,13 @@ impl NotesApp {
     }
 
     fn set_zoom(&mut self, ctx: &egui::Context, z: f32) {
-        let z = design::clamp_zoom(z);
+        let z = original::clamp_zoom(z);
         ctx.set_zoom_factor(z);
         self.ws.settings.zoom = z;
         self.status = crate::trf!("Zoom {} %", "Zoom {} %", (z * 100.0).round());
     }
 
-    /// The desktop menu's shortcuts (MECHANICS.md, "Menu shortcuts").
+    /// The desktop menu's shortcuts, as the original defines them (MECHANICS.md, "Shortcuts").
     fn shortcuts(&mut self, ctx: &egui::Context, actions: &mut Vec<Action>) {
         use egui::Modifiers as M;
         let cmd = M::COMMAND;
@@ -538,7 +540,7 @@ impl NotesApp {
             // Order matters: the longer combinations first.
             k(cmd_shift, Key::T, "reopen_tab");
             if mac {
-                // Extra macOS-only tab shortcuts.
+                // Hidden macOS-only menu items in the original (j = darwin).
                 k(cmd_shift, Key::OpenBracket, "prev_tab");
                 k(cmd_shift, Key::CloseBracket, "next_tab");
                 k(cmd_alt, Key::ArrowLeft, "prev_tab");
@@ -590,9 +592,9 @@ impl NotesApp {
                 "sidebar" => self.ws.settings.sidebar_hidden = !self.ws.settings.sidebar_hidden,
                 "back" => self.go_back(),
                 "forward" => self.go_forward(),
-                "zoom_in" => self.set_zoom(ctx, ctx.zoom_factor() + design::ZOOM_STEP),
-                "zoom_out" => self.set_zoom(ctx, ctx.zoom_factor() - design::ZOOM_STEP),
-                "zoom_reset" => self.set_zoom(ctx, design::ZOOM_DEFAULT),
+                "zoom_in" => self.set_zoom(ctx, ctx.zoom_factor() + original::ZOOM_STEP),
+                "zoom_out" => self.set_zoom(ctx, ctx.zoom_factor() - original::ZOOM_STEP),
+                "zoom_reset" => self.set_zoom(ctx, original::ZOOM_DEFAULT),
                 "search" => {
                     self.search_open = true;
                     self.search_focus = true;
@@ -782,7 +784,7 @@ impl NotesApp {
         let mut focus_used = false;
         egui::ScrollArea::vertical().auto_shrink([false, false]).id_salt(("page", &cur)).show(ui, |ui| {
             let avail = ui.available_width();
-            // Page column: 708 px of text (900 px page minus 96 px padding on each side),
+            // Notion's page column: 708 px of text (900 px page minus 96 px padding on each side),
             // plus the 44 px block gutter on the left. Full width keeps 96 px padding.
             let gutter = BLOCK_GUTTER;
             let width = if full {
@@ -1021,6 +1023,7 @@ impl eframe::App for NotesApp {
         self.review_tick(&ctx);
         self.ais_tick();
         self.orch_tick(&ctx);
+        self.update_tick(&ctx);
         self.versions.tick(&ctx);
         if let Some(m) = self.versions.status.take() {
             self.status = m;
@@ -1053,8 +1056,8 @@ impl eframe::App for NotesApp {
             self.term_focus = self.term_open;
         }
         let dark = ctx.global_style().visuals.dark_mode;
-        let side_fill = rgb(if dark { design::dark::SIDEBAR } else { design::light::SIDEBAR });
-        let page_fill = rgb(if dark { design::dark::BACKGROUND } else { design::light::BACKGROUND });
+        let side_fill = rgb(if dark { original::dark::SIDEBAR } else { original::light::SIDEBAR });
+        let page_fill = rgb(if dark { original::dark::BACKGROUND } else { original::light::BACKGROUND });
         // Sidebar first: it runs the full height, beside the window buttons.
         if !self.ws.settings.sidebar_hidden {
             let w = if self.ws.settings.sidebar_width >= 200.0 { self.ws.settings.sidebar_width } else { SIDEBAR_WIDTH };
@@ -1071,7 +1074,7 @@ impl eframe::App for NotesApp {
         }
         // Tab strip over the page only.
         egui::Panel::top("tabs")
-            .exact_size(design::TAB_BAR_HEIGHT)
+            .exact_size(original::TAB_BAR_HEIGHT)
             .frame(egui::Frame::new().fill(page_fill))
             .show(ui, |ui| self.tab_strip(ui));
         if !self.status.is_empty() {
@@ -1114,6 +1117,9 @@ impl eframe::App for NotesApp {
                 egui::ScrollArea::vertical().auto_shrink([false, false]).id_salt("inbox").show(ui, |ui| self.inbox_view(ui, &mut actions));
             }
         });
+        if self.settings_tab.is_none() {
+            self.ai_button(&ctx);
+        }
         self.search_window(&ctx, &mut actions);
         self.settings_window(&ctx, &mut actions);
         let had_actions = !actions.is_empty();
@@ -1186,8 +1192,8 @@ pub fn semibold(size: f32) -> FontId {
     FontId::new(size, egui::FontFamily::Name(SEMIBOLD.into()))
 }
 
-/// Block sizes: body 16 px, headings 1.875 / 1.5 / 1.25 em.
-/// Line height of a block: 1.5 for text (24 px at 16 px), 1.3 for headings.
+/// Block sizes: body 16 px, headings 1.875 / 1.5 / 1.25 em (estimated: the editor isn't in the package).
+/// Line height of a block: 1.5 for text (24 px at 16 px), 1.3 for headings (estimated).
 fn block_line_height(kind: BlockKind) -> f32 {
     match kind {
         BlockKind::Heading1 => 39.0,
@@ -1276,7 +1282,7 @@ fn block_job(text: &str, kind: BlockKind, done: bool, editing: bool, t: &Tone) -
             Inline::Italic => f.italics = true,
             Inline::Strike => f.strikethrough = egui::Stroke::new(1.0, base_color),
             Inline::Code => {
-                // Inline code: red text on a light grey wash, 85 % size.
+                // Inline code: red text on a light grey wash, 85 % size (estimated).
                 f.font_id = FontId::monospace(font.size * 0.85);
                 f.color = Color32::from_rgb(235, 87, 87);
                 f.background = Color32::from_rgba_unmultiplied(135, 131, 120, 38);
@@ -1329,7 +1335,7 @@ fn set_cursor(ctx: &egui::Context, id: egui::Id, at: usize) {
     st.store(ctx, id);
 }
 
-/// Colours of the current theme, from the design tokens.
+/// Colours of the current theme, from the original's design tokens.
 pub struct Tone {
     pub text: Color32,
     pub secondary: Color32,
@@ -1346,7 +1352,7 @@ pub struct Tone {
 
 pub fn tone(dark: bool) -> Tone {
     if dark {
-        use design::dark as d;
+        use original::dark as d;
         Tone {
             text: rgb(d::TEXT),
             secondary: rgb(d::TEXT_SECONDARY),
@@ -1359,7 +1365,7 @@ pub fn tone(dark: bool) -> Tone {
             card: rgb(d::SIDEBAR),                                        // background.dark.elevated (32,32,32)
         }
     } else {
-        use design::light as l;
+        use original::light as l;
         Tone {
             text: rgb(l::TEXT),
             secondary: rgb(l::TEXT_SECONDARY),
@@ -1406,7 +1412,7 @@ fn block_gutter(ui: &mut egui::Ui, visible: bool, t: &Tone, line: f32) -> (egui:
     (plus, handle)
 }
 
-/// Check box: rounded square, blue with a white tick when done.
+/// Notion-style check box: rounded square, blue with a white tick when done.
 fn todo_box(ui: &mut egui::Ui, checked: &mut bool, t: &Tone) {
     let (rect, resp) = ui.allocate_exact_size(egui::vec2(24.0, 24.0), egui::Sense::click());
     let r = egui::Rect::from_center_size(rect.center(), egui::vec2(16.0, 16.0));
@@ -1470,7 +1476,7 @@ fn blocks_view(
         let mut slash_scroll = false;
         let mut slash_anchor = egui::Rect::NOTHING;
         let mut quote_x: Option<f32> = None;
-        // Space above headings: about 2 em, 1.4 em and 1 em.
+        // Space above headings (Notion: about 2 em, 1.4 em and 1 em; estimated).
         let above = match b.kind {
             BlockKind::Heading1 if i > 0 => 22.0,
             BlockKind::Heading2 if i > 0 => 16.0,
@@ -1651,7 +1657,7 @@ fn blocks_view(
             if has_focus_before {
                 te = te.hint_text(RichText::new(hint).color(t.tertiary));
             }
-            // Callout and code: soft grey (dark #252525, light #F1F1EF).
+            // Callout and code: Notion's soft grey (dark #252525, light #F1F1EF; estimated).
             let soft = if dark { Color32::from_rgb(37, 37, 37) } else { Color32::from_rgb(241, 241, 239) };
             let query_bg = ui.painter().add(egui::Shape::Noop);
             let out = match b.kind {
@@ -1917,6 +1923,7 @@ mod projects;
 mod rich;
 mod search;
 mod term_ui;
+mod update_ui;
 mod versions;
 mod side;
 mod live_ui;
@@ -2047,7 +2054,7 @@ fn rgb(c: [u8; 3]) -> Color32 {
 const ACCENT: [u8; 3] = [35, 131, 226];
 
 fn setup_style(ctx: &egui::Context) {
-    use design::{dark as d, light as l};
+    use original::{dark as d, light as l};
     ctx.style_mut_of(egui::Theme::Light, |s| {
         s.visuals.panel_fill = rgb(l::BACKGROUND);
         s.visuals.window_fill = rgb(l::BACKGROUND);
@@ -2077,7 +2084,7 @@ fn setup_style(ctx: &egui::Context) {
         s.spacing.item_spacing = egui::vec2(6.0, 5.0);
     });
     // Shared flat look: borderless buttons with a rounded hover tint, rounded menus with the
-    // outline shadow, thin floating scroll bars.
+    // original's outline shadow, thin floating scroll bars.
     for theme in [egui::Theme::Light, egui::Theme::Dark] {
         let t = tone(theme == egui::Theme::Dark);
         ctx.style_mut_of(theme, |s| {
@@ -2099,7 +2106,7 @@ fn setup_style(ctx: &egui::Context) {
             v.widgets.hovered.weak_bg_fill = t.selected;
             s.spacing.interact_size.y = 28.0;
             v.menu_corner_radius = egui::CornerRadius::same(10);
-            // Light outline: 0 20 24 rgba(25,25,25,0.05) + 1 px rgba(42,28,0,0.07).
+            // Light "outline.lg": 0 20 24 rgba(25,25,25,0.05) + 1 px rgba(42,28,0,0.07) (0x1a3fde).
             let shadow = egui::Shadow { offset: [0, 12], blur: 24, spread: 0, color: Color32::from_rgba_unmultiplied(25, 25, 25, if theme == egui::Theme::Dark { 90 } else { 22 }) };
             v.popup_shadow = shadow;
             v.window_shadow = shadow;
@@ -2113,8 +2120,9 @@ fn setup_style(ctx: &egui::Context) {
     }
 }
 
-/// The font stack starts with the system font (`ui-sans-serif, -apple-system,
-/// BlinkMacSystemFont, "Segoe UI Variable Display", "Segoe UI", Helvetica…`). Load it (regular, and semi-bold for titles) in front of egui's fonts, which stay as
+/// Notion's font stack starts with the system font (`ui-sans-serif, -apple-system,
+/// BlinkMacSystemFont, "Segoe UI Variable Display", "Segoe UI", Helvetica…`, renderer/tabs
+/// @0x398af). Load it (regular, and semi-bold for titles) in front of egui's fonts, which stay as
 /// fallbacks for emoji and missing characters.
 pub fn setup_fonts(ctx: &egui::Context) {
     use egui::epaint::text::{FontData, FontTweak, VariationCoords};
@@ -2262,7 +2270,7 @@ mod tests {
     }
 
     #[test]
-    fn slash_menu_filters_in_order() {
+    fn slash_menu_filters_in_notion_order() {
         let all = slash::matches("/");
         assert_eq!(all.len(), 13);
         assert_eq!(all[0].0, BlockKind::Paragraph);
@@ -2272,7 +2280,7 @@ mod tests {
     }
 
     #[test]
-    fn markdown_shortcuts_work() {
+    fn notion_markdown_shortcuts() {
         assert_eq!(markdown_shortcut("> x").map(|x| x.0), Some(BlockKind::Toggle));
         assert_eq!(markdown_shortcut("\" x").map(|x| x.0), Some(BlockKind::Quote));
         assert_eq!(markdown_shortcut("## x").map(|x| x.0), Some(BlockKind::Heading2));

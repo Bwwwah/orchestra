@@ -1,0 +1,252 @@
+//! Updates from the project's GitHub repository: the newest release (the one "Publier une
+//! version" creates, with the apps that the repository's workflow builds) is compared with
+//! this build's version; when newer, its file for this system is downloaded, put in place of
+//! the running app, and the app restarts.
+//!
+//! The repository is the one the app was built from (ORCHESTRA_UPDATE_REPO at build time,
+//! which the GitHub workflow sets), or the one chosen in the settings. A private repository
+//! works through `gh` when signed in (each friend needs access to it); a public one works
+//! with no account at all.
+
+use serde_json::Value;
+use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
+
+pub const VERSION: &str = env!("CARGO_PKG_VERSION");
+
+/// The repository built into the app (owner/name), if any.
+pub fn built_in_repo() -> Option<&'static str> {
+    option_env!("ORCHESTRA_UPDATE_REPO").filter(|r| r.contains('/'))
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct Release {
+    pub tag: String,
+    pub notes: String,
+    /// (file name, download url)
+    pub assets: Vec<(String, String)>,
+}
+
+impl Release {
+    /// This system's file.
+    pub fn asset(&self) -> Option<&(String, String)> {
+        let suffix = if cfg!(target_os = "macos") {
+            "-macOS.zip"
+        } else if cfg!(windows) {
+            "-Windows.zip"
+        } else {
+            "-Linux.tar.gz"
+        };
+        self.assets.iter().find(|(n, _)| n.ends_with(suffix))
+    }
+}
+
+fn run(bin: &str, args: &[&str], dir: Option<&Path>) -> Result<String, String> {
+    let p = crate::sync::shell_path();
+    let exe = crate::sync::which(bin, &p).ok_or_else(|| format!("« {bin} » introuvable"))?;
+    let mut c = Command::new(exe);
+    c.args(args).env("PATH", &p).env("GH_PROMPT_DISABLED", "1").stdin(Stdio::null());
+    if let Some(d) = dir {
+        c.current_dir(d);
+    }
+    let o = c.output().map_err(|e| e.to_string())?;
+    if o.status.success() {
+        Ok(String::from_utf8_lossy(&o.stdout).to_string())
+    } else {
+        Err(String::from_utf8_lossy(&o.stderr).lines().find(|l| !l.trim().is_empty()).unwrap_or("échec").trim().chars().take(200).collect())
+    }
+}
+
+fn gh_ready() -> bool {
+    run("gh", &["auth", "status"], None).is_ok()
+}
+
+fn parse(v: &Value) -> Option<Release> {
+    let tag = v["tag_name"].as_str()?.to_string();
+    let assets = v["assets"]
+        .as_array()
+        .map(|a| a.iter().filter_map(|x| Some((x["name"].as_str()?.to_string(), x["browser_download_url"].as_str()?.to_string()))).collect())
+        .unwrap_or_default();
+    Some(Release { tag, notes: v["body"].as_str().unwrap_or("").trim().to_string(), assets })
+}
+
+/// The newest release of `repo` (owner/name).
+pub fn latest(repo: &str) -> Result<Release, String> {
+    let repo = repo.trim().trim_start_matches("https://github.com/").trim_end_matches('/').trim_end_matches(".git");
+    if repo.split('/').count() != 2 {
+        return Err(crate::trf!("« {repo} » : attendu propriétaire/dépôt", "« {repo} »: expected owner/repository"));
+    }
+    let path = format!("repos/{repo}/releases/latest");
+    let text = if gh_ready() {
+        run("gh", &["api", &path], None)?
+    } else {
+        run("curl", &["-fsSL", "-H", "Accept: application/vnd.github+json", &format!("https://api.github.com/{path}")], None)
+            .map_err(|e| crate::trf!("dépôt introuvable ou privé ({e}) ; pour un dépôt privé, connectez « gh »", "repository not found or private ({e}); for a private repository, sign in with « gh »"))?
+    };
+    let v: Value = serde_json::from_str(&text).map_err(|e| e.to_string())?;
+    parse(&v).ok_or_else(|| crate::tr!("aucune version publiée", "no version published").to_string())
+}
+
+/// `tag` (v1.2.3) is newer than `current` (1.2.0).
+pub fn newer(tag: &str, current: &str) -> bool {
+    let n = |s: &str| -> Vec<u64> { s.trim_start_matches('v').split(['-', '+']).next().unwrap_or("").split('.').map(|x| x.parse().unwrap_or(0)).collect() };
+    let (a, b) = (n(tag), n(current));
+    (0..3).map(|i| (a.get(i).copied().unwrap_or(0), b.get(i).copied().unwrap_or(0))).find(|(x, y)| x != y).is_some_and(|(x, y)| x > y)
+}
+
+/// What gets replaced: the .app bundle on macOS, the program elsewhere. None when running
+/// from the source (cargo), which updates with git pull + cargo build instead.
+pub fn target() -> Option<PathBuf> {
+    let exe = std::env::current_exe().ok()?.canonicalize().ok()?;
+    if exe.components().any(|c| c.as_os_str() == "target") && exe.ancestors().any(|a| a.join("Cargo.toml").is_file()) {
+        return None;
+    }
+    if cfg!(target_os = "macos") {
+        let bundle = exe.parent()?.parent()?.parent()?.to_path_buf();
+        return bundle.extension().is_some_and(|e| e == "app").then_some(bundle);
+    }
+    Some(exe)
+}
+
+/// Download, unpack and put the new version in place. Returns what to start afterwards.
+pub fn install(repo: &str, rel: &Release) -> Result<PathBuf, String> {
+    let target = target().ok_or(crate::tr!(
+        "Orchestra tourne depuis son code source : mettez-le à jour avec git pull puis cargo build.",
+        "Orchestra runs from its source code: update it with git pull then cargo build."
+    ))?;
+    install_to(&target, repo, rel)
+}
+
+fn install_to(target: &Path, repo: &str, rel: &Release) -> Result<PathBuf, String> {
+    let target = target.to_path_buf();
+    let (name, url) = rel.asset().ok_or(crate::tr!("cette version n'a pas de fichier pour ce système", "this version has no file for this system"))?.clone();
+    let tmp = std::env::temp_dir().join(format!("orchestra-maj-{}", rel.tag));
+    let _ = std::fs::remove_dir_all(&tmp);
+    std::fs::create_dir_all(&tmp).map_err(|e| e.to_string())?;
+    let file = tmp.join(&name);
+    // Download: gh for a private repository, curl otherwise.
+    let got = if gh_ready() {
+        run("gh", &["release", "download", &rel.tag, "-R", repo.trim(), "-p", &name, "-D", &tmp.display().to_string(), "--clobber"], None).map(|_| ())
+    } else {
+        Err(String::new())
+    };
+    if got.is_err() || !file.is_file() {
+        run("curl", &["-fsSL", "-o", &file.display().to_string(), &url], None).map_err(|e| crate::trf!("téléchargement impossible : {e}", "download failed: {e}"))?;
+    }
+    // Unpack.
+    let out = tmp.join("x");
+    std::fs::create_dir_all(&out).map_err(|e| e.to_string())?;
+    let (f, o) = (file.display().to_string(), out.display().to_string());
+    if name.ends_with(".tar.gz") {
+        run("tar", &["-xzf", &f, "-C", &o], None)?;
+    } else if cfg!(target_os = "macos") {
+        run("ditto", &["-x", "-k", &f, &o], None)?;
+    } else if cfg!(windows) {
+        run("powershell", &["-NoProfile", "-Command", &format!("Expand-Archive -Force -LiteralPath '{f}' -DestinationPath '{o}'")], None)?;
+    } else {
+        run("unzip", &["-q", "-o", &f, "-d", &o], None)?;
+    }
+    let new = find(&out, |p| {
+        let n = p.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+        if cfg!(target_os = "macos") {
+            n.ends_with(".app") && p.is_dir()
+        } else if cfg!(windows) {
+            n.eq_ignore_ascii_case("orchestra.exe")
+        } else {
+            n == "orchestra" && p.is_file()
+        }
+    })
+    .ok_or(crate::tr!("le fichier téléchargé ne contient pas l'app", "the downloaded file doesn't contain the app"))?;
+    // Swap: the old one is renamed first (a running program can be renamed everywhere).
+    let old = target.with_file_name(format!("{}.ancienne", target.file_name().unwrap().to_string_lossy()));
+    if old.exists() {
+        let _ = if old.is_dir() { std::fs::remove_dir_all(&old) } else { std::fs::remove_file(&old) };
+    }
+    std::fs::rename(&target, &old).map_err(|e| crate::trf!("impossible de remplacer l'app ({e})", "couldn't replace the app ({e})"))?;
+    let placed = if cfg!(target_os = "macos") {
+        run("ditto", &[&new.display().to_string(), &target.display().to_string()], None).map(|_| ())
+    } else {
+        std::fs::copy(&new, &target).map(|_| ()).map_err(|e| e.to_string())
+    };
+    if let Err(e) = placed {
+        let _ = std::fs::rename(&old, &target);
+        return Err(crate::trf!("impossible d'installer la nouvelle version ({e}) ; l'ancienne est remise", "couldn't install the new version ({e}); the old one is back"));
+    }
+    #[cfg(unix)]
+    if !cfg!(target_os = "macos") {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o755));
+    }
+    if cfg!(target_os = "macos") {
+        let _ = run("xattr", &["-dr", "com.apple.quarantine", &target.display().to_string()], None);
+    }
+    let _ = if old.is_dir() { std::fs::remove_dir_all(&old) } else { std::fs::remove_file(&old) };
+    let _ = std::fs::remove_dir_all(&tmp);
+    Ok(target)
+}
+
+fn find(dir: &Path, ok: impl Fn(&Path) -> bool + Copy) -> Option<PathBuf> {
+    for e in std::fs::read_dir(dir).ok()?.flatten() {
+        let p = e.path();
+        if ok(&p) {
+            return Some(p);
+        }
+        if p.is_dir() && p.extension().is_none_or(|x| x != "app") {
+            if let Some(f) = find(&p, ok) {
+                return Some(f);
+            }
+        }
+    }
+    None
+}
+
+/// Start the new version (then the caller quits).
+pub fn restart(target: &Path) {
+    if cfg!(target_os = "macos") {
+        let _ = Command::new("open").arg("-n").arg(target).spawn();
+    } else {
+        let _ = Command::new(target).spawn();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn installs_over_the_program() {
+        let base = std::env::temp_dir().join(format!("orch-upd-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(base.join("pack/orchestra")).unwrap();
+        std::fs::write(base.join("pack/orchestra/orchestra"), "#!/bin/sh\necho nouvelle\n").unwrap();
+        let tar = base.join("Orchestra-v9.0.0-Linux.tar.gz");
+        assert!(Command::new("tar").args(["-czf", &tar.display().to_string(), "-C", &base.join("pack").display().to_string(), "orchestra"]).status().unwrap().success());
+        let app = base.join("installed/orchestra");
+        std::fs::create_dir_all(app.parent().unwrap()).unwrap();
+        std::fs::write(&app, "ancienne").unwrap();
+        let rel = Release { tag: "v9.0.0".into(), notes: String::new(), assets: vec![("Orchestra-v9.0.0-Linux.tar.gz".into(), format!("file://{}", tar.display()))] };
+        let got = install_to(&app, "moi/orchestra", &rel).unwrap();
+        assert_eq!(got, app);
+        assert!(std::fs::read_to_string(&app).unwrap().contains("nouvelle"));
+        assert!(!app.with_file_name("orchestra.ancienne").exists());
+        let out = Command::new(&app).output().unwrap();
+        assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "nouvelle");
+        let _ = std::fs::remove_dir_all(base);
+    }
+
+    #[test]
+    fn versions_and_assets() {
+        assert!(newer("v0.2.0", "0.1.9"));
+        assert!(newer("v1.0.0", "0.9.9"));
+        assert!(!newer("v0.1.0", "0.1.0"));
+        assert!(!newer("v0.1.0", "0.2.0"));
+        let v = serde_json::json!({"tag_name": "v0.2.0", "body": "- x", "assets": [
+            {"name": "Orchestra-v0.2.0-macOS.zip", "browser_download_url": "https://a/m"},
+            {"name": "Orchestra-v0.2.0-Linux.tar.gz", "browser_download_url": "https://a/l"},
+            {"name": "Orchestra-v0.2.0-Windows.zip", "browser_download_url": "https://a/w"}]});
+        let r = parse(&v).unwrap();
+        assert_eq!(r.tag, "v0.2.0");
+        assert!(r.asset().is_some());
+    }
+}
