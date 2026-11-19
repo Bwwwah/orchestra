@@ -569,7 +569,7 @@ fn call_tool(name: &str, args: &Value) -> Result<String, ToolError> {
             }
             if let Some(t) = s(args, "title") {
                 if let Some(x) = pr.steps.iter_mut().find(|x| x.id == sid) {
-                    x.title = crate::richtext::one_line_md(t, project::STEP_MAX);
+                    x.title = crate::richtext::step_title(t, project::STEP_MAX);
                     x.updated = crate::model::now_ms();
                 }
                 pr.touch();

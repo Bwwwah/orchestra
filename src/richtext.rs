@@ -163,6 +163,13 @@ pub fn one_line_md(text: &str, max: usize) -> String {
     cut(&plain_markers.replace('\u{1}', "`").replace('\u{2}', "**"), max)
 }
 
+/// A step title: like `one_line_md`, but a text written on several lines is kept whole
+/// (its lines joined with spaces) instead of losing everything after the first line.
+pub fn step_title(text: &str, max: usize) -> String {
+    let joined = text.lines().map(str::trim).filter(|l| !l.is_empty()).collect::<Vec<_>>().join(" ");
+    one_line_md(&joined, max)
+}
+
 fn cut(t: &str, max: usize) -> String {
     let t = t.to_string();
     if t.chars().count() > max { format!("{}…", t.chars().take(max - 1).collect::<String>().trim_end()) } else { t }
@@ -372,6 +379,9 @@ mod tests {
         assert_eq!(one_line("- [ ] **Brancher** le `MCP`\nexplication", 80), "Brancher le MCP");
         assert_eq!(one_line("2. Écrire les tests", 80), "Écrire les tests");
         assert_eq!(one_line(&"a".repeat(20), 10), "aaaaaaaaa…");
+        assert_eq!(step_title("Refaire la page **Orchestration**\navec une barre\n\nen haut", 2000), "Refaire la page **Orchestration** avec une barre en haut");
+        let long = "mot ".repeat(200);
+        assert_eq!(step_title(&long, crate::project::STEP_MAX), long.trim());
         assert_eq!(one_line_md("- [ ] Retirer `USE_MOCK` **vite**", 80), "Retirer `USE_MOCK` **vite**");
     }
 

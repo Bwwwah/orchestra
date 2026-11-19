@@ -9,9 +9,10 @@ use crate::model::{Page, Workspace, new_id, now_ms};
 use serde::{Deserialize, Serialize};
 use std::path::{Component, Path, PathBuf};
 
-/// Longest state of play kept (characters), and longest step title.
+/// Longest state of play kept (characters), and longest step title. Step titles are what
+/// the AIs work from, so they are kept whole (the window shows one line, a click shows all).
 pub const SUMMARY_MAX: usize = 4000;
-pub const STEP_MAX: usize = 160;
+pub const STEP_MAX: usize = 2000;
 
 /// A state of play built from lists, so every AI's summary has the same shape:
 /// "Fait", "En cours", "Bloquants", then free notes.
@@ -178,7 +179,7 @@ impl Project {
 
     pub fn add_step(&mut self, title: &str, source: &str) -> String {
         let t = now_ms();
-        let s = Step { id: new_id(), title: crate::richtext::one_line_md(title, STEP_MAX), status: StepStatus::Todo, source: source.to_string(), created: t, updated: t };
+        let s = Step { id: new_id(), title: crate::richtext::step_title(title, STEP_MAX), status: StepStatus::Todo, source: source.to_string(), created: t, updated: t };
         let id = s.id.clone();
         self.steps.push(s);
         self.touch();
