@@ -719,9 +719,6 @@ impl NotesApp {
                 row(ui, crate::tr!("Limite globale", "Global limit"), crate::tr!("Aucune session ne va au-delà, tous projets confondus", "No session goes past it, all projects together"), &mut |ui| {
                     ui.add(egui::DragValue::new(&mut o.global_limit).range(5.0..=100.0).speed(0.5).suffix(" %"));
                 });
-                row(ui, crate::tr!("Part par projet", "Share per project"), crate::tr!("Par défaut, modifiable au lancement", "By default, can be changed at start"), &mut |ui| {
-                    ui.add(egui::DragValue::new(&mut o.default_limit).range(1.0..=100.0).speed(0.5).suffix(" %"));
-                });
                 row(ui, crate::tr!("Commits autorisés", "Commits allowed"), crate::tr!("Sur leur branche, jamais de push", "On their branch, never a push"), &mut |ui| {
                     super::settings::switch(ui, &mut o.allow_commits, &lk);
                 });

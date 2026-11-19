@@ -43,7 +43,7 @@ ajouté sans votre clic. Le texte de la consigne est dans `sync::ask_tasks`.
 |---|---|---|
 | Limite globale | 60 % | part de la fenêtre de 5 h de l'abonnement, tous projets confondus |
 | Limite de la semaine | 95 % | au-delà, aucune session ne démarre ni ne continue (barre en haut de la page) |
-| Part par projet | 20 % | part qu'un seul projet peut utiliser ; les parts ensemble ne dépassent jamais la limite globale |
+| Part par projet | 20 % | réglée sur la ligne de chaque projet au lancement ; les parts ensemble ne dépassent jamais la limite globale |
 | Tours au plus | 30 | nombre de tours d'une session |
 | Commits | non | l'IA peut faire des commits sur sa branche (jamais de push) |
 | Rapport du jour | 19 h | heure du rapport d'ensemble quand plusieurs projets ont tourné |
