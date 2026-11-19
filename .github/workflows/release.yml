@@ -93,9 +93,23 @@ jobs:
           cargo install cargo-deb --locked
           cargo deb --no-build --output out/Orchestra-${GITHUB_REF_NAME}-Linux.deb || echo "paquet .deb non fabriqué"
 
+      # Checksums of the files the app installs by itself (.zip, .tar.gz): it refuses an
+      # update whose SHA-256 doesn't match "<file>.sha256".
+      - name: Empreintes SHA-256
+        shell: bash
+        run: |
+          cd out
+          for f in *.zip *.tar.gz; do
+            [ -f "$f" ] || continue
+            h=$( (sha256sum "$f" 2>/dev/null || shasum -a 256 "$f") | cut -d' ' -f1)
+            printf '%s  %s\n' "$h" "$f" > "$f.sha256"
+          done
+          ls -l
+
       - uses: softprops/action-gh-release@v2
         with:
           files: |
+            out/*.sha256
             out/*.dmg
             out/*.zip
             out/*.exe
