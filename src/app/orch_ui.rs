@@ -113,6 +113,14 @@ impl NotesApp {
                 return Err(crate::trf!("la limite globale ({:.0} %) est déjà atteinte", "the global limit ({:.0} %) is already reached", self.ws.settings.orch.global_limit));
             }
         }
+        let taken: f32 = self.orch.runs.iter().map(|r| r.limit).sum();
+        if taken + limit > self.ws.settings.orch.global_limit + 0.01 {
+            return Err(crate::trf!(
+                "{limit:.0} % pour ce projet dépasserait la limite globale ({:.0} %), dont {taken:.0} % sont déjà pris",
+                "{limit:.0} % for this project would go past the global limit ({:.0} %), {taken:.0} % of which is already taken",
+                self.ws.settings.orch.global_limit
+            ));
+        }
         if let Some(w) = self.orch.week {
             if w >= self.ws.settings.orch.week_limit {
                 return Err(crate::trf!("la limite de la semaine ({:.0} %) est déjà atteinte", "the weekly limit ({:.0} %) is already reached", self.ws.settings.orch.week_limit));
@@ -829,6 +837,9 @@ impl NotesApp {
         let picked: Vec<String> = projects.iter().filter(|(id, _, _)| self.orch.drafts.get(id).is_some_and(|d| d.pick) && !running.contains(id)).map(|(id, _, _)| id.clone()).collect();
         let picked_sum: f32 = picked.iter().filter_map(|id| self.orch.drafts.get(id)).map(|d| d.limit).sum();
         let global = self.ws.settings.orch.global_limit;
+        // Shares add up: the sessions running and the projects picked together never
+        // get more than the global limit.
+        let running_sum: f32 = self.orch.runs.iter().map(|r| r.limit).sum();
         let open_steps: HashMap<String, usize> = projects
             .iter()
             .map(|(id, _, _)| (id.clone(), self.ws.page(id).and_then(|p| p.project.as_ref()).map(|x| x.steps.iter().filter(|s| s.status != crate::project::StepStatus::Done).count()).unwrap_or(0)))
@@ -848,6 +859,8 @@ impl NotesApp {
                 let busy = running.contains(id);
                 let bg = super::projects::hover_begin(ui);
                 let open = open_steps.get(id).copied().unwrap_or(0);
+                let others = running_sum + if d.pick { picked_sum - d.limit } else { picked_sum };
+                let room = (global - others).floor().max(0.0);
                 let row = ui.vertical(|ui| {
                     ui.horizontal(|ui| {
                         ui.add_enabled(!busy, egui::Checkbox::without_text(&mut d.pick)).on_hover_text(crate::tr!("Sélectionner pour lancer plusieurs projets ensemble", "Select to start several projects together"));
@@ -872,14 +885,28 @@ impl NotesApp {
                             if busy {
                                 let (r, _) = ui.allocate_exact_size(egui::vec2(16.0, 16.0), egui::Sense::hover());
                                 super::projects::pulse_dot(ui, r.center(), super::projects::GREEN);
-                            } else if start_button(ui, plugged, t).on_disabled_hover_text(crate::tr!("Branchez d'abord Claude Code", "Plug in Claude Code first")).clicked() {
+                            } else if !plugged {
+                                start_button(ui, false, t).on_disabled_hover_text(crate::tr!("Branchez d'abord Claude Code", "Plug in Claude Code first"));
+                            } else if room < 1.0 {
+                                start_button(ui, false, t).on_disabled_hover_text(crate::trf!("La limite globale ({global:.0} %) est déjà répartie entre les autres projets", "The global limit ({global:.0} %) is already shared among the other projects"));
+                            } else if start_button(ui, true, t).clicked() {
                                 start.push(id.clone());
                             }
                             ui.add_space(4.0);
                             super::settings::switch(ui, &mut d.commits, &lk).on_hover_text(crate::tr!("L'IA peut faire des commits sur sa branche (jamais de push)", "The AI may commit on its branch (never push)"));
                             ui.label(RichText::new("commits").size(12.0).color(t.tertiary));
                             ui.add_space(6.0);
-                            ui.add(egui::DragValue::new(&mut d.limit).range(1.0..=100.0).speed(0.5).suffix(" %")).on_hover_text(crate::tr!("Part de la session de 5 h que ce projet peut utiliser", "Share of the 5-hour window this project may use"));
+                            // A picked project keeps its share within the room left; the others
+                            // only show it capped, so unpicking one doesn't shrink the rest for good.
+                            if d.pick && !busy {
+                                d.limit = d.limit.clamp(1.0, room.max(1.0));
+                            }
+                            let mut shown = if busy { d.limit } else { d.limit.clamp(1.0, room.max(1.0)) };
+                            let dv = ui.add_enabled(!busy && room >= 1.0, egui::DragValue::new(&mut shown).range(1.0..=room.max(1.0)).speed(0.5).suffix(" %"));
+                            if dv.changed() {
+                                d.limit = shown;
+                            }
+                            dv.on_hover_text(crate::trf!("Part de la session de 5 h que ce projet peut utiliser : {room:.0} % au plus, le reste de la limite globale ({global:.0} %) étant pris par les autres", "Share of the 5-hour window this project may use: {room:.0} % at most, the rest of the global limit ({global:.0} %) being taken by the others"));
                         });
                     });
                     ui.horizontal(|ui| {
@@ -905,7 +932,9 @@ impl NotesApp {
         for id in start {
             let d = self.orch.drafts.get(&id).cloned().unwrap();
             let title = self.ws.page(&id).map(|p| p.display_title()).unwrap_or_default();
-            match self.launch_run(ctx, &id, &d.mission, d.limit, d.commits) {
+            let taken: f32 = self.orch.runs.iter().map(|r| r.limit).sum();
+            let limit = d.limit.min((global - taken).floor()).max(1.0);
+            match self.launch_run(ctx, &id, &d.mission, limit, d.commits) {
                 Ok(()) => {
                     if let Some(x) = self.orch.drafts.get_mut(&id) {
                         x.pick = false;
