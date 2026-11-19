@@ -194,6 +194,8 @@ pub struct Stats {
     pub updated: usize,
     pub kept: usize,
     pub removed: usize,
+    /// Links to the project's sub-pages taken out of its text.
+    pub unlinked: usize,
 }
 
 fn child_with_source(ws: &Workspace, parent: &str, path: &str) -> Option<String> {
@@ -302,6 +304,17 @@ fn sync_nodes(ws: &mut Workspace, parent: &str, nodes: &[Node], seen: &mut Vec<S
 /// Bring a project's documentation pages in line with its folder.
 pub fn sync_project(ws: &mut Workspace, project_id: &str) -> Stats {
     let mut st = Stats::default();
+    // A project's own sub-pages are listed by its "Pages" card: links to them left in the
+    // project's text (by earlier versions) are removed, folder or not.
+    let kids: Vec<String> = ws.children(Some(project_id)).iter().map(|p| p.id.clone()).collect();
+    if let Some(p) = ws.page_mut(project_id).filter(|p| p.project.is_some()) {
+        let before = p.blocks.len();
+        p.blocks.retain(|b| !(b.kind == BlockKind::PageLink && kids.contains(&b.extra)));
+        if p.blocks.len() != before {
+            st.unlinked = before - p.blocks.len();
+            p.touch();
+        }
+    }
     let Some(folder) = ws.page(project_id).and_then(|p| p.project.as_ref()).map(|pr| pr.folder.trim().to_string()) else { return st };
     if folder.is_empty() {
         return st;
@@ -387,6 +400,25 @@ mod tests {
 
     fn child(ws: &Workspace, parent: &str, title: &str) -> String {
         ws.pages.iter().find(|p| !p.trashed && p.parent.as_deref() == Some(parent) && p.title == title).unwrap().id.clone()
+    }
+
+    #[test]
+    fn project_pages_are_not_linked_in_its_text() {
+        let mut ws = Workspace::default();
+        let id = ws.create_project("Sans dossier", "");
+        let kid = ws.create_page("Idées", Some(id.clone()));
+        let links = |ws: &Workspace| ws.page(&id).unwrap().blocks.iter().filter(|b| b.kind == BlockKind::PageLink).count();
+        assert_eq!(links(&ws), 0);
+        // A link left by an earlier version goes away at the next sync, even without a folder.
+        let mut b = crate::model::Block::new(BlockKind::PageLink, "");
+        b.extra = kid;
+        ws.page_mut(&id).unwrap().blocks.push(b);
+        assert_eq!(sync_project(&mut ws, &id).unlinked, 1);
+        assert_eq!(links(&ws), 0);
+        // An ordinary page still links to its sub-pages.
+        let page = ws.create_page("Notes", None);
+        ws.create_page("Sous-page", Some(page.clone()));
+        assert_eq!(ws.page(&page).unwrap().blocks.iter().filter(|b| b.kind == BlockKind::PageLink).count(), 1);
     }
 
     #[test]
