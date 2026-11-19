@@ -516,6 +516,15 @@ pub struct InboxMsg {
     pub page: Option<String>,
     #[serde(default)]
     pub read: bool,
+    /// The person's answer to a question, typed in the inbox (empty: not answered yet).
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub answer: String,
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub answered_at: u64,
+}
+
+fn is_zero(x: &u64) -> bool {
+    *x == 0
 }
 
 /// An autonomous work session of an AI on a project, in its own copy of the repository.
@@ -568,6 +577,7 @@ impl Workspace {
             text: text.into(),
             page,
             read: false,
+            ..Default::default()
         });
         // Keep the inbox to a sane size.
         if self.inbox.len() > 500 {

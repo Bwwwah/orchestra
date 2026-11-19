@@ -1098,6 +1098,7 @@ impl NotesApp {
         let mut open: Option<usize> = None;
         let mut remove: Option<usize> = None;
         let mut all_read = false;
+        let mut answer: Option<(usize, String)> = None;
         ui.add_space(50.0);
         ui.horizontal(|ui| {
             ui.add_space(((avail - width) / 2.0).max(20.0));
@@ -1153,6 +1154,11 @@ impl NotesApp {
                     if resp.clicked() && remove.is_none() {
                         open = Some(i);
                     }
+                    if m.kind == "question" {
+                        if let Some(text) = answer_box(ui, m, &t) {
+                            answer = Some((i, text));
+                        }
+                    }
                     ui.add_space(6.0);
                 }
             });
@@ -1162,6 +1168,14 @@ impl NotesApp {
                 m.read = true;
             }
             self.dirty_since.get_or_insert_with(Instant::now);
+        }
+        if let Some((i, text)) = answer {
+            let m = &mut self.ws.inbox[i];
+            m.answer = text;
+            m.answered_at = crate::model::now_ms();
+            m.read = true;
+            self.dirty_since.get_or_insert_with(Instant::now);
+            self.ack(crate::tr!("Réponse enregistrée : l'IA la verra au prochain état des lieux du projet.", "Answer saved: the AI will see it in the project's next state of play."));
         }
         if let Some(i) = remove {
             self.ws.inbox.remove(i);
@@ -1179,6 +1193,57 @@ impl NotesApp {
     }
 }
 
+
+/// Under a question of the inbox: the answer given, or a box to type one.
+/// Returns the answer when the person sends it (button, or Cmd/Ctrl+Enter).
+fn answer_box(ui: &mut egui::Ui, m: &crate::model::InboxMsg, t: &Tone) -> Option<String> {
+    let draft_id = egui::Id::unique(("inbox-draft", &m.id));
+    let edit_id = egui::Id::unique(("inbox-edit", &m.id));
+    let editing = ui.data(|d| d.get_temp::<bool>(edit_id)).unwrap_or(false);
+    let mut out = None;
+    ui.horizontal_top(|ui| {
+        ui.add_space(12.0);
+        ui.vertical(|ui| {
+            ui.set_width(ui.available_width() - 30.0);
+            if !m.answer.is_empty() && !editing {
+                ui.horizontal_wrapped(|ui| {
+                    ui.label(RichText::new(crate::tr!("Votre réponse :", "Your answer:")).size(12.0).color(t.tertiary));
+                    ui.add(egui::Label::new(RichText::new(&m.answer).size(13.0).color(t.text)).wrap());
+                });
+                if super::projects::action_link(ui, crate::tr!("Modifier la réponse", "Edit the answer")).clicked() {
+                    ui.data_mut(|d| {
+                        d.insert_temp(draft_id, m.answer.clone());
+                        d.insert_temp(edit_id, true);
+                    });
+                }
+                return;
+            }
+            let mut draft = ui.data(|d| d.get_temp::<String>(draft_id)).unwrap_or_default();
+            let te = ui.add(
+                egui::TextEdit::multiline(&mut draft)
+                    .desired_rows(2)
+                    .desired_width(f32::INFINITY)
+                    .hint_text(crate::tr!("Répondre à l'IA…", "Answer the AI…")),
+            );
+            let send_key = te.has_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter) && i.modifiers.command);
+            let mut send = false;
+            ui.horizontal(|ui| {
+                let ok = !draft.trim().is_empty();
+                send = ui.add_enabled(ok, egui::Button::new(crate::tr!("Répondre", "Answer"))).clicked() || (ok && send_key);
+                if editing && super::projects::action_link(ui, crate::tr!("Annuler", "Cancel")).clicked() {
+                    ui.data_mut(|d| d.insert_temp(edit_id, false));
+                }
+            });
+            if send {
+                out = Some(crate::richtext::clean(draft.trim(), 4000));
+                draft.clear();
+                ui.data_mut(|d| d.insert_temp(edit_id, false));
+            }
+            ui.data_mut(|d| d.insert_temp(draft_id, draft));
+        });
+    });
+    out
+}
 
 /// A ring gauge: `value` (0..1, None when unknown) and a tick at `limit`.
 fn ring(ui: &egui::Ui, c: egui::Pos2, r: f32, value: Option<f32>, limit: f32, color: Color32, t: &Tone) {
