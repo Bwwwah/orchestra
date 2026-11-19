@@ -75,6 +75,9 @@ pub struct Orch {
     last_reading: Option<(u64, f32, Option<u64>)>,
     pub five: Option<f32>,
     pub week: Option<f32>,
+    /// When the 5-hour and the weekly windows start again (ms since epoch).
+    pub five_reset: Option<u64>,
+    pub week_reset: Option<u64>,
     usage_polled: Option<Instant>,
     daily_checked: Option<Instant>,
     confirm: Option<(String, &'static str)>,
@@ -112,7 +115,9 @@ impl NotesApp {
         }
         if let Some(f) = self.orch.five {
             if f >= self.ws.settings.orch.global_limit {
-                return Err(crate::trf!("la limite globale ({:.0} %) est déjà atteinte", "the global limit ({:.0} %) is already reached", self.ws.settings.orch.global_limit));
+                let left = self.orch.five_reset.and_then(|r| crate::usage::until(r, crate::model::now_ms()));
+                let when = left.map(|l| crate::trf!(" ; la fenêtre de 5 h repart à zéro dans {}", "; the 5-hour window resets in {}", crate::usage::left_text(l))).unwrap_or_default();
+                return Err(crate::trf!("la limite globale ({:.0} %) est déjà atteinte{when}", "the global limit ({:.0} %) is already reached{when}", self.ws.settings.orch.global_limit));
             }
         }
         let taken: f32 = self.orch.runs.iter().map(|r| r.limit).sum();
@@ -356,8 +361,10 @@ impl NotesApp {
         }
         self.orch.usage_polled = Some(Instant::now());
         let Some(u) = crate::usage::read() else { return };
-        let five = u.windows.iter().find(|w| w.label.starts_with("Session")).cloned();
-        self.orch.week = u.windows.iter().find(|w| w.label == "Semaine").map(|w| w.pct);
+        let five = u.five().cloned();
+        self.orch.week = u.week().map(|w| w.pct);
+        self.orch.week_reset = u.week().and_then(|w| w.resets_at);
+        self.orch.five_reset = five.as_ref().and_then(|w| w.resets_at);
         let Some(five) = five else { return };
         self.orch.five = Some(five.pct);
         let prev = self.orch.last_reading;
@@ -598,6 +605,9 @@ impl NotesApp {
         let five = self.orch.five;
         let week = self.orch.week;
         let global = self.ws.settings.orch.global_limit;
+        let now_ms = crate::model::now_ms();
+        let five_left = self.orch.five_reset.and_then(|r| crate::usage::until(r, now_ms));
+        let week_left = self.orch.week_reset.and_then(|r| crate::usage::until(r, now_ms));
         let running = self.orch.runs.len();
         let ready = self.ws.projects().iter().filter(|p| p.project.as_ref().is_some_and(|x| !x.folder.trim().is_empty())).count();
         let today = auto::local_day(crate::model::now_ms());
@@ -624,9 +634,11 @@ impl NotesApp {
             let (big, sub): (String, String) = match i {
                 0 => (
                     five.map(|f| format!("{f:.0} %")).unwrap_or_else(|| "—".into()),
-                    match (five, week) {
-                        (Some(_), Some(wk)) => crate::trf!("limite {global:.0} % · semaine {wk:.0} %", "limit {global:.0} % · week {wk:.0} %"),
-                        (Some(_), None) => crate::trf!("limite globale {global:.0} %", "global limit {global:.0} %"),
+                    match (five, week, five_left) {
+                        (Some(_), Some(wk), Some(l)) => crate::trf!("à zéro dans {} · semaine {wk:.0} %", "resets in {} · week {wk:.0} %", crate::usage::left_text(l)),
+                        (Some(_), None, Some(l)) => crate::trf!("limite {global:.0} % · à zéro dans {}", "limit {global:.0} % · resets in {}", crate::usage::left_text(l)),
+                        (Some(_), Some(wk), None) => crate::trf!("limite {global:.0} % · semaine {wk:.0} %", "limit {global:.0} % · week {wk:.0} %"),
+                        (Some(_), None, None) => crate::trf!("limite globale {global:.0} %", "global limit {global:.0} %"),
                         _ => crate::tr!("inconnu pour l'instant", "unknown for now").into(),
                     },
                 ),
@@ -642,10 +654,24 @@ impl NotesApp {
             let g = ui.fonts_mut(|f| f.layout_job(job));
             ui.painter().galley(egui::pos2(x, rect.bottom() - 28.0), g, t.secondary);
             match i {
-                0 if tw >= 240.0 => {
-                    // A ring: the 5-hour use, the global limit as a tick.
-                    let c = egui::pos2(rect.right() - 50.0, rect.center().y + 4.0);
-                    ring(ui, c, 28.0, five.map(|f| f / 100.0), global / 100.0, accent, t);
+                0 => {
+                    if tw >= 240.0 {
+                        // A ring: the 5-hour use, the global limit as a tick.
+                        let c = egui::pos2(rect.right() - 50.0, rect.center().y + 4.0);
+                        ring(ui, c, 28.0, five.map(|f| f / 100.0), global / 100.0, accent, t);
+                    }
+                    // The details: limits and when each window starts again.
+                    let mut tip = vec![crate::trf!("Limite globale : {global:.0} % de la fenêtre de 5 h", "Global limit: {global:.0} % of the 5-hour window")];
+                    if let Some(l) = five_left {
+                        tip.push(crate::trf!("Fenêtre de 5 h : repart à zéro dans {}", "5-hour window: resets in {}", crate::usage::left_text(l)));
+                    }
+                    if let Some(wk) = week {
+                        tip.push(match week_left {
+                            Some(l) => crate::trf!("Semaine : {wk:.0} %, repart à zéro dans {}", "Week: {wk:.0} %, resets in {}", crate::usage::left_text(l)),
+                            None => crate::trf!("Semaine : {wk:.0} %", "Week: {wk:.0} %"),
+                        });
+                    }
+                    resp.on_hover_text(tip.join("\n"));
                 }
                 1 if running > 0 => {
                     super::projects::pulse_dot(ui, egui::pos2(rect.right() - 30.0, rect.top() + 24.0), super::projects::GREEN);

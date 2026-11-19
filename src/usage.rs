@@ -168,6 +168,38 @@ pub fn read() -> Option<Usage> {
     (!u.windows.is_empty()).then_some(u)
 }
 
+impl Usage {
+    /// The 5-hour window.
+    pub fn five(&self) -> Option<&Window> {
+        self.windows.iter().find(|w| w.label.starts_with("Session"))
+    }
+
+    /// The weekly window (all models).
+    pub fn week(&self) -> Option<&Window> {
+        self.windows.iter().find(|w| w.label == "Semaine")
+    }
+}
+
+/// Time left before `resets_at` (ms); None once it has passed.
+pub fn until(resets_at: u64, now: u64) -> Option<u64> {
+    (resets_at > now).then(|| resets_at - now)
+}
+
+/// "2 h 14", "3 j 5 h", "12 min", "< 1 min": a time left, short.
+pub fn left_text(ms: u64) -> String {
+    let min = ms / 60_000;
+    let (d, h, m) = (min / (24 * 60), min / 60 % 24, min % 60);
+    if d > 0 {
+        if crate::i18n::en() { format!("{d} d {h} h") } else { format!("{d} j {h} h") }
+    } else if h > 0 {
+        format!("{h} h {m:02}")
+    } else if m > 0 {
+        format!("{m} min")
+    } else {
+        "< 1 min".into()
+    }
+}
+
 // ---------------------------------------------------------------- status line
 
 fn settings_file() -> PathBuf {
@@ -289,5 +321,18 @@ mod tests {
         assert_eq!(c[1].label, "Semaine (Fable)");
         let p = from_cache(&json!({"five_hour": {"utilization": 23.0}}));
         assert_eq!(p[0].pct, 23.0);
+    }
+
+    #[test]
+    fn time_left_before_reset() {
+        assert_eq!(until(1_000, 2_000), None);
+        assert_eq!(until(5_000, 2_000), Some(3_000));
+        assert_eq!(left_text(30_000), "< 1 min");
+        assert_eq!(left_text(12 * 60_000), "12 min");
+        assert_eq!(left_text((2 * 60 + 4) * 60_000), "2 h 04");
+        assert!(left_text((3 * 24 * 60 + 5 * 60) * 60_000).starts_with('3'));
+        let u = Usage { windows: from_rate_limits(&json!({"seven_day": {"used_percentage": 41.0}, "five_hour": {"used_percentage": 23.0}})), at: 0 };
+        assert_eq!(u.five().unwrap().pct, 23.0);
+        assert_eq!(u.week().unwrap().pct, 41.0);
     }
 }
