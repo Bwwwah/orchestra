@@ -113,6 +113,11 @@ impl NotesApp {
                 return Err(crate::trf!("la limite globale ({:.0} %) est déjà atteinte", "the global limit ({:.0} %) is already reached", self.ws.settings.orch.global_limit));
             }
         }
+        if let Some(w) = self.orch.week {
+            if w >= self.ws.settings.orch.week_limit {
+                return Err(crate::trf!("la limite de la semaine ({:.0} %) est déjà atteinte", "the weekly limit ({:.0} %) is already reached", self.ws.settings.orch.week_limit));
+            }
+        }
         // The limits are checked with Claude Code's own figures: they come through the status line.
         if !crate::usage::tracking_on() {
             crate::usage::start_tracking(&std::env::current_exe().unwrap_or_default())?;
@@ -196,6 +201,7 @@ impl NotesApp {
         }
         let now = Instant::now();
         let global = self.ws.settings.orch.global_limit;
+        let week_limit = self.ws.settings.orch.week_limit;
         let mut finished: Vec<(usize, String, String)> = vec![];
         for (i, r) in self.orch.runs.iter_mut().enumerate() {
             // How the screen moves (idle = nothing drawn for a while).
@@ -289,8 +295,8 @@ impl NotesApp {
                             Some(crate::trf!("limite du projet atteinte ({:.0} %)", "project limit reached ({:.0} %)", r.limit))
                         } else if five.is_some_and(|f| f >= global) {
                             Some(crate::trf!("limite globale atteinte ({global:.0} %)", "global limit reached ({global:.0} %)"))
-                        } else if self.orch.week.is_some_and(|w| w >= 95.0) {
-                            Some(crate::tr!("limite de la semaine presque atteinte", "weekly limit almost reached").into())
+                        } else if self.orch.week.is_some_and(|w| w >= week_limit) {
+                            Some(crate::trf!("limite de la semaine atteinte ({week_limit:.0} %)", "weekly limit reached ({week_limit:.0} %)"))
                         } else if !r.measured && r.turns >= 2 {
                             Some(crate::tr!("utilisation de l'abonnement impossible à mesurer", "subscription use can't be measured").into())
                         } else if r.turns >= r.max_turns {
@@ -486,6 +492,8 @@ impl NotesApp {
                 ui.label(RichText::new(crate::tr!("Orchestration", "Orchestration")).font(bold(30.0)).color(t.text));
                 ui.label(RichText::new(crate::tr!("Des IA qui avancent seules sur vos projets, chacune dans une copie à part, dans les limites de votre abonnement.", "AIs that move your projects forward on their own, each in a separate copy, within your subscription's limits.")).color(t.secondary));
                 ui.add_space(14.0);
+                self.week_bar(ui, &t);
+                ui.add_space(14.0);
                 self.stats_row(ui, &t);
                 ui.add_space(14.0);
                 self.running_card(ui, &t);
@@ -502,6 +510,46 @@ impl NotesApp {
                 ui.add_space(40.0);
             });
         });
+    }
+
+    /// The bar at the very top: the week's use of the subscription, with its own limit
+    /// (set right here) past which no session starts or goes on.
+    fn week_bar(&mut self, ui: &mut egui::Ui, t: &Tone) {
+        let week = self.orch.week;
+        let before = self.ws.settings.orch.week_limit;
+        let red = Color32::from_rgb(224, 62, 62);
+        super::projects::card(ui, t, 0.0, |ui| {
+            ui.horizontal(|ui| {
+                ui.label(RichText::new(crate::tr!("CETTE SEMAINE", "THIS WEEK")).font(semibold(11.5)).color(t.tertiary));
+                let used = match week {
+                    Some(w) => crate::trf!("{w:.0} % de l'abonnement utilisés", "{w:.0} % of the subscription used"),
+                    None => crate::tr!("utilisation inconnue pour l'instant", "usage unknown for now").into(),
+                };
+                ui.label(RichText::new(used).font(semibold(14.0)).color(t.text));
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    ui.add(egui::DragValue::new(&mut self.ws.settings.orch.week_limit).range(5.0..=100.0).speed(0.5).suffix(" %"))
+                        .on_hover_text(crate::tr!("Au-delà, aucune session ne démarre ni ne continue", "Past it, no session starts or goes on"));
+                    ui.label(RichText::new(crate::tr!("Limite de la semaine", "Weekly limit")).size(13.0).color(t.secondary));
+                });
+            });
+            ui.add_space(4.0);
+            let limit = self.ws.settings.orch.week_limit;
+            let w = ui.available_width();
+            let (bar, _) = ui.allocate_exact_size(egui::vec2(w, 12.0), egui::Sense::hover());
+            let p = ui.painter();
+            p.rect_filled(bar, 6.0, t.fill);
+            let lx = bar.left() + bar.width() * limit / 100.0;
+            p.rect_filled(egui::Rect::from_min_max(egui::pos2(lx, bar.top()), bar.max), egui::CornerRadius { nw: 0, sw: 0, ne: 6, se: 6 }, red.gamma_multiply(0.12));
+            if let Some(f) = week {
+                let frac = super::projects::smooth(ui, "orch-week", (f / 100.0).clamp(0.0, 1.0));
+                let color = if f >= limit { red } else if f >= limit * 0.85 { super::projects::ORANGE } else { super::projects::BLUE };
+                ui.painter().rect_filled(egui::Rect::from_min_size(bar.min, egui::vec2(bar.width() * frac, bar.height())), 6.0, color);
+            }
+            ui.painter().vline(lx, egui::Rangef::new(bar.top() - 3.0, bar.bottom() + 3.0), egui::Stroke::new(2.0, super::projects::ORANGE));
+        });
+        if self.ws.settings.orch.week_limit != before {
+            self.dirty_since.get_or_insert_with(Instant::now);
+        }
     }
 
     /// Three tiles at the top: the subscription, the AIs at work, today's work.
