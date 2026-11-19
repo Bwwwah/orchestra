@@ -463,6 +463,12 @@ fn call_tool(name: &str, args: &Value) -> Result<String, ToolError> {
                 _ => return Err(ToolError::Failed("give `project` or `folder`".into())),
             };
             let mut out = project::project_to_markdown(p);
+            // Questions asked with ask_human, and the answers typed in the inbox.
+            if let Some(q) = ws.questions_markdown(&p.id) {
+                out.push_str("\n## Questions posées à la personne (ask_human) et réponses\n\n");
+                out.push_str("Tiens compte des réponses ci-dessous dans ton travail ; ne repose pas une question déjà répondue.\n\n");
+                out.push_str(&q);
+            }
             // Claude Code / Codex sessions found on this machine in the project's folder.
             let folder = p.project.as_ref().map(|x| x.folder.trim().to_string()).unwrap_or_default();
             if let Some(g) = (!folder.is_empty()).then(|| crate::git::for_ai(&folder)).flatten() {

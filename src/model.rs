@@ -567,6 +567,26 @@ impl Workspace {
         self.inbox.iter().filter(|m| !m.read).count()
     }
 
+    /// The questions the AIs asked about a project and the person's answers, as Markdown
+    /// for the AIs (MCP `get_project_state`). Newest first; None when there are none.
+    pub fn questions_markdown(&self, project: &str) -> Option<String> {
+        let qs: Vec<&InboxMsg> = self.inbox.iter().rev().filter(|m| m.kind == "question" && m.project == project).take(15).collect();
+        if qs.is_empty() {
+            return None;
+        }
+        let mut out = String::new();
+        for m in qs {
+            let q = m.text.trim().replace('\n', "\n  ");
+            if m.answer.trim().is_empty() {
+                out.push_str(&format!("- Question : {q}\n  Réponse : (pas encore de réponse)\n"));
+            } else {
+                let a = m.answer.trim().replace('\n', "\n  ");
+                out.push_str(&format!("- Question : {q}\n  Réponse de la personne : {a}\n"));
+            }
+        }
+        Some(out)
+    }
+
     pub fn notify(&mut self, kind: &str, project: &str, title: &str, text: &str, page: Option<String>) {
         self.inbox.push(InboxMsg {
             id: new_id(),
@@ -893,5 +913,20 @@ mod tests {
         assert_eq!(clamp_zoom(9.0), ZOOM_MAX);
         assert_eq!(clamp_zoom(ZOOM_DEFAULT + ZOOM_STEP), 1.1);
         assert_eq!(clamp_zoom(1.0 - 5.0 * ZOOM_STEP), 0.5);
+    }
+
+    #[test]
+    fn answers_reach_the_project_state() {
+        let mut ws = super::Workspace::default();
+        assert!(ws.questions_markdown("p1").is_none());
+        ws.notify("question", "p1", "Question sur X", "Garder l'ancienne API ?", None);
+        ws.notify("question", "p2", "Question sur Y", "Autre projet", None);
+        ws.notify("info", "p1", "Info", "pas une question", None);
+        let md = ws.questions_markdown("p1").unwrap();
+        assert!(md.contains("Garder l'ancienne API ?") && md.contains("pas encore de réponse"));
+        assert!(!md.contains("Autre projet") && !md.contains("pas une question"));
+        ws.inbox[0].answer = "Oui, jusqu'à la v1.".into();
+        let md = ws.questions_markdown("p1").unwrap();
+        assert!(md.contains("Réponse de la personne : Oui, jusqu'à la v1."));
     }
 }
