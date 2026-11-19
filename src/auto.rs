@@ -318,7 +318,8 @@ pub fn mission_prompt(title: &str, project_id: &str, branch: &str, mission: &str
          3. Prends les étapes ouvertes une par une : passe-la « doing » avec update_step, fais le travail, vérifie-le \
          (compilation, tests) quand c'est possible, puis passe-la « done ».\n\
          4. {commit_rule}\n\
-         5. Si une décision humaine est nécessaire, appelle ask_human (project = « {project_id} ») avec une question courte, puis continue sur autre chose.\n\
+         5. Si une décision humaine est nécessaire, appelle ask_human (project = « {project_id} ») avec une question courte, puis continue sur autre chose. \
+         Les réponses de la personne apparaissent dans get_project_state (section « Questions posées ») : rappelle get_project_state avant chaque nouvelle étape et applique-les.\n\
          6. Ne modifie rien hors de ce dossier ; aucune commande destructrice.\n\
          Quand tu t'arrêtes pour ce tour, termine ta réponse par une seule de ces lignes : \
          [[CONTINUER]] s'il reste du travail possible, [[FINI]] si tout ce qui pouvait être fait l'est, [[BLOQUÉ]] si tu ne peux plus avancer.", "You are working autonomously for Orchestra on the project « {title} » (id {project_id}). \
@@ -328,7 +329,8 @@ pub fn mission_prompt(title: &str, project_id: &str, branch: &str, mission: &str
          3. Take the open steps one by one: set it to « doing » with update_step, do the work, check it \
          (build, tests) when possible, then set it to « done ».\n\
          4. {commit_rule}\n\
-         5. If a human decision is needed, call ask_human (project = « {project_id} ») with a short question, then go on with something else.\n\
+         5. If a human decision is needed, call ask_human (project = « {project_id} ») with a short question, then go on with something else. \
+         The person's answers show up in get_project_state (section « Questions posées »): call it again before each new step and apply them.\n\
          6. Change nothing outside this folder; no destructive command.\n\
          When you stop for this turn, end your answer with exactly one of these lines: \
          [[CONTINUER]] if there is work left you can do, [[FINI]] if everything that could be done is done, [[BLOQUÉ]] if you can't go further."
@@ -337,8 +339,8 @@ pub fn mission_prompt(title: &str, project_id: &str, branch: &str, mission: &str
 
 pub fn continue_prompt() -> &'static str {
     crate::tr!(
-        "Continue la mission avec les mêmes règles (étape suivante). Termine par [[CONTINUER]], [[FINI]] ou [[BLOQUÉ]].",
-        "Go on with the mission under the same rules (next step). End with [[CONTINUER]], [[FINI]] or [[BLOQUÉ]]."
+        "Continue la mission avec les mêmes règles (étape suivante ; relis get_project_state pour les réponses à tes questions). Termine par [[CONTINUER]], [[FINI]] ou [[BLOQUÉ]].",
+        "Go on with the mission under the same rules (next step; read get_project_state again for the answers to your questions). End with [[CONTINUER]], [[FINI]] or [[BLOQUÉ]]."
     )
 }
 

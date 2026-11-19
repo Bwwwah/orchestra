@@ -56,6 +56,8 @@ pub struct LiveRun {
     nudged: bool,
     started_wall: u64,
     measured: bool,
+    /// Stopped by the 5-hour or weekly limit: when that window resets (to start again).
+    quota_reset: Option<u64>,
 }
 
 #[derive(Clone)]
@@ -75,7 +77,11 @@ pub struct Orch {
     last_reading: Option<(u64, f32, Option<u64>)>,
     pub five: Option<f32>,
     pub week: Option<f32>,
+    /// When the 5-hour and the weekly windows start again (ms since epoch).
+    pub five_reset: Option<u64>,
+    pub week_reset: Option<u64>,
     usage_polled: Option<Instant>,
+    resume_checked: Option<Instant>,
     daily_checked: Option<Instant>,
     confirm: Option<(String, &'static str)>,
     started: bool,
@@ -112,7 +118,9 @@ impl NotesApp {
         }
         if let Some(f) = self.orch.five {
             if f >= self.ws.settings.orch.global_limit {
-                return Err(crate::trf!("la limite globale ({:.0} %) est déjà atteinte", "the global limit ({:.0} %) is already reached", self.ws.settings.orch.global_limit));
+                let left = self.orch.five_reset.and_then(|r| crate::usage::until(r, crate::model::now_ms()));
+                let when = left.map(|l| crate::trf!(" ; la fenêtre de 5 h repart à zéro dans {}", "; the 5-hour window resets in {}", crate::usage::left_text(l))).unwrap_or_default();
+                return Err(crate::trf!("la limite globale ({:.0} %) est déjà atteinte{when}", "the global limit ({:.0} %) is already reached{when}", self.ws.settings.orch.global_limit));
             }
         }
         let taken: f32 = self.orch.runs.iter().map(|r| r.limit).sum();
@@ -153,8 +161,14 @@ impl NotesApp {
             branch: copy.branch.clone(),
             started: crate::model::now_ms(),
             commits_allowed: commits,
+            mission: mission.clone(),
+            limit,
             ..Default::default()
         };
+        // A new session replaces any planned restart of this project.
+        for x in self.ws.runs.iter_mut().filter(|x| x.project == project) {
+            x.resume_at = 0;
+        }
         self.ws.runs.push(rec);
         self.dirty_since.get_or_insert_with(Instant::now);
         self.orch.runs.push(LiveRun {
@@ -165,6 +179,7 @@ impl NotesApp {
             term,
             phase: Phase::Starting(Instant::now()),
             next: Some(auto::mission_prompt(&self.ws.page(project).map(|p| p.display_title()).unwrap_or_default(), project, &copy.branch, &mission, commits)),
+            quota_reset: None,
             reader: auto::Reader::default(),
             since: std::time::SystemTime::now() - Duration::from_secs(2),
             base: copy.base,
@@ -200,6 +215,7 @@ impl NotesApp {
             }
         }
         self.usage_tick();
+        self.resume_tick(ctx);
         // Developer aid: ORCHESTRA_AUTO_RUN=<project id> starts a session once Claude Code is seen.
         if let Ok(pid) = std::env::var("ORCHESTRA_AUTO_RUN") {
             if !pid.is_empty() && self.orch.runs.is_empty() && !self.ws.runs.iter().any(|r| r.project == pid) && self.ais.plugged().contains(&crate::setup::Ai::ClaudeCode) {
@@ -305,8 +321,10 @@ impl NotesApp {
                         } else if r.pct >= r.limit {
                             Some(crate::trf!("limite du projet atteinte ({:.0} %)", "project limit reached ({:.0} %)", r.limit))
                         } else if five.is_some_and(|f| f >= global) {
+                            r.quota_reset = self.orch.five_reset;
                             Some(crate::trf!("limite globale atteinte ({global:.0} %)", "global limit reached ({global:.0} %)"))
                         } else if self.orch.week.is_some_and(|w| w >= week_limit) {
+                            r.quota_reset = self.orch.week_reset;
                             Some(crate::trf!("limite de la semaine atteinte ({week_limit:.0} %)", "weekly limit reached ({week_limit:.0} %)"))
                         } else if !r.measured && r.turns >= 2 {
                             Some(crate::tr!("utilisation de l'abonnement impossible à mesurer", "subscription use can't be measured").into())
@@ -348,6 +366,45 @@ impl NotesApp {
         self.daily_tick();
     }
 
+    /// Sessions stopped by a quota start again by themselves once it has reset.
+    fn resume_tick(&mut self, ctx: &egui::Context) {
+        if self.orch.resume_checked.is_some_and(|t| t.elapsed() < Duration::from_secs(20)) {
+            return;
+        }
+        self.orch.resume_checked = Some(Instant::now());
+        let now = crate::model::now_ms();
+        if !self.ws.settings.orch.auto_resume {
+            return;
+        }
+        let running: Vec<&str> = self.orch.runs.iter().map(|r| r.project.as_str()).collect();
+        let due = crate::model::due_resumes(&self.ws.runs, now, &running);
+        for i in due {
+            let rec = self.ws.runs[i].clone();
+            // Once only: a failure doesn't try again every 20 seconds.
+            for x in self.ws.runs.iter_mut().filter(|x| x.project == rec.project) {
+                x.resume_at = 0;
+            }
+            self.dirty_since.get_or_insert_with(Instant::now);
+            let limit = if rec.limit > 0.0 { rec.limit } else { self.ws.settings.orch.default_limit };
+            match self.launch_run(ctx, &rec.project, &rec.mission, limit, rec.commits_allowed) {
+                Ok(()) => self.ws.notify(
+                    "info",
+                    &rec.project,
+                    &crate::trf!("Reprise automatique sur {}", "Automatic restart on {}", rec.title),
+                    crate::tr!("Le quota est revenu : la session autonome repart avec la même mission.", "The quota is back: the autonomous session starts again with the same mission."),
+                    None,
+                ),
+                Err(e) => self.ws.notify(
+                    "erreur",
+                    &rec.project,
+                    &crate::trf!("Reprise automatique impossible sur {}", "Couldn't restart {} automatically", rec.title),
+                    &e,
+                    None,
+                ),
+            }
+        }
+    }
+
     /// Follow Claude Code's figures; share each rise of the 5-hour window between the
     /// running sessions by the tokens each used since the last reading.
     fn usage_tick(&mut self) {
@@ -355,10 +412,20 @@ impl NotesApp {
             return;
         }
         self.orch.usage_polled = Some(Instant::now());
-        let Some(u) = crate::usage::read() else { return };
-        let five = u.windows.iter().find(|w| w.label.starts_with("Session")).cloned();
-        self.orch.week = u.windows.iter().find(|w| w.label == "Semaine").map(|w| w.pct);
-        let Some(five) = five else { return };
+        // A window that has reset is dropped by read(): forget its old figure too, so a
+        // limit reached before the reset doesn't block what follows.
+        let Some(u) = crate::usage::read() else {
+            (self.orch.five, self.orch.week, self.orch.five_reset, self.orch.week_reset) = (None, None, None, None);
+            return;
+        };
+        let five = u.five().cloned();
+        self.orch.week = u.week().map(|w| w.pct);
+        self.orch.week_reset = u.week().and_then(|w| w.resets_at);
+        self.orch.five_reset = five.as_ref().and_then(|w| w.resets_at);
+        let Some(five) = five else {
+            self.orch.five = None;
+            return;
+        };
         self.orch.five = Some(five.pct);
         let prev = self.orch.last_reading;
         if prev.is_some_and(|(at, _, _)| at == u.at) {
@@ -413,6 +480,9 @@ impl NotesApp {
         r.term.write(b"\r");
         r.phase = Phase::Closing(Instant::now());
         let (id, project, base, pct, tokens, turns) = (r.id.clone(), r.project.clone(), r.base.clone(), r.pct, r.reader.tokens, r.turns);
+        // Stopped by a quota: start again by itself once it resets (if that is allowed).
+        let now = crate::model::now_ms();
+        let resume_at = r.quota_reset.filter(|&reset| self.ws.settings.orch.auto_resume && reset > now).map(crate::model::resume_time).unwrap_or(0);
         let before = r.steps_at_start.clone();
         let done_now: Vec<String> = self
             .ws
@@ -428,6 +498,7 @@ impl NotesApp {
         rec.tokens = tokens;
         rec.turns = turns;
         rec.steps_done = newly;
+        rec.resume_at = resume_at;
         let rec = rec.clone();
         let (commits, dirty) = auto::work_done(&rec, &base);
         auto::push_copy_later(rec.worktree.clone());
@@ -437,7 +508,14 @@ impl NotesApp {
         if let Some(x) = self.ws.runs.iter_mut().find(|x| x.id == id) {
             x.report = Some(page.clone());
         }
-        let text = crate::trf!("{why} · {} étape(s) · ≈ {:.0} % · {} commit(s)", "{why} · {} step(s) · ≈ {:.0} % · {} commit(s)", rec.steps_done.len(), rec.pct, commits.len());
+        let mut text = crate::trf!("{why} · {} étape(s) · ≈ {:.0} % · {} commit(s)", "{why} · {} step(s) · ≈ {:.0} % · {} commit(s)", rec.steps_done.len(), rec.pct, commits.len());
+        if resume_at > 0 {
+            text.push_str(&crate::trf!(
+                " · reprendra seule dans {} (après la remise à zéro du quota)",
+                " · will start again by itself in {} (after the quota resets)",
+                crate::usage::left_text(resume_at.saturating_sub(now))
+            ));
+        }
         // Commits on main allowed for this project: merge once Claude Code has closed.
         let to_main = self.ws.page(&project).and_then(|p| p.project.as_ref()).is_some_and(|p| p.commit_to_main);
         if to_main && (!commits.is_empty() || dirty > 0) {
@@ -598,6 +676,9 @@ impl NotesApp {
         let five = self.orch.five;
         let week = self.orch.week;
         let global = self.ws.settings.orch.global_limit;
+        let now_ms = crate::model::now_ms();
+        let five_left = self.orch.five_reset.and_then(|r| crate::usage::until(r, now_ms));
+        let week_left = self.orch.week_reset.and_then(|r| crate::usage::until(r, now_ms));
         let running = self.orch.runs.len();
         let ready = self.ws.projects().iter().filter(|p| p.project.as_ref().is_some_and(|x| !x.folder.trim().is_empty())).count();
         let today = auto::local_day(crate::model::now_ms());
@@ -624,9 +705,11 @@ impl NotesApp {
             let (big, sub): (String, String) = match i {
                 0 => (
                     five.map(|f| format!("{f:.0} %")).unwrap_or_else(|| "—".into()),
-                    match (five, week) {
-                        (Some(_), Some(wk)) => crate::trf!("limite {global:.0} % · semaine {wk:.0} %", "limit {global:.0} % · week {wk:.0} %"),
-                        (Some(_), None) => crate::trf!("limite globale {global:.0} %", "global limit {global:.0} %"),
+                    match (five, week, five_left) {
+                        (Some(_), Some(wk), Some(l)) => crate::trf!("à zéro dans {} · semaine {wk:.0} %", "resets in {} · week {wk:.0} %", crate::usage::left_text(l)),
+                        (Some(_), None, Some(l)) => crate::trf!("limite {global:.0} % · à zéro dans {}", "limit {global:.0} % · resets in {}", crate::usage::left_text(l)),
+                        (Some(_), Some(wk), None) => crate::trf!("limite {global:.0} % · semaine {wk:.0} %", "limit {global:.0} % · week {wk:.0} %"),
+                        (Some(_), None, None) => crate::trf!("limite globale {global:.0} %", "global limit {global:.0} %"),
                         _ => crate::tr!("inconnu pour l'instant", "unknown for now").into(),
                     },
                 ),
@@ -642,10 +725,24 @@ impl NotesApp {
             let g = ui.fonts_mut(|f| f.layout_job(job));
             ui.painter().galley(egui::pos2(x, rect.bottom() - 28.0), g, t.secondary);
             match i {
-                0 if tw >= 240.0 => {
-                    // A ring: the 5-hour use, the global limit as a tick.
-                    let c = egui::pos2(rect.right() - 50.0, rect.center().y + 4.0);
-                    ring(ui, c, 28.0, five.map(|f| f / 100.0), global / 100.0, accent, t);
+                0 => {
+                    if tw >= 240.0 {
+                        // A ring: the 5-hour use, the global limit as a tick.
+                        let c = egui::pos2(rect.right() - 50.0, rect.center().y + 4.0);
+                        ring(ui, c, 28.0, five.map(|f| f / 100.0), global / 100.0, accent, t);
+                    }
+                    // The details: limits and when each window starts again.
+                    let mut tip = vec![crate::trf!("Limite globale : {global:.0} % de la fenêtre de 5 h", "Global limit: {global:.0} % of the 5-hour window")];
+                    if let Some(l) = five_left {
+                        tip.push(crate::trf!("Fenêtre de 5 h : repart à zéro dans {}", "5-hour window: resets in {}", crate::usage::left_text(l)));
+                    }
+                    if let Some(wk) = week {
+                        tip.push(match week_left {
+                            Some(l) => crate::trf!("Semaine : {wk:.0} %, repart à zéro dans {}", "Week: {wk:.0} %, resets in {}", crate::usage::left_text(l)),
+                            None => crate::trf!("Semaine : {wk:.0} %", "Week: {wk:.0} %"),
+                        });
+                    }
+                    resp.on_hover_text(tip.join("\n"));
                 }
                 1 if running > 0 => {
                     super::projects::pulse_dot(ui, egui::pos2(rect.right() - 30.0, rect.top() + 24.0), super::projects::GREEN);
@@ -723,6 +820,9 @@ impl NotesApp {
                 });
                 row(ui, crate::tr!("Commits autorisés", "Commits allowed"), crate::tr!("Sur leur branche, envoyée sur GitHub par Orchestra", "On their branch, pushed to GitHub by Orchestra"), &mut |ui| {
                     super::settings::switch(ui, &mut o.allow_commits, &lk);
+                });
+                row(ui, crate::tr!("Reprise automatique", "Automatic restart"), crate::tr!("Une session arrêtée par la limite globale ou de la semaine repart seule après la remise à zéro du quota", "A session stopped by the global or weekly limit starts again by itself once the quota resets"), &mut |ui| {
+                    super::settings::switch(ui, &mut o.auto_resume, &lk);
                 });
             };
             let mut right = |ui: &mut egui::Ui| {
@@ -1098,6 +1198,7 @@ impl NotesApp {
         let mut open: Option<usize> = None;
         let mut remove: Option<usize> = None;
         let mut all_read = false;
+        let mut answer: Option<(usize, String)> = None;
         ui.add_space(50.0);
         ui.horizontal(|ui| {
             ui.add_space(((avail - width) / 2.0).max(20.0));
@@ -1112,11 +1213,46 @@ impl NotesApp {
                     });
                 });
                 ui.label(RichText::new(crate::tr!("Les questions des IA, la fin de leurs sessions de travail, les rapports (rangés dans la page « Rapports des IA ») et les messages de l'application, dont les erreurs.", "The AIs' questions, the end of their work sessions, the reports (kept in the « AI reports » page) and the app's messages, errors included.")).color(t.secondary));
+                ui.add_space(14.0);
+                // Filters: everything, the questions still waiting for an answer, the unread.
+                let filter_id = egui::Id::unique("inbox-filter");
+                let mut filter = ui.data(|d| d.get_temp::<u8>(filter_id)).unwrap_or(0);
+                let waiting = self.ws.inbox.iter().filter(|m| m.kind == "question" && m.answer.trim().is_empty()).count();
+                let unread = self.ws.unread();
+                ui.horizontal(|ui| {
+                    for (k, label, n) in [
+                        (0u8, crate::tr!("Tout", "All"), self.ws.inbox.len()),
+                        (1, crate::tr!("À répondre", "To answer"), waiting),
+                        (2, crate::tr!("Non lus", "Unread"), unread),
+                    ] {
+                        if filter_chip(ui, label, n, filter == k, &t).clicked() {
+                            filter = k;
+                        }
+                    }
+                });
+                ui.data_mut(|d| d.insert_temp(filter_id, filter));
                 ui.add_space(12.0);
-                if self.ws.inbox.is_empty() {
-                    ui.label(RichText::new(crate::tr!("Rien pour l'instant.", "Nothing yet.")).color(t.tertiary).italics());
+                let shown: Vec<usize> = (0..self.ws.inbox.len())
+                    .rev()
+                    .filter(|&i| {
+                        let m = &self.ws.inbox[i];
+                        match filter {
+                            1 => m.kind == "question" && m.answer.trim().is_empty(),
+                            2 => !m.read,
+                            _ => true,
+                        }
+                    })
+                    .collect();
+                if shown.is_empty() {
+                    let empty = match filter {
+                        1 => crate::tr!("Aucune question en attente de réponse.", "No question waiting for an answer."),
+                        2 => crate::tr!("Tout est lu.", "Everything is read."),
+                        _ => crate::tr!("Rien pour l'instant.", "Nothing yet."),
+                    };
+                    ui.label(RichText::new(empty).color(t.tertiary).italics());
                 }
-                for (i, m) in self.ws.inbox.iter().enumerate().rev() {
+                for i in shown {
+                    let m = &self.ws.inbox[i];
                     let (accent, kind) = match m.kind.as_str() {
                         "question" => (Color32::from_rgb(144, 101, 176), crate::tr!("Question", "Question")),
                         "fin" => (super::projects::GREEN, crate::tr!("Session", "Session")),
@@ -1124,36 +1260,65 @@ impl NotesApp {
                         "erreur" => (Color32::from_rgb(224, 62, 62), crate::tr!("Erreur", "Error")),
                         _ => (t.tertiary, crate::tr!("Info", "Info")),
                     };
+                    let project = (!m.project.is_empty()).then(|| self.ws.page(&m.project).map(|p| p.display_title())).flatten();
                     let bg = super::projects::hover_begin(ui);
-                    let row = ui.horizontal_top(|ui| {
-                        let (dot, _) = ui.allocate_exact_size(egui::vec2(12.0, 22.0), egui::Sense::hover());
-                        if !m.read {
-                            ui.painter().circle_filled(dot.center(), 4.0, super::projects::BLUE);
-                        }
-                        ui.vertical(|ui| {
-                            ui.set_width(ui.available_width() - 30.0);
-                            ui.horizontal(|ui| {
-                                ui.label(RichText::new(kind).size(11.5).color(accent));
-                                ui.label(RichText::new(&m.title).font(if m.read { FontId::proportional(14.0) } else { semibold(14.0) }).color(t.text));
-                                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                                    ui.label(RichText::new(super::chrome::relative_time(m.at)).size(12.0).color(t.tertiary));
+                    let card = egui::Frame::new()
+                        .fill(if m.read { Color32::TRANSPARENT } else { t.card })
+                        .stroke(egui::Stroke::new(1.0, t.border))
+                        .corner_radius(10.0)
+                        .inner_margin(egui::Margin { left: 16, right: 10, top: 10, bottom: 10 })
+                        .show(ui, |ui| {
+                            ui.set_width(ui.available_width());
+                            let head = ui.horizontal_top(|ui| {
+                                ui.vertical(|ui| {
+                                    ui.set_width(ui.available_width() - 30.0);
+                                    ui.horizontal(|ui| {
+                                        kind_badge(ui, kind, accent);
+                                        if let Some(p) = &project {
+                                            ui.label(RichText::new(p).size(12.0).color(t.tertiary));
+                                        }
+                                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                            ui.label(RichText::new(super::chrome::relative_time(m.at)).size(12.0).color(t.tertiary));
+                                            if !m.read {
+                                                let (dot, _) = ui.allocate_exact_size(egui::vec2(10.0, 10.0), egui::Sense::hover());
+                                                ui.painter().circle_filled(dot.center(), 3.5, super::projects::BLUE);
+                                            }
+                                        });
+                                    });
+                                    ui.add_space(3.0);
+                                    ui.add(egui::Label::new(RichText::new(&m.title).font(if m.read { FontId::proportional(14.5) } else { semibold(14.5) }).color(t.text)).wrap());
+                                    if !m.text.is_empty() {
+                                        ui.add_space(2.0);
+                                        ui.add(egui::Label::new(RichText::new(&m.text).size(13.0).color(t.secondary)).wrap());
+                                    }
                                 });
+                                let x = ui.add(egui::Button::new(RichText::new("×").color(t.tertiary)).frame(false)).on_hover_text(crate::tr!("Supprimer", "Delete"));
+                                if x.clicked() {
+                                    remove = Some(i);
+                                }
                             });
-                            if !m.text.is_empty() {
-                                ui.add(egui::Label::new(RichText::new(&m.text).size(13.0).color(t.secondary)).wrap());
+                            // Only the head opens the page: the answer box below stays free to type in.
+                            let resp = ui.interact(head.response.rect, egui::Id::unique(("inbox", &m.id)), egui::Sense::click());
+                            let resp = if m.page.is_some() || !m.project.is_empty() { resp.on_hover_cursor(egui::CursorIcon::PointingHand) } else { resp };
+                            if resp.clicked() && remove.is_none() {
+                                open = Some(i);
+                            }
+                            if m.kind == "question" {
+                                ui.add_space(6.0);
+                                if let Some(text) = answer_box(ui, m, &t) {
+                                    answer = Some((i, text));
+                                }
                             }
                         });
-                        let x = ui.add(egui::Button::new(RichText::new("×").color(t.tertiary)).frame(false)).on_hover_text(crate::tr!("Supprimer", "Delete"));
-                        if x.clicked() {
-                            remove = Some(i);
-                        }
-                    });
-                    let resp = ui.interact(row.response.rect, egui::Id::unique(("inbox", &m.id)), egui::Sense::click());
-                    super::projects::hover_end(ui, bg, row.response.rect, egui::Id::unique(("inbox-h", &m.id)), &t);
-                    if resp.clicked() && remove.is_none() {
-                        open = Some(i);
-                    }
-                    ui.add_space(6.0);
+                    let rect = card.response.rect;
+                    // A coloured edge on the left: the kind at a glance.
+                    ui.painter().rect_filled(
+                        egui::Rect::from_min_max(rect.left_top() + egui::vec2(0.0, 8.0), egui::pos2(rect.left() + 3.0, rect.bottom() - 8.0)),
+                        2.0,
+                        accent.gamma_multiply(if m.read { 0.45 } else { 1.0 }),
+                    );
+                    super::projects::hover_end(ui, bg, rect.shrink2(egui::vec2(6.0, 2.0)), egui::Id::unique(("inbox-h", &m.id)), &t);
+                    ui.add_space(8.0);
                 }
             });
         });
@@ -1162,6 +1327,14 @@ impl NotesApp {
                 m.read = true;
             }
             self.dirty_since.get_or_insert_with(Instant::now);
+        }
+        if let Some((i, text)) = answer {
+            let m = &mut self.ws.inbox[i];
+            m.answer = text;
+            m.answered_at = crate::model::now_ms();
+            m.read = true;
+            self.dirty_since.get_or_insert_with(Instant::now);
+            self.ack(crate::tr!("Réponse enregistrée : l'IA la verra au prochain état des lieux du projet.", "Answer saved: the AI will see it in the project's next state of play."));
         }
         if let Some(i) = remove {
             self.ws.inbox.remove(i);
@@ -1179,6 +1352,80 @@ impl NotesApp {
     }
 }
 
+
+/// The kind of an inbox message, as a small tinted pill.
+fn kind_badge(ui: &mut egui::Ui, text: &str, accent: Color32) {
+    let g = ui.painter().layout_no_wrap(text.to_string(), semibold(11.0), accent);
+    let (rect, _) = ui.allocate_exact_size(g.size() + egui::vec2(14.0, 6.0), egui::Sense::hover());
+    ui.painter().rect_filled(rect, 6.0, accent.gamma_multiply(0.14));
+    ui.painter().galley(rect.center() - g.size() / 2.0, g, accent);
+}
+
+/// A filter of the inbox: its name and how many messages it holds.
+fn filter_chip(ui: &mut egui::Ui, text: &str, count: usize, on: bool, t: &Tone) -> egui::Response {
+    let label = if count > 0 { format!("{text}  {count}") } else { text.to_string() };
+    let color = if on { t.text } else { t.secondary };
+    let g = ui.painter().layout_no_wrap(label, if on { semibold(12.5) } else { FontId::proportional(12.5) }, color);
+    let (rect, resp) = ui.allocate_exact_size(g.size() + egui::vec2(20.0, 10.0), egui::Sense::click());
+    let a = ui.ctx().animate_bool_with_time(resp.id.with("hov"), resp.hovered(), 0.14);
+    let fill = if on { t.selected } else { t.hover.gamma_multiply(a) };
+    ui.painter().rect_filled(rect, 8.0, fill);
+    if on {
+        ui.painter().rect_stroke(rect, 8.0, egui::Stroke::new(1.0, t.border), egui::StrokeKind::Inside);
+    }
+    ui.painter().galley(rect.center() - g.size() / 2.0, g, color);
+    resp.on_hover_cursor(egui::CursorIcon::PointingHand)
+}
+
+/// Under a question of the inbox: the answer given, or a box to type one.
+/// Returns the answer when the person sends it (button, or Cmd/Ctrl+Enter).
+fn answer_box(ui: &mut egui::Ui, m: &crate::model::InboxMsg, t: &Tone) -> Option<String> {
+    let draft_id = egui::Id::unique(("inbox-draft", &m.id));
+    let edit_id = egui::Id::unique(("inbox-edit", &m.id));
+    let editing = ui.data(|d| d.get_temp::<bool>(edit_id)).unwrap_or(false);
+    let mut out = None;
+    ui.horizontal_top(|ui| {
+        ui.vertical(|ui| {
+            ui.set_width(ui.available_width() - 30.0);
+            if !m.answer.is_empty() && !editing {
+                ui.horizontal_wrapped(|ui| {
+                    ui.label(RichText::new(crate::tr!("Votre réponse :", "Your answer:")).size(12.0).color(t.tertiary));
+                    ui.add(egui::Label::new(RichText::new(&m.answer).size(13.0).color(t.text)).wrap());
+                });
+                if super::projects::action_link(ui, crate::tr!("Modifier la réponse", "Edit the answer")).clicked() {
+                    ui.data_mut(|d| {
+                        d.insert_temp(draft_id, m.answer.clone());
+                        d.insert_temp(edit_id, true);
+                    });
+                }
+                return;
+            }
+            let mut draft = ui.data(|d| d.get_temp::<String>(draft_id)).unwrap_or_default();
+            let te = ui.add(
+                egui::TextEdit::multiline(&mut draft)
+                    .desired_rows(2)
+                    .desired_width(f32::INFINITY)
+                    .hint_text(crate::tr!("Répondre à l'IA…", "Answer the AI…")),
+            );
+            let send_key = te.has_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter) && i.modifiers.command);
+            let mut send = false;
+            ui.horizontal(|ui| {
+                let ok = !draft.trim().is_empty();
+                send = ui.add_enabled(ok, egui::Button::new(crate::tr!("Répondre", "Answer"))).clicked() || (ok && send_key);
+                if editing && super::projects::action_link(ui, crate::tr!("Annuler", "Cancel")).clicked() {
+                    ui.data_mut(|d| d.insert_temp(edit_id, false));
+                }
+            });
+            if send {
+                out = Some(crate::richtext::clean(draft.trim(), 4000));
+                draft.clear();
+                ui.data_mut(|d| d.insert_temp(edit_id, false));
+            }
+            ui.data_mut(|d| d.insert_temp(draft_id, draft));
+        });
+    });
+    out
+}
 
 /// A ring gauge: `value` (0..1, None when unknown) and a tick at `limit`.
 fn ring(ui: &egui::Ui, c: egui::Pos2, r: f32, value: Option<f32>, limit: f32, color: Color32, t: &Tone) {

@@ -516,6 +516,15 @@ pub struct InboxMsg {
     pub page: Option<String>,
     #[serde(default)]
     pub read: bool,
+    /// The person's answer to a question, typed in the inbox (empty: not answered yet).
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub answer: String,
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub answered_at: u64,
+}
+
+pub(crate) fn is_zero(x: &u64) -> bool {
+    *x == 0
 }
 
 /// An autonomous work session of an AI on a project, in its own copy of the repository.
@@ -551,11 +560,60 @@ pub struct RunRecord {
     /// "fusionné" or "abandonné" once dealt with.
     #[serde(default)]
     pub closed: String,
+    /// The mission and the project's share it was given, to start it again.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub mission: String,
+    #[serde(default)]
+    pub limit: f32,
+    /// Stopped by a quota: starts again by itself at this time (ms); 0 = no.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub resume_at: u64,
+}
+
+/// When a session stopped by a quota may start again: one minute after the window
+/// resets (Claude Code's figures need a moment to follow).
+pub fn resume_time(resets_at: u64) -> u64 {
+    resets_at + 60_000
+}
+
+/// The sessions due to start again at `now`: the latest per project, none whose project
+/// already has a session running.
+pub fn due_resumes(runs: &[RunRecord], now: u64, running: &[&str]) -> Vec<usize> {
+    let mut out: Vec<usize> = vec![];
+    for (i, r) in runs.iter().enumerate().rev() {
+        if r.resume_at == 0 || r.resume_at > now || running.contains(&r.project.as_str()) {
+            continue;
+        }
+        if !out.iter().any(|&j| runs[j].project == r.project) {
+            out.push(i);
+        }
+    }
+    out
 }
 
 impl Workspace {
     pub fn unread(&self) -> usize {
         self.inbox.iter().filter(|m| !m.read).count()
+    }
+
+    /// The questions the AIs asked about a project and the person's answers, as Markdown
+    /// for the AIs (MCP `get_project_state`). Newest first; None when there are none.
+    pub fn questions_markdown(&self, project: &str) -> Option<String> {
+        let qs: Vec<&InboxMsg> = self.inbox.iter().rev().filter(|m| m.kind == "question" && m.project == project).take(15).collect();
+        if qs.is_empty() {
+            return None;
+        }
+        let mut out = String::new();
+        for m in qs {
+            let q = m.text.trim().replace('\n', "\n  ");
+            if m.answer.trim().is_empty() {
+                out.push_str(&format!("- Question : {q}\n  Réponse : (pas encore de réponse)\n"));
+            } else {
+                let a = m.answer.trim().replace('\n', "\n  ");
+                out.push_str(&format!("- Question : {q}\n  Réponse de la personne : {a}\n"));
+            }
+        }
+        Some(out)
     }
 
     pub fn notify(&mut self, kind: &str, project: &str, title: &str, text: &str, page: Option<String>) {
@@ -568,6 +626,7 @@ impl Workspace {
             text: text.into(),
             page,
             read: false,
+            ..Default::default()
         });
         // Keep the inbox to a sane size.
         if self.inbox.len() > 500 {
@@ -599,6 +658,9 @@ pub struct OrchSettings {
     pub last_daily: String,
     /// The "Rapports des IA" page.
     pub reports_page: String,
+    /// A session stopped by the 5-hour or weekly limit starts again by itself once that
+    /// window resets.
+    pub auto_resume: bool,
 }
 
 impl Default for OrchSettings {
@@ -613,6 +675,7 @@ impl Default for OrchSettings {
             extra_tools: String::new(),
             last_daily: String::new(),
             reports_page: String::new(),
+            auto_resume: true,
         }
     }
 }
@@ -883,5 +946,32 @@ mod tests {
         assert_eq!(clamp_zoom(9.0), ZOOM_MAX);
         assert_eq!(clamp_zoom(ZOOM_DEFAULT + ZOOM_STEP), 1.1);
         assert_eq!(clamp_zoom(1.0 - 5.0 * ZOOM_STEP), 0.5);
+    }
+
+    #[test]
+    fn stopped_sessions_resume_once_per_project() {
+        use super::{RunRecord, due_resumes, resume_time};
+        let run = |p: &str, at: u64| RunRecord { project: p.into(), resume_at: at, ..Default::default() };
+        let runs = vec![run("a", resume_time(1_000)), run("a", resume_time(2_000)), run("b", 0), run("c", 999_999_999), run("d", 10)];
+        // Due: the latest of "a" and "d"; "b" has none, "c" not yet.
+        assert_eq!(due_resumes(&runs, 100_000, &[]), vec![4, 1]);
+        // A project already at work isn't started twice.
+        assert_eq!(due_resumes(&runs, 100_000, &["a"]), vec![4]);
+        assert!(due_resumes(&runs, 5, &[]).is_empty());
+    }
+
+    #[test]
+    fn answers_reach_the_project_state() {
+        let mut ws = super::Workspace::default();
+        assert!(ws.questions_markdown("p1").is_none());
+        ws.notify("question", "p1", "Question sur X", "Garder l'ancienne API ?", None);
+        ws.notify("question", "p2", "Question sur Y", "Autre projet", None);
+        ws.notify("info", "p1", "Info", "pas une question", None);
+        let md = ws.questions_markdown("p1").unwrap();
+        assert!(md.contains("Garder l'ancienne API ?") && md.contains("pas encore de réponse"));
+        assert!(!md.contains("Autre projet") && !md.contains("pas une question"));
+        ws.inbox[0].answer = "Oui, jusqu'à la v1.".into();
+        let md = ws.questions_markdown("p1").unwrap();
+        assert!(md.contains("Réponse de la personne : Oui, jusqu'à la v1."));
     }
 }
