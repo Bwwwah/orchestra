@@ -58,6 +58,10 @@ pub struct LiveRun {
     measured: bool,
     /// Stopped by the 5-hour or weekly limit: when that window resets (to start again).
     quota_reset: Option<u64>,
+    /// The week's figure when the running turn began.
+    week_at_turn: Option<f32>,
+    /// The most one turn took from the week so far (percentage points).
+    week_turn: f32,
 }
 
 #[derive(Clone)]
@@ -80,6 +84,12 @@ pub struct Orch {
     /// When the 5-hour and the weekly windows start again (ms since epoch).
     pub five_reset: Option<u64>,
     pub week_reset: Option<u64>,
+    /// The 5-hour windows of the last 24 hours, added up.
+    pub day_total: Option<f32>,
+    /// What went from the week in the last 24 hours, and over how long the readings go back.
+    pub day_week: Option<(f32, u64)>,
+    /// Time of the reading the 24-hour figures were worked out from.
+    history_at: u64,
     usage_polled: Option<Instant>,
     resume_checked: Option<Instant>,
     daily_checked: Option<Instant>,
@@ -132,8 +142,12 @@ impl NotesApp {
             ));
         }
         if let Some(w) = self.orch.week {
-            if w >= self.ws.settings.orch.week_limit {
-                return Err(crate::trf!("la limite de la semaine ({:.0} %) est déjà atteinte", "the weekly limit ({:.0} %) is already reached", self.ws.settings.orch.week_limit));
+            if crate::usage::near_reserve(w, self.ws.settings.orch.week_limit, 0.0) {
+                return Err(crate::trf!(
+                    "la réserve minimum de la semaine ({:.0} %) est atteinte ou trop proche",
+                    "the week's minimum reserve ({:.0} %) is reached or too near",
+                    self.ws.settings.orch.reserve()
+                ));
             }
         }
         // The limits are checked with Claude Code's own figures: they come through the status line.
@@ -180,6 +194,8 @@ impl NotesApp {
             phase: Phase::Starting(Instant::now()),
             next: Some(auto::mission_prompt(&self.ws.page(project).map(|p| p.display_title()).unwrap_or_default(), project, &copy.branch, &mission, commits)),
             quota_reset: None,
+            week_at_turn: None,
+            week_turn: 0.0,
             reader: auto::Reader::default(),
             since: std::time::SystemTime::now() - Duration::from_secs(2),
             base: copy.base,
@@ -268,6 +284,7 @@ impl NotesApp {
                         r.term.write(b"\r");
                         r.reader.turn_over = false;
                         r.nudged = false;
+                        r.week_at_turn = self.orch.week;
                         r.phase = if r.summarizing { Phase::Summary(now) } else { Phase::Working(now) };
                         r.last_line = if r.summarizing { crate::tr!("Rédige son compte rendu…", "Writing its summary…").into() } else { crate::trf!("Tour {} en cours…", "Turn {} running…", r.turns + 1) };
                     }
@@ -306,6 +323,12 @@ impl NotesApp {
                             continue;
                         }
                         r.turns += 1;
+                        // What this turn took from the week (a reset in between counts for nothing).
+                        if let (Some(a), Some(b)) = (r.week_at_turn, self.orch.week) {
+                            if b >= a {
+                                r.week_turn = r.week_turn.max(b - a);
+                            }
+                        }
                         auto::push_copy_later(r.worktree.clone());
                         let sig = auto::signal(&r.reader.last_text);
                         r.last_line = crate::richtext::one_line(&auto::strip_markers(&r.reader.last_text), 140);
@@ -323,9 +346,10 @@ impl NotesApp {
                         } else if five.is_some_and(|f| f >= global) {
                             r.quota_reset = self.orch.five_reset;
                             Some(crate::trf!("limite globale atteinte ({global:.0} %)", "global limit reached ({global:.0} %)"))
-                        } else if self.orch.week.is_some_and(|w| w >= week_limit) {
+                        } else if self.orch.week.is_some_and(|w| crate::usage::near_reserve(w, week_limit, r.week_turn)) {
+                            // Paused before the next turn bites into the reserve; starts again once the week resets.
                             r.quota_reset = self.orch.week_reset;
-                            Some(crate::trf!("limite de la semaine atteinte ({week_limit:.0} %)", "weekly limit reached ({week_limit:.0} %)"))
+                            Some(crate::trf!("pause : la réserve minimum de la semaine ({:.0} %) approche", "paused: the week's minimum reserve ({:.0} %) is near", 100.0 - week_limit))
                         } else if !r.measured && r.turns >= 2 {
                             Some(crate::tr!("utilisation de l'abonnement impossible à mesurer", "subscription use can't be measured").into())
                         } else if r.turns >= r.max_turns {
@@ -418,6 +442,13 @@ impl NotesApp {
             (self.orch.five, self.orch.week, self.orch.five_reset, self.orch.week_reset) = (None, None, None, None);
             return;
         };
+        if self.orch.history_at != u.at {
+            self.orch.history_at = u.at;
+            let h = crate::usage::record(&u);
+            let now = crate::model::now_ms();
+            self.orch.day_total = crate::usage::day_total(&h, now);
+            self.orch.day_week = crate::usage::day_week_used(&h, now);
+        }
         let five = u.five().cloned();
         self.orch.week = u.week().map(|w| w.pct);
         self.orch.week_reset = u.week().and_then(|w| w.resets_at);
@@ -631,13 +662,38 @@ impl NotesApp {
         });
     }
 
-    /// The bar at the very top: the week's use of the subscription, with its own limit
-    /// (set right here) past which no session starts or goes on.
+    /// The bar at the very top: the week's use of the subscription, with the reserve kept
+    /// for the person (set right here): past 100 − reserve, no session starts or goes on.
     fn week_bar(&mut self, ui: &mut egui::Ui, t: &Tone) {
         let week = self.orch.week;
-        let before = self.ws.settings.orch.week_limit;
+        let before = (self.ws.settings.orch.week_limit, self.ws.settings.orch.reserve_asked);
         let red = Color32::from_rgb(224, 62, 62);
         super::projects::card(ui, t, 0.0, |ui| {
+            // Until the person has chosen it: the question, with a few ready answers.
+            if !self.ws.settings.orch.reserve_asked {
+                ui.label(RichText::new(crate::tr!("Quelle part de l'abonnement garder pour vous ?", "How much of the subscription should be kept for you?")).font(semibold(14.0)).color(t.text));
+                ui.label(
+                    RichText::new(crate::tr!(
+                        "Les IA s'arrêtent avant d'entamer cette réserve de la semaine, et reprennent quand la semaine repart à zéro. Modifiable ensuite à droite de la barre.",
+                        "The AIs stop before touching this reserve of the week, and start again once the week resets. You can change it later, right of the bar."
+                    ))
+                    .size(12.5)
+                    .color(t.secondary),
+                );
+                ui.horizontal(|ui| {
+                    for r in [5.0, 10.0, 20.0, 30.0] {
+                        if ui.button(format!("{r:.0} %")).clicked() {
+                            self.ws.settings.orch.set_reserve(r);
+                            self.ws.settings.orch.reserve_asked = true;
+                        }
+                    }
+                    let keep = self.ws.settings.orch.reserve();
+                    if ui.button(RichText::new(crate::trf!("Garder {keep:.0} %", "Keep {keep:.0} %")).color(t.secondary)).clicked() {
+                        self.ws.settings.orch.reserve_asked = true;
+                    }
+                });
+                ui.add_space(8.0);
+            }
             ui.horizontal(|ui| {
                 ui.label(RichText::new(crate::tr!("CETTE SEMAINE", "THIS WEEK")).font(semibold(11.5)).color(t.tertiary));
                 let used = match week {
@@ -646,9 +702,16 @@ impl NotesApp {
                 };
                 ui.label(RichText::new(used).font(semibold(14.0)).color(t.text));
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    ui.add(egui::DragValue::new(&mut self.ws.settings.orch.week_limit).range(5.0..=100.0).speed(0.5).suffix(" %"))
-                        .on_hover_text(crate::tr!("Au-delà, aucune session ne démarre ni ne continue", "Past it, no session starts or goes on"));
-                    ui.label(RichText::new(crate::tr!("Limite de la semaine", "Weekly limit")).size(13.0).color(t.secondary));
+                    let mut reserve = self.ws.settings.orch.reserve();
+                    let r = ui.add(egui::DragValue::new(&mut reserve).range(0.0..=95.0).speed(0.5).suffix(" %")).on_hover_text(crate::tr!(
+                        "Part de la semaine gardée pour vous : les IA s'arrêtent avant de l'entamer",
+                        "Share of the week kept for you: the AIs stop before touching it"
+                    ));
+                    if r.changed() {
+                        self.ws.settings.orch.set_reserve(reserve);
+                        self.ws.settings.orch.reserve_asked = true;
+                    }
+                    ui.label(RichText::new(crate::tr!("Réserve minimum", "Minimum reserve")).size(13.0).color(t.secondary));
                 });
             });
             ui.add_space(4.0);
@@ -665,8 +728,19 @@ impl NotesApp {
                 ui.painter().rect_filled(egui::Rect::from_min_size(bar.min, egui::vec2(bar.width() * frac, bar.height())), 6.0, color);
             }
             ui.painter().vline(lx, egui::Rangef::new(bar.top() - 3.0, bar.bottom() + 3.0), egui::Stroke::new(2.0, super::projects::ORANGE));
+            // The day's pace: what went from the week in 24 hours against a seventh of it.
+            if let Some((used, span)) = self.orch.day_week {
+                let d = crate::usage::daily_pct(used);
+                let over = if span >= 23 * 3_600_000 { crate::tr!("sur 24 h", "over 24 h").to_string() } else { crate::trf!("depuis {}", "for the last {}", crate::usage::left_text(span)) };
+                let color = if d > 100.0 { super::projects::ORANGE } else { t.secondary };
+                ui.add_space(4.0);
+                ui.label(RichText::new(crate::trf!("Aujourd'hui : {d:.0} % de la part du jour ({over})", "Today: {d:.0} % of the day's share ({over})")).size(12.5).color(color)).on_hover_text(crate::trf!(
+                    "{used:.1} % de la semaine utilisés, pour une part du jour d'un septième de la semaine (≈ 14,3 %). Au-delà de 100 %, le rythme épuiserait la semaine avant sa fin.",
+                    "{used:.1} % of the week used, against a day's share of one seventh of the week (≈ 14.3 %). Past 100 %, this pace would use up the week before it ends."
+                ));
+            }
         });
-        if self.ws.settings.orch.week_limit != before {
+        if (self.ws.settings.orch.week_limit, self.ws.settings.orch.reserve_asked) != before {
             self.dirty_since.get_or_insert_with(Instant::now);
         }
     }
@@ -675,6 +749,7 @@ impl NotesApp {
     fn stats_row(&mut self, ui: &mut egui::Ui, t: &Tone) {
         let five = self.orch.five;
         let week = self.orch.week;
+        let day = self.orch.day_total;
         let global = self.ws.settings.orch.global_limit;
         let now_ms = crate::model::now_ms();
         let five_left = self.orch.five_reset.and_then(|r| crate::usage::until(r, now_ms));
@@ -700,16 +775,15 @@ impl NotesApp {
             // A soft wash of the accent in the corner.
             p.with_clip_rect(rect.shrink(1.0)).circle_filled(rect.right_top() + egui::vec2(-10.0, 10.0), 52.0 + 6.0 * a, accent.gamma_multiply(0.07));
             let x = rect.left() + 18.0;
-            let label = [crate::tr!("ABONNEMENT · 5 H", "SUBSCRIPTION · 5 H"), crate::tr!("IA AU TRAVAIL", "AIS AT WORK"), crate::tr!("AUJOURD'HUI", "TODAY")][i];
+            let label = [crate::tr!("ABONNEMENT · 24 H", "SUBSCRIPTION · 24 H"), crate::tr!("IA AU TRAVAIL", "AIS AT WORK"), crate::tr!("AUJOURD'HUI", "TODAY")][i];
             p.text(egui::pos2(x, rect.top() + 16.0), egui::Align2::LEFT_TOP, label, semibold(11.5), t.tertiary);
             let (big, sub): (String, String) = match i {
+                // The last 24 hours up front; the current 5-hour window below and in the ring.
                 0 => (
-                    five.map(|f| format!("{f:.0} %")).unwrap_or_else(|| "—".into()),
-                    match (five, week, five_left) {
-                        (Some(_), Some(wk), Some(l)) => crate::trf!("à zéro dans {} · semaine {wk:.0} %", "resets in {} · week {wk:.0} %", crate::usage::left_text(l)),
-                        (Some(_), None, Some(l)) => crate::trf!("limite {global:.0} % · à zéro dans {}", "limit {global:.0} % · resets in {}", crate::usage::left_text(l)),
-                        (Some(_), Some(wk), None) => crate::trf!("limite {global:.0} % · semaine {wk:.0} %", "limit {global:.0} % · week {wk:.0} %"),
-                        (Some(_), None, None) => crate::trf!("limite globale {global:.0} %", "global limit {global:.0} %"),
+                    day.or(five).map(|f| format!("{f:.0} %")).unwrap_or_else(|| "—".into()),
+                    match (five, five_left) {
+                        (Some(f), Some(l)) => crate::trf!("5 h : {f:.0} % · à zéro dans {}", "5 h: {f:.0} % · resets in {}", crate::usage::left_text(l)),
+                        (Some(f), None) => crate::trf!("5 h : {f:.0} % · limite {global:.0} %", "5 h: {f:.0} % · limit {global:.0} %"),
                         _ => crate::tr!("inconnu pour l'instant", "unknown for now").into(),
                     },
                 ),
@@ -732,7 +806,14 @@ impl NotesApp {
                         ring(ui, c, 28.0, five.map(|f| f / 100.0), global / 100.0, accent, t);
                     }
                     // The details: limits and when each window starts again.
-                    let mut tip = vec![crate::trf!("Limite globale : {global:.0} % de la fenêtre de 5 h", "Global limit: {global:.0} % of the 5-hour window")];
+                    let mut tip = vec![];
+                    if let Some(d) = day {
+                        tip.push(crate::trf!(
+                            "Dernières 24 h : {d:.0} % (les fenêtres de 5 h de la journée, additionnées)",
+                            "Last 24 hours: {d:.0} % (the day's 5-hour windows, added up)"
+                        ));
+                    }
+                    tip.push(crate::trf!("Limite globale : {global:.0} % de la fenêtre de 5 h", "Global limit: {global:.0} % of the 5-hour window"));
                     if let Some(l) = five_left {
                         tip.push(crate::trf!("Fenêtre de 5 h : repart à zéro dans {}", "5-hour window: resets in {}", crate::usage::left_text(l)));
                     }
@@ -821,7 +902,7 @@ impl NotesApp {
                 row(ui, crate::tr!("Commits autorisés", "Commits allowed"), crate::tr!("Sur leur branche, envoyée sur GitHub par Orchestra", "On their branch, pushed to GitHub by Orchestra"), &mut |ui| {
                     super::settings::switch(ui, &mut o.allow_commits, &lk);
                 });
-                row(ui, crate::tr!("Reprise automatique", "Automatic restart"), crate::tr!("Une session arrêtée par la limite globale ou de la semaine repart seule après la remise à zéro du quota", "A session stopped by the global or weekly limit starts again by itself once the quota resets"), &mut |ui| {
+                row(ui, crate::tr!("Reprise automatique", "Automatic restart"), crate::tr!("Une session arrêtée par la limite globale ou la réserve de la semaine repart seule après la remise à zéro du quota", "A session stopped by the global limit or the week's reserve starts again by itself once the quota resets"), &mut |ui| {
                     super::settings::switch(ui, &mut o.auto_resume, &lk);
                 });
             };
