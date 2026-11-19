@@ -394,7 +394,7 @@ pub(super) fn versions_card(ui: &mut egui::Ui, v: &mut Versions, page_id: &str, 
             // The branch: click to work on another one, or start a new one.
             let idle = busy.is_none();
             ui.horizontal(|ui| {
-                ui.label(small(crate::tr!("Branche", "Branch"), t.tertiary));
+                row_label(ui, crate::tr!("Branche", "Branch"), t);
                 let btn = ui.add_enabled_ui(idle, |ui| branch_pill(ui, &s.branch, t)).inner;
                 let changes = !s.changes.is_empty();
                 egui::Popup::menu(&btn).show(|ui| {
@@ -610,10 +610,20 @@ pub(super) fn versions_card(ui: &mut egui::Ui, v: &mut Versions, page_id: &str, 
             main(ui);
             if !s.commits.is_empty() {
                 ui.add_space(10.0);
+                ui.label(small(crate::tr!("Derniers commits", "Latest commits"), t.tertiary));
+                ui.add_space(4.0);
                 commit_list(ui, &s, t);
             }
         }
     })
+}
+
+/// The name of a row ("Branche", "Actions") in a fixed-width column: the pills on the
+/// right of the rows start at the same place.
+fn row_label(ui: &mut egui::Ui, text: &str, t: &Tone) {
+    let w = ["Branche", "Branch", "Actions"].iter().map(|x| ui.painter().layout_no_wrap(x.to_string(), FontId::proportional(12.5), t.tertiary).size().x).fold(0.0, f32::max);
+    let (rect, _) = ui.allocate_exact_size(egui::vec2(w + 4.0, 20.0), egui::Sense::hover());
+    ui.painter().text(egui::pos2(rect.left(), rect.center().y), egui::Align2::LEFT_CENTER, text, FontId::proportional(12.5), t.tertiary);
 }
 
 /// The last commits as a small timeline; the time sits on the right.
@@ -661,7 +671,7 @@ fn run_pills(ui: &mut egui::Ui, runs: &[crate::git::Run], t: &Tone) {
     let red = Color32::from_rgb(224, 62, 62);
     ui.horizontal_wrapped(|ui| {
         ui.spacing_mut().item_spacing.x = 6.0;
-        ui.label(small(crate::tr!("Actions", "Actions"), t.tertiary));
+        row_label(ui, crate::tr!("Actions", "Actions"), t);
         for r in runs {
             let (word, color) = match (r.status.as_str(), r.conclusion.as_str()) {
                 ("completed", "success") => (crate::tr!("réussi", "passed"), GREEN),

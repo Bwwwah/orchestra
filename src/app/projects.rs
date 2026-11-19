@@ -112,6 +112,27 @@ fn chip(ui: &mut egui::Ui, text: &str, color: Color32, sense: egui::Sense) -> eg
     resp
 }
 
+/// The tool of a session ("Claude Code", "Codex"…) as a chip in a fixed-width column, so
+/// the titles of the rows below each other start at the same place.
+fn tool_chip(ui: &mut egui::Ui, label: &str, t: &Tone) {
+    let col = ui.painter().layout_no_wrap("Claude Code".into(), FontId::proportional(12.0), t.secondary).size().x + 14.0;
+    let (rect, _) = ui.allocate_exact_size(egui::vec2(col, 20.0), egui::Sense::hover());
+    let mut child = ui.new_child(egui::UiBuilder::new().max_rect(rect).layout(egui::Layout::left_to_right(egui::Align::Center)));
+    chip(&mut child, label, t.secondary, egui::Sense::hover());
+}
+
+/// "claude-code" → "Claude Code": the tool names written by the AIs, as shown elsewhere.
+fn tool_label(tool: &str) -> String {
+    match tool.trim().to_lowercase().replace(['_', ' '], "-").as_str() {
+        "claude-code" | "claude" => "Claude Code".into(),
+        "codex" | "codex-cli" => "Codex".into(),
+        "claude-web" => "Claude (web)".into(),
+        "gemini-cli" | "gemini" => "Gemini".into(),
+        "chatgpt" => "ChatGPT".into(),
+        _ => tool.to_string(),
+    }
+}
+
 /// The command that plugs this app into Claude Code as an MCP server.
 pub fn mcp_command() -> String {
     let exe = std::env::current_exe().map(|p| p.display().to_string()).unwrap_or_else(|_| "orchestra".into());
@@ -576,7 +597,7 @@ fn session_row(ui: &mut egui::Ui, page_id: &str, s: &SessionInfo, t: &Tone) -> O
             } else {
                 ui.painter().circle_filled(r.center(), 4.0, t.border);
             }
-            chip(ui, s.tool.label(), t.secondary, egui::Sense::hover());
+            tool_chip(ui, s.tool.label(), t);
             let when = relative_time(s.last_activity);
             let when_w = ui.painter().layout_no_wrap(when.clone(), FontId::proportional(12.5), t.tertiary).size().x;
             let room = ui.available_width() - when_w - 16.0;
@@ -1308,9 +1329,11 @@ fn sessions_card(ui: &mut egui::Ui, cx: &mut Cx, extra: f32) -> f32 {
             }
         }
         for s in others.iter().take(if all { usize::MAX } else { 3 }) {
+            // Same columns as the rows above: a (hollow) dot, the tool, the title, the time.
             ui.horizontal(|ui| {
-                ui.add_space(14.0);
-                chip(ui, &s.tool, t.secondary, egui::Sense::hover());
+                let (r, _) = ui.allocate_exact_size(egui::vec2(10.0, 20.0), egui::Sense::hover());
+                ui.painter().circle_stroke(r.center(), 3.5, egui::Stroke::new(1.2, t.border));
+                tool_chip(ui, &tool_label(&s.tool), t);
                 let when = relative_time(s.last_activity);
                 let room = ui.available_width() - ui.painter().layout_no_wrap(when.clone(), FontId::proportional(12.5), t.tertiary).size().x - 16.0;
                 let title = if s.title.is_empty() { s.id.clone() } else { s.title.clone() };
@@ -1318,6 +1341,7 @@ fn sessions_card(ui: &mut egui::Ui, cx: &mut Cx, extra: f32) -> f32 {
                 line(ui, job, room).on_hover_text(if s.location.is_empty() { &s.id } else { &s.location });
                 ui.label(RichText::new(when).size(12.5).color(t.tertiary));
             });
+            ui.add_space(2.0);
         }
         if live.len() > 4 || others.len() > 3 {
             if link(ui, &if all { crate::tr!("Voir moins", "Show less").to_string() } else { crate::trf!("Voir les {n} sessions", "Show the {n} sessions") }) {

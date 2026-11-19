@@ -1279,6 +1279,7 @@ impl NotesApp {
         let mut open: Option<usize> = None;
         let mut remove: Option<usize> = None;
         let mut all_read = false;
+        let mut clear_all = false;
         let mut answer: Option<(usize, String)> = None;
         ui.add_space(50.0);
         ui.horizontal(|ui| {
@@ -1288,8 +1289,29 @@ impl NotesApp {
                 ui.horizontal(|ui| {
                     ui.label(RichText::new(crate::tr!("Boîte de réception", "Inbox")).font(bold(30.0)).color(t.text));
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        if self.ws.unread() > 0 && super::projects::action_link(ui, crate::tr!("Tout marquer comme lu", "Mark all as read")).clicked() {
-                            all_read = true;
+                        // "Tout supprimer": a second click confirms, nothing goes on one slip.
+                        let confirm_id = egui::Id::unique("inbox-clear-confirm");
+                        let confirming = ui.data(|d| d.get_temp::<bool>(confirm_id)).unwrap_or(false);
+                        if !self.ws.inbox.is_empty() {
+                            if confirming {
+                                if super::projects::action_link(ui, crate::tr!("Annuler", "Cancel")).clicked() {
+                                    ui.data_mut(|d| d.insert_temp(confirm_id, false));
+                                }
+                                let n = self.ws.inbox.len();
+                                let sure = crate::trf!("Confirmer : supprimer les {n} messages", "Confirm: delete the {n} messages");
+                                if ui.add(egui::Label::new(RichText::new(sure).size(13.0).color(Color32::from_rgb(224, 62, 62))).sense(egui::Sense::click())).on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
+                                    clear_all = true;
+                                    ui.data_mut(|d| d.insert_temp(confirm_id, false));
+                                }
+                            } else if super::projects::action_link(ui, crate::tr!("Tout supprimer", "Delete all")).clicked() {
+                                ui.data_mut(|d| d.insert_temp(confirm_id, true));
+                            }
+                        }
+                        if !confirming && self.ws.unread() > 0 {
+                            ui.label(RichText::new("·").color(t.tertiary));
+                            if super::projects::action_link(ui, crate::tr!("Tout marquer comme lu", "Mark all as read")).clicked() {
+                                all_read = true;
+                            }
                         }
                     });
                 });
@@ -1351,7 +1373,7 @@ impl NotesApp {
                         .show(ui, |ui| {
                             ui.set_width(ui.available_width());
                             let head = ui.horizontal_top(|ui| {
-                                ui.vertical(|ui| {
+                                let text = ui.vertical(|ui| {
                                     ui.set_width(ui.available_width() - 30.0);
                                     ui.horizontal(|ui| {
                                         kind_badge(ui, kind, accent);
@@ -1373,13 +1395,15 @@ impl NotesApp {
                                         ui.add(egui::Label::new(RichText::new(&m.text).size(13.0).color(t.secondary)).wrap());
                                     }
                                 });
-                                let x = ui.add(egui::Button::new(RichText::new("×").color(t.tertiary)).frame(false)).on_hover_text(crate::tr!("Supprimer", "Delete"));
+                                let x = ui.add(egui::Button::new(RichText::new("×").size(16.0).color(t.tertiary)).frame(false)).on_hover_text(crate::tr!("Supprimer", "Delete"));
                                 if x.clicked() {
                                     remove = Some(i);
                                 }
+                                text.response.rect
                             });
-                            // Only the head opens the page: the answer box below stays free to type in.
-                            let resp = ui.interact(head.response.rect, egui::Id::unique(("inbox", &m.id)), egui::Sense::click());
+                            // Only the text of the head opens the page: the answer box below stays free to
+                            // type in, and the × keeps its click (a zone over it would take it).
+                            let resp = ui.interact(head.inner, egui::Id::unique(("inbox", &m.id)), egui::Sense::click());
                             let resp = if m.page.is_some() || !m.project.is_empty() { resp.on_hover_cursor(egui::CursorIcon::PointingHand) } else { resp };
                             if resp.clicked() && remove.is_none() {
                                 open = Some(i);
@@ -1403,6 +1427,15 @@ impl NotesApp {
                 }
             });
         });
+        if clear_all {
+            let n = self.ws.inbox.len();
+            for m in self.ws.inbox.drain(..) {
+                self.inbox_removed.insert(m.id);
+            }
+            self.dirty_since.get_or_insert_with(Instant::now);
+            self.ack(crate::trf!("{n} messages supprimés.", "{n} messages deleted."));
+            return;
+        }
         if all_read {
             for m in self.ws.inbox.iter_mut() {
                 m.read = true;
@@ -1418,7 +1451,8 @@ impl NotesApp {
             self.ack(crate::tr!("Réponse enregistrée : l'IA la verra au prochain état des lieux du projet.", "Answer saved: the AI will see it in the project's next state of play."));
         }
         if let Some(i) = remove {
-            self.ws.inbox.remove(i);
+            let m = self.ws.inbox.remove(i);
+            self.inbox_removed.insert(m.id);
             self.dirty_since.get_or_insert_with(Instant::now);
         } else if let Some(i) = open {
             let m = &mut self.ws.inbox[i];

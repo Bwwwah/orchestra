@@ -847,7 +847,8 @@ Cmd/Ctrl+P or K to search all pages.").into();
         self.pages.push(p);
         if let Some(pid) = parent {
             if let Some(par) = self.page_mut(&pid) {
-                if par.database.is_none() {
+                // A project lists its pages in its "Pages" card: no link at the bottom of its text.
+                if par.database.is_none() && par.project.is_none() {
                     let mut b = Block::new(BlockKind::PageLink, "");
                     b.extra = id.clone();
                     par.blocks.push(b);
