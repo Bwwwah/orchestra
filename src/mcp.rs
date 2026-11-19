@@ -57,6 +57,9 @@ fn handle(msg: &Value) -> Option<Value> {
         "tools/call" => {
             let name = params.get("name").and_then(Value::as_str).unwrap_or("").to_string();
             let args = params.get("arguments").cloned().unwrap_or(json!({}));
+            if name == "take_screenshot" {
+                return Some(json!({"jsonrpc":"2.0","id":id,"result":screenshot(&args)}));
+            }
             match call_tool(&name, &args) {
                 Ok(text) => Ok(json!({"content":[{"type":"text","text":text}],"isError":false})),
                 Err(ToolError::Unknown) => Err((-32602, format!("Unknown tool: {name}"))),
@@ -178,7 +181,29 @@ fn tools() -> Vec<Value> {
             json!({"project": project, "question":{"type":"string","description":"One or two sentences"}}),
             &["question"],
         ),
+        tool(
+            "take_screenshot",
+            "Take a screenshot to check an interface: the front window of `app` (e.g. \"Orchestra\", \"Safari\", \"Simulator\"; the app comes to the front), or the whole main screen when `app` is left out. Returns the picture and the path of its PNG file.",
+            json!({"app":{"type":"string","description":"Name of the app whose window to capture; empty for the whole screen"}}),
+            &[],
+        ),
     ]
+}
+
+/// The `take_screenshot` tool's result: the picture inline (when not too large) and its path.
+fn screenshot(args: &Value) -> Value {
+    match crate::screen::take(s(args, "app")) {
+        Ok(shot) => {
+            let text = format!("Screenshot of {}, saved at {}", shot.note, shot.path.display());
+            let mut content = vec![json!({"type":"text","text":text})];
+            match shot.inline() {
+                Some((data, mime)) => content.push(json!({"type":"image","data":data,"mimeType":mime})),
+                None => content.push(json!({"type":"text","text":"The picture is too large to send inline: read the file at that path."})),
+            }
+            json!({"content": content, "isError": false})
+        }
+        Err(e) => json!({"content":[{"type":"text","text":e}],"isError":true}),
+    }
 }
 
 enum ToolError {

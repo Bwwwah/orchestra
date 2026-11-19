@@ -378,15 +378,60 @@ pub fn ask_tasks(folder: &str, existing: &[String], prefer: Option<Tool>) -> Res
     Ok(tasks)
 }
 
-/// A pasted text (notes, an email, a list…) turned into tasks by an AI. It reads nothing.
-pub fn text_to_tasks(folder: &str, text: &str, prefer: Option<Tool>) -> Result<Vec<String>, String> {
+/// The command line for one question to an agent. Images: Codex takes them with `--image`;
+/// Claude Code reads them itself, from their folders added with `--add-dir`.
+fn ask_args(tool: Tool, prompt: String, claude_tools: &str, max_turns: u32, images: &[String]) -> Vec<String> {
+    match tool {
+        Tool::ClaudeCode => {
+            let mut a: Vec<String> = vec!["-p".into(), prompt, "--output-format".into(), "json".into(), "--max-turns".into(), max_turns.to_string(), "--allowedTools".into(), claude_tools.into()];
+            let mut dirs: Vec<String> = vec![];
+            for i in images {
+                if let Some(d) = Path::new(i).parent().map(|d| d.display().to_string()).filter(|d| !d.is_empty()) {
+                    if !dirs.contains(&d) {
+                        dirs.push(d);
+                    }
+                }
+            }
+            for d in dirs {
+                a.push("--add-dir".into());
+                a.push(d);
+            }
+            a
+        }
+        Tool::Codex => {
+            let mut a: Vec<String> = vec!["exec".into(), "--sandbox".into(), "read-only".into(), "--skip-git-repo-check".into()];
+            for i in images {
+                a.push(format!("--image={i}"));
+            }
+            a.push("--".into());
+            a.push(prompt);
+            a
+        }
+    }
+}
+
+/// The image files a person may join to a text (by their extension).
+pub fn is_image(path: &Path) -> bool {
+    path.extension().and_then(|e| e.to_str()).is_some_and(|e| matches!(e.to_ascii_lowercase().as_str(), "png" | "jpg" | "jpeg" | "gif" | "webp"))
+}
+
+/// A pasted text (notes, an email, a list…) and joined images (screenshots…) turned into
+/// tasks by an AI. It reads nothing else.
+pub fn text_to_tasks(folder: &str, text: &str, images: &[String], prefer: Option<Tool>) -> Result<Vec<String>, String> {
+    let text = if text.trim().is_empty() { crate::tr!("(pas de texte : seulement les images)", "(no text: only the images)").to_string() } else { text.to_string() };
+    let tools_rule = if images.is_empty() {
+        crate::tr!("N'utilise aucun outil.", "Don't use any tool.").to_string()
+    } else {
+        let list = images.iter().map(|i| format!("- {i}")).collect::<Vec<_>>().join("\n");
+        crate::trf!("Des images sont jointes (captures d'écran, photos…) : regarde-les (outil Read sur chaque chemin) et tiens-en compte autant que du texte. N'utilise aucun autre outil.\nImages :\n{list}", "Images are joined (screenshots, photos…): look at them (Read tool on each path) and take them into account as much as the text. Don't use any other tool.\nImages:\n{list}")
+    };
     let prompt = crate::trf!("Transforme ce texte en tâches claires et actionnables pour un projet : regroupe ce qui va ensemble, retire les doublons \
          et le bavardage, garde l'ordre logique. Une tâche = une action courte à l'infinitif (tu peux la préfixer d'un domaine court suivi de « : »).\n\
-         Réponds UNIQUEMENT par la liste, une tâche par ligne commençant par « - ». N'utilise aucun outil.\n\nTexte :\n{text}", "Turn this text into clear, actionable tasks for a project: group what belongs together, drop duplicates \
+         Réponds UNIQUEMENT par la liste, une tâche par ligne commençant par « - ». {tools_rule}\n\nTexte :\n{text}", "Turn this text into clear, actionable tasks for a project: group what belongs together, drop duplicates \
          and chatter, keep a logical order. One task = one short action (you may prefix it with a short area followed by « : »).\n\
-         Answer ONLY with the list, one task per line starting with « - ». Don't use any tool.\n\nText:\n{text}");
+         Answer ONLY with the list, one task per line starting with « - ». {tools_rule}\n\nText:\n{text}");
     let dir = if !folder.trim().is_empty() && crate::project::normalize_folder(folder).is_dir() { folder.to_string() } else { dirs::home_dir().unwrap_or_default().display().to_string() };
-    let (answer, _) = ask(&dir, prompt, "Read", 3, prefer)?;
+    let (answer, _) = ask_with_images(&dir, prompt, "Read", 3 + images.len() as u32, prefer, images)?;
     let tasks = parse_tasks(&answer);
     if tasks.is_empty() {
         return Err(crate::tr!("l'IA n'a trouvé aucune tâche dans ce texte", "the AI found no task in this text").into());
@@ -397,6 +442,12 @@ pub fn text_to_tasks(folder: &str, text: &str, prefer: Option<Tool>) -> Result<V
 /// Ask an agent one question in `folder` and return its answer. Claude Code may use only
 /// `claude_tools`; Codex runs read-only. `prefer`: the agent to use when installed.
 pub fn ask(folder: &str, prompt: String, claude_tools: &str, max_turns: u32, prefer: Option<Tool>) -> Result<(String, Tool), String> {
+    ask_with_images(folder, prompt, claude_tools, max_turns, prefer, &[])
+}
+
+/// Like `ask`, with images the agent may look at: Codex gets them with `--image`, Claude Code
+/// reads them (its `Read` tool must be allowed) from folders added with `--add-dir`.
+pub fn ask_with_images(folder: &str, prompt: String, claude_tools: &str, max_turns: u32, prefer: Option<Tool>, images: &[String]) -> Result<(String, Tool), String> {
     let path = shell_path();
     let agents = detect(&path);
     let agent = agents
@@ -405,24 +456,12 @@ pub fn ask(folder: &str, prompt: String, claude_tools: &str, max_turns: u32, pre
         .or_else(|| agents.first())
         .ok_or(crate::tr!("Ni Claude Code ni Codex n'ont été trouvés sur cette machine.", "Neither Claude Code nor Codex was found on this computer."))?;
     let prompt_copy = prompt.clone();
-    let args: Vec<String> = match agent.tool {
-        Tool::ClaudeCode => vec![
-            "-p".into(),
-            prompt,
-            "--output-format".into(),
-            "json".into(),
-            "--max-turns".into(),
-            max_turns.to_string(),
-            "--allowedTools".into(),
-            claude_tools.into(),
-        ],
-        Tool::Codex => vec!["exec".into(), "--sandbox".into(), "read-only".into(), "--skip-git-repo-check".into(), prompt],
-    };
+    let args = ask_args(agent.tool, prompt, claude_tools, max_turns, images);
     let res = run_agent(agent, folder, args, &path, &AtomicBool::new(false), PER_PROJECT);
     // Claude Code can't renew its sign-in headless: Codex answers instead, when installed.
     if matches!(&res, Err(e) if e == AUTH_ERROR) && prefer != Some(Tool::Codex) {
         if agents.iter().any(|a| a.tool == Tool::Codex) {
-            if let Ok(r) = ask(folder, prompt_copy, claude_tools, max_turns, Some(Tool::Codex)) {
+            if let Ok(r) = ask_with_images(folder, prompt_copy, claude_tools, max_turns, Some(Tool::Codex), images) {
                 return Ok(r);
             }
         }
@@ -564,6 +603,21 @@ impl SyncRun {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn images_reach_the_agents() {
+        let imgs = vec!["/tmp/x/a.png".to_string(), "/tmp/x/b.jpg".to_string()];
+        let c = ask_args(Tool::ClaudeCode, "p".into(), "Read", 5, &imgs);
+        // Claude reads them itself: their folder is added once.
+        assert_eq!(c.iter().filter(|a| *a == "--add-dir").count(), 1);
+        assert!(c.windows(2).any(|w| w[0] == "--add-dir" && w[1] == "/tmp/x"));
+        let x = ask_args(Tool::Codex, "p".into(), "Read", 5, &imgs);
+        assert!(x.contains(&"--image=/tmp/x/a.png".to_string()) && x.contains(&"--image=/tmp/x/b.jpg".to_string()));
+        assert_eq!(x.last().map(String::as_str), Some("p"));
+        // Without images, nothing changes.
+        assert!(!ask_args(Tool::ClaudeCode, "p".into(), "Read", 5, &[]).contains(&"--add-dir".to_string()));
+        assert!(is_image(Path::new("/a/B.PNG")) && is_image(Path::new("c.webp")) && !is_image(Path::new("notes.txt")) && !is_image(Path::new("dir")));
+    }
 
     #[test]
     fn fill_and_tasks_are_parsed() {

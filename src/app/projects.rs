@@ -1258,11 +1258,53 @@ fn ai_steps(ui: &mut egui::Ui, page_id: &str, pr: &mut Project, ai: &mut super::
                 .desired_width(f32::INFINITY)
                 .font(FontId::proportional(13.0)),
         );
+        // Joined images (screenshots…): pasted from the clipboard or dropped on the window.
+        let img_key = egui::Id::unique(("paste-images", page_id));
+        let err_key = egui::Id::unique(("paste-image-error", page_id));
+        let mut images: Vec<String> = ui.ctx().data(|d| d.get_temp(img_key)).unwrap_or_default();
+        let mut err: Option<String> = ui.ctx().data(|d| d.get_temp(err_key)).unwrap_or_default();
+        let dropped: Vec<String> = ui.ctx().input(|i| i.raw.dropped_files.iter().map(|f| f.path().to_path_buf()).filter(|p| crate::sync::is_image(p)).map(|p| p.display().to_string()).collect());
+        for p in dropped {
+            if !images.contains(&p) {
+                images.push(p);
+                err = None;
+            }
+        }
+        let mut remove = None;
+        for (i, p) in images.iter().enumerate() {
+            ui.horizontal(|ui| {
+                ui.spacing_mut().item_spacing.x = 6.0;
+                let name = std::path::Path::new(p).file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_else(|| p.clone());
+                ui.label(RichText::new(crate::trf!("Image : {name}", "Image: {name}")).size(12.5).color(t.secondary)).on_hover_text(p.as_str());
+                if ui.add(egui::Button::new(RichText::new("×").size(13.0).color(t.tertiary)).frame(false)).on_hover_text(crate::tr!("Retirer l'image", "Remove the image")).clicked() {
+                    remove = Some(i);
+                }
+            });
+        }
+        if let Some(i) = remove {
+            images.remove(i);
+        }
+        if let Some(e) = &err {
+            ui.label(RichText::new(e.as_str()).size(12.5).color(t.tertiary));
+        }
         let mut close = false;
         ui.horizontal(|ui| {
-            if ui.add_enabled(!text.trim().is_empty(), egui::Button::new(RichText::new(crate::tr!("Transformer en étapes", "Turn into steps")).size(13.0))).clicked() {
-                super::ai_fill::request(ui.ctx(), super::ai_fill::AiReq::Tasks { page_id: page_id.to_string(), folder: folder.clone(), existing: existing.clone(), prefer, text: Some(text.clone()) });
+            let ready = !text.trim().is_empty() || !images.is_empty();
+            if ui.add_enabled(ready, egui::Button::new(RichText::new(crate::tr!("Transformer en étapes", "Turn into steps")).size(13.0))).clicked() {
+                super::ai_fill::request(ui.ctx(), super::ai_fill::AiReq::Tasks { page_id: page_id.to_string(), folder: folder.clone(), existing: existing.clone(), prefer, text: Some(text.clone()), images: images.clone() });
                 close = true;
+            }
+            let paste = ui
+                .add(egui::Button::new(RichText::new(crate::tr!("Coller une image", "Paste an image")).size(13.0)))
+                .on_hover_text(crate::tr!("Joint l'image copiée (une capture d'écran…) ; vous pouvez aussi glisser des images sur la fenêtre", "Joins the copied image (a screenshot…); you can also drop images on the window"));
+            if paste.clicked() {
+                match crate::clip::paste_image() {
+                    Ok(p) => {
+                        images.push(p.display().to_string());
+                        err = None;
+                    }
+                    Err(e) => err = Some(crate::trf!("Pas d'image : {e}", "No image: {e}")),
+                }
             }
             if ui.add(egui::Button::new(RichText::new(crate::tr!("Annuler", "Cancel")).size(13.0).color(t.tertiary)).frame(false)).clicked() {
                 close = true;
@@ -1270,9 +1312,15 @@ fn ai_steps(ui: &mut egui::Ui, page_id: &str, pr: &mut Project, ai: &mut super::
         });
         if close {
             text.clear();
+            images.clear();
+            err = None;
             toggle_flag(ui, paste_key);
         }
-        ui.ctx().data_mut(|d| d.insert_temp(text_key, text));
+        ui.ctx().data_mut(|d| {
+            d.insert_temp(text_key, text);
+            d.insert_temp(img_key, images);
+            d.insert_temp(err_key, err);
+        });
         return;
     }
     ui.horizontal_wrapped(|ui| {
@@ -1282,9 +1330,9 @@ fn ai_steps(ui: &mut egui::Ui, page_id: &str, pr: &mut Project, ai: &mut super::
             .on_hover_text(crate::tr!("L'IA lit le code sans rien modifier et propose des étapes précises (fonctionnalité, technique, sécurité), faites pour être menées par une IA en autonomie ; vous choisissez celles à garder.", "The AI reads the code without changing anything and proposes precise steps (feature, technical, security), made to be carried out by an AI on its own; you choose which to keep."))
             .on_disabled_hover_text(crate::tr!("Indiquez d'abord le dossier du projet", "Set the project's folder first"));
         if r.clicked() && folder_ok {
-            super::ai_fill::request(ui.ctx(), super::ai_fill::AiReq::Tasks { page_id: page_id.to_string(), folder: folder.clone(), existing: existing.clone(), prefer, text: None });
+            super::ai_fill::request(ui.ctx(), super::ai_fill::AiReq::Tasks { page_id: page_id.to_string(), folder: folder.clone(), existing: existing.clone(), prefer, text: None, images: vec![] });
         }
-        if action_link(ui, crate::tr!("Depuis un texte", "From a text")).on_hover_text(crate::tr!("Collez un texte : l'IA le réorganise en étapes", "Paste a text: the AI reorganises it into steps")).clicked() {
+        if action_link(ui, crate::tr!("Depuis un texte", "From a text")).on_hover_text(crate::tr!("Collez un texte, joignez des images : l'IA en fait des étapes", "Paste a text, join images: the AI turns them into steps")).clicked() {
             toggle_flag(ui, paste_key);
         }
     });
