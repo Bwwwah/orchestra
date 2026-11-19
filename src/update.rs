@@ -133,15 +133,24 @@ fn install_to(target: &Path, repo: &str, rel: &Release) -> Result<PathBuf, Strin
     let tmp = std::env::temp_dir().join(format!("orchestra-maj-{}", rel.tag));
     let _ = std::fs::remove_dir_all(&tmp);
     std::fs::create_dir_all(&tmp).map_err(|e| e.to_string())?;
-    let file = tmp.join(&name);
-    // Download: gh for a private repository, curl otherwise.
-    let got = if gh_ready() {
-        run("gh", &["release", "download", &rel.tag, "-R", repo.trim(), "-p", &name, "-D", &tmp.display().to_string(), "--clobber"], None).map(|_| ())
-    } else {
-        Err(String::new())
-    };
-    if got.is_err() || !file.is_file() {
-        run("curl", &["-fsSL", "-o", &file.display().to_string(), &url], None).map_err(|e| crate::trf!("téléchargement impossible : {e}", "download failed: {e}"))?;
+    let file = fetch(repo, rel, &name, &url, &tmp)?;
+    // Integrity: the release publishes "<file>.sha256"; without it, or if it differs, nothing
+    // is installed.
+    let sum_name = format!("{name}.sha256");
+    let (_, sum_url) = rel.assets.iter().find(|(n, _)| *n == sum_name).cloned().ok_or(crate::tr!(
+        "cette version ne publie pas d'empreinte SHA-256 : mise à jour refusée, téléchargez-la depuis la page GitHub du projet",
+        "this version publishes no SHA-256 checksum: update refused, download it from the project's GitHub page"
+    ))?;
+    let sum_file = fetch(repo, rel, &sum_name, &sum_url, &tmp)?;
+    let expected = std::fs::read_to_string(&sum_file).ok().and_then(|t| expected_sha256(&t)).ok_or(crate::tr!("empreinte SHA-256 illisible", "unreadable SHA-256 checksum"))?;
+    let got = sha256_file(&file)?;
+    if got != expected {
+        let _ = std::fs::remove_dir_all(&tmp);
+        return Err(crate::tr!(
+            "le fichier téléchargé ne correspond pas à son empreinte SHA-256 : mise à jour refusée",
+            "the downloaded file doesn't match its SHA-256 checksum: update refused"
+        )
+        .to_string());
     }
     // Unpack.
     let out = tmp.join("x");
@@ -195,6 +204,42 @@ fn install_to(target: &Path, repo: &str, rel: &Release) -> Result<PathBuf, Strin
     Ok(target)
 }
 
+/// Download one file of the release into `dir`: gh for a private repository, curl otherwise.
+fn fetch(repo: &str, rel: &Release, name: &str, url: &str, dir: &Path) -> Result<PathBuf, String> {
+    let file = dir.join(name);
+    let got = if gh_ready() {
+        run("gh", &["release", "download", &rel.tag, "-R", repo.trim(), "-p", name, "-D", &dir.display().to_string(), "--clobber"], None).map(|_| ())
+    } else {
+        Err(String::new())
+    };
+    if got.is_err() || !file.is_file() {
+        run("curl", &["-fsSL", "-o", &file.display().to_string(), url], None).map_err(|e| crate::trf!("téléchargement impossible : {e}", "download failed: {e}"))?;
+    }
+    Ok(file)
+}
+
+/// The checksum in a "<hex>  <file>" line (sha256sum format), lowercase.
+fn expected_sha256(text: &str) -> Option<String> {
+    let h = text.split_whitespace().next()?.to_ascii_lowercase();
+    (h.len() == 64 && h.bytes().all(|b| b.is_ascii_hexdigit())).then_some(h)
+}
+
+fn sha256_file(path: &Path) -> Result<String, String> {
+    use sha2::{Digest, Sha256};
+    use std::io::Read;
+    let mut f = std::fs::File::open(path).map_err(|e| e.to_string())?;
+    let mut h = Sha256::new();
+    let mut buf = [0u8; 64 * 1024];
+    loop {
+        let n = f.read(&mut buf).map_err(|e| e.to_string())?;
+        if n == 0 {
+            break;
+        }
+        h.update(&buf[..n]);
+    }
+    Ok(h.finalize().iter().map(|b| format!("{b:02x}")).collect())
+}
+
 fn find(dir: &Path, ok: impl Fn(&Path) -> bool + Copy) -> Option<PathBuf> {
     for e in std::fs::read_dir(dir).ok()?.flatten() {
         let p = e.path();
@@ -235,7 +280,23 @@ mod tests {
         let app = base.join("installed/orchestra");
         std::fs::create_dir_all(app.parent().unwrap()).unwrap();
         std::fs::write(&app, "ancienne").unwrap();
-        let rel = Release { tag: "v9.0.0".into(), notes: String::new(), assets: vec![("Orchestra-v9.0.0-Linux.tar.gz".into(), format!("file://{}", tar.display()))] };
+        let sum = base.join("Orchestra-v9.0.0-Linux.tar.gz.sha256");
+        std::fs::write(&sum, format!("{}  Orchestra-v9.0.0-Linux.tar.gz\n", sha256_file(&tar).unwrap())).unwrap();
+        let mut rel = Release {
+            tag: "v9.0.0".into(),
+            notes: String::new(),
+            assets: vec![("Orchestra-v9.0.0-Linux.tar.gz".into(), format!("file://{}", tar.display()))],
+        };
+        // No checksum published: refused.
+        assert!(install_to(&app, "moi/orchestra", &rel).is_err());
+        assert_eq!(std::fs::read_to_string(&app).unwrap(), "ancienne");
+        // Wrong checksum: refused.
+        let bad = base.join("bad.sha256");
+        std::fs::write(&bad, format!("{}  x\n", "0".repeat(64))).unwrap();
+        rel.assets.push(("Orchestra-v9.0.0-Linux.tar.gz.sha256".into(), format!("file://{}", bad.display())));
+        assert!(install_to(&app, "moi/orchestra", &rel).is_err());
+        assert_eq!(std::fs::read_to_string(&app).unwrap(), "ancienne");
+        rel.assets[1].1 = format!("file://{}", sum.display());
         let got = install_to(&app, "moi/orchestra", &rel).unwrap();
         assert_eq!(got, app);
         assert!(std::fs::read_to_string(&app).unwrap().contains("nouvelle"));
@@ -243,6 +304,19 @@ mod tests {
         let out = Command::new(&app).output().unwrap();
         assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "nouvelle");
         let _ = std::fs::remove_dir_all(base);
+    }
+
+    #[test]
+    fn checksums() {
+        let h = "AB".repeat(32);
+        assert_eq!(expected_sha256(&format!("{h}  Orchestra-v1-macOS.zip\n")), Some("ab".repeat(32)));
+        assert_eq!(expected_sha256("abc  x"), None);
+        assert_eq!(expected_sha256(&format!("{}  x", "g".repeat(64))), None);
+        assert_eq!(expected_sha256(""), None);
+        let f = std::env::temp_dir().join(format!("orch-sha-{}", std::process::id()));
+        std::fs::write(&f, b"abc").unwrap();
+        assert_eq!(sha256_file(&f).unwrap(), "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad");
+        let _ = std::fs::remove_file(f);
     }
 
     #[test]
