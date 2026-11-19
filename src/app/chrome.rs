@@ -165,9 +165,6 @@ impl NotesApp {
             }
         });
         ui.add_space(12.0);
-        if side_item(ui, SideIcon::Line(Icon::Compose), crate::tr!("Nouvelle page", "New page"), false, 0.0, &t).clicked() {
-            actions.push(Action::NewPage(None));
-        }
         if side_item(ui, SideIcon::Line(Icon::Library), crate::tr!("Bibliothèque", "Library"), self.view == View::Library, 0.0, &t).clicked() {
             self.view = View::Library;
         }
