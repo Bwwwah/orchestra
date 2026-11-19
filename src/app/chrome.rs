@@ -357,7 +357,7 @@ impl NotesApp {
         }
         if locked {
             row.context_menu(|ui| {
-                ui.label(RichText::new(crate::tr!("🔒 Projet en lecture seule", "🔒 Read-only project")).color(t.tertiary));
+                ui.label(RichText::new(crate::tr!("Projet en lecture seule", "Read-only project")).color(t.tertiary));
             });
         } else {
             row.context_menu(|ui| {
@@ -546,6 +546,7 @@ impl NotesApp {
                 let more = icons::button(ui, Icon::More, 28.0, t.text, t.hover, "");
                 let page = self.ws.page_mut(cur).unwrap();
                 let words: usize = page.blocks.iter().map(|b| b.text.split_whitespace().count()).sum();
+                let mut reformatted = None;
                 egui::Popup::menu(&more).show(|ui| {
                     ui.set_min_width(230.0);
                     ui.checkbox(&mut page.full_width, crate::tr!("Pleine largeur", "Full width"));
@@ -572,8 +573,7 @@ impl NotesApp {
                         ui.close();
                     }
                     if ui.button(crate::tr!("Remettre en forme le texte des IA", "Reformat the AIs' text")).on_hover_text(crate::tr!("Tableaux, listes et titres écrits en Markdown brut redeviennent des blocs propres", "Tables, lists and headings written in raw Markdown become clean blocks again")).clicked() {
-                        let n = crate::store::reformat_page(page);
-                        self.status = crate::trf!("{n} bloc(s) remis en forme.", "{n} block(s) reformatted.");
+                        reformatted = Some(crate::store::reformat_page(page));
                         ui.close();
                     }
                     ui.separator();
@@ -588,9 +588,12 @@ impl NotesApp {
                 if icons::button(ui, if fav { Icon::StarFilled } else { Icon::Star }, 28.0, if fav { Color32::from_rgb(232, 179, 52) } else { t.text }, t.hover, crate::tr!("Ajouter aux favoris", "Add to favorites")).clicked() {
                     page.favorite = !fav;
                 }
+                if let Some(n) = reformatted {
+                    self.ack(crate::trf!("{n} bloc(s) remis en forme.", "{n} block(s) reformatted."));
+                }
                 if icons::button(ui, Icon::Link, 28.0, t.text, t.hover, crate::tr!("Copier le lien (Cmd/Ctrl+L)", "Copy link (Cmd/Ctrl+L)")).clicked() {
                     ui.ctx().copy_text(format!("orchestra://page/{cur}"));
-                    self.status = crate::tr!("Lien copié.", "Link copied.").into();
+                    self.ack(crate::tr!("Lien copié.", "Link copied."));
                 }
                 let g = ui.painter().layout_no_wrap(crate::tr!("Partager", "Share").into(), FontId::proportional(14.0), t.text);
                 let (rect, resp) = ui.allocate_exact_size(egui::vec2(g.size().x + 36.0, 28.0), egui::Sense::click());
@@ -631,7 +634,7 @@ impl NotesApp {
         ui.add_space(2.0);
         let mut set: Option<bool> = None;
         if shared {
-            ui.label(RichText::new(crate::tr!("✔ Partagé : le projet, ses pages et sa discussion partent chez l'équipe.", "✔ Shared: the project, its pages and its discussion go to the team.")).size(12.5).color(Color32::from_rgb(68, 131, 97)));
+            ui.label(RichText::new(crate::tr!("Partagé : le projet, ses pages et sa discussion partent chez l'équipe.", "Shared: the project, its pages and its discussion go to the team.")).size(12.5).color(Color32::from_rgb(68, 131, 97)));
             ui.horizontal(|ui| {
                 if ui.button(crate::tr!("Rendre privé", "Make private")).on_hover_text(crate::tr!("Le projet ne part plus chez les autres ; ils gardent leur copie.", "The project no longer goes to the others; they keep their copy.")).clicked() {
                     set = Some(false);
@@ -659,9 +662,9 @@ impl NotesApp {
             self.dirty_since.get_or_insert_with(std::time::Instant::now);
             if v {
                 self.send_everything();
-                self.status = crate::trf!("« {title} » est partagé.", "« {title} » is shared.");
+                self.ack(crate::trf!("« {title} » est partagé.", "« {title} » is shared."));
             } else {
-                self.status = crate::trf!("« {title} » est redevenu privé.", "« {title} » is private again.");
+                self.ack(crate::trf!("« {title} » est redevenu privé.", "« {title} » is private again."));
             }
         }
         ui.separator();
@@ -691,7 +694,7 @@ impl NotesApp {
             if let Some(inv) = invite {
                 if ui.button(crate::tr!("Copier l'invitation", "Copy the invitation")).on_hover_text(crate::tr!("Adresse et code à donner aux autres", "Address and code to give to the others")).clicked() {
                     ui.ctx().copy_text(inv);
-                    self.status = crate::tr!("Adresse et code copiés.", "Address and code copied.").into();
+                    self.ack(crate::tr!("Adresse et code copiés.", "Address and code copied."));
                     ui.close();
                 }
             }

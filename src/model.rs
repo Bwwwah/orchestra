@@ -503,7 +503,7 @@ pub struct Workspace {
 pub struct InboxMsg {
     pub id: String,
     pub at: u64,
-    /// "question", "fin", "rapport", "info".
+    /// "question", "fin", "rapport", "info", "erreur".
     pub kind: String,
     /// Project page id, when it is about one.
     #[serde(default)]

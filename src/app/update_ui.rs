@@ -65,14 +65,15 @@ impl NotesApp {
                 Err(e) => self.upd.last = Some(Err(e)),
             }
         }
-        if let Some(r) = self.upd.install.lock().unwrap().take() {
+        let done = self.upd.install.lock().unwrap().take();
+        if let Some(r) = done {
             self.upd.installing = false;
             match r {
                 Ok(p) => {
                     self.upd.ready = Some(p);
-                    self.status = crate::tr!("Mise à jour installée : redémarrez pour l'utiliser.", "Update installed: restart to use it.").into();
+                    self.info(crate::tr!("Mise à jour installée : redémarrez pour l'utiliser.", "Update installed: restart to use it."));
                 }
-                Err(e) => self.status = crate::trf!("Mise à jour impossible : {e}", "Update failed: {e}"),
+                Err(e) => self.fail(crate::trf!("Mise à jour impossible : {e}", "Update failed: {e}")),
             }
         }
     }

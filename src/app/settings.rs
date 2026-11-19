@@ -488,15 +488,14 @@ impl NotesApp {
         row(ui, crate::tr!("Dossier des données", "Data folder"), &crate::trf!("{path}\nVos pages et réglages (workspace.json), les copies des sessions autonomes, le suivi de l'abonnement.", "{path}\nYour pages and settings (workspace.json), the copies of autonomous sessions, the subscription tracking."), t, |ui| {
             if button(ui, crate::tr!("Copier le chemin", "Copy the path"), t, l).clicked() {
                 ui.ctx().copy_text(path.clone());
-                self.status = crate::tr!("Chemin copié.", "Path copied.").into();
+                self.ack(crate::tr!("Chemin copié.", "Path copied."));
             }
             if button(ui, crate::tr!("Ouvrir le dossier", "Open the folder"), t, l).clicked() {
                 let _ = std::fs::create_dir_all(&dir);
                 let opener = if cfg!(target_os = "macos") { "open" } else if cfg!(windows) { "explorer" } else { "xdg-open" };
-                self.status = match std::process::Command::new(opener).arg(&dir).spawn() {
-                    Ok(_) => crate::tr!("Dossier des données ouvert.", "Data folder opened.").into(),
-                    Err(e) => crate::trf!("Impossible d'ouvrir le dossier : {e}", "Couldn't open the folder: {e}"),
-                };
+                if let Err(e) = std::process::Command::new(opener).arg(&dir).spawn() {
+                    self.fail(crate::trf!("Impossible d'ouvrir le dossier : {e}", "Couldn't open the folder: {e}"));
+                }
             }
         });
         row(ui, crate::tr!("Changer de dossier", "Change folder"), crate::tr!("Lancez l'application avec la variable ORCHESTRA_DIR pour utiliser un autre dossier.", "Launch the app with the ORCHESTRA_DIR variable to use another folder."), t, |_| {});
@@ -530,10 +529,10 @@ impl NotesApp {
         section(ui, crate::tr!("Exporter", "Export"), t, l);
         row(ui, crate::tr!("Toutes les pages en Markdown", "All pages as Markdown"), crate::tr!("Un fichier .md par page dans ce dossier.", "One .md file per page in this folder."), t, |ui| {
             if button(ui, crate::tr!("Exporter", "Export"), t, l).clicked() {
-                self.status = match store::export_all(&self.ws, std::path::Path::new(&self.export_dir)) {
-                    Ok(n) => crate::trf!("{n} page(s) exportée(s) dans {}", "{n} page(s) exported to {}", self.export_dir),
-                    Err(e) => crate::trf!("Export impossible : {e}", "Export failed: {e}"),
-                };
+                let r = store::export_all(&self.ws, std::path::Path::new(&self.export_dir))
+                    .map(|n| crate::trf!("{n} page(s) exportée(s) dans {}", "{n} page(s) exported to {}", self.export_dir))
+                    .map_err(|e| crate::trf!("Export impossible : {e}", "Export failed: {e}"));
+                self.notice(super::notices::Notice::from_result(r));
             }
         });
         ui.add(field(&mut self.export_dir, crate::tr!("/chemin/du/dossier", "/path/to/folder"), f32::INFINITY, t, l));
@@ -549,9 +548,9 @@ impl NotesApp {
                         self.ws.pages.push(p);
                         actions.push(Action::Open(id));
                         self.settings_tab = None;
-                        self.status = crate::tr!("Page importée.", "Page imported.").into();
+                        self.ack(crate::tr!("Page importée.", "Page imported."));
                     }
-                    Err(e) => self.status = crate::trf!("Lecture impossible : {e}", "Couldn't read it: {e}"),
+                    Err(e) => self.fail(crate::trf!("Lecture impossible : {e}", "Couldn't read it: {e}")),
                 }
             }
         });
@@ -572,7 +571,7 @@ impl NotesApp {
         row(ui, crate::tr!("Commande du serveur MCP", "MCP server command"), crate::tr!("À donner à votre client MCP (Claude Desktop, Cursor, un modèle local…).", "To give to your MCP client (Claude Desktop, Cursor, a local model…)."), t, |ui| {
             if button(ui, crate::tr!("Copier", "Copy"), t, l).clicked() {
                 ui.ctx().copy_text(cmd.clone());
-                self.status = crate::tr!("Commande copiée.", "Command copied.").into();
+                self.ack(crate::tr!("Commande copiée.", "Command copied."));
             }
         });
         let mut c = cmd.clone();
@@ -581,7 +580,7 @@ impl NotesApp {
         row(ui, crate::tr!("Bloc de configuration", "Configuration block"), crate::tr!("Le format attendu par la plupart des clients.", "The format most clients expect."), t, |ui| {
             if button(ui, crate::tr!("Copier", "Copy"), t, l).clicked() {
                 ui.ctx().copy_text(config.clone());
-                self.status = crate::tr!("Configuration copiée.", "Configuration copied.").into();
+                self.ack(crate::tr!("Configuration copiée.", "Configuration copied."));
             }
         });
         let mut cfg = config.clone();
@@ -619,7 +618,7 @@ impl NotesApp {
             let st = states.as_ref().and_then(|s| s.iter().find(|x| x.ai == ai).cloned());
             let state = match &st {
                 None => crate::tr!("vérification…", "checking…").to_string(),
-                Some(x) if x.plugged => crate::tr!("✔ branchée", "✔ plugged in").to_string(),
+                Some(x) if x.plugged => crate::tr!("branchée", "plugged in").to_string(),
                 Some(x) if x.installed => crate::tr!("installée, pas branchée", "installed, not plugged in").to_string(),
                 Some(_) => crate::tr!("pas installée sur cette machine", "not installed on this computer").to_string(),
             };
@@ -747,7 +746,7 @@ impl NotesApp {
                 });
             });
             if sync_now {
-                self.run_sync();
+                self.run_sync(true);
             }
             for line in &self.sync_log {
                 ui.label(RichText::new(line).size(13.0).color(t.secondary));
@@ -812,7 +811,7 @@ impl NotesApp {
                 row(ui, crate::tr!("À donner aux autres", "To give to the others"), &crate::trf!("Adresse {addr} · code {code}", "Address {addr} · code {code}"), t, |ui| {
                     if button(ui, crate::tr!("Copier", "Copy"), t, l).clicked() {
                         ui.ctx().copy_text(crate::trf!("Adresse : {addr}\nCode : {code}", "Address: {addr}\nCode: {code}"));
-                        self.status = crate::tr!("Adresse et code copiés.", "Address and code copied.").into();
+                        self.ack(crate::tr!("Adresse et code copiés.", "Address and code copied."));
                     }
                 });
             }

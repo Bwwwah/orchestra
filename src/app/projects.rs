@@ -125,7 +125,7 @@ impl NotesApp {
                         }
                         let busy = self.sync_dialog.is_some() || self.sync_run.is_some();
                         if ui
-                            .add_enabled(!busy, egui::Button::new(RichText::new(crate::tr!("⟳ Synchroniser avec les IA", "⟳ Sync with the AIs")).size(14.0)))
+                            .add_enabled(!busy, egui::Button::new(RichText::new(crate::tr!("Synchroniser avec les IA", "Sync with the AIs")).size(14.0)))
                             .on_hover_text(crate::tr!("Demande à Claude Code (ou Codex) de se brancher au tableau de bord et de faire l'état des lieux de vos projets", "Asks Claude Code (or Codex) to plug into the dashboard and write where each of your projects stands"))
                             .clicked()
                         {
@@ -549,7 +549,7 @@ fn step_icon(ui: &mut egui::Ui, step_id: &str, st: StepStatus, t: &Tone) -> egui
     resp.on_hover_text(crate::trf!("{} — cliquer pour changer", "{} — click to change", st.label()))
 }
 
-fn session_row(ui: &mut egui::Ui, page_id: &str, s: &SessionInfo, t: &Tone) -> Option<String> {
+fn session_row(ui: &mut egui::Ui, page_id: &str, s: &SessionInfo, t: &Tone) -> Option<super::notices::Notice> {
     let mut msg = None;
     let open_key = ("session-open", s.id.as_str());
     let open = flag(ui, open_key);
@@ -599,7 +599,7 @@ fn session_row(ui: &mut egui::Ui, page_id: &str, s: &SessionInfo, t: &Tone) -> O
             ui.add_space(4.0);
             ui.horizontal(|ui| {
                 let cmd = s.resume_command();
-                if ui.button(crate::tr!("▶ Reprendre ici", "▶ Resume here")).on_hover_text(crate::tr!("Rouvre la session dans le terminal intégré", "Reopens the session in the built-in terminal")).clicked() {
+                if ui.button(crate::tr!("Reprendre ici", "Resume here")).on_hover_text(crate::tr!("Rouvre la session dans le terminal intégré", "Reopens the session in the built-in terminal")).clicked() {
                     let resume = match s.tool {
                         crate::sessions::Tool::ClaudeCode => format!("claude --resume {}", s.id),
                         crate::sessions::Tool::Codex => format!("codex resume {}", s.id),
@@ -609,16 +609,16 @@ fn session_row(ui: &mut egui::Ui, page_id: &str, s: &SessionInfo, t: &Tone) -> O
                 }
                 if ui.button(crate::tr!("Terminal macOS", "macOS Terminal")).on_hover_text(&cmd).clicked() {
                     msg = Some(match crate::sessions::open_in_terminal(&cmd) {
-                        Ok(()) => crate::tr!("Session rouverte dans le Terminal.", "Session reopened in the Terminal.").to_string(),
+                        Ok(()) => super::notices::Notice::Ack(crate::tr!("Session rouverte dans le Terminal.", "Session reopened in the Terminal.").to_string()),
                         Err(e) => {
                             ui.ctx().copy_text(cmd.clone());
-                            crate::trf!("Terminal indisponible ({e}) : commande copiée.", "Terminal unavailable ({e}): command copied.")
+                            super::notices::Notice::Error(crate::trf!("Terminal indisponible ({e}) : commande copiée.", "Terminal unavailable ({e}): command copied."))
                         }
                     });
                 }
                 if ui.button(crate::tr!("Copier la commande", "Copy the command")).on_hover_text(&cmd).clicked() {
                     ui.ctx().copy_text(cmd.clone());
-                    msg = Some(crate::tr!("Commande copiée.", "Command copied.").into());
+                    msg = Some(super::notices::Notice::Ack(crate::tr!("Commande copiée.", "Command copied.").into()));
                 }
             });
         });
@@ -639,7 +639,7 @@ pub(super) struct Cx<'a> {
     pub live: &'a [SessionInfo],
     pub pages: &'a [PageRow],
     pub actions: &'a mut Vec<Action>,
-    pub msg: Option<String>,
+    pub msg: Option<super::notices::Notice>,
     /// A "Regard extérieur" is being written for this project.
     pub reviewing: bool,
     /// Who else is in this (shared) project right now, and whether their AI is at work.
@@ -776,7 +776,7 @@ fn columns(ui: &mut egui::Ui, cx: &mut Cx, cols: &[Vec<CardKind>], gap: f32) {
 
 /// The panel at the top of a project's page: header, then the cards, side by side when
 /// the window is wide enough (one, two or three columns), bottoms lined up.
-pub(super) fn project_panel(ui: &mut egui::Ui, cx: &mut Cx) -> Option<String> {
+pub(super) fn project_panel(ui: &mut egui::Ui, cx: &mut Cx) -> Option<super::notices::Notice> {
     ui.spacing_mut().item_spacing.y = 6.0;
     let shown: Option<(String, f64)> = ui.ctx().data(|d| d.get_temp(appear_key()));
     if shown.as_ref().is_none_or(|(id, _)| id != cx.page_id) {
@@ -838,7 +838,7 @@ pub(super) fn project_panel(ui: &mut egui::Ui, cx: &mut Cx) -> Option<String> {
             } else if !pr.read_only {
                 let folder = pr.folder.trim().to_string();
                 let ok = !folder.is_empty() && crate::project::normalize_folder(&folder).is_dir();
-                let r = ui.add_enabled_ui(ok, |ui| action_link(ui, crate::tr!("✦ Remplir avec l'IA", "✦ Fill in with the AI"))).inner;
+                let r = ui.add_enabled_ui(ok, |ui| action_link(ui, crate::tr!("Remplir avec l'IA", "Fill in with the AI"))).inner;
                 let r = r.on_disabled_hover_text(crate::tr!("Indiquez d'abord le dossier du projet", "Set the project's folder first"));
                 egui::Popup::menu(&r).show(|ui| {
                     ui.set_max_width(300.0);
@@ -848,7 +848,7 @@ pub(super) fn project_panel(ui: &mut egui::Ui, cx: &mut Cx) -> Option<String> {
                     ui.add(
                         egui::Label::new(
                             RichText::new(if has {
-                                crate::tr!("⚠ L'état des lieux, le statut et le regard extérieur actuels seront remplacés. Les étapes ne sont pas touchées.", "⚠ The current state, status and outside view will be replaced. The steps aren't touched.")
+                                crate::tr!("L'état des lieux, le statut et le regard extérieur actuels seront remplacés. Les étapes ne sont pas touchées.", "The current state, status and outside view will be replaced. The steps aren't touched.")
                             } else {
                                 crate::tr!("L'IA lit le projet sans rien modifier et écrit l'état des lieux, le statut et un regard extérieur. Les étapes ne sont pas touchées.", "The AI reads the project without changing anything and writes the current state, the status and an outside view. The steps aren't touched.")
                             })
@@ -899,7 +899,7 @@ pub(super) fn project_panel(ui: &mut egui::Ui, cx: &mut Cx) -> Option<String> {
                 let mut ro = pr.read_only;
                 let ro_color = if ro { ORANGE } else { t.tertiary };
                 if ui
-                    .checkbox(&mut ro, RichText::new(crate::tr!("🔒 Lecture seule", "🔒 Read-only")).size(12.5).color(ro_color))
+                    .checkbox(&mut ro, RichText::new(crate::tr!("Lecture seule", "Read-only")).size(12.5).color(ro_color))
                     .on_hover_text(crate::tr!("Empêche de modifier ce projet et ses pages par erreur. Les IA peuvent toujours mettre à jour l'état des lieux et les étapes.", "Prevents editing this project and its pages by mistake. The AIs can still update the current state and the steps."))
                     .changed()
                 {
@@ -958,7 +958,7 @@ fn summary_card(ui: &mut egui::Ui, cx: &mut Cx, folded_h: f32, extra: f32) -> f3
         }
         if pr.summary.trim().is_empty() {
             if !cx.ai.filling(page_id) {
-                ui.label(RichText::new(crate::tr!("Pas encore écrit. Cliquez sur « ✦ Remplir avec l'IA » en haut, ou demandez à votre IA : « fais l'état des lieux de ce projet dans le tableau de bord ».", "Not written yet. Click « ✦ Fill in with the AI » at the top, or ask your AI: « write the current state of this project in the dashboard ».")).color(t.tertiary).italics());
+                ui.label(RichText::new(crate::tr!("Pas encore écrit. Cliquez sur « Remplir avec l'IA » en haut, ou demandez à votre IA : « fais l'état des lieux de ce projet dans le tableau de bord ».", "Not written yet. Click « Fill in with the AI » at the top, or ask your AI: « write the current state of this project in the dashboard ».")).color(t.tertiary).italics());
             }
             return;
         }
@@ -1200,7 +1200,7 @@ fn ai_steps(ui: &mut egui::Ui, page_id: &str, pr: &mut Project, ai: &mut super::
         );
         let mut close = false;
         ui.horizontal(|ui| {
-            if ui.add_enabled(!text.trim().is_empty(), egui::Button::new(RichText::new(crate::tr!("✦ Transformer en étapes", "✦ Turn into steps")).size(13.0))).clicked() {
+            if ui.add_enabled(!text.trim().is_empty(), egui::Button::new(RichText::new(crate::tr!("Transformer en étapes", "Turn into steps")).size(13.0))).clicked() {
                 super::ai_fill::request(ui.ctx(), super::ai_fill::AiReq::Tasks { page_id: page_id.to_string(), folder: folder.clone(), existing: existing.clone(), prefer, text: Some(text.clone()) });
                 close = true;
             }
@@ -1217,9 +1217,9 @@ fn ai_steps(ui: &mut egui::Ui, page_id: &str, pr: &mut Project, ai: &mut super::
     }
     ui.horizontal_wrapped(|ui| {
         ui.spacing_mut().item_spacing.x = 8.0;
-        let r = ui.add_enabled_ui(folder_ok, |ui| action_link(ui, crate::tr!("✦ Suggérer des étapes", "✦ Suggest steps"))).inner;
+        let r = ui.add_enabled_ui(folder_ok, |ui| action_link(ui, crate::tr!("Suggérer des étapes", "Suggest steps"))).inner;
         let r = r
-            .on_hover_text(crate::tr!("L'IA lit le projet sans rien modifier et propose les prochaines étapes ; vous choisissez celles à garder.", "The AI reads the project without changing anything and proposes the next steps; you choose which to keep."))
+            .on_hover_text(crate::tr!("L'IA lit le code sans rien modifier et propose des étapes précises (fonctionnalité, technique, sécurité), faites pour être menées par une IA en autonomie ; vous choisissez celles à garder.", "The AI reads the code without changing anything and proposes precise steps (feature, technical, security), made to be carried out by an AI on its own; you choose which to keep."))
             .on_disabled_hover_text(crate::tr!("Indiquez d'abord le dossier du projet", "Set the project's folder first"));
         if r.clicked() && folder_ok {
             super::ai_fill::request(ui.ctx(), super::ai_fill::AiReq::Tasks { page_id: page_id.to_string(), folder: folder.clone(), existing: existing.clone(), prefer, text: None });
@@ -1734,7 +1734,7 @@ impl NotesApp {
                     }
                     self.detect_changes();
                 }
-                Err(e) => self.status = crate::trf!("Regard extérieur impossible : {e}", "Outside view failed: {e}"),
+                Err(e) => self.fail(crate::trf!("Regard extérieur impossible : {e}", "Outside view failed: {e}")),
             }
         }
         if !self.reviews.is_empty() {

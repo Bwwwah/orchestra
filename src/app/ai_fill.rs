@@ -114,9 +114,9 @@ impl NotesApp {
                         apply_fill(pr, &f, tool.label());
                     }
                     self.detect_changes();
-                    self.status = crate::trf!("{} a rempli le projet.", "{} filled in the project.", tool.label());
+                    self.info(crate::trf!("{} a rempli le projet.", "{} filled in the project.", tool.label()));
                 }
-                Err(e) => self.status = crate::trf!("Remplissage par l'IA impossible : {e}", "The AI couldn't fill in the project: {e}"),
+                Err(e) => self.fail(crate::trf!("Remplissage par l'IA impossible : {e}", "The AI couldn't fill in the project: {e}")),
             }
         }
         // Finished task proposals.
@@ -127,7 +127,7 @@ impl NotesApp {
                 Ok(list) => {
                     self.ai.proposals.insert(id, list.into_iter().map(|t| (t, true)).collect());
                 }
-                Err(e) => self.status = crate::trf!("Pas de tâches proposées : {e}", "No task proposed: {e}"),
+                Err(e) => self.fail(crate::trf!("Pas de tâches proposées : {e}", "No task proposed: {e}")),
             }
         }
         if !self.ai.fills.is_empty() || !self.ai.tasks.is_empty() || !self.ai.pending.is_empty() {

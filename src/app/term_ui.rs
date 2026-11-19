@@ -69,7 +69,7 @@ impl NotesApp {
                 self.term_open = true;
                 self.term_focus = true;
             }
-            Err(e) => self.status = crate::trf!("Impossible d'ouvrir le terminal : {e}", "Couldn't open the terminal: {e}"),
+            Err(e) => self.fail(crate::trf!("Impossible d'ouvrir le terminal : {e}", "Couldn't open the terminal: {e}")),
         }
     }
 
@@ -136,7 +136,7 @@ impl NotesApp {
                             if ui.add(egui::Button::new(RichText::new(label).size(12.0)).frame(false)).on_hover_text(crate::tr!("Ou sélectionnez à la souris puis Cmd+C", "Or select with the mouse then Cmd+C")).clicked() {
                                 if let Some(term) = self.terms.get(self.term_active) {
                                     ui.ctx().copy_text(term.selected_text().unwrap_or_else(|| term.text()));
-                                    self.status = if has_sel { crate::tr!("Sélection copiée.", "Selection copied.") } else { crate::tr!("Contenu du terminal copié.", "Terminal content copied.") }.into();
+                                    self.ack(if has_sel { crate::tr!("Sélection copiée.", "Selection copied.") } else { crate::tr!("Contenu du terminal copié.", "Terminal content copied.") });
                                 }
                             }
                             if ui.add(egui::Button::new(RichText::new("+ Shell").size(12.0)).frame(false)).on_hover_text(crate::tr!("Nouveau terminal", "New terminal")).clicked() {

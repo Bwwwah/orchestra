@@ -51,7 +51,11 @@ pub struct NotesApp {
     search_focus: bool,
     search_ask: search::Ask,
     search_sel: usize,
-    status: String,
+    /// Popups on screen (see notices.rs); the messages themselves go to the inbox.
+    toasts: Vec<notices::Toast>,
+    /// Messages raised while the workspace is borrowed, shown at the end of the frame.
+    said: Vec<notices::Notice>,
+    toast_seq: u64,
     snapshot: HashMap<String, String>,
     settings_snapshot: String,
     dirty_since: Option<Instant>,
@@ -148,7 +152,9 @@ impl NotesApp {
             search_focus: false,
             search_ask: Default::default(),
             search_sel: 0,
-            status: String::new(),
+            toasts: vec![],
+            said: vec![],
+            toast_seq: 0,
             snapshot: HashMap::new(),
             settings_snapshot: String::new(),
             dirty_since: None,
@@ -374,7 +380,7 @@ impl NotesApp {
                 self.known_mtime = store::modified(&store::workspace_path());
                 self.dirty_since = None;
             }
-            Err(e) => self.status = crate::trf!("Enregistrement impossible : {e}", "Couldn't save: {e}"),
+            Err(e) => self.fail(crate::trf!("Enregistrement impossible : {e}", "Couldn't save: {e}")),
         }
     }
 
@@ -394,20 +400,26 @@ impl NotesApp {
                     self.current = None;
                 }
             }
-            self.status = crate::tr!("Mis à jour depuis le disque (IA ou synchronisation).", "Updated from disk (AI or sync).").into();
         }
     }
 
-    fn run_sync(&mut self) {
+    /// Sync with the team. `by_hand`: asked from the settings (a short confirmation then);
+    /// the automatic one every 30 s stays silent unless it fails.
+    fn run_sync(&mut self, by_hand: bool) {
         self.last_sync = Instant::now();
         self.detect_changes();
-        let line = match collab::sync(&mut self.ws) {
-            Ok(r) => r,
+        let res = collab::sync(&mut self.ws);
+        let line = match &res {
+            Ok(r) => r.clone(),
             Err(e) => crate::trf!("Échec : {e}", "Failed: {e}"),
         };
         self.sync_log.insert(0, line.clone());
         self.sync_log.truncate(20);
-        self.status = line;
+        match res {
+            Ok(_) if by_hand => self.ack(line),
+            Ok(_) => {}
+            Err(e) => self.fail(crate::trf!("Synchronisation impossible : {e}", "Sync failed: {e}")),
+        }
         // Merged pages keep their own times: refresh the snapshot without touching them.
         self.take_snapshot();
         self.save_now();
@@ -532,7 +544,7 @@ impl NotesApp {
         let z = original::clamp_zoom(z);
         ctx.set_zoom_factor(z);
         self.ws.settings.zoom = z;
-        self.status = crate::trf!("Zoom {} %", "Zoom {} %", (z * 100.0).round());
+        self.ack(crate::trf!("Zoom {} %", "Zoom {} %", (z * 100.0).round()));
     }
 
     /// The desktop menu's shortcuts, as the original defines them (MECHANICS.md, "Shortcuts").
@@ -600,7 +612,7 @@ impl NotesApp {
                         let link = format!("orchestra://page/{}", p.id);
                         let text = if e == "copy_named_link" { format!("[{}]({link})", p.display_title()) } else { link };
                         ctx.copy_text(text);
-                        self.status = crate::tr!("Lien copié.", "Link copied.").into();
+                        self.ack(crate::tr!("Lien copié.", "Link copied."));
                     }
                 }
                 "sidebar" => self.ws.settings.sidebar_hidden = !self.ws.settings.sidebar_hidden,
@@ -669,11 +681,11 @@ impl NotesApp {
                             .filter(|p| self.ws.page(p).map(|x| !x.trashed).unwrap_or(false))
                             .or_else(|| self.ws.pages.iter().find(|p| !p.trashed).map(|p| p.id.clone()));
                     }
-                    self.status = crate::tr!("Page placée dans la corbeille.", "Page moved to the trash.").into();
+                    self.ack(crate::tr!("Page placée dans la corbeille.", "Page moved to the trash."));
                 }
                 Action::Restore(id) => {
                     self.ws.set_trashed(&id, false);
-                    self.status = crate::tr!("Page restaurée.", "Page restored.").into();
+                    self.ack(crate::tr!("Page restaurée.", "Page restored."));
                 }
                 Action::DeleteForever(id) => {
                     self.ws.delete_forever(&id);
@@ -688,10 +700,10 @@ impl NotesApp {
                         let dir = std::path::PathBuf::from(&self.export_dir);
                         let file = dir.join(format!("{}.md", store::safe_name(&p.display_title())));
                         let md = store::page_to_markdown(&self.ws, p);
-                        self.status = match std::fs::create_dir_all(&dir).and_then(|_| std::fs::write(&file, md)) {
-                            Ok(()) => crate::trf!("Exporté : {}", "Exported: {}", file.display()),
-                            Err(e) => crate::trf!("Export impossible : {e}", "Export failed: {e}"),
-                        };
+                        self.notice(notices::Notice::from_result(match std::fs::create_dir_all(&dir).and_then(|_| std::fs::write(&file, md)) {
+                            Ok(()) => Ok(crate::trf!("Exporté : {}", "Exported: {}", file.display())),
+                            Err(e) => Err(crate::trf!("Export impossible : {e}", "Export failed: {e}")),
+                        }));
                     }
                 }
                 Action::OpenRow(db_page, row) => {
@@ -720,13 +732,13 @@ impl NotesApp {
                 }
                 Action::LocalCopy(id) => {
                     if let Some(n) = self.ws.local_copy(&id) {
-                        self.status = crate::tr!("Copie locale créée : elle reste privée et ne suit plus le projet partagé.", "Local copy created: it stays private and no longer follows the shared project.").into();
+                        self.info(crate::tr!("Copie locale créée : elle reste privée et ne suit plus le projet partagé.", "Local copy created: it stays private and no longer follows the shared project."));
                         self.navigate(n);
                     }
                 }
                 Action::RevertDoc(id) => match crate::docs::revert_to_file(&mut self.ws, &id) {
-                    Ok(()) => self.status = crate::tr!("Page remise à l'identique du fichier.", "Page reset to match the file.").into(),
-                    Err(e) => self.status = crate::trf!("Impossible de relire le fichier : {e}", "Couldn't read the file again: {e}"),
+                    Ok(()) => self.ack(crate::tr!("Page remise à l'identique du fichier.", "Page reset to match the file.")),
+                    Err(e) => self.fail(crate::trf!("Impossible de relire le fichier : {e}", "Couldn't read the file again: {e}")),
                 },
                 Action::NewProject(title, folder) => {
                     let id = self.ws.create_project(&title, &folder);
@@ -899,8 +911,8 @@ impl NotesApp {
                                 let launchers = self.ais.launchers();
                                 let mut cx = projects::Cx { page_id: &page_id, pr, new_step: &mut self.new_step, t: &t, live, pages: &tree, actions, msg: None, reviewing, peers, vers: &mut self.versions, launchers, title: page_title.clone(), ai: &mut self.ai };
                                 let _p = Section::start("panneau projet");
-                                if let Some(msg) = projects::project_panel(ui, &mut cx) {
-                                    self.status = msg;
+                                if let Some(m) = projects::project_panel(ui, &mut cx) {
+                                    self.said.push(m);
                                 }
                             });
                         ui.add_space(16.0);
@@ -1041,7 +1053,7 @@ impl eframe::App for NotesApp {
         self.update_tick(&ctx);
         self.versions.tick(&ctx);
         if let Some(m) = self.versions.status.take() {
-            self.status = m;
+            self.notice(m);
         }
         // Every 10 s, bring the projects' documentation pages in line with their files.
         if self.docs_checked.is_none_or(|t| t.elapsed().as_secs() >= 10) {
@@ -1057,11 +1069,14 @@ impl eframe::App for NotesApp {
             ctx.request_repaint_after(std::time::Duration::from_secs(10));
         }
         if !self.mcp_report_shown {
-            if let Some(r) = self.mcp_report.lock().unwrap().as_ref() {
-                if let Some(msg) = crate::setup::summary(r) {
-                    self.status = msg;
-                }
+            let done = self.mcp_report.lock().unwrap().as_ref().map(|r| (crate::setup::summary(r), r.iter().any(|(_, o)| matches!(o, crate::setup::Outcome::Failed(_)))));
+            if let Some((msg, failed)) = done {
                 self.mcp_report_shown = true;
+                match msg {
+                    Some(m) if failed => self.fail(m),
+                    Some(m) => self.info(m),
+                    None => {}
+                }
             }
         }
         self.shortcuts(&ctx, &mut actions);
@@ -1092,19 +1107,6 @@ impl eframe::App for NotesApp {
             .exact_size(original::TAB_BAR_HEIGHT)
             .frame(egui::Frame::new().fill(page_fill))
             .show(ui, |ui| self.tab_strip(ui));
-        if !self.status.is_empty() {
-            egui::Panel::bottom("status").frame(egui::Frame::new().fill(page_fill).inner_margin(egui::Margin::symmetric(12, 4))).show(ui, |ui| {
-                ui.horizontal(|ui| {
-                    ui.label(RichText::new(&self.status).small());
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        let t = tone(ui.visuals().dark_mode);
-                        if icons::button(ui, icons::Icon::Close, 20.0, t.secondary, t.hover, crate::tr!("Masquer", "Hide")).clicked() {
-                            self.status.clear();
-                        }
-                    });
-                });
-            });
-        }
         self.side_w = 0.0;
         self.dock_h = 0.0;
         self.terminal_dock(ui, page_fill);
@@ -1132,9 +1134,15 @@ impl eframe::App for NotesApp {
                 egui::ScrollArea::vertical().auto_shrink([false, false]).id_salt("inbox").show(ui, |ui| self.inbox_view(ui, &mut actions));
             }
         });
-        if self.settings_tab.is_none() {
+        // The round AI button only while no AI is plugged in (it leads to plugging one).
+        let fab = self.settings_tab.is_none() && self.ais.none_plugged();
+        if fab {
             self.ai_button(&ctx);
         }
+        for m in std::mem::take(&mut self.said) {
+            self.notice(m);
+        }
+        self.toasts_ui(&ctx, fab);
         self.search_window(&ctx, &mut actions);
         self.settings_window(&ctx, &mut actions);
         let had_actions = !actions.is_empty();
@@ -1169,7 +1177,7 @@ impl eframe::App for NotesApp {
         }
         let c = &self.ws.settings.collab;
         if c.auto_sync && c.connector != ConnectorKind::None && self.last_sync.elapsed() > Duration::from_secs(30) {
-            self.run_sync();
+            self.run_sync(false);
         }
         ctx.request_repaint_after(Duration::from_millis(500));
     }
@@ -1933,6 +1941,7 @@ fn apply_kind(
 // -------------------------------------------------------------------- databases
 
 mod ai_fill;
+mod notices;
 mod ai_ui;
 mod chrome;
 mod projects;

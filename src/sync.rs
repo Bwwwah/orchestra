@@ -339,14 +339,38 @@ pub fn parse_tasks(answer: &str) -> Vec<String> {
 /// steps already there, not to repeat.
 pub fn ask_tasks(folder: &str, existing: &[String], prefer: Option<Tool>) -> Result<Vec<String>, String> {
     let have = if existing.is_empty() { crate::tr!("(aucune)", "(none)").to_string() } else { existing.iter().map(|e| format!("- {e}")).collect::<Vec<_>>().join("\n") };
-    let prompt = crate::trf!("Propose les 3 à 7 prochaines tâches concrètes du projet du dossier « {folder} ». Lis-le rapidement SANS RIEN MODIFIER \
-         (README, structure, `git log --oneline -15`, `git status`). Ne répète pas les tâches déjà là :\n{have}\n\n\
-         Réponds UNIQUEMENT par la liste, une tâche par ligne commençant par « - », une action courte à l'infinitif \
-         (tu peux la préfixer d'un domaine court suivi de « : », ex. « UI : … »), la plus utile d'abord.", "Propose the next 3 to 7 concrete tasks of the project in the folder « {folder} ». Read it quickly WITHOUT CHANGING ANYTHING \
-         (README, structure, `git log --oneline -15`, `git status`). Don't repeat the tasks already there:\n{have}\n\n\
-         Answer ONLY with the list, one task per line starting with « - », a short action \
-         (you may prefix it with a short area followed by « : », e.g. « UI: … »), the most useful first.");
-    let (answer, _) = ask(folder, prompt, "Read,Glob,Grep,Bash(git log:*),Bash(git status:*),Bash(ls:*)", 20, prefer)?;
+    // These steps are what the AIs work on when they run on their own (Orchestration page):
+    // each must be a real piece of work, precise enough to be done and checked without a human.
+    let prompt = crate::trf!("Tu prépares le travail d'une IA qui va avancer SEULE sur le projet du dossier « {folder} ». \
+         Lis-le SANS RIEN MODIFIER, et lis vraiment le code, pas seulement le README : structure, manifestes \
+         (Cargo.toml, package.json…), les fichiers source principaux, les tests, `git log --oneline -15`, `git status`.\n\
+         Propose ensuite 4 à 8 étapes, réparties entre ces trois domaines :\n\
+         - Fonctionnalité : une fonction utile qui manque ou qui est inachevée, vue dans le code ;\n\
+         - Technique : un bug probable, une fragilité, un manque de tests sur du code critique, une lenteur, du code dupliqué ;\n\
+         - Sécurité : secrets en clair, entrées non validées, commandes shell construites à partir d'entrées, permissions, dépendances à risque.\n\
+         Chaque étape doit pouvoir être faite et vérifiée par une IA seule en une session : précise, concrète, \
+         elle nomme le fichier, le module ou la fonction concernés. \
+         Interdit : les étapes vagues (« améliorer l'UX », « optimiser le code »), la doc ou le README, les tâches de routine \
+         (commit, push, publier une version), et ce qui demande une décision ou un accès humain. \
+         Ne répète pas les étapes déjà là :\n{have}\n\n\
+         Réponds UNIQUEMENT par la liste, la plus importante d'abord, une étape par ligne au format \
+         « - Domaine : action à l'infinitif (fichier ou module) », 140 caractères au plus. \
+         Exemple : « - Sécurité : échapper le nom de dossier passé à la commande git (src/git.rs) ».", "You are preparing the work of an AI that will move the project in the folder « {folder} » forward ON ITS OWN. \
+         Read it WITHOUT CHANGING ANYTHING, and really read the code, not just the README: structure, manifests \
+         (Cargo.toml, package.json…), the main source files, the tests, `git log --oneline -15`, `git status`.\n\
+         Then propose 4 to 8 steps, spread across these three areas:\n\
+         - Feature: a useful function that is missing or unfinished, seen in the code;\n\
+         - Technical: a likely bug, a fragile spot, missing tests on critical code, something slow, duplicated code;\n\
+         - Security: secrets in clear, unchecked input, shell commands built from input, permissions, risky dependencies.\n\
+         Each step must be doable and checkable by an AI alone in one session: precise, concrete, \
+         naming the file, module or function concerned. \
+         Not allowed: vague steps (« improve the UX », « optimise the code »), docs or README, routine chores \
+         (commit, push, publish a release), and anything needing a human decision or access. \
+         Don't repeat the steps already there:\n{have}\n\n\
+         Answer ONLY with the list, the most important first, one step per line as \
+         « - Area: action (file or module) », 140 characters at most. \
+         Example: « - Security: escape the folder name passed to the git command (src/git.rs) ».");
+    let (answer, _) = ask(folder, prompt, "Read,Glob,Grep,Bash(git log:*),Bash(git status:*),Bash(ls:*)", 40, prefer)?;
     let tasks = parse_tasks(&answer);
     if tasks.is_empty() {
         return Err(crate::tr!("l'IA n'a proposé aucune tâche", "the AI proposed no task").into());

@@ -398,7 +398,7 @@ impl NotesApp {
         let text = crate::trf!("{why} · {} étape(s) · ≈ {:.0} % · {} commit(s)", "{why} · {} step(s) · ≈ {:.0} % · {} commit(s)", rec.steps_done.len(), rec.pct, commits.len());
         self.ws.notify("fin", &project, &crate::trf!("Fin de session sur {}", "End of session on {}", rec.title), &text, Some(page));
         self.detect_changes();
-        self.status = crate::trf!("Session autonome terminée sur {} : {why}.", "Autonomous session finished on {}: {why}.", rec.title);
+        self.ack(crate::trf!("Session autonome terminée sur {} : {why}.", "Autonomous session finished on {}: {why}.", rec.title));
     }
 
     /// A page under "Rapports des IA › <day>".
@@ -493,7 +493,7 @@ impl NotesApp {
                     ui.add_space(14.0);
                 }
                 if let Some(msg) = self.launch_card(ui, &ctx, &t) {
-                    self.status = msg;
+                    self.notice(msg);
                 }
                 ui.add_space(14.0);
                 self.history_card(ui, &t, actions);
@@ -762,7 +762,7 @@ impl NotesApp {
     }
 
     /// The projects that can be started; returns a message to show.
-    fn launch_card(&mut self, ui: &mut egui::Ui, ctx: &egui::Context, t: &Tone) -> Option<String> {
+    fn launch_card(&mut self, ui: &mut egui::Ui, ctx: &egui::Context, t: &Tone) -> Option<super::notices::Notice> {
         let mut msg = None;
         let projects: Vec<(String, String, String)> = self
             .ws
@@ -862,9 +862,9 @@ impl NotesApp {
                     if let Some(x) = self.orch.drafts.get_mut(&id) {
                         x.pick = false;
                     }
-                    msg = Some(crate::trf!("Session autonome lancée sur {title}.", "Autonomous session started on {title}."));
+                    msg = Some(super::notices::Notice::Ack(crate::trf!("Session autonome lancée sur {title}.", "Autonomous session started on {title}.")));
                 }
-                Err(e) => msg = Some(format!("{title} : {e}.")),
+                Err(e) => msg = Some(super::notices::Notice::Error(format!("{title} : {e}."))),
             }
         }
         msg
@@ -952,9 +952,9 @@ impl NotesApp {
                                     x.closed = if a == "merge" { crate::tr!("fusionné", "merged").into() } else { crate::tr!("abandonné", "discarded").into() };
                                 }
                                 self.dirty_since.get_or_insert_with(Instant::now);
-                                self.status = m;
+                                self.info(m);
                             }
-                            Err(e) => self.status = format!("{} : {e}", rec.title),
+                            Err(e) => self.fail(format!("{} : {e}", rec.title)),
                         }
                     }
                 }
@@ -984,7 +984,7 @@ impl NotesApp {
                         }
                     });
                 });
-                ui.label(RichText::new(crate::tr!("Les questions des IA, la fin de leurs sessions de travail et les rapports (rangés dans la page « Rapports des IA »).", "The AIs' questions, the end of their work sessions and the reports (kept in the « AI reports » page).")).color(t.secondary));
+                ui.label(RichText::new(crate::tr!("Les questions des IA, la fin de leurs sessions de travail, les rapports (rangés dans la page « Rapports des IA ») et les messages de l'application, dont les erreurs.", "The AIs' questions, the end of their work sessions, the reports (kept in the « AI reports » page) and the app's messages, errors included.")).color(t.secondary));
                 ui.add_space(12.0);
                 if self.ws.inbox.is_empty() {
                     ui.label(RichText::new(crate::tr!("Rien pour l'instant.", "Nothing yet.")).color(t.tertiary).italics());
@@ -994,6 +994,7 @@ impl NotesApp {
                         "question" => (Color32::from_rgb(144, 101, 176), crate::tr!("Question", "Question")),
                         "fin" => (super::projects::GREEN, crate::tr!("Session", "Session")),
                         "rapport" => (super::projects::BLUE, crate::tr!("Rapport", "Report")),
+                        "erreur" => (Color32::from_rgb(224, 62, 62), crate::tr!("Erreur", "Error")),
                         _ => (t.tertiary, crate::tr!("Info", "Info")),
                     };
                     let bg = super::projects::hover_begin(ui);
@@ -1107,9 +1108,9 @@ fn outcome_mark(outcome: &str, closed: &str, t: &Tone) -> (&'static str, Color32
     }
 }
 
-/// "▶ Lancer": a filled button.
+/// "Lancer": a filled button.
 fn start_button(ui: &mut egui::Ui, enabled: bool, t: &Tone) -> egui::Response {
-    let text = crate::tr!("▶ Lancer", "▶ Start");
+    let text = crate::tr!("Lancer", "Start");
     let g = ui.painter().layout_no_wrap(text.to_string(), semibold(13.0), Color32::WHITE);
     let sense = if enabled { egui::Sense::click() } else { egui::Sense::hover() };
     let (rect, resp) = ui.allocate_exact_size(g.size() + egui::vec2(24.0, 12.0), sense);

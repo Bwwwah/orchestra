@@ -55,7 +55,7 @@ pub struct Versions {
     /// Running job per project page.
     jobs: HashMap<String, Job>,
     drafts: HashMap<String, Draft>,
-    pub status: Option<String>,
+    pub status: Option<super::notices::Notice>,
     /// gh: (installed, signed in), checked in the background every 30 s while needed.
     gh: Slot<(bool, bool)>,
     gh_last: Option<(bool, bool)>,
@@ -155,11 +155,11 @@ impl Versions {
             let out = job.out.lock().unwrap().take().unwrap();
             match out {
                 Outcome::Done(m) => {
-                    self.status = Some(m);
+                    self.status = Some(super::notices::Notice::Info(m));
                     self.drafts.remove(&id);
                 }
                 Outcome::Quiet => {}
-                Outcome::Failed(e) => self.status = Some(format!("{} : {e}", job.what)),
+                Outcome::Failed(e) => self.status = Some(super::notices::Notice::Error(format!("{} : {e}", job.what))),
                 Outcome::Message(m) => {
                     if let Some(Draft::Commit { msg }) = self.drafts.get_mut(&id) {
                         *msg = m;
@@ -351,14 +351,14 @@ pub(super) fn versions_card(ui: &mut egui::Ui, v: &mut Versions, page_id: &str, 
                 // Each piece stays whole and goes to the next line when it doesn't fit.
                 ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Extend);
                 if s.changes.is_empty() {
-                    ui.label(small(crate::tr!("✔ Tout est enregistré", "✔ Everything is saved"), GREEN));
+                    ui.label(small(crate::tr!("Tout est enregistré", "Everything is saved"), GREEN));
                 } else {
                     let files: Vec<String> = s.changes.iter().take(12).map(|l| l.get(3..).unwrap_or(l).to_string()).collect();
                     let more = if s.changes.len() > 12 { crate::trf!("\n… et {} autres", "\n… and {} more", s.changes.len() - 12) } else { String::new() };
-                    ui.label(small(crate::trf!("● {} modification(s) non enregistrée(s)", "● {} unsaved change(s)", s.changes.len()), ORANGE)).on_hover_text(files.join("\n") + &more);
+                    ui.label(small(crate::trf!("{} modification(s) non enregistrée(s)", "{} unsaved change(s)", s.changes.len()), ORANGE)).on_hover_text(files.join("\n") + &more);
                 }
                 if s.ahead > 0 && s.behind > 0 {
-                    ui.label(small(crate::trf!("⚠ Divergé : ↑ {} ici, ↓ {} sur GitHub", "⚠ Diverged: ↑ {} here, ↓ {} on GitHub", s.ahead, s.behind), ORANGE))
+                    ui.label(small(crate::trf!("Divergé : ↑ {} ici, ↓ {} sur GitHub", "Diverged: ↑ {} here, ↓ {} on GitHub", s.ahead, s.behind), ORANGE))
                         .on_hover_text(crate::tr!("Des commits des deux côtés. « Récupérer » replace les vôtres après ceux de GitHub, puis vous pourrez envoyer.", "Commits on both sides. « Pull » puts yours after GitHub's, then you can push."));
                 } else if s.ahead > 0 {
                     ui.label(small(crate::trf!("↑ {} à envoyer", "↑ {} to push", s.ahead), BLUE));
@@ -371,7 +371,7 @@ pub(super) fn versions_card(ui: &mut egui::Ui, v: &mut Versions, page_id: &str, 
                     ui.label(small(crate::trf!("{} commit(s) depuis {}", "{} commit(s) since {}", s.since_tag, s.last_tag.as_deref().unwrap_or("")), t.tertiary));
                 }
                 if s.remote.is_some() {
-                    let r = ui.add_enabled_ui(busy.is_none(), |ui| super::projects::action_link(ui, crate::tr!("⟳ Vérifier", "⟳ Check"))).inner;
+                    let r = ui.add_enabled_ui(busy.is_none(), |ui| super::projects::action_link(ui, crate::tr!("Vérifier", "Check"))).inner;
                     if r.on_hover_text(crate::tr!("Demande à GitHub ce qui a changé (git fetch) et compare avec vos fichiers", "Asks GitHub what changed (git fetch) and compares with your files")).clicked() && busy.is_none() {
                         let root = s.root.clone();
                         v.start(page_id, folder, crate::tr!("Vérification auprès de GitHub", "Checking with GitHub"), &ctx, move || match crate::git::check(&root) {

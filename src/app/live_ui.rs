@@ -45,17 +45,17 @@ impl NotesApp {
             let port = if c.live_port == 0 { live::DEFAULT_PORT } else { c.live_port };
             match live::host(port, &code, wake) {
                 Ok(l) => {
-                    self.status = crate::trf!("En direct : hébergé à l'adresse {}", "Live: hosted at {}", l.status().address);
+                    self.info(crate::trf!("En direct : hébergé à l'adresse {}", "Live: hosted at {}", l.status().address));
                     self.live = Some(l);
                 }
                 Err(e) => {
-                    self.status = crate::trf!("Impossible d'héberger sur le port {port} : {e}", "Couldn't host on port {port}: {e}");
+                    self.fail(crate::trf!("Impossible d'héberger sur le port {port} : {e}", "Couldn't host on port {port}: {e}"));
                     return;
                 }
             }
         } else {
             if c.live_address.trim().is_empty() {
-                self.status = crate::tr!("Indiquez l'adresse de l'hôte.", "Enter the host's address.").into();
+                self.fail(crate::tr!("Indiquez l'adresse de l'hôte.", "Enter the host's address."));
                 return;
             }
             let name = self.my_name();
@@ -108,7 +108,7 @@ impl NotesApp {
                 }
                 LiveMsg::Disconnected { reason } => {
                     self.peers.clear();
-                    self.status = crate::trf!("En direct : {reason}, nouvelle tentative…", "Live: {reason}, trying again…");
+                    self.ack(crate::trf!("En direct : {reason}, nouvelle tentative…", "Live: {reason}, trying again…"));
                 }
                 LiveMsg::Pages { pages, deleted } => {
                     merged_any |= self.merge_remote(pages, deleted);

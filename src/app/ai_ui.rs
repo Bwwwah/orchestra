@@ -12,13 +12,18 @@ pub struct Ais {
     pub states: Arc<Mutex<Option<Vec<AiState>>>>,
     /// An AI being plugged or unplugged (key), and the message to show when it's done.
     pub busy: Arc<Mutex<Option<String>>>,
-    pub done_msg: Arc<Mutex<Option<String>>>,
+    pub done_msg: Arc<Mutex<Option<Result<String, String>>>>,
     pub usage: Option<crate::usage::Usage>,
     pub usage_read: Option<Instant>,
     pub tracking: bool,
 }
 
 impl Ais {
+    /// True once the check is done and no AI is plugged in: the round AI button shows then.
+    pub fn none_plugged(&self) -> bool {
+        self.states.lock().unwrap().as_ref().is_some_and(|s| !s.iter().any(|x| x.plugged))
+    }
+
     pub fn plugged(&self) -> Vec<Ai> {
         self.states.lock().unwrap().as_ref().map(|s| s.iter().filter(|x| x.plugged).map(|x| x.ai).collect()).unwrap_or_default()
     }
@@ -75,14 +80,14 @@ impl NotesApp {
             let text = if on {
                 let exe = std::env::current_exe().unwrap_or_default();
                 match crate::setup::plug(ai, &exe) {
-                    crate::setup::Outcome::Failed(e) => crate::trf!("{} : branchement impossible ({e}).", "{}: couldn't plug it in ({e}).", ai.label()),
-                    _ if ai == Ai::ClaudeDesktop => crate::trf!("{} est branchée : redémarrez l'app Claude pour qu'elle le voie.", "{} is plugged in: restart the Claude app so it sees it.", ai.label()),
-                    _ => crate::trf!("{} est branché au tableau de bord.", "{} is plugged into the dashboard.", ai.label()),
+                    crate::setup::Outcome::Failed(e) => Err(crate::trf!("{} : branchement impossible ({e}).", "{}: couldn't plug it in ({e}).", ai.label())),
+                    _ if ai == Ai::ClaudeDesktop => Ok(crate::trf!("{} est branchée : redémarrez l'app Claude pour qu'elle le voie.", "{} is plugged in: restart the Claude app so it sees it.", ai.label())),
+                    _ => Ok(crate::trf!("{} est branché au tableau de bord.", "{} is plugged into the dashboard.", ai.label())),
                 }
             } else {
                 match crate::setup::unplug(ai) {
-                    Ok(()) => crate::trf!("{} est débranché.", "{} is unplugged.", ai.label()),
-                    Err(e) => crate::trf!("{} : impossible de débrancher ({e}).", "{}: couldn't unplug it ({e}).", ai.label()),
+                    Ok(()) => Ok(crate::trf!("{} est débranché.", "{} is unplugged.", ai.label())),
+                    Err(e) => Err(crate::trf!("{} : impossible de débrancher ({e}).", "{}: couldn't unplug it ({e}).", ai.label())),
                 }
             };
             *states.lock().unwrap() = Some(crate::setup::states());
@@ -94,8 +99,9 @@ impl NotesApp {
 
     /// Once per frame: messages of finished actions; usage read again every 20 s.
     pub(super) fn ais_tick(&mut self) {
-        if let Some(m) = self.ais.done_msg.lock().unwrap().take() {
-            self.status = m;
+        let done = self.ais.done_msg.lock().unwrap().take();
+        if let Some(m) = done {
+            self.notice(super::notices::Notice::from_result(m));
         }
         if self.ais.usage_read.is_none_or(|t| t.elapsed().as_secs() >= 20) {
             self.ais.usage_read = Some(Instant::now());
@@ -110,11 +116,12 @@ impl NotesApp {
         } else {
             crate::usage::stop_tracking()
         };
-        self.status = match r {
-            Ok(()) if on => crate::tr!("Suivi activé : les chiffres arrivent dès que Claude Code répond (dans le terminal intégré ou ailleurs).", "Tracking on: the figures arrive as soon as Claude Code answers (in the built-in terminal or elsewhere).").into(),
-            Ok(()) => crate::tr!("Suivi désactivé, votre ligne d'état d'origine est revenue.", "Tracking off, your original status line is back.").into(),
-            Err(e) => crate::trf!("Impossible de changer la ligne d'état de Claude Code : {e}", "Couldn't change Claude Code's status line: {e}"),
+        let n = match r {
+            Ok(()) if on => super::notices::Notice::Info(crate::tr!("Suivi activé : les chiffres arrivent dès que Claude Code répond (dans le terminal intégré ou ailleurs).", "Tracking on: the figures arrive as soon as Claude Code answers (in the built-in terminal or elsewhere).").into()),
+            Ok(()) => super::notices::Notice::Info(crate::tr!("Suivi désactivé, votre ligne d'état d'origine est revenue.", "Tracking off, your original status line is back.").into()),
+            Err(e) => super::notices::Notice::Error(crate::trf!("Impossible de changer la ligne d'état de Claude Code : {e}", "Couldn't change Claude Code's status line: {e}")),
         };
+        self.notice(n);
         self.ais.usage_read = None;
     }
 }
