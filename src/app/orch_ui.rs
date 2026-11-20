@@ -92,6 +92,9 @@ pub struct LiveRun {
     pub endless: Option<crate::model::EndConditions>,
     /// Turns in a row the AI said it had nothing left ([[FINI]]).
     done_streak: u32,
+    /// Ids of the project's steps when the running turn began: steps the person adds
+    /// during a turn are new to the AI, even if it then says there is nothing left.
+    steps_at_turn: Vec<String>,
     /// Paused, waiting for the person (with `Phase::Waiting`).
     pub waiting: Option<Wait>,
     /// The screen when the pause began: the answer given in the terminal changes it.
@@ -312,6 +315,7 @@ impl NotesApp {
         let mut granted_version = self.ws.settings.screen_granted_version.clone();
         crate::screen::ensure_permission(&mut granted_version);
         let steps_at_start: Vec<(String, bool)> = pr.steps.iter().map(|s| (s.id.clone(), s.status == crate::project::StepStatus::Done)).collect();
+        let steps_at_turn: Vec<String> = steps_at_start.iter().map(|(id, _)| id.clone()).collect();
         let copy = auto::make_copy(&folder, &title, !pr.commit_to_main)?;
         let agent = Agent::ClaudeCode;
         let o = &self.ws.settings.orch;
@@ -376,6 +380,7 @@ impl NotesApp {
             measured: false,
             endless,
             done_streak: 0,
+            steps_at_turn,
             waiting: None,
             paused_screen: 0,
         });
@@ -587,8 +592,16 @@ impl NotesApp {
                                 r.week_turn = r.week_turn.max(b - a);
                             }
                         auto::push_copy_later(r.worktree.clone());
-                        let sig = auto::signal(&r.reader.last_text);
+                        let mut sig = auto::signal(&r.reader.last_text);
                         r.last_line = crate::richtext::one_line(&auto::strip_markers(&r.reader.last_text), 140);
+                        // Steps the person added during the turn: the AI hasn't seen them, so
+                        // its « nothing left » doesn't stop the session; it is sent on to them.
+                        let steps_now = self.ws.page(&r.project).and_then(|p| p.project.as_ref()).map(|pr| pr.steps.clone()).unwrap_or_default();
+                        let fresh = fresh_steps(&r.steps_at_turn, &steps_now);
+                        if sig == Signal::Done && !fresh.is_empty() {
+                            sig = Signal::Continue;
+                        }
+                        r.steps_at_turn = steps_now.iter().map(|s| s.id.clone()).collect();
                         let five = self.orch.five;
                         r.done_streak = if sig == Signal::Done { r.done_streak + 1 } else { 0 };
                         // Endless mode: its own end conditions replace [[FINI]] and the turn limit.
@@ -641,8 +654,10 @@ impl NotesApp {
                                 r.summarizing = true;
                                 r.term.paste(&auto::summary_prompt(&r.project, &why));
                             }
-                            None if r.endless.is_some() => r.term.paste(auto::endless_prompt(r.endless.as_ref().is_some_and(|c| !c.when_done))),
-                            None => r.term.paste(auto::continue_prompt()),
+                            None => {
+                                let next = if r.endless.is_some() { auto::endless_prompt(r.endless.as_ref().is_some_and(|c| !c.when_done)) } else { auto::continue_prompt() };
+                                r.term.paste(&format!("{}{next}", new_steps_note(&fresh)));
+                            }
                         }
                         r.phase = Phase::Typed(now);
                     }
@@ -2214,6 +2229,31 @@ fn steps_since(before: &[(String, bool)], steps: &[crate::project::Step]) -> Ste
     }
 }
 
+/// Open steps the person added (typed, accepted, received) since the turn began: `at_turn`
+/// holds the step ids then. Their titles, in the project's order.
+fn fresh_steps(at_turn: &[String], steps: &[crate::project::Step]) -> Vec<String> {
+    steps
+        .iter()
+        .filter(|s| s.status != crate::project::StepStatus::Done && s.by_person() && !at_turn.contains(&s.id))
+        .map(|s| s.title.clone())
+        .collect()
+}
+
+/// Put before the next turn's prompt when the person added steps during the turn, so the
+/// AI takes them without leaving its endless mode. Empty when there are none.
+fn new_steps_note(fresh: &[String]) -> String {
+    if fresh.is_empty() {
+        return String::new();
+    }
+    let list: Vec<String> = fresh.iter().take(5).map(|t| format!("« {} »", crate::richtext::one_line(t, 100))).collect();
+    crate::trf!(
+        "La personne vient d'ajouter {} étape(s) : {}. Prends-les en compte. ",
+        "The person just added {} step(s): {}. Take them into account. ",
+        fresh.len(),
+        list.join(", ")
+    )
+}
+
 /// What a session's turn ended on, to choose whether it stops.
 struct TurnEnd {
     /// A stop already asked (by the person, or a limit seen during the turn).
@@ -3192,6 +3232,30 @@ mod tests {
             p.add_step(&format!("Ajoutée par l'IA {i}"), "ia");
         }
         assert!(crate::auto::too_many_self_steps(super::steps_since(&before, &p.steps).added_open));
+    }
+
+    /// Steps the person adds during a turn reach the AI on the next one, even after a [[FINI]].
+    #[test]
+    fn steps_added_during_a_turn_are_sent_on() {
+        use crate::project::{Project, StepStatus};
+        let mut p = Project::default();
+        p.add_step("Ancienne", crate::project::SOURCE_PERSON);
+        let at_turn: Vec<String> = p.steps.iter().map(|s| s.id.clone()).collect();
+        assert!(super::fresh_steps(&at_turn, &p.steps).is_empty());
+        assert_eq!(super::new_steps_note(&[]), "");
+        // During the turn: the person adds two, one gets done already; the AI adds its own.
+        p.add_step("Nouvelle à faire", crate::project::SOURCE_PERSON);
+        let d = p.add_step("Nouvelle déjà faite", crate::project::SOURCE_PERSON);
+        p.set_step_status(&d, StepStatus::Done);
+        p.add_step("Proposée et acceptée", crate::project::SOURCE_ACCEPTED);
+        p.add_step("De l'IA", "claude-code");
+        let fresh = super::fresh_steps(&at_turn, &p.steps);
+        assert_eq!(fresh, vec!["Nouvelle à faire".to_string(), "Proposée et acceptée".into()]);
+        let note = super::new_steps_note(&fresh);
+        assert!(note.contains("Nouvelle à faire") && note.contains('2'));
+        // The next turn starts from what is there now: nothing new any more.
+        let at_turn: Vec<String> = p.steps.iter().map(|s| s.id.clone()).collect();
+        assert!(super::fresh_steps(&at_turn, &p.steps).is_empty());
     }
 
     #[test]
