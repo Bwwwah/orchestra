@@ -170,6 +170,16 @@ struct Draft {
     end: crate::model::EndConditions,
 }
 
+/// What to do with a finished session's copy.
+#[derive(Clone, Copy, PartialEq)]
+enum CopyOp {
+    /// Into the branch open in the project's folder (asked by the person).
+    Merge,
+    /// By itself, only when the project's folder is on main.
+    ToMain,
+    Discard,
+}
+
 /// A merge or a discard of a finished session's copy, running on its own thread.
 struct CopyJob {
     id: String,
@@ -640,7 +650,7 @@ impl NotesApp {
             }
             self.finish_run(i, &why, &summary);
         }
-        self.merge_to_main();
+        self.merge_to_main(ctx);
         if !self.orch.runs.is_empty() {
             ctx.request_repaint_after(Duration::from_millis(500));
         }
@@ -732,27 +742,40 @@ impl NotesApp {
         }
     }
 
-    /// Merge into main the finished sessions of projects that allow it, once closed.
-    fn merge_to_main(&mut self) {
+    /// Merge into main the finished sessions of projects that allow it, once closed, in
+    /// the background; one waits while another copy of its project is being dealt with.
+    fn merge_to_main(&mut self, ctx: &egui::Context) {
         let ready: Vec<String> = self.orch.to_main.iter().filter(|id| !self.orch.runs.iter().any(|r| &r.id == *id)).cloned().collect();
-        if ready.is_empty() {
-            return;
-        }
-        self.orch.to_main.retain(|id| !ready.contains(id));
         for id in ready {
-            let Some(rec) = self.ws.runs.iter().find(|x| x.id == id).cloned() else { continue };
-            match auto::merge_into_main(&rec) {
-                Ok(m) => {
-                    if let Some(x) = self.ws.runs.iter_mut().find(|x| x.id == id) {
-                        x.closed = crate::tr!("fusionné", "merged").into();
-                    }
-                    self.dirty_since.get_or_insert_with(Instant::now);
-                    self.info(format!("{} : {m}", rec.title));
-                }
-                Err(e) => self.fail(format!("{} : {e}", rec.title)),
+            let Some(rec) = self.ws.runs.iter().find(|x| x.id == id).cloned() else {
+                self.orch.to_main.retain(|x| *x != id);
+                continue;
+            };
+            if self.start_copy_job(ctx, rec, CopyOp::ToMain) {
+                self.orch.to_main.retain(|x| *x != id);
             }
         }
-        self.detect_changes();
+    }
+
+    /// Start merging or discarding a session's copy on its own thread; false when another
+    /// copy of the same repository is being dealt with (git would find it locked).
+    fn start_copy_job(&mut self, ctx: &egui::Context, rec: crate::model::RunRecord, op: CopyOp) -> bool {
+        if self.orch.copy_jobs.iter().any(|j| j.id == rec.id || j.root == rec.root) {
+            return false;
+        }
+        let (tx, rx) = std::sync::mpsc::channel();
+        self.orch.copy_jobs.push(CopyJob { id: rec.id.clone(), merge: op != CopyOp::Discard, title: rec.title.clone(), root: rec.root.clone(), done: rx });
+        let ctx = ctx.clone();
+        std::thread::spawn(move || {
+            let res = match op {
+                CopyOp::Merge => auto::merge(&rec),
+                CopyOp::ToMain => auto::merge_into_main(&rec),
+                CopyOp::Discard => auto::discard(&rec),
+            };
+            let _ = tx.send(res);
+            ctx.request_repaint();
+        });
+        true
     }
 
     fn finish_run(&mut self, i: usize, why: &str, summary: &str) {
@@ -2031,19 +2054,12 @@ impl NotesApp {
             "merge" | "discard" => {
                 self.orch.confirm = None;
                 let Some(rec) = self.ws.runs.iter().find(|r| r.id == id).cloned() else { return };
+                let title = rec.title.clone();
+                let op = if a == "merge" { CopyOp::Merge } else { CopyOp::Discard };
                 // One git operation at a time per repository: a second would find it locked.
-                if self.orch.copy_jobs.iter().any(|j| j.id == id || j.root == rec.root) {
-                    self.fail(crate::trf!("{} : une autre copie de ce projet est en cours de traitement, réessayez dans un instant.", "{}: another copy of this project is being dealt with, try again in a moment.", rec.title));
-                    return;
+                if !self.start_copy_job(ctx, rec, op) {
+                    self.fail(crate::trf!("{} : une autre copie de ce projet est en cours de traitement, réessayez dans un instant.", "{}: another copy of this project is being dealt with, try again in a moment.", title));
                 }
-                let merge = a == "merge";
-                let (tx, rx) = std::sync::mpsc::channel();
-                self.orch.copy_jobs.push(CopyJob { id: id.to_string(), merge, title: rec.title.clone(), root: rec.root.clone(), done: rx });
-                let ctx = ctx.clone();
-                std::thread::spawn(move || {
-                    let _ = tx.send(if merge { auto::merge(&rec) } else { auto::discard(&rec) });
-                    ctx.request_repaint();
-                });
             }
             _ => {}
         }
