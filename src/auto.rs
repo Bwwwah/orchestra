@@ -348,6 +348,15 @@ pub fn continue_prompt() -> &'static str {
     )
 }
 
+/// The next turn of an endless session: Orchestra decides when it stops (its end
+/// conditions), not the turn limit.
+pub fn endless_prompt() -> &'static str {
+    crate::tr!(
+        "Mode sans fin : continue la mission avec les mêmes règles, l'étape ouverte suivante, une seule (relis get_project_state pour les réponses à tes questions). Orchestra décide quand la session s'arrête. Termine par [[CONTINUER]], [[FINI]] s'il ne reste vraiment rien à faire, ou [[BLOQUÉ]].",
+        "Endless mode: go on with the mission under the same rules, the next open step, only one (read get_project_state again for the answers to your questions). Orchestra decides when the session stops. End with [[CONTINUER]], [[FINI]] if there is really nothing left to do, or [[BLOQUÉ]]."
+    )
+}
+
 pub fn denied_prompt() -> &'static str {
     crate::tr!(
         "Cette commande n'est pas autorisée en mode autonome. Continue sans elle ; si elle est indispensable, appelle ask_human pour la demander, puis passe à autre chose. Termine par [[CONTINUER]], [[FINI]] ou [[BLOQUÉ]].",

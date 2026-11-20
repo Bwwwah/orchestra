@@ -62,6 +62,10 @@ pub struct LiveRun {
     week_at_turn: Option<f32>,
     /// The most one turn took from the week so far (percentage points).
     week_turn: f32,
+    /// Endless mode and its end conditions (None: the usual turn limit and [[FINI]]).
+    pub endless: Option<crate::model::EndConditions>,
+    /// Turns in a row the AI said it had nothing left ([[FINI]]).
+    done_streak: u32,
 }
 
 #[derive(Clone)]
@@ -70,6 +74,9 @@ struct Draft {
     limit: f32,
     commits: bool,
     pick: bool,
+    /// Endless mode, and its end conditions as set in the launch card.
+    endless: bool,
+    end: crate::model::EndConditions,
 }
 
 #[derive(Default)]
@@ -116,7 +123,7 @@ fn hash(s: &str) -> u64 {
 
 impl NotesApp {
     /// Start an autonomous session on a project.
-    fn launch_run(&mut self, ctx: &egui::Context, project: &str, mission: &str, limit: f32, commits: bool) -> Result<(), String> {
+    fn launch_run(&mut self, ctx: &egui::Context, project: &str, mission: &str, limit: f32, commits: bool, endless: Option<crate::model::EndConditions>) -> Result<(), String> {
         if self.orch.runs.iter().any(|r| r.project == project) {
             return Err(crate::tr!("une session tourne déjà sur ce projet", "a session is already running on this project").into());
         }
@@ -184,6 +191,7 @@ impl NotesApp {
             commits_allowed: commits,
             mission: mission.clone(),
             limit,
+            endless: endless.clone(),
             ..Default::default()
         };
         // A new session replaces any planned restart of this project.
@@ -222,6 +230,8 @@ impl NotesApp {
             nudged: false,
             started_wall: crate::model::now_ms(),
             measured: false,
+            endless,
+            done_streak: 0,
         });
         Ok(())
     }
@@ -264,7 +274,7 @@ impl NotesApp {
         if let Ok(pid) = std::env::var("ORCHESTRA_AUTO_RUN") {
             if !pid.is_empty() && self.orch.runs.is_empty() && !self.ws.runs.iter().any(|r| r.project == pid) && self.ais.plugged().contains(&crate::setup::Ai::ClaudeCode) {
                 let (l, c) = (self.ws.settings.orch.default_limit, true);
-                if let Err(e) = self.launch_run(ctx, &pid, "", l, c) {
+                if let Err(e) = self.launch_run(ctx, &pid, "", l, c, None) {
                     eprintln!("auto-run : {e}");
                 }
             }
@@ -367,11 +377,25 @@ impl NotesApp {
                         let sig = auto::signal(&r.reader.last_text);
                         r.last_line = crate::richtext::one_line(&auto::strip_markers(&r.reader.last_text), 140);
                         let five = self.orch.five;
+                        r.done_streak = if sig == Signal::Done { r.done_streak + 1 } else { 0 };
+                        // Endless mode: its own end conditions replace [[FINI]] and the turn limit.
+                        let endless_end = r.endless.as_ref().and_then(|c| {
+                            let before = &r.steps_at_start;
+                            let steps_done = self
+                                .ws
+                                .page(&r.project)
+                                .and_then(|p| p.project.as_ref())
+                                .map(|pr| pr.steps.iter().filter(|s| s.status == crate::project::StepStatus::Done && !before.iter().any(|(b, d)| *b == s.title && *d)).count())
+                                .unwrap_or(0) as u32;
+                            c.reached(crate::model::now_ms().saturating_sub(r.started_wall), steps_done, r.turns, r.done_streak)
+                        });
                         let reason = if let Some(s) = r.stop.clone() {
                             Some(s)
                         } else if too_long {
                             Some(crate::tr!("un tour a duré trop longtemps", "a turn took too long").into())
-                        } else if sig == Signal::Done {
+                        } else if let Some(why) = endless_end {
+                            Some(why)
+                        } else if sig == Signal::Done && r.endless.is_none() {
                             Some(crate::tr!("mission terminée", "mission complete").into())
                         } else if sig == Signal::Blocked {
                             Some(crate::tr!("l'IA est bloquée", "the AI is blocked").into())
@@ -386,7 +410,7 @@ impl NotesApp {
                             Some(crate::trf!("pause : la réserve minimum de la semaine ({:.0} %) approche", "paused: the week's minimum reserve ({:.0} %) is near", 100.0 - week_limit))
                         } else if !r.measured && r.turns >= 2 {
                             Some(crate::tr!("utilisation de l'abonnement impossible à mesurer", "subscription use can't be measured").into())
-                        } else if r.turns >= r.max_turns {
+                        } else if r.endless.is_none() && r.turns >= r.max_turns {
                             Some(crate::trf!("{} tours atteints", "{} turns reached", r.max_turns))
                         } else {
                             None
@@ -397,6 +421,7 @@ impl NotesApp {
                                 r.summarizing = true;
                                 r.term.paste(&auto::summary_prompt(&r.project, &why));
                             }
+                            None if r.endless.is_some() => r.term.paste(auto::endless_prompt()),
                             None => r.term.paste(auto::continue_prompt()),
                         }
                         r.phase = Phase::Typed(now);
@@ -444,7 +469,7 @@ impl NotesApp {
             }
             self.dirty_since.get_or_insert_with(Instant::now);
             let limit = if rec.limit > 0.0 { rec.limit } else { self.ws.settings.orch.default_limit };
-            match self.launch_run(ctx, &rec.project, &rec.mission, limit, rec.commits_allowed) {
+            match self.launch_run(ctx, &rec.project, &rec.mission, limit, rec.commits_allowed, rec.endless.clone()) {
                 Ok(()) => self.ws.notify(
                     "info",
                     &rec.project,
@@ -1003,6 +1028,10 @@ impl NotesApp {
                         _ => format!("tour {}", r.turns + 1),
                     };
                     ui.label(RichText::new(state).size(12.5).color(t.tertiary));
+                    if let Some(c) = &r.endless {
+                        ui.label(RichText::new(crate::tr!("∞ sans fin", "∞ endless")).size(12.5).color(super::projects::BLUE))
+                            .on_hover_text(crate::trf!("S'arrête après : {}, ou sur son budget", "Stops after: {}, or on its budget", c.describe()));
+                    }
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         if super::projects::action_link(ui, crate::tr!("Forcer l'arrêt", "Force stop")).on_hover_text(crate::tr!("Ferme Claude Code tout de suite, sans compte rendu", "Closes Claude Code right away, without a summary")).clicked() {
                             stop = Some((i, true));
@@ -1079,7 +1108,7 @@ impl NotesApp {
             .collect();
         let (dl, dc) = (self.ws.settings.orch.default_limit, self.ws.settings.orch.allow_commits);
         for (id, _, _) in &projects {
-            self.orch.drafts.entry(id.clone()).or_insert(Draft { mission: String::new(), limit: dl, commits: dc, pick: false });
+            self.orch.drafts.entry(id.clone()).or_insert(Draft { mission: String::new(), limit: dl, commits: dc, pick: false, endless: false, end: crate::model::EndConditions { hours: Some(4.0), ..Default::default() } });
         }
         let running: Vec<String> = self.orch.runs.iter().map(|r| r.project.clone()).collect();
         let plugged = self.ais.plugged().contains(&crate::setup::Ai::ClaudeCode);
@@ -1179,6 +1208,21 @@ impl NotesApp {
                         ui.add_space(70.0);
                         ui.add(egui::TextEdit::singleline(&mut d.mission).hint_text(default_mission()).desired_width(f32::INFINITY).font(FontId::proportional(13.0)).margin(egui::Margin::symmetric(8, 5)));
                     });
+                    if !busy {
+                        ui.horizontal_wrapped(|ui| {
+                            ui.add_space(70.0);
+                            ui.spacing_mut().item_spacing.x = 6.0;
+                            super::settings::switch(ui, &mut d.endless, &lk).on_hover_text(crate::tr!(
+                                "La session ne s'arrête ni au nombre de tours des réglages ni à la première fin de mission : seulement sur les conditions choisies ici, ou sur son budget, la limite globale et la réserve de la semaine.",
+                                "The session stops neither at the settings' number of turns nor at the first end of mission: only on the conditions chosen here, or on its budget, the global limit and the week's reserve."
+                            ));
+                            ui.label(RichText::new(crate::tr!("sans fin", "endless")).size(12.0).color(if d.endless { t.text } else { t.tertiary }));
+                            if d.endless {
+                                ui.label(RichText::new(crate::tr!("· s'arrête après", "· stops after")).size(12.0).color(t.tertiary));
+                                end_conditions(ui, &mut d.end, t);
+                            }
+                        });
+                    }
                 });
                 super::projects::hover_end(ui, bg, row.response.rect, egui::Id::unique(("orch-row", id)), t);
                 ui.add_space(10.0);
@@ -1208,7 +1252,8 @@ impl NotesApp {
             let title = self.ws.page(&id).map(|p| p.display_title()).unwrap_or_default();
             let taken: f32 = self.orch.runs.iter().map(|r| r.limit).sum();
             let limit = d.limit.min((global - taken).floor()).max(1.0);
-            match self.launch_run(ctx, &id, &d.mission, limit, d.commits) {
+            let endless = if d.endless { Some(d.end.clone()) } else { None };
+            match self.launch_run(ctx, &id, &d.mission, limit, d.commits, endless) {
                 Ok(()) => {
                     if let Some(x) = self.orch.drafts.get_mut(&id) {
                         x.pick = false;
@@ -1645,6 +1690,39 @@ fn project_color(title: &str) -> Color32 {
 }
 
 /// The mark and colour of a finished session: done, stopped on a limit or a block, failed.
+/// The end conditions of an endless session, each one ticked or not; the first reached stops it.
+fn end_conditions(ui: &mut egui::Ui, c: &mut crate::model::EndConditions, t: &Tone) {
+    let small = |s: &str| RichText::new(s).size(12.0).color(t.secondary);
+    let mut on = c.hours.is_some();
+    if ui.checkbox(&mut on, small(crate::tr!("une durée", "a time"))).changed() {
+        c.hours = if on { Some(4.0) } else { None };
+    }
+    if let Some(h) = c.hours.as_mut() {
+        ui.add(egui::DragValue::new(h).range(0.5..=72.0).speed(0.25).suffix(" h"));
+    }
+    let mut on = c.steps.is_some();
+    if ui.checkbox(&mut on, small(crate::tr!("des étapes faites", "steps done"))).changed() {
+        c.steps = if on { Some(5) } else { None };
+    }
+    if let Some(n) = c.steps.as_mut() {
+        ui.add(egui::DragValue::new(n).range(1..=500));
+    }
+    let mut on = c.turns.is_some();
+    if ui.checkbox(&mut on, small(crate::tr!("des tours", "turns"))).changed() {
+        c.turns = if on { Some(60) } else { None };
+    }
+    if let Some(n) = c.turns.as_mut() {
+        ui.add(egui::DragValue::new(n).range(1..=1000));
+    }
+    ui.checkbox(&mut c.when_done, small(crate::tr!("plus d'étape ouverte", "no open step left")));
+    if c.hours.is_none() && c.steps.is_none() && c.turns.is_none() && !c.when_done {
+        ui.label(RichText::new(crate::tr!("(budget seulement)", "(budget only)")).size(12.0).color(super::projects::ORANGE)).on_hover_text(crate::tr!(
+            "Sans condition, la session tourne jusqu'à son budget, la limite globale ou la réserve de la semaine (ou deux tours de suite sans rien à faire).",
+            "With no condition, the session runs until its budget, the global limit or the week's reserve (or two turns in a row with nothing to do)."
+        ));
+    }
+}
+
 /// The settings of the folded "Settings and limits" card, on one line.
 fn limits_summary(o: &crate::model::OrchSettings) -> String {
     let commits = if o.allow_commits { crate::tr!("commits autorisés", "commits allowed") } else { crate::tr!("sans commit", "no commits") };
