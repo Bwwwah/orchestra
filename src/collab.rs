@@ -168,7 +168,8 @@ pub fn merge(ours: &mut Workspace, theirs: &Workspace) -> usize {
             changed += 1;
         }
     }
-    for (id, t) in &theirs.deleted {
+    // Only deletions of shared pages (or of pages we don't have): never a private page.
+    for (id, t) in &ours.accept_remote_deletions(theirs.deleted.clone()) {
         let e = ours.deleted.entry(id.clone()).or_insert(*t);
         if *t > *e {
             *e = *t;
@@ -346,8 +347,12 @@ mod tests {
     fn newest_wins_and_deletions_stick() {
         let mut a = Workspace::default();
         let mut p = Page::new("A", None);
+        p.project = Some(crate::project::Project { shared: true, ..crate::project::Project::new("") });
         p.updated = 10;
         a.pages.push(p.clone());
+        let mut private = Page::new("Privée", None);
+        private.updated = 10;
+        a.pages.push(private.clone());
         let mut b = a.clone();
         b.pages[0].title = "B".into();
         b.pages[0].updated = 20;
@@ -356,7 +361,11 @@ mod tests {
         let mut c = a.clone();
         c.pages.clear();
         c.deleted.insert(p.id.clone(), 30);
+        // Even knowing its id, they can't delete a private page.
+        c.deleted.insert(private.id.clone(), 30);
         merge(&mut a, &c);
-        assert!(a.pages.is_empty());
+        assert_eq!(a.pages.len(), 1);
+        assert_eq!(a.pages[0].id, private.id);
+        assert!(!a.deleted.contains_key(&private.id));
     }
 }

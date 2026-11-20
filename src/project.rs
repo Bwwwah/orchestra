@@ -435,6 +435,14 @@ impl Workspace {
         out
     }
 
+    /// Of the deletions another person sent, those that may apply here: pages of shared
+    /// projects, and ids we don't have (a page they deleted before it reached us). Never
+    /// one of our private pages, even if its id is known to them.
+    pub fn accept_remote_deletions(&self, deleted: std::collections::BTreeMap<String, u64>) -> std::collections::BTreeMap<String, u64> {
+        let shared = self.shared_ids();
+        deleted.into_iter().filter(|(id, _)| shared.contains(id) || self.page(id).is_none()).collect()
+    }
+
     /// What may leave this computer: the shared projects, their pages and discussions.
     pub fn shared_copy(&self) -> Workspace {
         let ids = self.shared_ids();
@@ -723,6 +731,11 @@ mod tests {
             assert!(!got.iter().any(|g| g == id), "{id} acceptée");
         }
         assert!(ws.accept_remote(vec![moved]).is_empty());
+        // Deletions: shared pages and unknown ids, never a private page whose id they know.
+        let del: std::collections::BTreeMap<String, u64> = [&doc, &b, &notes, &folder].iter().map(|i| (i.to_string(), 5)).chain([("inconnue".to_string(), 5)]).collect();
+        let kept: Vec<String> = ws.accept_remote_deletions(del).into_keys().collect();
+        assert!(kept.contains(&doc) && kept.contains(&"inconnue".to_string()));
+        assert!(!kept.contains(&b) && !kept.contains(&notes) && !kept.contains(&folder));
     }
 
     #[test]
