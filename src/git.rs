@@ -270,10 +270,16 @@ pub fn switch(root: &str, branch: &str, create: bool) -> Result<String, String> 
         git(&rd, &["switch", "-c", b])?;
         Ok(crate::trf!("Nouvelle branche « {b} », vous y êtes.", "New branch « {b} », you're on it."))
     } else {
+        // Held by the copy of a session that is over: free it (its work stays on the branch).
+        if let Some(at) = worktree_of(&rd, b)
+            && crate::auto::idle_copy(Path::new(&at))
+        {
+            crate::auto::free_copy(&rd, Path::new(&at))?;
+        }
         if let Some(at) = worktree_of(&rd, b) {
             return Err(crate::trf!(
-                "« {b} » est la copie d'une session autonome, ouverte dans {at}. Pour la récupérer, fusionnez-la depuis l'historique d'Orchestration ; pour la consulter, ouvrez ce dossier ou la branche sur GitHub",
-                "« {b} » is an autonomous session's copy, open in {at}. To bring it in, merge it from the Orchestration history; to look at it, open that folder or the branch on GitHub"
+                "« {b} » est utilisée en ce moment par une session autonome (dans {at}). Réessayez quand elle sera terminée, ou consultez la branche sur GitHub",
+                "« {b} » is in use right now by an autonomous session (in {at}). Try again once it's over, or look at the branch on GitHub"
             ));
         }
         git(&rd, &["switch", b])?;

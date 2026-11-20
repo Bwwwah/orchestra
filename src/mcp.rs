@@ -588,6 +588,8 @@ fn call_tool(name: &str, args: &Value) -> Result<String, ToolError> {
                 out.push_str("\n## Versions (git)\n\n");
                 out.push_str(&g);
                 out.push('\n');
+                let on_main = p.project.as_ref().is_some_and(|x| x.commit_to_main);
+                out.push_str(&branch_rule(on_main));
             }
             if !folder.is_empty() {
                 let mut found = crate::sessions::sessions_in(std::path::Path::new(&folder));
@@ -1073,5 +1075,21 @@ mod tests {
         let m = ws.inbox.iter().find(|m| m.kind == "question").expect("question in the inbox");
         assert_eq!(m.project, pid);
         assert!(m.title.contains("Projet test"));
+    }
+}
+
+/// How an interactive AI session should use the branches (the autonomous ones follow
+/// their own mission, in a copy already on the right branch).
+fn branch_rule(on_main: bool) -> String {
+    let dev = crate::auto::DEV;
+    if on_main {
+        format!("\nBranches : ce projet autorise le travail directement sur main. N'ouvre pas de branche par session ; s'il faut isoler un travail risqué, utilise la branche `{dev}`.\n")
+    } else {
+        format!(
+            "\nBranches : sauf si la personne te demande de travailler sur main, travaille sur la branche `{dev}` \
+             (git switch {dev}, ou git switch -c {dev} depuis main si elle n'existe pas) et garde-la d'une session à l'autre. \
+             Ne crée pas une branche par session : une autre branche seulement pour un travail vraiment à part, à fusionner dans `{dev}` puis supprimer une fois fini. \
+             (Les sessions autonomes d'Orchestra suivent leur propre mission.)\n"
+        )
     }
 }

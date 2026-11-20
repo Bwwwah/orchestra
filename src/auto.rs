@@ -237,9 +237,118 @@ fn slug(s: &str) -> String {
     out.trim_matches('-').chars().take(30).collect::<String>().trim_matches('-').to_string()
 }
 
-/// A new worktree of the project's repository, on a branch of its own, from HEAD.
-pub fn make_copy(folder: &str, title: &str) -> Result<Copy, String> {
-    make_copy_in(&crate::store::data_dir().join("worktrees"), folder, title)
+/// The branch the sessions of a project share when they don't work on main: one `dev`
+/// that goes on from session to session, instead of a new branch each time.
+pub const DEV: &str = "dev";
+
+/// The copies of sessions running now (their folders), kept up to date by the
+/// Orchestration page: a copy in this list is never freed under a working AI.
+static BUSY: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+
+pub fn set_busy(copies: Vec<String>) {
+    *BUSY.lock().unwrap() = copies;
+}
+
+fn is_busy(copy: &Path) -> bool {
+    BUSY.lock().unwrap().iter().any(|b| Path::new(b) == copy)
+}
+
+/// A new worktree of the project's repository. `on_dev`: on the shared branch `dev`
+/// (made from HEAD the first time); otherwise, or when `dev` can't be taken (open in the
+/// person's folder, or in a copy still in use), on a branch of its own, from HEAD.
+pub fn make_copy(folder: &str, title: &str, on_dev: bool) -> Result<Copy, String> {
+    let copies = crate::store::data_dir().join("worktrees");
+    if on_dev {
+        match dev_copy_in(&copies, folder, title) {
+            Ok(c) => return Ok(c),
+            Err(e) => eprintln!("orchestra: dev branch not used ({e}), a branch of its own instead"),
+        }
+    }
+    make_copy_in(&copies, folder, title)
+}
+
+/// The folder of the worktree that has `branch` checked out, if any (the main one included).
+pub fn checked_out_at(rd: &Path, branch: &str) -> Option<PathBuf> {
+    let list = git(rd, &["worktree", "list", "--porcelain"]).ok()?;
+    let mut path = None;
+    for l in list.lines() {
+        if let Some(p) = l.strip_prefix("worktree ") {
+            path = Some(PathBuf::from(p));
+        } else if l.strip_prefix("branch refs/heads/") == Some(branch) {
+            return path;
+        }
+    }
+    None
+}
+
+/// An Orchestra copy left by a session that is over (not in use): it may be freed so its
+/// branch can be checked out elsewhere.
+pub fn idle_copy(copy: &Path) -> bool {
+    let dir = crate::store::data_dir().join("worktrees");
+    (copy.starts_with(&dir) || copy.parent().and_then(|p| p.file_name()).is_some_and(|n| n == "worktrees")) && !is_busy(copy)
+}
+
+/// Free an idle copy so its branch can be checked out elsewhere: work not committed is
+/// committed first (on its branch, nothing lost), then the copy goes.
+pub fn free_copy(rd: &Path, copy: &Path) -> Result<(), String> {
+    if copy.is_dir() && !git(copy, &["status", "--porcelain"]).unwrap_or_default().trim().is_empty() {
+        git(copy, &["add", "-A"])?;
+        git(copy, &["commit", "-m", crate::tr!("Travail autonome Orchestra (laissé non enregistré)", "Orchestra autonomous work (left unsaved)")])?;
+    }
+    git(rd, &["worktree", "remove", &copy.display().to_string()])?;
+    let _ = git(rd, &["worktree", "prune"]);
+    Ok(())
+}
+
+fn dev_copy_in(copies: &Path, folder: &str, title: &str) -> Result<Copy, String> {
+    let dir = crate::project::normalize_folder(folder);
+    let root = git(&dir, &["rev-parse", "--show-toplevel"]).map_err(|_| crate::tr!("le projet n'est pas un dépôt git : créez-le d'abord (encadré Versions)", "the project isn't a git repository: create it first (Versions card)").to_string())?.trim().to_string();
+    let rd = PathBuf::from(&root);
+    let head = git(&rd, &["rev-parse", "HEAD"]).map_err(|_| crate::tr!("le dépôt n'a encore aucun commit : faites un premier enregistrement", "the repository has no commit yet: make a first commit").to_string())?.trim().to_string();
+    let current = git(&rd, &["rev-parse", "--abbrev-ref", "HEAD"]).unwrap_or_default().trim().to_string();
+    if let Some(at) = checked_out_at(&rd, DEV) {
+        if at == rd || !idle_copy(&at) {
+            return Err(format!("{DEV} is checked out in {}", at.display()));
+        }
+        free_copy(&rd, &at)?;
+    }
+    let exists = git(&rd, &["rev-parse", "--verify", "--quiet", &format!("refs/heads/{DEV}")]).is_ok();
+    if !exists {
+        git(&rd, &["branch", DEV, "HEAD"])?;
+    } else if git(&rd, &["merge-base", "--is-ancestor", DEV, "HEAD"]).is_ok() && (current == "main" || current == "master") {
+        // dev was merged into main (or is behind it): it starts again from main.
+        git(&rd, &["branch", "-f", DEV, "HEAD"])?;
+    }
+    let mut name = format!("{}-{DEV}", if slug(title).is_empty() { "projet".to_string() } else { slug(title) });
+    if copies.join(&name).exists() {
+        name = format!("{name}-{}", local_stamp(crate::model::now_ms()));
+    }
+    let wt = copies.join(&name);
+    std::fs::create_dir_all(copies).map_err(|e| e.to_string())?;
+    git(&rd, &["worktree", "add", &wt.display().to_string(), DEV])?;
+    // main moved on since dev left it: bring it in, unless it conflicts (then dev stays as it was).
+    if (current == "main" || current == "master") && git(&wt, &["merge-base", "--is-ancestor", &head, "HEAD"]).is_err() && git(&wt, &["merge", "--no-edit", &head]).is_err() {
+        let _ = git(&wt, &["merge", "--abort"]);
+    }
+    let base = git(&wt, &["rev-parse", "HEAD"])?.trim().to_string();
+    Ok(Copy { root, worktree: wt.display().to_string(), branch: DEV.into(), base })
+}
+
+/// End of a session on `dev`: its work stays on the branch (committed if it wasn't, sent
+/// to the remote), and the copy goes, so `dev` can be opened in the project's folder.
+pub fn park(r: &crate::model::RunRecord) -> Result<String, String> {
+    let wt = PathBuf::from(&r.worktree);
+    if wt.is_dir() && !git(&wt, &["status", "--porcelain"]).unwrap_or_default().trim().is_empty() {
+        git(&wt, &["add", "-A"])?;
+        git(&wt, &["commit", "-m", &crate::trf!("Travail autonome Orchestra · {}", "Orchestra autonomous work · {}", r.title)])?;
+    }
+    if let Err(e) = push_copy(&r.worktree) {
+        eprintln!("orchestra: push of {} failed: {e}", r.worktree);
+    }
+    let rd = PathBuf::from(&r.root);
+    git(&rd, &["worktree", "remove", &r.worktree])?;
+    let _ = git(&rd, &["worktree", "prune"]);
+    Ok(crate::trf!("Travail gardé sur la branche « {} ».", "Work kept on the branch « {} ».", r.branch))
 }
 
 /// The same, with the copies kept in `copies` (the tests' own folder).
@@ -311,8 +420,10 @@ pub fn merge(r: &crate::model::RunRecord) -> Result<String, String> {
         return Err(crate::trf!("fusion impossible ({e}) ; rien n'a changé dans votre dossier", "merge failed ({e}); nothing changed in your folder"));
     }
     let _ = git(&rd, &["worktree", "remove", "--force", &r.worktree]);
-    let _ = git(&rd, &["branch", "-d", &r.branch]);
-    delete_remote_later(r.root.clone(), r.branch.clone());
+    if r.branch != DEV {
+        let _ = git(&rd, &["branch", "-d", &r.branch]);
+        delete_remote_later(r.root.clone(), r.branch.clone());
+    }
     Ok(crate::trf!("Travail fusionné dans « {into} ».", "Work merged into « {into} »."))
 }
 
@@ -332,6 +443,10 @@ pub fn discard(r: &crate::model::RunRecord) -> Result<String, String> {
     let rd = PathBuf::from(&r.root);
     let _ = git(&rd, &["worktree", "remove", "--force", &r.worktree]);
     let _ = git(&rd, &["worktree", "prune"]);
+    if r.branch == DEV {
+        // Shared with the other sessions: only this copy's unsaved changes go.
+        return Ok(crate::tr!("Copie supprimée ; la branche dev garde ses commits.", "Copy deleted; the dev branch keeps its commits.").into());
+    }
     git(&rd, &["branch", "-D", &r.branch])?;
     delete_remote_later(r.root.clone(), r.branch.clone());
     Ok(crate::tr!("Copie et branche supprimées.", "Copy and branch deleted.").into())
@@ -514,6 +629,18 @@ impl Reader {
 // ------------------------------------------------------------------ what the AI is told
 
 pub fn mission_prompt(title: &str, project_id: &str, branch: &str, mission: &str, commits: bool) -> String {
+    let shared = if branch == DEV {
+        crate::tr!(
+            "\nLa branche dev est partagée par les sessions successives du projet : reprends le travail qui s'y trouve, ne crée aucune autre branche.",
+            "\nThe dev branch is shared by the project's successive sessions: build on the work already there, create no other branch."
+        )
+    } else {
+        ""
+    };
+    mission_text(title, project_id, branch, mission, commits) + shared
+}
+
+fn mission_text(title: &str, project_id: &str, branch: &str, mission: &str, commits: bool) -> String {
     let commit_rule = if commits {
         crate::tr!("Après chaque étape terminée, fais un commit clair (git add -A puis git commit -m « … »). Ne fais jamais de git push.", "After each finished step, make a clear commit (git add -A then git commit -m « … »). Never git push.")
     } else {
@@ -1042,6 +1169,50 @@ mod tests {
         assert!(!trusted_in(j, "/Users/a/Code/new"));
         assert!(!trusted_in(j, ""));
         assert!(!trusted_in("not json", "/Users/a/Code/app"));
+    }
+
+    #[test]
+    fn sessions_share_dev() {
+        let base = std::env::temp_dir().join(format!("orch-auto-{}", uuid::Uuid::new_v4().simple()));
+        let (repo, copies) = (base.join("repo"), base.join("worktrees"));
+        std::fs::create_dir_all(&repo).unwrap();
+        let ok = |d: &Path, a: &[&str]| git(d, a).is_ok();
+        if !ok(&repo, &["init", "-b", "main"]) {
+            return;
+        }
+        let _ = git(&repo, &["config", "user.email", "t@t"]);
+        let _ = git(&repo, &["config", "user.name", "T"]);
+        std::fs::write(repo.join("a.txt"), "a").unwrap();
+        assert!(ok(&repo, &["add", "-A"]) && ok(&repo, &["commit", "-m", "a"]));
+        let folder = repo.display().to_string();
+        // First session: dev is made from main; its unsaved work is committed on dev, the copy goes.
+        let c = dev_copy_in(&copies, &folder, "Essai").unwrap();
+        assert_eq!(c.branch, DEV);
+        std::fs::write(PathBuf::from(&c.worktree).join("b.txt"), "b").unwrap();
+        let rec = crate::model::RunRecord { title: "Essai".into(), root: c.root.clone(), worktree: c.worktree.clone(), branch: c.branch.clone(), ..Default::default() };
+        park(&rec).unwrap();
+        assert!(!Path::new(&c.worktree).exists());
+        // Second session: the same dev, with the first one's work; main untouched.
+        let c2 = dev_copy_in(&copies, &folder, "Essai").unwrap();
+        assert!(PathBuf::from(&c2.worktree).join("b.txt").exists());
+        assert!(!repo.join("b.txt").exists());
+        // A copy left over (session over) doesn't stop the next session, nor opening dev here.
+        std::fs::write(PathBuf::from(&c2.worktree).join("c.txt"), "c").unwrap();
+        let c3 = dev_copy_in(&copies, &folder, "Essai").unwrap();
+        assert!(PathBuf::from(&c3.worktree).join("c.txt").exists(), "unsaved work kept on dev");
+        assert!(crate::git::switch(&folder, DEV, false).is_ok());
+        assert!(repo.join("c.txt").exists());
+        // dev open in the person's folder: the session gets a branch of its own instead.
+        assert!(dev_copy_in(&copies, &folder, "Essai").is_err());
+        // Merged into main, dev starts again from main.
+        assert!(ok(&repo, &["switch", "main"]) && ok(&repo, &["merge", "--ff-only", DEV]));
+        std::fs::write(repo.join("d.txt"), "d").unwrap();
+        assert!(ok(&repo, &["add", "-A"]) && ok(&repo, &["commit", "-m", "d"]));
+        let c4 = dev_copy_in(&copies, &folder, "Essai").unwrap();
+        assert!(PathBuf::from(&c4.worktree).join("d.txt").exists());
+        let branches = git(&repo, &["branch"]).unwrap();
+        assert_eq!(branches.lines().count(), 2, "{branches}");
+        let _ = std::fs::remove_dir_all(base);
     }
 
     #[test]

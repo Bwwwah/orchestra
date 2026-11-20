@@ -177,6 +177,8 @@ enum CopyOp {
     Merge,
     /// By itself, only when the project's folder is on main.
     ToMain,
+    /// A session on the shared `dev` branch: its work stays there, its copy goes.
+    Park,
     Discard,
 }
 
@@ -184,6 +186,8 @@ enum CopyOp {
 struct CopyJob {
     id: String,
     merge: bool,
+    /// Kept on `dev` rather than merged.
+    park: bool,
     title: String,
     /// The project's repository.
     root: String,
@@ -308,7 +312,7 @@ impl NotesApp {
         let mut granted_version = self.ws.settings.screen_granted_version.clone();
         crate::screen::ensure_permission(&mut granted_version);
         let steps_at_start: Vec<(String, bool)> = pr.steps.iter().map(|s| (s.id.clone(), s.status == crate::project::StepStatus::Done)).collect();
-        let copy = auto::make_copy(&folder, &title)?;
+        let copy = auto::make_copy(&folder, &title, !pr.commit_to_main)?;
         let agent = Agent::ClaudeCode;
         let o = &self.ws.settings.orch;
         let cmd = agent.command(commits, &o.extra_tools);
@@ -670,6 +674,7 @@ impl NotesApp {
             self.finish_run(i, &why, &summary);
         }
         self.merge_to_main(ctx);
+        auto::set_busy(self.orch.runs.iter().map(|r| r.worktree.clone()).collect());
         if !self.orch.runs.is_empty() {
             ctx.request_repaint_after(Duration::from_millis(500));
         }
@@ -770,7 +775,8 @@ impl NotesApp {
                 self.orch.to_main.retain(|x| *x != id);
                 continue;
             };
-            if self.start_copy_job(ctx, rec, CopyOp::ToMain) {
+            let op = if rec.branch == auto::DEV { CopyOp::Park } else { CopyOp::ToMain };
+            if self.start_copy_job(ctx, rec, op) {
                 self.orch.to_main.retain(|x| *x != id);
             }
         }
@@ -783,12 +789,13 @@ impl NotesApp {
             return false;
         }
         let (tx, rx) = std::sync::mpsc::channel();
-        self.orch.copy_jobs.push(CopyJob { id: rec.id.clone(), merge: op != CopyOp::Discard, title: rec.title.clone(), root: rec.root.clone(), done: rx });
+        self.orch.copy_jobs.push(CopyJob { id: rec.id.clone(), merge: op != CopyOp::Discard, park: op == CopyOp::Park, title: rec.title.clone(), root: rec.root.clone(), done: rx });
         let ctx = ctx.clone();
         std::thread::spawn(move || {
             let res = match op {
                 CopyOp::Merge => auto::merge(&rec),
                 CopyOp::ToMain => auto::merge_into_main(&rec),
+                CopyOp::Park => auto::park(&rec),
                 CopyOp::Discard => auto::discard(&rec),
             };
             let _ = tx.send(res);
@@ -837,7 +844,10 @@ impl NotesApp {
         }
         // Commits on main allowed for this project: merge once Claude Code has closed.
         let to_main = self.ws.page(&project).and_then(|p| p.project.as_ref()).is_some_and(|p| p.commit_to_main);
-        if to_main && (!commits.is_empty() || dirty > 0) {
+        // On the shared dev branch: the work stays there and the copy goes, so dev can be
+        // opened from the Versions card (unless the session starts again by itself).
+        let on_dev = rec.branch == auto::DEV && resume_at == 0;
+        if on_dev || (to_main && (!commits.is_empty() || dirty > 0)) {
             self.orch.to_main.push(id.clone());
         }
         self.ws.notify("fin", &project, &crate::trf!("Fin de session sur {}", "End of session on {}", rec.title), &text, Some(page));
@@ -2041,12 +2051,12 @@ impl NotesApp {
         let mut finished = vec![];
         self.orch.copy_jobs.retain(|j| match j.done.try_recv() {
             Ok(res) => {
-                finished.push((j.id.clone(), j.merge, j.title.clone(), res));
+                finished.push((j.id.clone(), if j.park { 2 } else { j.merge as u8 }, j.title.clone(), res));
                 false
             }
             Err(std::sync::mpsc::TryRecvError::Empty) => true,
             Err(std::sync::mpsc::TryRecvError::Disconnected) => {
-                finished.push((j.id.clone(), j.merge, j.title.clone(), Err(crate::tr!("interrompu", "interrupted").into())));
+                finished.push((j.id.clone(), if j.park { 2 } else { j.merge as u8 }, j.title.clone(), Err(crate::tr!("interrompu", "interrupted").into())));
                 false
             }
         });
@@ -2054,7 +2064,11 @@ impl NotesApp {
             match res {
                 Ok(m) => {
                     if let Some(x) = self.ws.runs.iter_mut().find(|x| x.id == id) {
-                        x.closed = if merge { crate::tr!("fusionné", "merged").into() } else { crate::tr!("abandonné", "discarded").into() };
+                        x.closed = match merge {
+                            2 => crate::tr!("gardé sur dev", "kept on dev").into(),
+                            1 => crate::tr!("fusionné", "merged").into(),
+                            _ => crate::tr!("abandonné", "discarded").into(),
+                        };
                     }
                     self.dirty_since.get_or_insert_with(Instant::now);
                     self.detect_changes();
