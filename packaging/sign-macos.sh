@@ -53,7 +53,17 @@ fi
 
 if [ -n "$IDENTITY" ]; then
   echo "Signature avec « $IDENTITY »…"
-  codesign --force --deep --timestamp=none --identifier "$BUNDLE_ID" --sign "$IDENTITY" "$APP"
+  case "$IDENTITY" in
+    "Developer ID Application"*)
+      # Developer ID: hardened runtime and Apple's timestamp, both required to notarize.
+      codesign --force --deep --options runtime --timestamp \
+        --entitlements packaging/entitlements.plist \
+        --identifier "$BUNDLE_ID" --sign "$IDENTITY" "$APP"
+      ;;
+    *)
+      codesign --force --deep --timestamp=none --identifier "$BUNDLE_ID" --sign "$IDENTITY" "$APP"
+      ;;
+  esac
 else
   if [ "${MACOS_REQUIRE_IDENTITY:-0}" = "1" ]; then
     echo "sign-macos.sh : aucun certificat (MACOS_SIGN_IDENTITY ou MACOS_CERT_P12) alors que MACOS_REQUIRE_IDENTITY=1." >&2

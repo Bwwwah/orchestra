@@ -26,6 +26,8 @@
 	<string>public.app-category.productivity</string>
 	<key>NSHighResolutionCapable</key>
 	<true/>
+	<key>NSAppleEventsUsageDescription</key>
+	<string>Orchestra pilote d'autres apps pour choisir un dossier, lire le presse-papiers et capturer la fenêtre d'une app à la demande d'une IA.</string>
 	<key>NSLocalNetworkUsageDescription</key>
 	<string>Orchestra se connecte aux autres ordinateurs de votre réseau pour la collaboration en direct.</string>
 </dict>

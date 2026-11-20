@@ -79,6 +79,40 @@ GitHub › Settings › Secrets and variables › Actions, ajouter `MACOS_CERT_P
 exact du certificat, ex. « Developer ID Application: Nom (ÉQUIPE) »). Toujours réutiliser ce même
 certificat ensuite.
 
+## Developer ID : ce qu'il reste à faire (une fois)
+
+Choix fait le 20/11/2026 : abonnement Apple Developer, donc certificat **Developer ID Application**.
+Tout est prêt dans les scripts ; il manque le certificat et les secrets, que seul le titulaire du
+compte peut créer.
+
+1. **Créer le certificat** sur le Mac : Xcode › Réglages › Comptes › (le compte) › Gérer les
+   certificats › « + » › *Developer ID Application*. (Ou developer.apple.com › Certificates, avec une
+   demande de signature faite dans Trousseaux d'accès.)
+2. **L'exporter** : Trousseaux d'accès › Mes certificats › clic droit sur
+   « Developer ID Application: … » › Exporter… › format .p12, avec un mot de passe.
+3. **Créer un mot de passe pour app** : account.apple.com › Connexion et sécurité › Mots de passe
+   pour app.
+4. **Ajouter les secrets** dans GitHub › dépôt › Settings › Secrets and variables › Actions :
+
+   | Secret | Valeur |
+   |---|---|
+   | `MACOS_CERT_P12` | `base64 -i certificat.p12 \| pbcopy`, puis coller |
+   | `MACOS_CERT_PASSWORD` | le mot de passe du .p12 |
+   | `MACOS_SIGN_IDENTITY` | le nom exact : `Developer ID Application: Prénom Nom (ABCDE12345)` |
+   | `APPLE_ID` | l'adresse du compte Apple |
+   | `APPLE_TEAM_ID` | l'identifiant d'équipe (10 caractères, developer.apple.com › Membership) |
+   | `APPLE_APP_PASSWORD` | le mot de passe pour app de l'étape 3 |
+
+À la version suivante, `build-macos.sh` signe avec ce certificat (hardened runtime,
+`packaging/entitlements.plist` : seulement le droit Apple Events, pour osascript), puis
+`notarize-macos.sh` envoie l'app à Apple, attend la notarisation et agrafe le ticket. Le .zip des
+mises à jour et le .dmg contiennent alors l'app notarisée : plus de « Ouvrir quand même », et la
+permission « Enregistrement de l'écran » est conservée d'une version à l'autre (après l'avoir accordée
+une dernière fois à la première version signée).
+
+Une fois les secrets en place, mettre `MACOS_REQUIRE_IDENTITY: "1"` dans le workflow pour qu'une
+version ne puisse plus partir signée ad hoc par erreur.
+
 Dans les deux premiers cas, `build-macos.sh` doit signer avec `codesign --force --deep
 --sign "<nom du certificat>"` au lieu de `--sign -` (plus `--options runtime` pour la notarisation
 avec un Developer ID), et garder le même identifiant de bundle.

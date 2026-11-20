@@ -42,6 +42,9 @@ cp packaging/LISEZMOI.txt "dist/Orchestra/LISEZMOI.txt"
 # macOS keeps the permissions after an update; ad hoc with a warning when no certificate is
 # given. See packaging/sign-macos.sh and docs/permissions-macos.md.
 sh packaging/sign-macos.sh "$APP"
+# Notarization by Apple (Developer ID only, when APPLE_ID… are given): the .zip and the
+# .dmg below then hold the stapled app.
+sh packaging/notarize-macos.sh "$APP"
 
 ditto -c -k --norsrc --keepParent "dist/Orchestra" "dist/Orchestra-$VERSION-macOS.zip"
 
