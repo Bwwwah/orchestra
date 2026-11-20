@@ -265,6 +265,17 @@ impl NotesApp {
                         if !folder.trim().is_empty() && !folder_ok {
                             ui.label(RichText::new(crate::tr!("Ce dossier n'existe pas sur cette machine.", "This folder doesn't exist on this computer.")).size(12.5).color(ORANGE));
                         }
+                        if folder_ok {
+                            // Detected once per folder typed, not on every frame.
+                            let kind_key = egui::Id::unique(("new-project-code", folder.trim().to_string()));
+                            let code = ui.ctx().data(|d| d.get_temp::<bool>(kind_key)).unwrap_or_else(|| {
+                                let c = crate::project::is_code_folder(&crate::project::normalize_folder(folder.trim()));
+                                ui.ctx().data_mut(|d| d.insert_temp(kind_key, c));
+                                c
+                            });
+                            let text = if code { crate::tr!("Projet de code détecté", "Code project detected") } else { crate::tr!("Projet sans code (documents, cours, démarches…)", "Non-code project (documents, school, paperwork…)") };
+                            ui.label(RichText::new(text).size(12.5).color(t.tertiary));
+                        }
                         ui.add_space(6.0);
                         ui.horizontal(|ui| {
                             let name = if title.trim().is_empty() {
