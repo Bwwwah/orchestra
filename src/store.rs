@@ -42,7 +42,14 @@ pub fn lock_workspace() -> WorkspaceLock {
         if let Some(dir) = path.parent() {
             fs::create_dir_all(dir)?;
         }
-        let f = fs::OpenOptions::new().create(true).truncate(false).write(true).open(&path)?;
+        let mut o = fs::OpenOptions::new();
+        o.create(true).truncate(false).write(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            o.mode(0o600);
+        }
+        let f = o.open(&path)?;
         f.lock()?;
         Ok::<_, std::io::Error>(f)
     })();
@@ -123,6 +130,22 @@ pub fn save(ws: &Workspace) -> std::io::Result<()> {
     write_atomic(&path, serde_json::to_string_pretty(ws).unwrap_or_default().as_bytes())
 }
 
+/// A new file that only this user may read (0600 on Unix), from its creation: the
+/// workspace holds the pages, the projects' folders and the AIs' sessions, and must not be
+/// readable by other accounts, not even while it is being written. The rename keeps the
+/// mode, so `workspace.json` ends up 0600 too (an older 0644 file is replaced on the next
+/// save).
+fn private_file() -> fs::OpenOptions {
+    let mut o = fs::OpenOptions::new();
+    o.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        o.mode(0o600);
+    }
+    o
+}
+
 /// Write `bytes` to `path` through a temporary file with a unique name, then a rename.
 /// The app and the MCP server save the same file (and several Claude Code sessions the same
 /// usage files): a shared temporary name would let one truncate or rename the other's
@@ -131,7 +154,7 @@ pub fn write_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("workspace.json");
     let tmp = path.with_file_name(format!(".{name}.{}.tmp", uuid::Uuid::new_v4().simple()));
     let written = (|| {
-        let mut f = fs::File::create(&tmp)?;
+        let mut f = private_file().open(&tmp)?;
         f.write_all(bytes)?;
         f.sync_all()?;
         fs::rename(&tmp, path)
@@ -338,6 +361,28 @@ mod tests {
         assert!(got == a || got == b, "file mixes two writes");
         let left: Vec<_> = fs::read_dir(&dir).unwrap().map(|e| e.unwrap().file_name()).collect();
         assert_eq!(left, vec![std::ffi::OsString::from("workspace.json")]);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// The workspace file, rewritten over an older one readable by all, ends up readable by
+    /// its owner only; no temporary file is left.
+    #[cfg(unix)]
+    #[test]
+    fn written_files_are_private() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!("orchestra-mode-{}", uuid::Uuid::new_v4().simple()));
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("workspace.json");
+        fs::write(&path, "{}").unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o644)).unwrap();
+        write_atomic(&path, b"{\"pages\":[]}").unwrap();
+        assert_eq!(fs::metadata(&path).unwrap().permissions().mode() & 0o777, 0o600);
+        assert_eq!(fs::read_to_string(&path).unwrap(), "{\"pages\":[]}");
+        // A brand-new file too.
+        let other = dir.join("claude-usage.json");
+        write_atomic(&other, b"[]").unwrap();
+        assert_eq!(fs::metadata(&other).unwrap().permissions().mode() & 0o777, 0o600);
+        assert_eq!(fs::read_dir(&dir).unwrap().count(), 2, "no temporary file left");
         let _ = fs::remove_dir_all(&dir);
     }
 
