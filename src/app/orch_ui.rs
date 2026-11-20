@@ -174,6 +174,14 @@ struct Draft {
 }
 
 impl Draft {
+    /// A project's line in the launch card, with the choices the person last made for it
+    /// (kept in the project), else the settings' defaults: `limit` and `commits`.
+    fn new(pr: Option<&crate::project::Project>, limit: f32, commits: bool) -> Self {
+        let limit = pr.and_then(|x| x.session_limit).unwrap_or(limit);
+        let prefs = pr.and_then(|x| x.launch.clone()).unwrap_or_else(|| default_prefs(commits));
+        Draft { mission: String::new(), limit, commits: prefs.commits, pick: false, endless: prefs.endless, end: prefs.end }
+    }
+
     /// The choices kept in the project for its next sessions.
     fn prefs(&self) -> crate::project::LaunchPrefs {
         crate::project::LaunchPrefs { commits: self.commits, endless: self.endless, end: self.end.clone() }
@@ -1754,11 +1762,8 @@ impl NotesApp {
             .collect();
         let (dl, dc) = (self.ws.settings.orch.default_limit, self.ws.settings.orch.allow_commits);
         for (id, _, _) in &projects {
-            // The choices the person last made for this project, kept in the project.
             let pr = self.ws.page(id).and_then(|p| p.project.as_ref());
-            let dl = pr.and_then(|x| x.session_limit).unwrap_or(dl);
-            let prefs = pr.and_then(|x| x.launch.clone()).unwrap_or_else(|| default_prefs(dc));
-            self.orch.drafts.entry(id.clone()).or_insert(Draft { mission: String::new(), limit: dl, commits: prefs.commits, pick: false, endless: prefs.endless, end: prefs.end });
+            self.orch.drafts.entry(id.clone()).or_insert_with(|| Draft::new(pr, dl, dc));
         }
         let prefs_before: HashMap<String, crate::project::LaunchPrefs> = self.orch.drafts.iter().map(|(id, d)| (id.clone(), d.prefs())).collect();
         let running: Vec<String> = self.orch.runs.iter().map(|r| r.project.clone()).collect();
@@ -3087,6 +3092,33 @@ fn start_button(ui: &mut egui::Ui, enabled: bool, t: &Tone) -> egui::Response {
 /// The mark and colour of a finished session: done, stopped on a limit or a block, failed.
 #[cfg(test)]
 mod tests {
+    /// A project's launch line starts from the choices kept in the project, else from the
+    /// settings; and what it keeps back is what it started from.
+    #[test]
+    fn a_draft_starts_from_the_kept_choices() {
+        use super::{Draft, default_prefs};
+        use crate::model::EndConditions;
+        use crate::project::{LaunchPrefs, Project};
+        // Never set: the settings' budget and commits, not endless, 4 h when switched on.
+        let d = Draft::new(None, 20.0, true);
+        assert_eq!((d.limit, d.commits, d.endless, d.pick), (20.0, true, false, false));
+        assert_eq!(d.end.hours, Some(4.0));
+        assert_eq!(d.prefs(), default_prefs(true));
+        let fresh = Project::default();
+        assert_eq!(Draft::new(Some(&fresh), 30.0, false).limit, 30.0);
+        // Set before: 95 %, no commits, endless for 6 h or 12 turns.
+        let kept = LaunchPrefs { commits: false, endless: true, end: EndConditions { hours: Some(6.0), turns: Some(12), ..Default::default() } };
+        let p = Project { session_limit: Some(95.0), launch: Some(kept.clone()), ..Default::default() };
+        let d = Draft::new(Some(&p), 20.0, true);
+        assert_eq!((d.limit, d.commits, d.endless), (95.0, false, true));
+        assert!(d.mission.is_empty());
+        assert_eq!(d.prefs(), kept);
+        // Only the budget kept: the rest from the settings.
+        let p = Project { session_limit: Some(50.0), ..Default::default() };
+        let d = Draft::new(Some(&p), 20.0, true);
+        assert_eq!((d.limit, d.commits, d.endless), (50.0, true, false));
+    }
+
     /// The global limit shared in the launch card: what each project may take.
     #[test]
     fn the_global_limit_is_shared() {
