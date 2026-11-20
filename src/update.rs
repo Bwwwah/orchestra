@@ -130,6 +130,11 @@ fn install_to(target: &Path, repo: &str, rel: &Release) -> Result<PathBuf, Strin
     }
     let _ = std::fs::remove_file(&probe);
     let (name, url) = rel.asset().ok_or(crate::tr!("cette version n'a pas de fichier pour ce système", "this version has no file for this system"))?.clone();
+    // The tag and the file name come from the network and become paths and command
+    // arguments: only plain names are accepted.
+    if !safe_name(&rel.tag) || !safe_name(&name) {
+        return Err(crate::tr!("nom de version ou de fichier invalide : mise à jour refusée", "invalid version or file name: update refused").to_string());
+    }
     let tmp = std::env::temp_dir().join(format!("orchestra-maj-{}", rel.tag));
     let _ = std::fs::remove_dir_all(&tmp);
     std::fs::create_dir_all(&tmp).map_err(|e| e.to_string())?;
@@ -161,7 +166,8 @@ fn install_to(target: &Path, repo: &str, rel: &Release) -> Result<PathBuf, Strin
     } else if cfg!(target_os = "macos") {
         run("ditto", &["-x", "-k", &f, &o], None)?;
     } else if cfg!(windows) {
-        run("powershell", &["-NoProfile", "-Command", &format!("Expand-Archive -Force -LiteralPath '{f}' -DestinationPath '{o}'")], None)?;
+        let (f, o) = (ps_quote(&f), ps_quote(&o));
+        run("powershell", &["-NoProfile", "-Command", &format!("Expand-Archive -Force -LiteralPath {f} -DestinationPath {o}")], None)?;
     } else {
         run("unzip", &["-q", "-o", &f, "-d", &o], None)?;
     }
@@ -213,9 +219,23 @@ fn fetch(repo: &str, rel: &Release, name: &str, url: &str, dir: &Path) -> Result
         Err(String::new())
     };
     if got.is_err() || !file.is_file() {
-        run("curl", &["-fsSL", "-o", &file.display().to_string(), url], None).map_err(|e| crate::trf!("téléchargement impossible : {e}", "download failed: {e}"))?;
+        run("curl", &["-fsSL", "-o", &file.display().to_string(), "--url", url], None).map_err(|e| crate::trf!("téléchargement impossible : {e}", "download failed: {e}"))?;
     }
     Ok(file)
+}
+
+/// A release tag or file name that is safe as a path component and a command argument:
+/// [A-Za-z0-9._-] only, not starting with "-" or ".", at most 128 characters.
+fn safe_name(s: &str) -> bool {
+    !s.is_empty()
+        && s.len() <= 128
+        && !s.starts_with(['-', '.'])
+        && s.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-'))
+}
+
+/// A PowerShell single-quoted literal ('' stands for a quote inside).
+fn ps_quote(s: &str) -> String {
+    format!("'{}'", s.replace('\'', "''"))
 }
 
 /// The checksum in a "<hex>  <file>" line (sha256sum format), lowercase.
@@ -304,6 +324,28 @@ mod tests {
         let out = Command::new(&app).output().unwrap();
         assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "nouvelle");
         let _ = std::fs::remove_dir_all(base);
+    }
+
+    #[test]
+    fn names_are_sanitized() {
+        assert!(safe_name("v0.6.0"));
+        assert!(safe_name("Orchestra-v0.6.0-Linux.tar.gz"));
+        assert!(safe_name("Orchestra-v0.6.0-macOS.zip.sha256"));
+        for bad in ["", "..", "../x", "a/b", "a\\b", "-x", ".hidden", "v1'; rm", "v1 x", "v1$(x)", "é"] {
+            assert!(!safe_name(bad), "{bad}");
+        }
+        assert!(!safe_name(&"a".repeat(129)));
+        assert_eq!(ps_quote("C:\\a'b"), "'C:\\a''b'");
+        let rel = Release { tag: "../../x".into(), notes: String::new(), assets: vec![] };
+        let dir = std::env::temp_dir().join(format!("orch-upd-bad-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut r = rel.clone();
+        r.assets.push(("Orchestra-x-macOS.zip".into(), "u".into()));
+        r.assets.push(("Orchestra-x-Linux.tar.gz".into(), "u".into()));
+        r.assets.push(("Orchestra-x-Windows.zip".into(), "u".into()));
+        let e = install_to(&dir.join("orchestra"), "moi/orchestra", &r).unwrap_err();
+        assert!(e.contains("invalid") || e.contains("invalide"), "{e}");
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]
