@@ -18,6 +18,28 @@ pub fn lights_room(ctx: &egui::Context) -> f32 {
 /// Rows in the sidebar: 47 of 2000 px on the reference, about 31 px.
 pub const SIDE_ROW: f32 = 30.0;
 
+/// Orchestra's own violet, taken from the app icon: the sidebar's signature colour.
+pub fn violet(dark: bool) -> Color32 {
+    if dark { Color32::from_rgb(167, 139, 250) } else { Color32::from_rgb(109, 74, 222) }
+}
+
+/// The sidebar's background: a faint violet tint rather than Notion's warm grey.
+pub fn side_fill(dark: bool) -> Color32 {
+    if dark { Color32::from_rgb(27, 25, 35) } else { Color32::from_rgb(246, 244, 252) }
+}
+
+/// The sidebar's colours: the theme's, with violet-tinted hover and selection.
+pub fn side_tone(dark: bool) -> Tone {
+    let mut t = tone(dark);
+    let v = violet(dark);
+    let tint = |a: u8| Color32::from_rgba_unmultiplied(v.r(), v.g(), v.b(), a);
+    t.hover = tint(if dark { 22 } else { 16 });
+    t.selected = tint(if dark { 40 } else { 30 });
+    t.fill = tint(if dark { 34 } else { 24 });
+    t.border = tint(if dark { 48 } else { 40 });
+    t
+}
+
 pub enum SideIcon<'a> {
     Emoji(&'a str),
     Line(Icon),
@@ -28,33 +50,48 @@ pub fn side_item(ui: &mut egui::Ui, icon: SideIcon, label: &str, selected: bool,
     let w = ui.available_width();
     let (rect, resp) = ui.allocate_exact_size(egui::vec2(w, SIDE_ROW), egui::Sense::click());
     let painter = ui.painter().with_clip_rect(rect);
+    let dark = ui.visuals().dark_mode;
     if selected {
-        painter.rect_filled(rect, 6.0, t.selected);
+        // The open item: violet tint and a short violet bar on its left edge.
+        painter.rect_filled(rect, 8.0, t.selected);
+        let bar = egui::Rect::from_min_max(egui::pos2(rect.left(), rect.top() + 7.0), egui::pos2(rect.left() + 3.0, rect.bottom() - 7.0));
+        painter.rect_filled(bar, 1.5, violet(dark));
     } else if resp.hovered() {
-        painter.rect_filled(rect, 6.0, t.hover);
+        painter.rect_filled(rect, 8.0, t.hover);
     }
     let x = rect.left() + indent;
     let icon_rect = egui::Rect::from_center_size(egui::pos2(x + 18.0, rect.center().y), egui::vec2(20.0, 20.0));
+    let icon_color = if selected { violet(dark) } else { t.accent_text };
     match icon {
         SideIcon::Emoji(e) => {
-            painter.text(icon_rect.center(), egui::Align2::CENTER_CENTER, e, FontId::proportional(16.0), t.accent_text);
+            painter.text(icon_rect.center(), egui::Align2::CENTER_CENTER, e, FontId::proportional(16.0), icon_color);
         }
-        SideIcon::Line(i) => icons::paint(&painter, icon_rect, i, t.accent_text),
+        SideIcon::Line(i) => icons::paint(&painter, icon_rect, i, icon_color),
     }
     let color = if selected { t.text } else { t.accent_text };
     let max_w = (rect.right() - (x + 36.0) - 28.0).max(20.0);
-    let mut job = egui::text::LayoutJob::single_section(label.to_string(), egui::TextFormat::simple(FontId::proportional(14.0), color));
+    let font = if selected { semibold(14.0) } else { FontId::proportional(14.0) };
+    let mut job = egui::text::LayoutJob::single_section(label.to_string(), egui::TextFormat::simple(font, color));
     job.wrap = egui::text::TextWrapping::truncate_at_width(max_w);
     let galley = ui.fonts_mut(|f| f.layout_job(job));
     painter.galley(egui::pos2(x + 36.0, rect.center().y - galley.size().y / 2.0), galley, color);
     resp
 }
 
-/// Small grey section title ("Pages privées"…).
+/// Small section title in spaced capitals ("PAGES PRIVÉES"…), followed by a hairline.
 pub fn section_header(ui: &mut egui::Ui, label: &str, t: &Tone) {
     let w = ui.available_width();
     let (rect, _) = ui.allocate_exact_size(egui::vec2(w, 28.0), egui::Sense::hover());
-    ui.painter().text(egui::pos2(rect.left() + 8.0, rect.center().y + 2.0), egui::Align2::LEFT_CENTER, label, semibold(12.0), t.tertiary);
+    let mut format = egui::TextFormat::simple(semibold(10.5), t.tertiary);
+    format.extra_letter_spacing = 0.8;
+    let job = egui::text::LayoutJob::single_section(label.to_uppercase(), format);
+    let g = ui.fonts_mut(|f| f.layout_job(job));
+    let y = rect.center().y + 2.0;
+    let end = rect.left() + 8.0 + g.size().x;
+    ui.painter().galley(egui::pos2(rect.left() + 8.0, y - g.size().y / 2.0), g, t.tertiary);
+    if end + 10.0 < rect.right() - 6.0 {
+        ui.painter().hline(end + 8.0..=rect.right() - 6.0, y, egui::Stroke::new(1.0, t.border));
+    }
 }
 
 /// The "+ Ajouter" row under a section.
@@ -98,7 +135,8 @@ pub(super) fn relative_time(ms: u64) -> String {
 
 impl NotesApp {
     pub(super) fn sidebar(&mut self, ui: &mut egui::Ui, actions: &mut Vec<Action>) {
-        let t = tone(ui.visuals().dark_mode);
+        let dark = ui.visuals().dark_mode;
+        let t = side_tone(dark);
         ui.spacing_mut().item_spacing.y = 2.0;
         // First row, level with the tab strip: window buttons, sidebar toggle, new page.
         let w = ui.available_width();
@@ -110,6 +148,12 @@ impl NotesApp {
             self.ws.settings.sidebar_hidden = true;
         }
         let drag_from = child.cursor().left();
+        // The app's name, painted only (so the empty title area still moves the window).
+        if row.right() - drag_from > 130.0 {
+            let pos = egui::pos2(drag_from + 6.0, row.center().y);
+            child.painter().circle_stroke(pos + egui::vec2(5.0, 0.0), 4.5, egui::Stroke::new(2.0, violet(dark)));
+            child.painter().text(pos + egui::vec2(15.0, 0.0), egui::Align2::LEFT_CENTER, "Orchestra", semibold(13.5), t.secondary);
+        }
         child.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             ui.add_space(4.0);
             if icons::button(ui, Icon::Compose, 26.0, t.secondary, t.hover, crate::tr!("Nouvelle page (Cmd/Ctrl+N)", "New page (Cmd/Ctrl+N)")).clicked() {
@@ -150,7 +194,7 @@ impl NotesApp {
             if home || resp.hovered() {
                 ui.painter().rect_filled(rect, 8.0, t.hover);
             }
-            icons::paint(ui.painter(), egui::Rect::from_center_size(rect.left_center() + egui::vec2(17.0, 0.0), egui::vec2(18.0, 18.0)), Icon::Home, t.text);
+            icons::paint(ui.painter(), egui::Rect::from_center_size(rect.left_center() + egui::vec2(17.0, 0.0), egui::vec2(18.0, 18.0)), Icon::Home, violet(dark));
             ui.painter().galley(egui::pos2(rect.left() + 32.0, rect.center().y - g.size().y / 2.0), g, t.text);
             if resp.clicked() {
                 self.view = View::Home;
@@ -367,7 +411,7 @@ impl NotesApp {
             // On hover the icon becomes the expand arrow, and "+" appears at the right.
             let painter = ui.painter();
             let cover = icon_rect.shrink(1.0);
-            painter.rect_filled(cover, 4.0, ui.visuals().faint_bg_color);
+            painter.rect_filled(cover, 4.0, side_fill(ui.visuals().dark_mode));
             painter.rect_filled(cover, 4.0, if selected { t.selected } else { t.hover });
             if arrow.hovered() {
                 painter.rect_filled(cover, 4.0, t.hover);

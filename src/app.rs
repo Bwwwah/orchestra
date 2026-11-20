@@ -1103,7 +1103,7 @@ impl eframe::App for NotesApp {
             self.term_focus = self.term_open;
         }
         let dark = ctx.global_style().visuals.dark_mode;
-        let side_fill = rgb(if dark { original::dark::SIDEBAR } else { original::light::SIDEBAR });
+        let side_fill = chrome::side_fill(dark);
         let page_fill = rgb(if dark { original::dark::BACKGROUND } else { original::light::BACKGROUND });
         // Sidebar first: it runs the full height, beside the window buttons.
         if !self.ws.settings.sidebar_hidden {
@@ -1114,6 +1114,9 @@ impl eframe::App for NotesApp {
                 .size_range(220.0..=480.0)
                 .frame(egui::Frame::new().fill(side_fill).inner_margin(egui::Margin { left: 10, right: 10, top: 0, bottom: 8 }))
                 .show(ui, |ui| self.sidebar(ui, &mut actions));
+            // A thin violet-grey line sets the sidebar apart from the page.
+            let r = resp.response.rect;
+            ui.painter().vline(r.right() - 0.5, r.y_range(), egui::Stroke::new(1.0, chrome::side_tone(dark).border));
             let now = resp.response.rect.width();
             if (now - self.ws.settings.sidebar_width).abs() > 1.0 && ctx.input(|i| !i.pointer.any_down()) {
                 self.ws.settings.sidebar_width = now;
