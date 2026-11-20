@@ -39,7 +39,7 @@ impl NotesApp {
         self.upd.checked = Some(Instant::now());
         let (slot, c) = (self.upd.check.clone(), ctx.clone());
         std::thread::spawn(move || {
-            *slot.lock().unwrap() = Some(update::latest(&repo));
+            *slot.lock_or_recover() = Some(update::latest(&repo));
             c.request_repaint();
         });
     }
@@ -55,7 +55,7 @@ impl NotesApp {
         if auto && due {
             self.check_updates(ctx);
         }
-        if let Some(r) = self.upd.check.lock().unwrap().take() {
+        if let Some(r) = self.upd.check.lock_or_recover().take() {
             self.upd.checking = false;
             if let Ok(rel) = &r {
                 self.upd.latest = Some(rel.clone());
@@ -72,7 +72,7 @@ impl NotesApp {
                 Err(e) => self.upd.last = Some(Err(e)),
             }
         }
-        let done = self.upd.install.lock().unwrap().take();
+        let done = self.upd.install.lock_or_recover().take();
         if let Some(r) = done {
             self.upd.installing = false;
             match r {
@@ -91,7 +91,7 @@ impl NotesApp {
         self.upd.installing = true;
         let (slot, c) = (self.upd.install.clone(), ctx.clone());
         std::thread::spawn(move || {
-            *slot.lock().unwrap() = Some(update::install(&repo, &rel));
+            *slot.lock_or_recover() = Some(update::install(&repo, &rel));
             c.request_repaint();
         });
     }

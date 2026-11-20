@@ -2007,8 +2007,8 @@ impl NotesApp {
 impl NotesApp {
     /// "IA branchées : Claude Code ✔ · Codex ✔", the subscription's use, and a way to manage them.
     fn mcp_line(&mut self, ui: &mut egui::Ui, t: &Tone) {
-        let states = self.ais.states.lock().unwrap().clone();
-        let report = self.mcp_report.lock().unwrap().clone();
+        let states = self.ais.states.lock_or_recover().clone();
+        let report = self.mcp_report.lock_or_recover().clone();
         let mut open_ai = false;
         ui.horizontal_wrapped(|ui| {
             ui.spacing_mut().item_spacing.x = 6.0;
@@ -2248,15 +2248,15 @@ impl NotesApp {
                 let code = self.code_forced(&r.page_id);
                 std::thread::spawn(move || {
                     let res = crate::sync::ask_review(&r.folder, code, r.prefer);
-                    *o2.lock().unwrap() = Some(res);
+                    *o2.lock_or_recover() = Some(res);
                     c2.request_repaint();
                 });
                 self.reviews.insert(r.page_id.clone(), ReviewJob { result: out });
             }
-        let done: Vec<String> = self.reviews.iter().filter(|(_, j)| j.result.lock().unwrap().is_some()).map(|(k, _)| k.clone()).collect();
+        let done: Vec<String> = self.reviews.iter().filter(|(_, j)| j.result.lock_or_recover().is_some()).map(|(k, _)| k.clone()).collect();
         for id in done {
             let job = self.reviews.remove(&id).unwrap();
-            let res = job.result.lock().unwrap().take().unwrap();
+            let res = job.result.lock_or_recover().take().unwrap();
             match res {
                 Ok((text, tool)) => {
                     if let Some(pr) = self.ws.page_mut(&id).and_then(|p| p.project.as_mut()) {

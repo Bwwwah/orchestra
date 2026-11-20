@@ -79,7 +79,7 @@ impl Versions {
             runs_at: None,
             hot: None,
         });
-        if let Some((g, r)) = e.state.lock().unwrap().take()
+        if let Some((g, r)) = e.state.lock_or_recover().take()
             && g == e.generation
         {
             e.last = Some(r);
@@ -90,7 +90,7 @@ impl Versions {
             let (slot, f, c, g) = (e.state.clone(), folder.to_string(), ctx.clone(), e.generation);
             std::thread::spawn(move || {
                 let r = crate::git::state(&f);
-                *slot.lock().unwrap() = Some((g, r));
+                *slot.lock_or_recover() = Some((g, r));
                 c.request_repaint();
             });
         }
@@ -116,7 +116,7 @@ impl Versions {
     /// every 3 min otherwise.
     fn runs(&mut self, folder: &str, root: &str, ctx: &egui::Context) -> Vec<crate::git::Run> {
         let Some(e) = self.repos.get_mut(folder) else { return vec![] };
-        if let Some(r) = e.runs.lock().unwrap().take() {
+        if let Some(r) = e.runs.lock_or_recover().take() {
             e.runs_last = r;
         }
         let every = if e.runs_last.iter().any(|r| r.running()) || e.hot.is_some_and(|h| h.elapsed().as_secs() < 120) { 15 } else { 180 };
@@ -125,7 +125,7 @@ impl Versions {
             let (slot, r, c) = (e.runs.clone(), root.to_string(), ctx.clone());
             std::thread::spawn(move || {
                 if let Ok(list) = crate::git::runs(&r) {
-                    *slot.lock().unwrap() = Some(list);
+                    *slot.lock_or_recover() = Some(list);
                     c.request_repaint();
                 }
             });
@@ -141,7 +141,7 @@ impl Versions {
         let (o, c) = (out.clone(), ctx.clone());
         std::thread::spawn(move || {
             let r = work();
-            *o.lock().unwrap() = Some(r);
+            *o.lock_or_recover() = Some(r);
             c.request_repaint();
         });
         self.jobs.insert(page_id.to_string(), Job { folder: folder.to_string(), what, out });
@@ -149,10 +149,10 @@ impl Versions {
 
     /// Collect finished jobs (call once per frame).
     pub fn tick(&mut self, ctx: &egui::Context) {
-        let done: Vec<String> = self.jobs.iter().filter(|(_, j)| j.out.lock().unwrap().is_some()).map(|(k, _)| k.clone()).collect();
+        let done: Vec<String> = self.jobs.iter().filter(|(_, j)| j.out.lock_or_recover().is_some()).map(|(k, _)| k.clone()).collect();
         for id in done {
             let job = self.jobs.remove(&id).unwrap();
-            let out = job.out.lock().unwrap().take().unwrap();
+            let out = job.out.lock_or_recover().take().unwrap();
             match out {
                 Outcome::Done(m) => {
                     self.status = Some(super::notices::Notice::Info(m));
@@ -182,14 +182,14 @@ impl Versions {
 
 impl Versions {
     fn gh(&mut self, ctx: &egui::Context) -> Option<(bool, bool)> {
-        if let Some(x) = self.gh.lock().unwrap().take() {
+        if let Some(x) = self.gh.lock_or_recover().take() {
             self.gh_last = Some(x);
         }
         if self.gh_checked.is_none_or(|t| t.elapsed().as_secs() >= 30) {
             self.gh_checked = Some(Instant::now());
             let (slot, c) = (self.gh.clone(), ctx.clone());
             std::thread::spawn(move || {
-                *slot.lock().unwrap() = Some(crate::git::gh_info());
+                *slot.lock_or_recover() = Some(crate::git::gh_info());
                 c.request_repaint();
             });
         }

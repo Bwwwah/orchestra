@@ -1175,7 +1175,7 @@ impl eframe::App for NotesApp {
             ctx.request_repaint_after(std::time::Duration::from_secs(10));
         }
         if !self.mcp_report_shown {
-            let done = self.mcp_report.lock().unwrap().as_ref().map(|r| (crate::setup::summary(r), r.iter().any(|(_, o)| matches!(o, crate::setup::Outcome::Failed(_)))));
+            let done = self.mcp_report.lock_or_recover().as_ref().map(|r| (crate::setup::summary(r), r.iter().any(|(_, o)| matches!(o, crate::setup::Outcome::Failed(_)))));
             if let Some((msg, failed)) = done {
                 self.mcp_report_shown = true;
                 match msg {
@@ -1186,7 +1186,7 @@ impl eframe::App for NotesApp {
             }
         }
         self.shortcuts(&ctx, &mut actions);
-        let unplugged = self.uninstall_report.lock().unwrap().take();
+        let unplugged = self.uninstall_report.lock_or_recover().take();
         if let Some(lines) = unplugged {
             self.info(crate::trf!(
                 "{}\nVous pouvez maintenant quitter Orchestra et le supprimer.",
@@ -2106,6 +2106,18 @@ fn apply_kind(
     }
 }
 
+/// Lock the slot of a background task even when the thread that held it panicked: its
+/// value is taken as it is, rather than bringing the whole window down with it.
+pub(crate) trait LockOrRecover<T> {
+    fn lock_or_recover(&self) -> std::sync::MutexGuard<'_, T>;
+}
+
+impl<T> LockOrRecover<T> for std::sync::Mutex<T> {
+    fn lock_or_recover(&self) -> std::sync::MutexGuard<'_, T> {
+        self.lock().unwrap_or_else(|e| e.into_inner())
+    }
+}
+
 // -------------------------------------------------------------------- databases
 
 mod ai_fill;
@@ -2420,7 +2432,7 @@ impl Section {
     }
 
     fn report() {
-        let mut v = SECTIONS.lock().unwrap();
+        let mut v = SECTIONS.lock_or_recover();
         for (name, total, n) in v.iter() {
             if *n > 0 {
                 eprintln!("   {name} : {} µs en moyenne", total / n);
@@ -2434,7 +2446,7 @@ impl Drop for Section {
     fn drop(&mut self) {
         if let Some(s) = self.start {
             let us = s.elapsed().as_micros() as u64;
-            let mut v = SECTIONS.lock().unwrap();
+            let mut v = SECTIONS.lock_or_recover();
             match v.iter_mut().find(|x| x.0 == self.name) {
                 Some(x) => {
                     x.1 += us;
@@ -2450,6 +2462,21 @@ impl Drop for Section {
 mod tests {
     use super::*;
     use egui_kittest::Harness;
+
+    /// A background task that panics while holding its slot: the window still reads it.
+    #[test]
+    fn a_panicked_task_leaves_its_slot_readable() {
+        let slot = std::sync::Arc::new(std::sync::Mutex::new(Some(7)));
+        let s = slot.clone();
+        let _ = std::thread::spawn(move || {
+            let _g = s.lock().unwrap();
+            panic!("tâche de fond en échec (attendu par le test)");
+        })
+        .join();
+        assert!(slot.is_poisoned());
+        assert_eq!(slot.lock_or_recover().take(), Some(7));
+        assert_eq!(*slot.lock_or_recover(), None);
+    }
 
     fn page_abc() -> Page {
         let mut p = Page::new("Test", None);

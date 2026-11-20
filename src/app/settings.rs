@@ -505,7 +505,7 @@ impl NotesApp {
                 // Runs the AIs' CLIs: off the UI thread, the result comes back as a message.
                 let (done, c) = (self.uninstall_report.clone(), ui.ctx().clone());
                 std::thread::spawn(move || {
-                    *done.lock().unwrap() = Some(crate::setup::clean_up_for_uninstall());
+                    *done.lock_or_recover() = Some(crate::setup::clean_up_for_uninstall());
                     c.request_repaint();
                 });
             }
@@ -620,8 +620,8 @@ impl NotesApp {
     fn ai_list(&mut self, ui: &mut egui::Ui, t: &Tone, l: &Look) {
         use crate::setup::Ai;
         section(ui, crate::tr!("Vos IA", "Your AIs"), t, l);
-        let states = self.ais.states.lock().unwrap().clone();
-        let busy = self.ais.busy.lock().unwrap().clone();
+        let states = self.ais.states.lock_or_recover().clone();
+        let busy = self.ais.busy.lock_or_recover().clone();
         let ctx = ui.ctx().clone();
         let mut toggle: Option<(Ai, bool)> = None;
         let mut term: Option<(String, String, Option<String>)> = None;
@@ -686,7 +686,7 @@ impl NotesApp {
         });
         row(ui, crate::tr!("Vérifier à nouveau", "Check again"), crate::tr!("Après avoir installé une IA ou changé sa configuration.", "After installing an AI or changing its configuration."), t, |ui| {
             if button(ui, crate::tr!("Vérifier", "Check"), t, l).clicked() {
-                *self.ais.states.lock().unwrap() = None;
+                *self.ais.states.lock_or_recover() = None;
                 self.refresh_ais(&ctx, false);
             }
         });

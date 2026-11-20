@@ -24,11 +24,11 @@ pub struct Ais {
 impl Ais {
     /// True once the check is done and no AI is plugged in: the round AI button shows then.
     pub fn none_plugged(&self) -> bool {
-        self.states.lock().unwrap().as_ref().is_some_and(|s| !s.iter().any(|x| x.plugged))
+        self.states.lock_or_recover().as_ref().is_some_and(|s| !s.iter().any(|x| x.plugged))
     }
 
     pub fn plugged(&self) -> Vec<Ai> {
-        self.states.lock().unwrap().as_ref().map(|s| s.iter().filter(|x| x.plugged).map(|x| x.ai).collect()).unwrap_or_default()
+        self.states.lock_or_recover().as_ref().map(|s| s.iter().filter(|x| x.plugged).map(|x| x.ai).collect()).unwrap_or_default()
     }
 
     /// Buttons for "Nouvelle session": the plugged agents that run in a terminal, then the shell.
@@ -55,15 +55,15 @@ impl NotesApp {
         let ctx = ctx.clone();
         self.mcp_report_shown = !plug;
         if plug {
-            *report.lock().unwrap() = None;
+            *report.lock_or_recover() = None;
         }
         std::thread::spawn(move || {
             if plug {
                 let exe = std::env::current_exe().unwrap_or_default();
                 let r = crate::setup::plug_all(&exe, &off);
-                *report.lock().unwrap() = Some(r);
+                *report.lock_or_recover() = Some(r);
             }
-            *states.lock().unwrap() = Some(crate::setup::states());
+            *states.lock_or_recover() = Some(crate::setup::states());
             ctx.request_repaint();
         });
     }
@@ -82,7 +82,7 @@ impl NotesApp {
         const EVERY: Duration = Duration::from_secs(5);
         const GIVE_UP: Duration = Duration::from_secs(20 * 60);
         let Some((ai, started, last)) = self.ais.installing else { return };
-        let there = self.ais.states.lock().unwrap().as_ref().and_then(|s| s.iter().find(|x| x.ai == ai).map(|x| x.installed));
+        let there = self.ais.states.lock_or_recover().as_ref().and_then(|s| s.iter().find(|x| x.ai == ai).map(|x| x.installed));
         if there == Some(true) {
             self.ais.installing = None;
             self.set_ai(ctx, ai, true);
@@ -110,7 +110,7 @@ impl NotesApp {
         }
         self.dirty_since.get_or_insert_with(Instant::now);
         let (states, busy, msg) = (self.ais.states.clone(), self.ais.busy.clone(), self.ais.done_msg.clone());
-        *busy.lock().unwrap() = Some(ai.key().to_string());
+        *busy.lock_or_recover() = Some(ai.key().to_string());
         let ctx = ctx.clone();
         std::thread::spawn(move || {
             let text = if on {
@@ -126,16 +126,16 @@ impl NotesApp {
                     Err(e) => Err(crate::trf!("{} : impossible de débrancher ({e}).", "{}: couldn't unplug it ({e}).", ai.label())),
                 }
             };
-            *states.lock().unwrap() = Some(crate::setup::states());
-            *busy.lock().unwrap() = None;
-            *msg.lock().unwrap() = Some(text);
+            *states.lock_or_recover() = Some(crate::setup::states());
+            *busy.lock_or_recover() = None;
+            *msg.lock_or_recover() = Some(text);
             ctx.request_repaint();
         });
     }
 
     /// Once per frame: messages of finished actions; usage read again every 20 s.
     pub(super) fn ais_tick(&mut self) {
-        let done = self.ais.done_msg.lock().unwrap().take();
+        let done = self.ais.done_msg.lock_or_recover().take();
         if let Some(m) = done {
             self.notice(super::notices::Notice::from_result(m));
         }

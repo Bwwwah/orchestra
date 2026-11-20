@@ -824,7 +824,7 @@ impl NotesApp {
             running: self.orch.runs.len(),
             ran: !self.ws.runs.is_empty() || !self.orch.runs.is_empty(),
             waiting: self.ws.inbox.iter().filter(|m| m.kind == "question" && m.answer.trim().is_empty()).count(),
-            checking: self.ais.states.lock().unwrap().is_none(),
+            checking: self.ais.states.lock_or_recover().is_none(),
         };
         let mut go: Option<HomeGo> = None;
         let avail = ui.available_width();

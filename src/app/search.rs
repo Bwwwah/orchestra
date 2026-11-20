@@ -39,7 +39,7 @@ impl NotesApp {
     pub(super) fn search_window(&mut self, ctx: &egui::Context, actions: &mut Vec<Action>) {
         // Collect a finished answer.
         if self.search_ask.running {
-            if let Some(r) = self.search_ask.result.lock().unwrap().take() {
+            if let Some(r) = self.search_ask.result.lock_or_recover().take() {
                 self.search_ask.answer = Some(r);
                 self.search_ask.running = false;
             } else {
@@ -193,7 +193,7 @@ impl NotesApp {
             std::thread::spawn(move || {
                 let r = crate::sync::ask(&folder, ask_prompt(&query, &folder), "mcp__orchestra,Read,Glob,Grep,WebSearch,WebFetch", 20, prefer)
                     .map(|(a, tool)| (a, tool.label().to_string()));
-                *slot.lock().unwrap() = Some(r);
+                *slot.lock_or_recover() = Some(r);
                 c.request_repaint();
             });
         }

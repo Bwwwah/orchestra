@@ -79,7 +79,7 @@ fn spawn<T: Send + 'static>(ctx: &egui::Context, work: impl FnOnce() -> T + Send
     let (s, c) = (slot.clone(), ctx.clone());
     std::thread::spawn(move || {
         let r = work();
-        *s.lock().unwrap() = Some(r);
+        *s.lock_or_recover() = Some(r);
         c.request_repaint();
     });
     slot
@@ -129,10 +129,10 @@ impl NotesApp {
             }
         }
         // Answered quick questions.
-        let done: Vec<String> = self.ai.questions.iter().filter(|(_, (_, s))| s.lock().unwrap().is_some()).map(|(k, _)| k.clone()).collect();
+        let done: Vec<String> = self.ai.questions.iter().filter(|(_, (_, s))| s.lock_or_recover().is_some()).map(|(k, _)| k.clone()).collect();
         for id in done {
             let (question, slot) = self.ai.questions.remove(&id).unwrap();
-            let res = slot.lock().unwrap().take().unwrap();
+            let res = slot.lock_or_recover().take().unwrap();
             let by = res.as_ref().map(|(_, t)| t.label().to_string()).unwrap_or_default();
             self.ai.answers.insert(id, QuickAnswer { question, answer: res.map(|(a, _)| a), by });
         }
@@ -148,9 +148,9 @@ impl NotesApp {
             }
         }
         // Finished fills.
-        let done: Vec<String> = self.ai.fills.iter().filter(|(_, s)| s.lock().unwrap().is_some()).map(|(k, _)| k.clone()).collect();
+        let done: Vec<String> = self.ai.fills.iter().filter(|(_, s)| s.lock_or_recover().is_some()).map(|(k, _)| k.clone()).collect();
         for id in done {
-            let res = self.ai.fills.remove(&id).unwrap().lock().unwrap().take().unwrap();
+            let res = self.ai.fills.remove(&id).unwrap().lock_or_recover().take().unwrap();
             match res {
                 Ok((f, tool)) => {
                     if let Some(pr) = self.ws.page_mut(&id).and_then(|p| p.project.as_mut()) {
@@ -163,9 +163,9 @@ impl NotesApp {
             }
         }
         // Finished task proposals.
-        let done: Vec<String> = self.ai.tasks.iter().filter(|(_, s)| s.lock().unwrap().is_some()).map(|(k, _)| k.clone()).collect();
+        let done: Vec<String> = self.ai.tasks.iter().filter(|(_, s)| s.lock_or_recover().is_some()).map(|(k, _)| k.clone()).collect();
         for id in done {
-            let res = self.ai.tasks.remove(&id).unwrap().lock().unwrap().take().unwrap();
+            let res = self.ai.tasks.remove(&id).unwrap().lock_or_recover().take().unwrap();
             match res {
                 Ok(list) => {
                     self.ai.proposals.insert(id, list.into_iter().map(|t| (t, true)).collect());
