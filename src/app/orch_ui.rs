@@ -215,6 +215,8 @@ pub struct Orch {
     confirm: Option<(String, &'static str)>,
     /// Copies being merged or discarded in the background (git can take a while).
     copy_jobs: Vec<CopyJob>,
+    /// The window was closed during one of them: close it once they are all done.
+    quit_after_jobs: bool,
     /// An endless session on main waiting for the person to confirm the warning: a project
     /// id, or SELECTION for « Lancer la sélection ».
     confirm_main: Option<String>,
@@ -381,7 +383,24 @@ impl NotesApp {
     /// Closing the window while autonomous sessions run only puts it in the Dock: Orchestra
     /// goes on driving them. Closing it again within a minute quits for real.
     fn keep_running_on_close(&mut self, ctx: &egui::Context) {
-        if !ctx.input(|i| i.viewport().close_requested()) || self.orch.runs.is_empty() {
+        let asked = ctx.input(|i| i.viewport().close_requested());
+        // A copy being merged or discarded: quitting would cut git short and could leave the
+        // project's folder half merged. Orchestra closes once it is done; asking again quits.
+        if asked && !self.orch.copy_jobs.is_empty() && !self.orch.quit_after_jobs {
+            self.orch.quit_after_jobs = true;
+            ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+            self.info(crate::tr!(
+                "Une copie est en cours de fusion : Orchestra se fermera dès qu'elle sera finie. Fermez à nouveau pour quitter tout de suite.",
+                "A copy is being merged: Orchestra will close as soon as it is done. Close again to quit right away."
+            ));
+            return;
+        }
+        if self.orch.quit_after_jobs && self.orch.copy_jobs.is_empty() {
+            self.orch.quit_after_jobs = false;
+            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+            return;
+        }
+        if !asked || self.orch.runs.is_empty() {
             return;
         }
         if self.orch.close_held.is_some_and(|t| t.elapsed() < Duration::from_secs(60)) {
