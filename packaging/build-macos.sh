@@ -38,9 +38,10 @@ rm -rf "$ICONSET"
 
 cp packaging/LISEZMOI.txt "dist/Orchestra/LISEZMOI.txt"
 
-# Ad-hoc signature: required to run on Apple-chip Macs (not an Apple-issued certificate).
-codesign --force --deep --sign - "$APP"
-codesign --verify --deep --strict "$APP"
+# Signature: always the same identity (certificate) and the same bundle identifier, so that
+# macOS keeps the permissions after an update; ad hoc with a warning when no certificate is
+# given. See packaging/sign-macos.sh and docs/permissions-macos.md.
+sh packaging/sign-macos.sh "$APP"
 
 ditto -c -k --norsrc --keepParent "dist/Orchestra" "dist/Orchestra-$VERSION-macOS.zip"
 
