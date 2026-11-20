@@ -31,16 +31,46 @@ pub struct Agent {
 
 /// The PATH of the person's own shell. Apps opened from the Finder get a bare PATH, where
 /// `claude` (often installed with npm / nvm) and `node` are missing.
+///
+/// Starting the shell takes about a second: the answer is kept a few minutes (git alone asks
+/// for it a dozen times to read one repository).
 pub fn shell_path() -> String {
+    static CACHE: Mutex<Option<(Instant, String)>> = Mutex::new(None);
+    if let Some((at, p)) = CACHE.lock().unwrap().as_ref() {
+        if at.elapsed() < Duration::from_secs(300) {
+            return p.clone();
+        }
+    }
+    let p = read_shell_path();
+    *CACHE.lock().unwrap() = Some((Instant::now(), p.clone()));
+    p
+}
+
+#[cfg(unix)]
+unsafe extern "C" {
+    fn setsid() -> i32;
+}
+
+fn read_shell_path() -> String {
     let mut parts: Vec<PathBuf> = vec![];
     #[cfg(unix)]
     {
+        use std::os::unix::process::CommandExt;
         let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".into());
-        let out = Command::new(&shell)
-            .args(["-lic", "printf '__PATH__%s\\n' \"$PATH\""])
-            .stdin(Stdio::null())
-            .stderr(Stdio::null())
-            .output();
+        let mut cmd = Command::new(&shell);
+        cmd.args(["-lic", "printf '__PATH__%s\\n' \"$PATH\""]).stdin(Stdio::null()).stderr(Stdio::null());
+        // An interactive shell takes over its terminal (job control). When Orchestra runs as
+        // the MCP server of a Claude Code session, that terminal is Claude Code's, which
+        // then loses it and quits in the middle of its turn. In a session of its own, the
+        // shell has no terminal to take.
+        // SAFETY: setsid is async-signal-safe and touches no memory of the parent.
+        unsafe {
+            cmd.pre_exec(|| {
+                setsid();
+                Ok(())
+            });
+        }
+        let out = cmd.output();
         let from_shell = out
             .ok()
             .and_then(|o| String::from_utf8(o.stdout).ok())

@@ -321,8 +321,10 @@ pub fn mission_prompt(title: &str, project_id: &str, branch: &str, mission: &str
          5. Si une décision humaine est nécessaire, appelle ask_human (project = « {project_id} ») avec une question courte, puis continue sur autre chose. \
          Les réponses de la personne apparaissent dans get_project_state (section « Questions posées ») : rappelle get_project_state avant chaque nouvelle étape et applique-les.\n\
          6. Ne modifie rien hors de ce dossier ; aucune commande destructrice.\n\
+         7. Une seule étape par tour : dès qu'elle est faite et vérifiée, arrête-toi ; Orchestra te relancera pour la suivante.\n\
          Quand tu t'arrêtes pour ce tour, termine ta réponse par une seule de ces lignes : \
-         [[CONTINUER]] s'il reste du travail possible, [[FINI]] si tout ce qui pouvait être fait l'est, [[BLOQUÉ]] si tu ne peux plus avancer.", "You are working autonomously for Orchestra on the project « {title} » (id {project_id}). \
+         [[CONTINUER]] s'il reste une étape ouverte que tu peux avancer, [[FINI]] s'il n'en reste aucune, \
+         [[BLOQUÉ]] seulement si aucune étape ouverte ne peut plus avancer (une question posée avec ask_human n'est pas un blocage tant qu'il reste d'autres étapes).", "You are working autonomously for Orchestra on the project « {title} » (id {project_id}). \
          This folder is a dedicated copy of the repository, on the branch {branch}: work only here, don't switch branches.\n\
          1. Call get_project_state with project = « {project_id} » for the current state and the steps.\n\
          2. Mission: {mission}\n\
@@ -332,15 +334,17 @@ pub fn mission_prompt(title: &str, project_id: &str, branch: &str, mission: &str
          5. If a human decision is needed, call ask_human (project = « {project_id} ») with a short question, then go on with something else. \
          The person's answers show up in get_project_state (section « Questions posées »): call it again before each new step and apply them.\n\
          6. Change nothing outside this folder; no destructive command.\n\
+         7. One step per turn: as soon as it is done and checked, stop; Orchestra will start you again for the next one.\n\
          When you stop for this turn, end your answer with exactly one of these lines: \
-         [[CONTINUER]] if there is work left you can do, [[FINI]] if everything that could be done is done, [[BLOQUÉ]] if you can't go further."
+         [[CONTINUER]] if an open step is left that you can move forward, [[FINI]] if none is left, \
+         [[BLOQUÉ]] only if no open step can move forward any more (a question asked with ask_human is not a block while other steps are left)."
     )
 }
 
 pub fn continue_prompt() -> &'static str {
     crate::tr!(
-        "Continue la mission avec les mêmes règles (étape suivante ; relis get_project_state pour les réponses à tes questions). Termine par [[CONTINUER]], [[FINI]] ou [[BLOQUÉ]].",
-        "Go on with the mission under the same rules (next step; read get_project_state again for the answers to your questions). End with [[CONTINUER]], [[FINI]] or [[BLOQUÉ]]."
+        "Continue la mission avec les mêmes règles : l'étape suivante, une seule (relis get_project_state pour les réponses à tes questions). Termine par [[CONTINUER]], [[FINI]] ou [[BLOQUÉ]].",
+        "Go on with the mission under the same rules: the next step, only one (read get_project_state again for the answers to your questions). End with [[CONTINUER]], [[FINI]] or [[BLOQUÉ]]."
     )
 }
 
@@ -397,7 +401,15 @@ pub fn read_screen(text: &str) -> Screen {
     let t = text.to_lowercase();
     if t.contains("do you trust") || (t.contains("trust") && t.contains("folder") && t.contains("proceed")) {
         Screen::Trust
-    } else if t.contains("do you want to proceed") || t.contains("do you want to make this edit") || t.contains("do you want to create") || t.contains("do you want to allow") {
+    } else if t.contains("do you want to proceed")
+        || t.contains("do you want to make this edit")
+        || t.contains("do you want to create")
+        || t.contains("do you want to allow")
+        || t.contains("do you want to run")
+        // The last choice of every permission menu, whatever the question above it.
+        || t.contains("tell claude what to do differently")
+        || (t.contains("1. yes") && t.contains("2. ") && t.contains("esc"))
+    {
         Screen::Permission
     } else {
         Screen::Other
@@ -536,6 +548,9 @@ mod tests {
         assert_eq!(signal("rien"), Signal::Continue);
         assert_eq!(read_screen("Do you trust the files in this folder?\n❯ 1. Yes, proceed"), Screen::Trust);
         assert_eq!(read_screen("Bash command\n rm x\nDo you want to proceed?"), Screen::Permission);
+        assert_eq!(read_screen("Bash command\n python3 - <<EOF\n❯ 1. Yes\n  2. No, and tell Claude what to do differently (esc)"), Screen::Permission);
+        assert_eq!(read_screen("Quelle question ?\n❯ 1. Yes\n  2. Yes, allow all edits\n  3. No (esc)"), Screen::Permission);
+        assert_eq!(read_screen("✻ Compiling… (12s · esc to interrupt)"), Screen::Other);
         assert_eq!(slug("Démo — Été 2026!"), "demo-ete-2026");
         assert!(Agent::ClaudeCode.command(false, "").contains("--permission-mode acceptEdits"));
         assert!(!Agent::ClaudeCode.command(false, "").contains("git commit"));

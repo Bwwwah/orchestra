@@ -161,7 +161,7 @@ impl NotesApp {
         let o = &self.ws.settings.orch;
         let cmd = agent.command(commits, &o.extra_tools);
         let c2 = ctx.clone();
-        let mut term = Term::spawn(&crate::trf!("Autonome · {title}", "Autonomous · {title}"), &copy.worktree, Some(&cmd), move || c2.request_repaint_after(Duration::from_millis(200)))?;
+        let mut term = Term::spawn_once(&crate::trf!("Autonome · {title}", "Autonomous · {title}"), &copy.worktree, &cmd, move || c2.request_repaint_after(Duration::from_millis(200)))?;
         term.resize(42, 140);
         let id = crate::model::new_id();
         let mission = if mission.trim().is_empty() { default_mission().to_string() } else { mission.trim().to_string() };
@@ -297,7 +297,13 @@ impl NotesApp {
                 }
                 Phase::Working(t) | Phase::Summary(t) => {
                     let summary = matches!(r.phase, Phase::Summary(_));
-                    if auto::read_screen(&screen) == Screen::Permission && idle > Duration::from_millis(800) {
+                    // While Claude Code works, its spinner redraws the screen every second: a
+                    // screen still for minutes, with nothing written to the session either, is
+                    // a question we didn't recognise. Answer it like a permission.
+                    let frozen = idle > Duration::from_secs(180)
+                        && !r.reader.turn_over
+                        && r.reader.last_growth.is_none_or(|g| g.elapsed() > Duration::from_secs(180));
+                    if (auto::read_screen(&screen) == Screen::Permission && idle > Duration::from_millis(800)) || frozen {
                         r.term.write(b"\x1b");
                         r.denials += 1;
                         r.last_line = crate::tr!("Commande refusée (non autorisée en autonome)", "Command refused (not allowed when autonomous)").into();

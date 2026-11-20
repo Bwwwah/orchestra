@@ -39,6 +39,16 @@ fn nz(n: u16) -> NonZeroU16 {
 impl Term {
     /// A login shell in `cwd`; with `cmd`, the shell runs it first, then stays open.
     pub fn spawn(title: &str, cwd: &str, cmd: Option<&str>, on_output: impl Fn() + Send + 'static) -> Result<Term, String> {
+        Self::spawn_with(title, cwd, cmd, true, on_output)
+    }
+
+    /// The shell runs `cmd` and ends with it: `exited()` says when the program has quit
+    /// (sessions driven by Orchestra, which must notice it).
+    pub fn spawn_once(title: &str, cwd: &str, cmd: &str, on_output: impl Fn() + Send + 'static) -> Result<Term, String> {
+        Self::spawn_with(title, cwd, Some(cmd), false, on_output)
+    }
+
+    fn spawn_with(title: &str, cwd: &str, cmd: Option<&str>, keep_shell: bool, on_output: impl Fn() + Send + 'static) -> Result<Term, String> {
         let (rows, cols) = (24u16, 80u16);
         let pair = native_pty_system()
             .openpty(PtySize { rows, cols, pixel_width: 0, pixel_height: 0 })
@@ -49,7 +59,10 @@ impl Term {
             let mut c = CommandBuilder::new("powershell.exe");
             c.arg("-NoLogo");
             if let Some(cmd) = cmd {
-                c.args(["-NoExit", "-Command", cmd]);
+                if keep_shell {
+                    c.arg("-NoExit");
+                }
+                c.args(["-Command", cmd]);
             }
             c
         };
@@ -58,8 +71,11 @@ impl Term {
             let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".into());
             let mut c = CommandBuilder::new(&shell);
             match cmd {
-                Some(cmd) => {
+                Some(cmd) if keep_shell => {
                     c.args(["-l", "-c", &format!("{cmd}; exec {} -l", crate::sessions::shell_quote(&shell))]);
+                }
+                Some(cmd) => {
+                    c.args(["-l", "-c", cmd]);
                 }
                 None => c.arg("-l"),
             }
