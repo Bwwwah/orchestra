@@ -28,6 +28,10 @@ UninstallDisplayIcon={app}\orchestra.exe
 Compression=lzma2
 SolidCompression=yes
 WizardStyle=modern
+; Orchestra still running (the window, its terminals, the MCP servers its AIs started)
+; holds orchestra.exe: closed first, see [Code].
+CloseApplications=force
+RestartApplications=no
 
 [Languages]
 Name: "french"; MessagesFile: "compiler:Languages\French.isl"
@@ -45,3 +49,29 @@ Name: "{autodesktop}\Orchestra"; Filename: "{app}\orchestra.exe"; Tasks: desktop
 
 [Run]
 Filename: "{app}\orchestra.exe"; Description: "{cm:LaunchProgram,Orchestra}"; Flags: nowait postinstall skipifsilent
+
+[Code]
+// Every orchestra.exe (the window, `orchestra mcp` started by the AIs, `orchestra
+// statusline`) and everything they started (PowerShell, claude, node…): /T ends the whole
+// tree, /F without waiting. Otherwise orchestra.exe stays locked and the install over an
+// old version, or the uninstall, fails on it.
+procedure StopOrchestra();
+var
+  Code: Integer;
+begin
+  Exec(ExpandConstant('{sys}\taskkill.exe'), '/F /T /IM orchestra.exe', '', SW_HIDE, ewWaitUntilTerminated, Code);
+  // Let Windows release the file handles.
+  Sleep(800);
+end;
+
+function PrepareToInstall(var NeedsRestart: Boolean): String;
+begin
+  StopOrchestra();
+  Result := '';
+end;
+
+function InitializeUninstall(): Boolean;
+begin
+  StopOrchestra();
+  Result := True;
+end;

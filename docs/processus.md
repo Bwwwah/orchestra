@@ -23,5 +23,17 @@ Rien ne relance un processus à chaque image ni ne relance l'app elle-même en b
 ressemblait à une boucle sous Windows venait des consoles visibles de ces commandes périodiques
 (surtout la ligne d'état et `git`), corrigé par `proc::command`.
 
-Reste à voir : ce qui continue de tourner une fois l'app fermée (terminaux, serveurs MCP, sessions),
-traité par les étapes « Désinstallation ».
+## Arrêt : à la fermeture, à la mise à jour, à la (dés)installation
+
+- **Un terminal** (`Term::stop`, appelé aussi quand il est détruit) arrête le shell **et tout ce
+  qu'il a lancé** : `taskkill /F /T /PID` sous Windows, `kill -TERM -- -<pid>` (le groupe du shell,
+  qui mène sa propre session dans le pseudo-terminal) ailleurs. Avant, seul le shell s'arrêtait et
+  claude, node… continuaient.
+- **En quittant l'app** (`on_exit`) : tous les terminaux et toutes les sessions autonomes sont
+  arrêtés (`stop_children`).
+- **Au redémarrage après une mise à jour** : pareil, avant `process::exit`, qui ne détruit rien de
+  lui-même (avant, terminaux et sessions restaient en vie, accrochés à l'ancienne version).
+- **Installateur Windows** (`packaging/orchestra.iss`) : avant d'installer et avant de désinstaller,
+  `taskkill /F /T /IM orchestra.exe` arrête toutes les copies d'Orchestra (fenêtre, `orchestra mcp`
+  lancés par les IA, `orchestra statusline`) et leurs descendants, puis laisse 0,8 s à Windows pour
+  libérer les fichiers ; `CloseApplications=force` en plus.

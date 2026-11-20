@@ -860,6 +860,14 @@ impl NotesApp {
 
     // ------------------------------------------------------------------ the page
 
+    /// Stop the autonomous sessions' programs (and everything they started), before quitting
+    /// or replacing the app.
+    pub(super) fn stop_runs(&mut self) {
+        for r in self.orch.runs.iter_mut() {
+            r.term.stop();
+        }
+    }
+
     /// At launch: read the « Screen Recording » permission (no dialog). Granted: remember
     /// this version as having it. Lost with an update: say so at once, with the way back.
     pub(super) fn screen_at_launch(&mut self) {

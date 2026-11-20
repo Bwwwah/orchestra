@@ -1291,10 +1291,21 @@ impl eframe::App for NotesApp {
 
     fn on_exit(&mut self) {
         self.save_on_exit();
+        self.stop_children();
     }
 }
 
 impl NotesApp {
+    /// Stop every program Orchestra started (terminals, autonomous sessions and what they
+    /// ran), so nothing keeps running, or holds the app's files, once it quits or is
+    /// replaced by an update.
+    pub(crate) fn stop_children(&mut self) {
+        for t in self.terms.iter_mut() {
+            t.stop();
+        }
+        self.stop_runs();
+    }
+
     fn save_on_exit(&mut self) {
         self.detect_changes();
         if self.dirty_since.is_some() {
