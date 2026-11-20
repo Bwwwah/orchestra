@@ -325,6 +325,9 @@ pub fn day_total(h: &[Sample], now: u64) -> Option<f32> {
     Some(total)
 }
 
+/// Without reset times, a drop of the weekly figure bigger than this (points) is a new week.
+const WEEK_DROP: f32 = 5.0;
+
 /// How much of the week went in the last 24 hours (percentage points of the week), and
 /// over how long the readings go back (24 h at most). None without any weekly reading.
 pub fn day_week_used(h: &[Sample], now: u64) -> Option<(f32, u64)> {
@@ -333,16 +336,27 @@ pub fn day_week_used(h: &[Sample], now: u64) -> Option<(f32, u64)> {
     // Starting point: the last reading before the 24 hours, or else the first one.
     let start = readings.iter().rposition(|s| s.at <= from).unwrap_or(0);
     let first = readings.get(start)?;
-    let (mut prev, mut reset) = (first.week?, first.week_reset);
+    // `high`: the highest figure of the week being read. Only what goes past it counts: the
+    // two sources (status line, ~/.claude.json) take turns and one may be a little late,
+    // so the figure dips and climbs back; counting each climb counted the same use twice.
+    let (mut high, mut reset) = (first.week?, first.week_reset);
     let mut used = 0.0;
     for s in &readings[start + 1..] {
         let p = s.week?;
         let same = match (reset, s.week_reset) {
             (Some(a), Some(b)) => a.abs_diff(b) < SAME_RESET,
-            _ => p + 0.5 >= prev,
+            // A reset time missing on one side: a new week drops the figure to a few
+            // points; a dip of a point or two is a late reading of the same week.
+            _ => p + WEEK_DROP >= high,
         };
-        used += if same { (p - prev).max(0.0) } else { p };
-        prev = p;
+        if same {
+            used += (p - high).max(0.0);
+            high = high.max(p);
+        } else {
+            // A new week: its figure so far is all new use.
+            used += p;
+            high = p;
+        }
         reset = s.week_reset.or(if same { reset } else { None });
     }
     Some((used, now - first.at.max(from)))
@@ -568,6 +582,20 @@ mod tests {
         assert!((used - 8.0).abs() < 0.01);
         assert_eq!(span, 10 * HOUR);
         assert_eq!(day_week_used(&[], now), None);
+        // Two sources taking turns (the status line, live, and ~/.claude.json, a little
+        // late): the figure goes 40, 39.5, 40.2, 39.8, 41. Only the week's real rise, 1
+        // point, counts; the dips and the climbs back over them don't.
+        let noisy = [w(20, 40.0, 100), w(21, 39.5, 100), w(22, 40.2, 100), w(23, 39.8, 100), w(24, 41.0, 100)];
+        let (used, _) = day_week_used(&noisy, now).unwrap();
+        assert!((used - 1.0).abs() < 0.01, "{used}");
+        // The late source without a reset time: a dip of a point or two is still the same
+        // week, not a new one whose whole figure would count.
+        let bare = |at_h: u64, pct: f32| Sample { at: at_h * HOUR, week: Some(pct), ..Default::default() };
+        let (used, _) = day_week_used(&[w(20, 40.0, 100), bare(21, 38.5, ), w(22, 41.0, 100)], now).unwrap();
+        assert!((used - 1.0).abs() < 0.01, "{used}");
+        // Without any reset time, a real new week (a big drop) still counts from zero.
+        let (used, _) = day_week_used(&[bare(30, 90.0), bare(31, 95.0), bare(35, 3.0)], now).unwrap();
+        assert!((used - 8.0).abs() < 0.01, "{used}");
     }
 
     #[test]
