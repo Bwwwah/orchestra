@@ -1393,7 +1393,11 @@ fn ai_steps(ui: &mut egui::Ui, page_id: &str, pr: &mut Project, ai: &mut super::
             ui.label(RichText::new(e.as_str()).size(12.5).color(t.tertiary));
         }
         let mut close = false;
+        // The actions, set apart from the field and from one another.
+        ui.add_space(8.0);
         ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = 12.0;
+            ui.spacing_mut().button_padding = egui::vec2(12.0, 5.0);
             let ready = !text.trim().is_empty() || !images.is_empty();
             if ui.add_enabled(ready, egui::Button::new(RichText::new(crate::tr!("Transformer en étapes", "Turn into steps")).size(13.0))).clicked() {
                 super::ai_fill::request(ui.ctx(), super::ai_fill::AiReq::Tasks { page_id: page_id.to_string(), folder: folder.clone(), existing: existing.clone(), prefer, text: Some(text.clone()), images: images.clone() });
@@ -1415,6 +1419,7 @@ fn ai_steps(ui: &mut egui::Ui, page_id: &str, pr: &mut Project, ai: &mut super::
                 close = true;
             }
         });
+        ui.add_space(4.0);
         if close {
             text.clear();
             images.clear();
