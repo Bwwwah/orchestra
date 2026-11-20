@@ -135,7 +135,7 @@ impl NotesApp {
             .pages
             .iter()
             .filter(|p| shared.contains(&p.id) && self.live_sent.get(&p.id).map(|t| p.updated > *t).unwrap_or(true))
-            .cloned()
+            .map(crate::project::shareable)
             .collect();
         let new_msgs: Vec<crate::model::ChatMsg> =
             self.ws.chat.values().filter(|m| shared.contains(&m.project) && !self.chat_sent.contains(&m.id)).cloned().collect();

@@ -261,7 +261,30 @@ pub struct Review {
     pub at: u64,
 }
 
+/// A page as it may leave this computer: a project's page without what only this
+/// computer knows (`Project::strip_local`); the others as they are.
+pub fn shareable(p: &crate::model::Page) -> crate::model::Page {
+    let mut p = p.clone();
+    if let Some(x) = p.project.as_mut() {
+        x.strip_local();
+    }
+    p
+}
+
 impl Project {
+    /// Remove what only this computer decides or knows: the code folder (a path of this
+    /// computer, with its user name), « sur main », the launch choices and the AI sessions
+    /// (their files and commands). Done before a shared project leaves this computer, and
+    /// on a project received new here.
+    pub fn strip_local(&mut self) {
+        self.folder.clear();
+        self.commit_to_main = false;
+        self.session_limit = None;
+        self.launch = None;
+        self.sessions.clear();
+        self.sessions_cleared = 0;
+    }
+
     /// A project received from another person, with what only this computer decides put
     /// back: `ours` is our copy before the merge (None for a project new here).
     ///
@@ -287,12 +310,7 @@ impl Project {
             None => {
                 let theirs = std::mem::take(&mut self.steps);
                 let tombs = std::mem::take(&mut self.deleted_steps);
-                self.folder.clear();
-                self.commit_to_main = false;
-                self.session_limit = None;
-                self.launch = None;
-                self.sessions.clear();
-                self.sessions_cleared = 0;
+                self.strip_local();
                 self.merge_steps(&theirs, &tombs);
             }
         }
@@ -711,11 +729,12 @@ impl Workspace {
         deleted.into_iter().filter(|(id, _)| shared.contains(id) || self.page(id).is_none()).collect()
     }
 
-    /// What may leave this computer: the shared projects, their pages and discussions.
+    /// What may leave this computer: the shared projects, their pages and discussions,
+    /// without what is this computer's own (`shareable`).
     pub fn shared_copy(&self) -> Workspace {
         let ids = self.shared_ids();
         Workspace {
-            pages: self.pages.iter().filter(|p| ids.contains(&p.id)).cloned().collect(),
+            pages: self.pages.iter().filter(|p| ids.contains(&p.id)).map(shareable).collect(),
             deleted: self.deleted.clone(),
             chat: self.chat.iter().filter(|(_, m)| ids.contains(&m.project)).map(|(k, v)| (k.clone(), v.clone())).collect(),
             ..Default::default()
@@ -1055,6 +1074,40 @@ mod tests {
         assert!(copy.title.ends_with("(copie locale)"));
         assert_eq!(ws.children(Some(&c)).len(), 1);
         assert!(!ws.shared_ids().contains(&c));
+    }
+
+    /// A shared project leaves this computer without its folder, its AI sessions and its
+    /// launch choices; its steps, state of play and pages go out; ours stay as they were.
+    #[test]
+    fn a_shared_project_leaves_without_what_is_ours() {
+        let mut ws = Workspace::default();
+        let a = ws.create_project("Partagé", "");
+        let sub = ws.create_page("Doc", Some(a.clone()));
+        {
+            let p = ws.page_mut(&a).unwrap().project.as_mut().unwrap();
+            p.shared = true;
+            p.folder = "/Users/moi/code/app".into();
+            p.commit_to_main = true;
+            p.session_limit = Some(95.0);
+            p.launch = Some(LaunchPrefs { commits: true, endless: true, end: Default::default() });
+            p.sessions.push(SessionRef { tool: "claude-code".into(), id: "abc".into(), title: String::new(), location: "/Users/moi/.claude/x.jsonl".into(), started: 1, last_activity: 2 });
+            p.sessions_cleared = 5;
+            p.summary = "État partagé".into();
+        }
+        let out = ws.shared_copy();
+        let sent = out.pages.iter().find(|p| p.id == a).unwrap().project.as_ref().unwrap();
+        assert!(sent.folder.is_empty() && !sent.commit_to_main);
+        assert_eq!((sent.session_limit, sent.launch.clone(), sent.sessions.len(), sent.sessions_cleared), (None, None, 0, 0));
+        assert!(sent.shared);
+        assert_eq!(sent.summary, "État partagé");
+        assert!(out.pages.iter().any(|p| p.id == sub));
+        // Nothing of the JSON that goes out names the folder nor the session file.
+        let json = serde_json::to_string(&out).unwrap();
+        assert!(!json.contains("/Users/moi"), "{json}");
+        // Ours is untouched.
+        let ours = ws.page(&a).unwrap().project.as_ref().unwrap();
+        assert_eq!(ours.folder, "/Users/moi/code/app");
+        assert_eq!((ours.session_limit, ours.sessions.len()), (Some(95.0), 1));
     }
 
     #[test]
