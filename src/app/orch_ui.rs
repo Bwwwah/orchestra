@@ -173,6 +173,19 @@ struct Draft {
     end: crate::model::EndConditions,
 }
 
+impl Draft {
+    /// The choices kept in the project for its next sessions.
+    fn prefs(&self) -> crate::project::LaunchPrefs {
+        crate::project::LaunchPrefs { commits: self.commits, endless: self.endless, end: self.end.clone() }
+    }
+}
+
+/// The launch choices of a project the person hasn't set yet: commits as in the settings,
+/// not endless, and 4 hours when endless is switched on.
+fn default_prefs(commits: bool) -> crate::project::LaunchPrefs {
+    crate::project::LaunchPrefs { commits, endless: false, end: crate::model::EndConditions { hours: Some(4.0), ..Default::default() } }
+}
+
 /// What to do with a finished session's copy.
 #[derive(Clone, Copy, PartialEq)]
 enum CopyOp {
@@ -1726,10 +1739,13 @@ impl NotesApp {
             .collect();
         let (dl, dc) = (self.ws.settings.orch.default_limit, self.ws.settings.orch.allow_commits);
         for (id, _, _) in &projects {
-            // The budget the person last chose for this project, kept in the project.
-            let dl = self.ws.page(id).and_then(|p| p.project.as_ref()).and_then(|x| x.session_limit).unwrap_or(dl);
-            self.orch.drafts.entry(id.clone()).or_insert(Draft { mission: String::new(), limit: dl, commits: dc, pick: false, endless: false, end: crate::model::EndConditions { hours: Some(4.0), ..Default::default() } });
+            // The choices the person last made for this project, kept in the project.
+            let pr = self.ws.page(id).and_then(|p| p.project.as_ref());
+            let dl = pr.and_then(|x| x.session_limit).unwrap_or(dl);
+            let prefs = pr.and_then(|x| x.launch.clone()).unwrap_or_else(|| default_prefs(dc));
+            self.orch.drafts.entry(id.clone()).or_insert(Draft { mission: String::new(), limit: dl, commits: prefs.commits, pick: false, endless: prefs.endless, end: prefs.end });
         }
+        let prefs_before: HashMap<String, crate::project::LaunchPrefs> = self.orch.drafts.iter().map(|(id, d)| (id.clone(), d.prefs())).collect();
         let running: Vec<String> = self.orch.runs.iter().map(|r| r.project.clone()).collect();
         let plugged = self.ais.plugged().contains(&crate::setup::Ai::ClaudeCode);
         let mut start: Vec<String> = vec![];
@@ -1906,6 +1922,20 @@ impl NotesApp {
         for (id, limit) in budgets {
             if let Some(p) = self.ws.page_mut(&id).and_then(|p| p.project.as_mut()) {
                 p.session_limit = Some(limit);
+                self.dirty_since.get_or_insert_with(Instant::now);
+            }
+        }
+        // So do commits, endless and its end conditions.
+        let changed: Vec<(String, crate::project::LaunchPrefs)> = self
+            .orch
+            .drafts
+            .iter()
+            .map(|(id, d)| (id.clone(), d.prefs()))
+            .filter(|(id, p)| prefs_before.get(id) != Some(p))
+            .collect();
+        for (id, prefs) in changed {
+            if let Some(p) = self.ws.page_mut(&id).and_then(|p| p.project.as_mut()) {
+                p.launch = Some(prefs);
                 self.dirty_since.get_or_insert_with(Instant::now);
             }
         }

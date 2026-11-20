@@ -230,6 +230,10 @@ pub struct Project {
     /// kept from one session to the next, and across restarts (None: the default).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub session_limit: Option<f32>,
+    /// The other launch choices of the Orchestration page (commits, endless and its end
+    /// conditions), kept the same way (None: the defaults).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub launch: Option<LaunchPrefs>,
     /// "Regard extérieur": a short outside view asked to an AI (Markdown), by whom, when.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub review: Option<Review>,
@@ -237,6 +241,17 @@ pub struct Project {
     /// `shows_git_card`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub code: Option<bool>,
+}
+
+/// How the next autonomous session of a project starts, as last chosen by the person.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct LaunchPrefs {
+    #[serde(default)]
+    pub commits: bool,
+    #[serde(default)]
+    pub endless: bool,
+    #[serde(default)]
+    pub end: crate::model::EndConditions,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, Default)]
@@ -264,6 +279,7 @@ impl Project {
                 self.deleted_steps = o.deleted_steps.clone();
                 self.commit_to_main = o.commit_to_main;
                 self.session_limit = o.session_limit;
+                self.launch = o.launch.clone();
                 self.read_only = o.read_only;
                 self.sessions = o.sessions.clone();
                 self.sessions_cleared = o.sessions_cleared;
@@ -274,6 +290,7 @@ impl Project {
                 self.folder.clear();
                 self.commit_to_main = false;
                 self.session_limit = None;
+                self.launch = None;
                 self.sessions.clear();
                 self.sessions_cleared = 0;
                 self.merge_steps(&theirs, &tombs);
@@ -857,18 +874,23 @@ mod tests {
     /// this computer's own when a shared copy comes in.
     #[test]
     fn the_session_budget_is_kept() {
-        let p = Project { session_limit: Some(95.0), ..Default::default() };
+        let prefs = LaunchPrefs { commits: true, endless: true, end: crate::model::EndConditions { hours: Some(6.0), turns: Some(12), ..Default::default() } };
+        let p = Project { session_limit: Some(95.0), launch: Some(prefs.clone()), ..Default::default() };
         let back: Project = serde_json::from_str(&serde_json::to_string(&p).unwrap()).unwrap();
         assert_eq!(back.session_limit, Some(95.0));
-        // An older file, without it: the default.
+        assert_eq!(back.launch, Some(prefs.clone()));
+        // An older file, without them: the defaults.
         let old: Project = serde_json::from_str("{}").unwrap();
         assert_eq!(old.session_limit, None);
-        let mut theirs = Project { session_limit: Some(10.0), ..Default::default() };
+        assert_eq!(old.launch, None);
+        let mut theirs = Project { session_limit: Some(10.0), launch: Some(LaunchPrefs { commits: false, endless: false, end: Default::default() }), ..Default::default() };
         theirs.keep_local(Some(&p));
         assert_eq!(theirs.session_limit, Some(95.0));
-        let mut new_here = Project { session_limit: Some(10.0), ..Default::default() };
+        assert_eq!(theirs.launch, Some(prefs));
+        let mut new_here = Project { session_limit: Some(10.0), launch: p.launch.clone(), ..Default::default() };
         new_here.keep_local(None);
         assert_eq!(new_here.session_limit, None);
+        assert_eq!(new_here.launch, None);
     }
 
     #[test]
