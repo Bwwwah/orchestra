@@ -842,6 +842,26 @@ mod tests {
         guard
     }
 
+    /// The lock every writer of the workspace takes (MCP, the window, the live server, the
+    /// import and sync commands): while one holds it, another can't take it; once dropped,
+    /// it can. Each `lock_workspace` opens the file anew, as another process would.
+    #[test]
+    fn the_workspace_lock_keeps_a_second_writer_out() {
+        let _g = fresh_workspace();
+        let path = store::data_dir().join("workspace.json.lock");
+        let other = || std::fs::OpenOptions::new().write(true).open(&path).unwrap();
+        {
+            let _held = store::lock_workspace();
+            assert!(other().try_lock().is_err(), "a second writer must wait");
+        }
+        let f = other();
+        assert!(f.try_lock().is_ok(), "free once the first one is done");
+        f.unlock().unwrap();
+        // A call to a tool takes it too, and gives it back.
+        call("list_pages", json!({})).unwrap();
+        assert!(other().try_lock().is_ok());
+    }
+
     fn call(name: &str, args: Value) -> Result<String, String> {
         call_tool(name, &args).map_err(|e| match e {
             ToolError::Unknown => "unknown tool".into(),
