@@ -2073,9 +2073,12 @@ fn launch_pill(ui: &mut egui::Ui, label: &str, accent: Color32, t: &Tone) -> egu
 
 // ---------------------------------------------------------------- "Regard extérieur"
 
+/// The review and the AI that wrote it, or why it failed: filled by the background thread.
+type ReviewResult = Arc<std::sync::Mutex<Option<Result<(String, crate::sessions::Tool), String>>>>;
+
 /// A review being written in the background.
 pub struct ReviewJob {
-    result: Arc<std::sync::Mutex<Option<Result<(String, crate::sessions::Tool), String>>>>,
+    result: ReviewResult,
 }
 
 #[derive(Clone, Default)]

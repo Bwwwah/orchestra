@@ -6,11 +6,14 @@ use super::*;
 use super::icons::Icon;
 use std::sync::{Arc, Mutex};
 
+/// Ok((answer, by)) or Err(message), once done: filled by the background thread.
+pub type AskResult = Arc<Mutex<Option<Result<(String, String), String>>>>;
+
 #[derive(Default)]
 pub struct Ask {
     pub question: String,
     /// Ok((answer, by)) or Err(message), once done.
-    pub result: Arc<Mutex<Option<Result<(String, String), String>>>>,
+    pub result: AskResult,
     pub answer: Option<Result<(String, String), String>>,
     pub running: bool,
     /// Where the question was asked from (the project's folder, or home).

@@ -42,16 +42,21 @@ pub fn request(ctx: &egui::Context, r: AiReq) {
     ctx.data_mut(|d| d.get_temp_mut_or_default::<Vec<AiReq>>(req_key()).push(r));
 }
 
+/// A page filled by an AI, and which one, once done.
+type FillSlot = Slot<Result<(Fill, Tool), String>>;
+/// A quick question: the answer, and the AI that gave it, once done.
+type AnswerSlot = Slot<Result<(String, Tool), String>>;
+
 #[derive(Default)]
 pub struct AiJobs {
-    fills: HashMap<String, Slot<Result<(Fill, Tool), String>>>,
+    fills: HashMap<String, FillSlot>,
     /// Folders of just-created projects, waiting for their page (with when asked).
     pending: Vec<(String, Instant)>,
     tasks: HashMap<String, Slot<Result<Vec<String>, String>>>,
     /// Proposed steps per project, each ticked or not.
     pub proposals: HashMap<String, Vec<(String, bool)>>,
     /// Quick questions being answered, per project (with the question).
-    questions: HashMap<String, (String, Slot<Result<(String, Tool), String>>)>,
+    questions: HashMap<String, (String, AnswerSlot)>,
     /// The last answer per project, shown in the question box until closed.
     pub answers: HashMap<String, QuickAnswer>,
 }
