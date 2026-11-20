@@ -370,8 +370,11 @@ impl NotesApp {
             let disk = store::load();
             crate::collab::merge(&mut self.ws, &disk);
             for m in &disk.inbox {
-                if !self.inbox_removed.contains(&m.id) && !self.ws.inbox.iter().any(|x| x.id == m.id) {
-                    self.ws.inbox.push(m.clone());
+                match self.ws.inbox.iter_mut().find(|x| x.id == m.id) {
+                    // An AI received the answer (written on disk by the MCP server).
+                    Some(x) => x.seen_at = x.seen_at.max(m.seen_at),
+                    None if !self.inbox_removed.contains(&m.id) => self.ws.inbox.push(m.clone()),
+                    None => {}
                 }
             }
             self.ws.inbox.sort_by_key(|m| m.at);

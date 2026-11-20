@@ -2268,7 +2268,13 @@ fn answer_box(ui: &mut egui::Ui, m: &crate::model::InboxMsg, accent: Color32, t:
                 let r = frame.response.rect;
                 ui.painter().rect_filled(egui::Rect::from_min_max(r.left_top() + egui::vec2(0.0, 6.0), egui::pos2(r.left() + 2.5, r.bottom() - 6.0)), 1.5, accent.gamma_multiply(0.7));
                 ui.add_space(3.0);
-                ui.label(RichText::new(answer_note(m.project.is_empty())).size(11.5).color(t.tertiary));
+                if m.answer_seen() {
+                    // An AI received it: the person knows it was taken in.
+                    let seen = crate::trf!("✓ Prise en compte par l'IA {}", "✓ Taken in by the AI {}", super::chrome::relative_time(m.seen_at));
+                    ui.label(RichText::new(seen).size(11.5).color(super::projects::GREEN));
+                } else {
+                    ui.label(RichText::new(answer_note(m.project.is_empty())).size(11.5).color(t.tertiary));
+                }
                 return;
             }
             let mut draft = ui.data(|d| d.get_temp::<String>(draft_id)).unwrap_or_default();

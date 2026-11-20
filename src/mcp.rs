@@ -560,6 +560,16 @@ fn call_tool(name: &str, args: &Value) -> Result<String, ToolError> {
                     .ok_or_else(|| format!("no project holds the folder {f}; create one with create_project"))?,
                 _ => return Err(ToolError::Failed("give `project` or `folder`".into())),
             };
+            // The answers this state of play hands the AI: noted as received, and the
+            // person told so in the inbox (once per answer, or per edit of it).
+            let pid = p.id.clone();
+            let seen = ws.mark_answers_seen(&pid, crate::model::now_ms());
+            if !seen.is_empty() {
+                let (title, text) = answers_seen_notice(&seen);
+                ws.notify("info", &pid, &title, &text, None);
+                save(&ws)?;
+            }
+            let p = ws.page(&pid).unwrap();
             let shared = p.project.as_ref().is_some_and(|x| x.shared);
             let mut out = String::new();
             if shared {
@@ -729,6 +739,22 @@ fn call_tool(name: &str, args: &Value) -> Result<String, ToolError> {
         }
         _ => Err(ToolError::Unknown),
     }
+}
+
+/// The inbox notice when an AI receives answers: (title, text listing the questions).
+fn answers_seen_notice(questions: &[String]) -> (String, String) {
+    let title = if questions.len() == 1 {
+        crate::tr!("Réponse prise en compte par l'IA", "Answer taken in by the AI").to_string()
+    } else {
+        crate::trf!("{} réponses prises en compte par l'IA", "{} answers taken in by the AI", questions.len())
+    };
+    let list: Vec<String> = questions.iter().map(|q| format!("- {q}")).collect();
+    let text = crate::trf!(
+        "L'IA a reçu votre réponse à :\n{}\nElle en tient compte pour la suite de son travail.",
+        "The AI received your answer to:\n{}\nIt takes it into account in its next work.",
+        list.join("\n")
+    );
+    (title, text)
 }
 
 /// The state of play from `done` / `in_progress` / `blockers` (+ `summary` as notes),
@@ -921,6 +947,28 @@ mod tests {
         let err = call("update_step", json!({"project": pid, "step": "inexistante"})).unwrap_err();
         assert!(err.contains("no step matches"), "{err}");
         assert!(call("update_step", json!({"project": pid, "step": "  "})).is_err());
+    }
+
+    /// get_project_state hands the answer to the AI, marks it received and tells the person,
+    /// once.
+    #[test]
+    fn project_state_notes_the_answers_it_hands_over() {
+        let _g = fresh_workspace();
+        let pid = project_with_steps(&["Une"]);
+        call("ask_human", json!({"project": pid, "question": "Garder l'ancienne API ?"})).unwrap();
+        let notices = || store::load().inbox.iter().filter(|m| m.kind == "info" && m.project == pid).count();
+        call("get_project_state", json!({"project": pid})).unwrap();
+        assert_eq!(notices(), 0, "no answer yet");
+        let mut ws = store::load();
+        ws.inbox[0].answer = "Oui".into();
+        ws.inbox[0].answered_at = crate::model::now_ms();
+        store::save(&ws).unwrap();
+        let state = call("get_project_state", json!({"project": pid})).unwrap();
+        assert!(state.contains("Réponse de la personne : Oui"), "{state}");
+        assert!(store::load().inbox[0].answer_seen());
+        assert_eq!(notices(), 1);
+        call("get_project_state", json!({"project": pid})).unwrap();
+        assert_eq!(notices(), 1, "told once");
     }
 
     #[test]
