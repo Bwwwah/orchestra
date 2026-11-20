@@ -34,8 +34,13 @@ impl Agent {
         match self {
             Agent::ClaudeCode => {
                 let (allowed, denied) = permissions(allow_commits, extra);
+                // The repository's own settings (.claude/settings*.json: hooks, permissions)
+                // and MCP servers (.mcp.json) are not loaded: a repository could otherwise run
+                // its code or grant itself rights as soon as the AI starts. Only the person's
+                // own settings, and Orchestra's MCP server.
                 format!(
-                    "claude --permission-mode acceptEdits --allowedTools {} --disallowedTools {}",
+                    "claude --setting-sources user --strict-mcp-config --mcp-config {} --permission-mode acceptEdits --allowedTools {} --disallowedTools {}",
+                    crate::sessions::shell_quote(&mcp_config()),
                     crate::sessions::shell_quote(&allowed.join(",")),
                     crate::sessions::shell_quote(&denied.join(","))
                 )
@@ -56,6 +61,16 @@ impl Agent {
 }
 
 // ------------------------------------------------------------------ what the AI may do
+
+/// The only MCP server of an autonomous session: Orchestra itself (this program, `mcp`).
+fn mcp_config() -> String {
+    let exe = std::env::current_exe().map(|p| p.display().to_string()).unwrap_or_else(|_| "orchestra".into());
+    let mut server = serde_json::json!({ "command": exe, "args": ["mcp"] });
+    if let Ok(d) = std::env::var("ORCHESTRA_DIR") {
+        server["env"] = serde_json::json!({ "ORCHESTRA_DIR": d });
+    }
+    serde_json::json!({ "mcpServers": { "orchestra": server } }).to_string()
+}
 
 /// Commands always allowed without asking. Reading, editing and creating files inside the
 /// copy needs nothing here: `acceptEdits` and Claude Code's own rules grant them for the
@@ -766,6 +781,11 @@ mod tests {
         assert!(allowed.iter().any(|a| a == "Bash(python -m pytest:*)"));
         let cmd = Agent::ClaudeCode.command(false, "");
         assert!(cmd.contains("--disallowedTools") && cmd.contains("Bash(rm:*)"));
+        // Neither the repository's hooks and settings nor its .mcp.json: only Orchestra's server.
+        assert!(cmd.contains("--setting-sources user ") && cmd.contains("--strict-mcp-config --mcp-config "));
+        let v: Value = serde_json::from_str(&mcp_config()).unwrap();
+        assert_eq!(v["mcpServers"].as_object().unwrap().len(), 1);
+        assert_eq!(v["mcpServers"]["orchestra"]["args"][0], "mcp");
     }
 
     #[test]
