@@ -277,6 +277,8 @@ fn md_blocks(md: &str) -> Vec<Block> {
 }
 
 fn call_tool(name: &str, args: &Value) -> Result<String, ToolError> {
+    // From the read to the write: another server's call waits instead of being overwritten.
+    let _lock = store::lock_workspace();
     let mut ws = store::load();
     match name {
         "list_pages" => {
@@ -774,6 +776,29 @@ mod tests {
 
     fn steps(pid: &str) -> Vec<project::Step> {
         store::load().page(pid).unwrap().project.clone().unwrap().steps
+    }
+
+    /// Several MCP servers writing at once (one per Claude Code session): each call reads,
+    /// changes and saves the whole file, so without the lock a save would drop the steps
+    /// another call added in between. Threads stand in for the servers: the file lock
+    /// holds between separate opens, in one process as in several.
+    #[test]
+    fn calls_at_the_same_time_lose_nothing() {
+        let _g = fresh_workspace();
+        let pid = project_with_steps(&[]);
+        let n = 12;
+        std::thread::scope(|s| {
+            for i in 0..n {
+                let pid = pid.clone();
+                s.spawn(move || {
+                    call("add_steps", json!({"project": pid, "steps": [format!("Étape parallèle {i}")], "source": "test"})).unwrap();
+                });
+            }
+        });
+        let titles: Vec<String> = steps(&pid).into_iter().map(|s| s.title).collect();
+        for i in 0..n {
+            assert!(titles.contains(&format!("Étape parallèle {i}")), "étape {i} perdue : {titles:?}");
+        }
     }
 
     #[test]

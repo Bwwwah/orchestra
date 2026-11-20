@@ -28,6 +28,33 @@ pub fn workspace_path() -> PathBuf {
     data_dir().join("workspace.json")
 }
 
+/// Holds the workspace for one read-then-write: several MCP servers (one per Claude Code
+/// session) each load the file, change it and save it whole; without a lock, two at once
+/// each keep their own change and the second save drops the first. Released on drop.
+pub struct WorkspaceLock(#[allow(dead_code)] Option<fs::File>);
+
+/// Waits for the other processes' read-then-write to end, then holds the workspace until
+/// the lock is dropped. A lock that can't be taken (an odd file system) doesn't stop the
+/// work: it goes on unlocked, as before.
+pub fn lock_workspace() -> WorkspaceLock {
+    let path = data_dir().join("workspace.json.lock");
+    let file = (|| {
+        if let Some(dir) = path.parent() {
+            fs::create_dir_all(dir)?;
+        }
+        let f = fs::OpenOptions::new().create(true).truncate(false).write(true).open(&path)?;
+        f.lock()?;
+        Ok::<_, std::io::Error>(f)
+    })();
+    match file {
+        Ok(f) => WorkspaceLock(Some(f)),
+        Err(e) => {
+            eprintln!("orchestra: workspace not locked ({e})");
+            WorkspaceLock(None)
+        }
+    }
+}
+
 pub fn modified(path: &Path) -> Option<SystemTime> {
     fs::metadata(path).and_then(|m| m.modified()).ok()
 }
