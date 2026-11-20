@@ -1213,19 +1213,7 @@ impl NotesApp {
                         }
                     });
                 });
-                // Use of the project's share.
-                ui.horizontal(|ui| {
-                    ui.add_space(20.0);
-                    let w = (ui.available_width() - 150.0).max(80.0);
-                    let (bar, _) = ui.allocate_exact_size(egui::vec2(w, 8.0), egui::Sense::hover());
-                    ui.painter().rect_filled(bar, 4.0, t.fill);
-                    let frac = super::projects::smooth(ui, ("run-pct", &r.id), (r.pct / r.limit.max(0.1)).clamp(0.0, 1.0));
-                    ui.painter().rect_filled(egui::Rect::from_min_size(bar.min, egui::vec2(bar.width() * frac, 8.0)), 4.0, if frac > 0.85 { super::projects::ORANGE } else { super::projects::GREEN });
-                    ui.label(RichText::new(crate::trf!("{:.1} % utilisés sur un budget de {:.0} %", "{:.1} % used of a {:.0} % budget", r.pct, r.limit)).size(12.5).color(t.secondary)).on_hover_text(crate::tr!(
-                        "Part de la fenêtre de 5 h utilisée par cette session depuis son lancement, et son budget : elle s'arrête en l'atteignant. Les sessions précédentes du projet ne comptent pas.",
-                        "Share of the 5-hour window this session used since it started, and its budget: it stops on reaching it. The project's earlier sessions don't count."
-                    ));
-                });
+                share_row(ui, &r.id, r.pct, r.limit, t);
                 ui.horizontal(|ui| {
                     ui.add_space(20.0);
                     let mut job = egui::text::LayoutJob::single_section(r.last_line.clone(), egui::TextFormat::simple(FontId::proportional(12.5), t.tertiary));
@@ -1840,6 +1828,23 @@ impl NotesApp {
 }
 
 
+/// In a running session's card: the use of its share of the 5-hour window, as a bar and
+/// its figures.
+fn share_row(ui: &mut egui::Ui, id: &str, pct: f32, limit: f32, t: &Tone) {
+    ui.horizontal(|ui| {
+        ui.add_space(20.0);
+        let w = (ui.available_width() - 150.0).max(80.0);
+        let (bar, _) = ui.allocate_exact_size(egui::vec2(w, 8.0), egui::Sense::hover());
+        ui.painter().rect_filled(bar, 4.0, t.fill);
+        let frac = super::projects::smooth(ui, ("run-pct", id), (pct / limit.max(0.1)).clamp(0.0, 1.0));
+        ui.painter().rect_filled(egui::Rect::from_min_size(bar.min, egui::vec2(bar.width() * frac, 8.0)), 4.0, if frac > 0.85 { super::projects::ORANGE } else { super::projects::GREEN });
+        ui.label(RichText::new(crate::trf!("{:.1} % utilisés sur un budget de {:.0} %", "{:.1} % used of a {:.0} % budget", pct, limit)).size(12.5).color(t.secondary)).on_hover_text(crate::tr!(
+            "Part de la fenêtre de 5 h utilisée par cette session depuis son lancement, et son budget : elle s'arrête en l'atteignant. Les sessions précédentes du projet ne comptent pas.",
+            "Share of the 5-hour window this session used since it started, and its budget: it stops on reaching it. The project's earlier sessions don't count."
+        ));
+    });
+}
+
 /// The group of an inbox message, by its local day: today, yesterday, this week, older.
 /// `offset`: the local time's offset from UTC (ms).
 fn day_group(at: u64, now: u64, offset: i64) -> &'static str {
@@ -2011,6 +2016,64 @@ mod tests {
         assert_ne!(g(now - 3 * day), g(now - 7 * day));
         // A clock a little behind: still today.
         assert_eq!(g(now + h), g(now));
+    }
+
+    /// Lays out the Orchestration page's column as `orchestra_view` does (a fixed width), a
+    /// card drawn before a session starts, then the running session's card, then a card
+    /// after it; returns the widths of the three.
+    fn card_widths(width: f32) -> [f32; 3] {
+        use eframe::egui;
+        let ctx = egui::Context::default();
+        let t = super::tone(false);
+        let mut out = [0.0; 3];
+        // Two passes: egui settles sizes on the second frame.
+        for _ in 0..2 {
+            ctx.begin_pass(egui::RawInput { screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1400.0, 900.0))), ..Default::default() });
+            {
+                egui::Area::new(egui::Id::new("cards")).fixed_pos(egui::Pos2::ZERO).show(&ctx, |ui| {
+                    ui.vertical(|ui| {
+                        ui.set_width(width);
+                        let card = |ui: &mut egui::Ui, add: &mut dyn FnMut(&mut egui::Ui)| {
+                            let r = egui::Frame::new().inner_margin(egui::Margin::symmetric(18, 16)).show(ui, |ui| {
+                                ui.set_width(ui.available_width());
+                                add(ui);
+                            });
+                            r.response.rect.width()
+                        };
+                        out[0] = card(ui, &mut |ui| {
+                            ui.label("Cette semaine");
+                        });
+                        out[1] = card(ui, &mut |ui| {
+                            egui::Frame::new().inner_margin(egui::Margin::same(12)).show(ui, |ui| {
+                                ui.set_width(ui.available_width());
+                                super::share_row(ui, "run", 0.0, 20.0, &t);
+                            });
+                        });
+                        out[2] = card(ui, &mut |ui| {
+                            ui.label("Réglages et limites");
+                        });
+                    });
+                });
+            }
+            // No screen to send the textures to: drop them on purpose.
+            ctx.end_pass().textures_delta.clear();
+        }
+        out
+    }
+
+    /// The gap seen when a session starts: the cards from the running one down come out
+    /// wider than the ones above. Kept ignored until the widths are made even.
+    #[test]
+    #[ignore = "reproduit l'écart de largeur des encadrés au lancement d'une session"]
+    fn cards_keep_one_width_once_a_session_runs() {
+        let mut uneven = vec![];
+        for width in [480.0, 620.0, 1000.0] {
+            let [above, running, below] = card_widths(width);
+            if (running - above).abs() >= 0.5 || (below - above).abs() >= 0.5 {
+                uneven.push(format!("à {width} px : au-dessus {above}, en cours {running}, en dessous {below}"));
+            }
+        }
+        assert!(uneven.is_empty(), "{}", uneven.join(" ; "));
     }
 
     #[test]
