@@ -38,6 +38,7 @@ pub fn load() -> Workspace {
         Ok(s) => match serde_json::from_str::<Workspace>(&s) {
             Ok(mut ws) => {
                 fix_icons(&mut ws);
+                live_code_in(&mut ws);
                 ws
             }
             Err(e) => {
@@ -68,7 +69,26 @@ fn fix_icons(ws: &mut Workspace) {
 }
 
 /// Write atomically: a temporary file then a rename, so a crash never leaves half a file.
+/// The live access code isn't in the file (see secret.rs): put the kept one in, or move
+/// there the one an older version wrote in clear (the next save leaves it out).
+fn live_code_in(ws: &mut Workspace) {
+    let c = &mut ws.settings.collab;
+    if c.live_code.trim().is_empty() {
+        c.live_code = crate::secret::live_code();
+    } else if let Err(e) = crate::secret::set_live_code(&c.live_code) {
+        eprintln!("orchestra: live code not moved out of the workspace file: {e}");
+    }
+}
+
 pub fn save(ws: &Workspace) -> std::io::Result<()> {
+    // The access code goes to the Keychain, never to the file. An empty one (a workspace
+    // read without it) leaves the kept code alone; a failure doesn't stop the pages' save.
+    let code = ws.settings.collab.live_code.trim();
+    if !code.is_empty() {
+        if let Err(e) = crate::secret::set_live_code(code) {
+            eprintln!("orchestra: live code not kept: {e}");
+        }
+    }
     let path = workspace_path();
     if let Some(dir) = path.parent() {
         fs::create_dir_all(dir)?;

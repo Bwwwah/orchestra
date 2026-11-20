@@ -178,6 +178,11 @@ impl NotesApp {
     /// Merge pages from another person. Returns true when something changed here.
     fn merge_remote(&mut self, pages: Vec<Page>, deleted: BTreeMap<String, u64>) -> bool {
         let mut changed = false;
+        // Only pages of shared projects come in: never one of our private pages, nor a page
+        // slipped under one.
+        let pages = self.ws.accept_remote(pages);
+        // Deletions too: only pages of shared projects, even if they know another id.
+        let deleted = self.ws.accept_remote_deletions(deleted);
         for (id, t) in deleted {
             let e = self.ws.deleted.entry(id).or_insert(t);
             *e = (*e).max(t);
@@ -206,7 +211,7 @@ impl NotesApp {
                 }
                 None => {
                     self.live_sent.insert(incoming.id.clone(), incoming.updated);
-                    self.ws.pages.push(incoming);
+                    self.ws.pages.push(collab::received_new(incoming));
                     changed = true;
                 }
             }

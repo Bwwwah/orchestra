@@ -177,6 +177,34 @@ pub struct Review {
 }
 
 impl Project {
+    /// A project received from another person, with what only this computer decides put
+    /// back: `ours` is our copy before the merge (None for a project new here).
+    ///
+    /// - the code folder: theirs would make our AIs work in a folder of their choosing;
+    /// - the steps: an autonomous AI does them, so only people of this computer (and its AIs)
+    ///   write them;
+    /// - « sur main »: lets a session merge its work into main by itself;
+    /// - the AI sessions (files and commands of their computer), read only.
+    pub fn keep_local(&mut self, ours: Option<&Project>) {
+        match ours {
+            Some(o) => {
+                self.folder = o.folder.clone();
+                self.steps = o.steps.clone();
+                self.commit_to_main = o.commit_to_main;
+                self.read_only = o.read_only;
+                self.sessions = o.sessions.clone();
+                self.sessions_cleared = o.sessions_cleared;
+            }
+            None => {
+                self.folder.clear();
+                self.steps.clear();
+                self.commit_to_main = false;
+                self.sessions.clear();
+                self.sessions_cleared = 0;
+            }
+        }
+    }
+
     pub fn new(folder: impl Into<String>) -> Self {
         Project { folder: folder.into(), status: ProjectStatus::Active, last_activity: now_ms(), ..Default::default() }
     }
@@ -360,6 +388,59 @@ impl Workspace {
             out.extend(self.descendants(&p.id));
         }
         out
+    }
+
+    /// Of the pages another person sent, those that may come in: only pages of shared
+    /// projects, never one of ours that isn't shared, nor one placed under a private page.
+    /// - a page we have: only if it is shared here, and it stays under a shared page;
+    /// - a new project page: only a shared one, at the top level;
+    /// - a new page: only under a shared page (ours, or one accepted in the same batch).
+    pub fn accept_remote(&self, pages: Vec<Page>) -> Vec<Page> {
+        let shared = self.shared_ids();
+        let known: std::collections::HashMap<&str, &Option<String>> = self.pages.iter().map(|p| (p.id.as_str(), &p.parent)).collect();
+        let mut allowed = shared.clone();
+        let mut rest = pages;
+        let mut out = vec![];
+        // Pages may come in any order: take them while one more fits.
+        loop {
+            let before = out.len();
+            let mut left = vec![];
+            for p in rest {
+                let ours = known.get(p.id.as_str());
+                // Where it already is here (a shared project may sit in a private folder),
+                // or under a shared page.
+                let parent_ok = ours.is_some_and(|par| **par == p.parent)
+                    || match &p.parent {
+                        None => p.project.as_ref().is_some_and(|x| x.shared),
+                        Some(par) => allowed.contains(par),
+                    };
+                let page_ok = if ours.is_some() {
+                    shared.contains(&p.id)
+                } else {
+                    // A new page inside a shared project can't be a project of its own.
+                    p.parent.is_none() || p.project.is_none()
+                };
+                if parent_ok && page_ok && p.project.as_ref().is_none_or(|x| x.shared) {
+                    allowed.insert(p.id.clone());
+                    out.push(p);
+                } else {
+                    left.push(p);
+                }
+            }
+            rest = left;
+            if out.len() == before || rest.is_empty() {
+                break;
+            }
+        }
+        out
+    }
+
+    /// Of the deletions another person sent, those that may apply here: pages of shared
+    /// projects, and ids we don't have (a page they deleted before it reached us). Never
+    /// one of our private pages, even if its id is known to them.
+    pub fn accept_remote_deletions(&self, deleted: std::collections::BTreeMap<String, u64>) -> std::collections::BTreeMap<String, u64> {
+        let shared = self.shared_ids();
+        deleted.into_iter().filter(|(id, _)| shared.contains(id) || self.page(id).is_none()).collect()
     }
 
     /// What may leave this computer: the shared projects, their pages and discussions.
@@ -608,6 +689,53 @@ mod tests {
         assert!(copy.title.ends_with("(copie locale)"));
         assert_eq!(ws.children(Some(&c)).len(), 1);
         assert!(!ws.shared_ids().contains(&c));
+    }
+
+    #[test]
+    fn only_shared_pages_come_in() {
+        let mut ws = Workspace::default();
+        let folder = ws.create_page("Dossier privé", None);
+        let a = ws.create_project("Partagé", "");
+        ws.page_mut(&a).unwrap().parent = Some(folder.clone());
+        ws.page_mut(&a).unwrap().project.as_mut().unwrap().shared = true;
+        let doc = ws.create_page("Doc", Some(a.clone()));
+        let b = ws.create_project("Privé", "");
+        let notes = ws.create_page("Notes perso", None);
+        let mut edited = |id: &str| {
+            let mut p = ws.page(id).unwrap().clone();
+            p.title = "changé".into();
+            p
+        };
+        let (pa, pdoc, pb, pnotes, pfolder) = (edited(&a), edited(&doc), edited(&b), edited(&notes), edited(&folder));
+        // A shared page moved under a private one.
+        let mut moved = pdoc.clone();
+        moved.parent = Some(b.clone());
+        // New pages: under a shared page (even one arriving later in the batch), under a
+        // private page, at the top level, a private project, a shared project.
+        let child = |id: &str, parent: &str| Page { id: id.into(), parent: Some(parent.into()), ..Page::new("x", None) };
+        let mut new_shared = Page::new("Autre projet", None);
+        new_shared.id = "np".into();
+        new_shared.project = Some(Project { shared: true, ..Project::new("") });
+        let mut new_private = new_shared.clone();
+        new_private.id = "npp".into();
+        new_private.project.as_mut().unwrap().shared = false;
+        let incoming = vec![
+            child("n2", "n1"), child("n1", &doc), child("evil", &b), Page { id: "top".into(), ..Page::new("x", None) },
+            child("under-np", "np"), new_shared, new_private, pa, pdoc, pb, pnotes, pfolder,
+        ];
+        let got: Vec<String> = ws.accept_remote(incoming).into_iter().map(|p| p.id).collect();
+        for id in [a.as_str(), doc.as_str(), "n1", "n2", "np", "under-np"] {
+            assert!(got.iter().any(|g| g == id), "{id} refusée");
+        }
+        for id in [b.as_str(), notes.as_str(), folder.as_str(), "evil", "top", "npp"] {
+            assert!(!got.iter().any(|g| g == id), "{id} acceptée");
+        }
+        assert!(ws.accept_remote(vec![moved]).is_empty());
+        // Deletions: shared pages and unknown ids, never a private page whose id they know.
+        let del: std::collections::BTreeMap<String, u64> = [&doc, &b, &notes, &folder].iter().map(|i| (i.to_string(), 5)).chain([("inconnue".to_string(), 5)]).collect();
+        let kept: Vec<String> = ws.accept_remote_deletions(del).into_keys().collect();
+        assert!(kept.contains(&doc) && kept.contains(&"inconnue".to_string()));
+        assert!(!kept.contains(&b) && !kept.contains(&notes) && !kept.contains(&folder));
     }
 
     #[test]

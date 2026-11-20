@@ -32,7 +32,7 @@ fn claude_dir() -> PathBuf {
     std::env::var_os("CLAUDE_CONFIG_DIR").map(PathBuf::from).unwrap_or_else(|| dirs::home_dir().unwrap_or_default().join(".claude"))
 }
 
-fn claude_json() -> PathBuf {
+pub(crate) fn claude_json() -> PathBuf {
     match std::env::var_os("CLAUDE_CONFIG_DIR") {
         Some(d) => PathBuf::from(d).join(".claude.json"),
         None => dirs::home_dir().unwrap_or_default().join(".claude.json"),

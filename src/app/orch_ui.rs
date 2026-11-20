@@ -40,6 +40,8 @@ pub struct LiveRun {
     since: std::time::SystemTime,
     base: String,
     worktree: String,
+    /// The project's repository (the copy's origin), for its trust in Claude Code.
+    root: String,
     pub limit: f32,
     pub pct: f32,
     tokens_counted: u64,
@@ -233,6 +235,7 @@ impl NotesApp {
             reader: auto::Reader::default(),
             since: std::time::SystemTime::now() - Duration::from_secs(2),
             base: copy.base,
+            root: copy.root,
             worktree: copy.worktree,
             limit,
             pct: 0.0,
@@ -322,10 +325,21 @@ impl NotesApp {
                         finished.push((i, crate::tr!("Claude Code n'a pas démarré", "Claude Code didn't start").into(), String::new()));
                     } else if t0.elapsed() > Duration::from_secs(3) && idle > Duration::from_millis(2500) {
                         match auto::read_screen(&screen) {
-                            Screen::Trust => {
-                                // The copy is a folder Orchestra made for this session.
+                            Screen::Trust if auto::folder_trusted(&r.root) => {
+                                // The person already trusts this repository in Claude Code;
+                                // the copy is the same repository, in a new folder.
                                 r.term.write(b"\r");
                                 r.screen_changed = now;
+                            }
+                            Screen::Trust => {
+                                // Never accept for them: it would turn on the repository's
+                                // hooks, MCP servers and settings.
+                                r.term.write(b"\x1b");
+                                finished.push((i, crate::trf!(
+                                    "Claude Code demande si le dossier est sûr ; ouvrez-le une fois dans « {} » et acceptez, puis relancez",
+                                    "Claude Code asks whether the folder is safe; open it once in « {} » and accept, then start again",
+                                    r.root
+                                ), String::new()));
                             }
                             _ => {
                                 if let Some(text) = r.next.take() {
@@ -1003,7 +1017,7 @@ impl NotesApp {
             }
             ui.collapsing(RichText::new(crate::tr!("Commandes autorisées", "Allowed commands")).size(13.0).color(t.secondary), |ui| {
                 ui.label(
-                    RichText::new(crate::tr!("Déjà permis : lire et modifier les fichiers de la copie, git status / diff / log, cargo, npm, pnpm, yarn, node, python, pytest, make, go (et git add / commit si les commits sont autorisés). Toujours refusés : git push, reset, checkout, switch, rm -rf, sudo, curl, wget. Une autre commande est refusée, l'IA continue sans.", "Already allowed: reading and editing the copy's files, git status / diff / log, cargo, npm, pnpm, yarn, node, python, pytest, make, go (and git add / commit when commits are allowed). Always refused: git push, reset, checkout, switch, rm -rf, sudo, curl, wget. Any other command is refused and the AI goes on without it."))
+                    RichText::new(crate::tr!("Déjà permis : lire et modifier les fichiers de la copie, git status / diff / log, compiler et tester (cargo build / test, npm test, pytest, make test, go test…) et git add / commit si les commits sont autorisés. Pas python, node, npm, cargo ou make en entier : ils exécutent n'importe quel code. Toujours refusés : rm, sudo, curl, wget, shells, git push / reset / checkout… Une autre commande est refusée, l'IA continue sans.", "Already allowed: reading and editing the copy's files, git status / diff / log, building and testing (cargo build / test, npm test, pytest, make test, go test…) and git add / commit when commits are allowed. Not python, node, npm, cargo or make as a whole: they run any code. Always refused: rm, sudo, curl, wget, shells, git push / reset / checkout… Any other command is refused and the AI goes on without it."))
                         .size(12.5)
                         .color(t.tertiary),
                 );
