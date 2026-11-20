@@ -368,6 +368,23 @@ pub fn daily_pct(week_used: f32) -> f32 {
     week_used * 7.0
 }
 
+/// One day's share of the week (in points of the week): a seventh.
+pub const DAY_SHARE: f32 = 100.0 / 7.0;
+
+/// The line under the week's bar: the points of the week used over the last 24 hours (or
+/// since the first reading, `span`), next to a day's share. Before, it read « 105 % de la
+/// part du jour », a percentage of a percentage hard to read; the figures themselves are
+/// shown now. The flag: faster than a day's share, at which pace the week runs out early
+/// (over a shorter span, compared with that span's share of a day).
+pub fn day_pace_line(used: f32, span: u64) -> (String, bool) {
+    let full = span >= 23 * HOUR;
+    let share = if full { DAY_SHARE } else { DAY_SHARE * span as f32 / DAY as f32 };
+    let fast = used > share + 0.05;
+    let when = if full { crate::tr!("Ces 24 h", "These 24 h").to_string() } else { crate::trf!("Depuis {}", "Last {}", left_text(span)) };
+    let pace = if fast { crate::tr!(" · plus vite que la part d'un jour", " · faster than a day's share") } else { "" };
+    (crate::trf!("{when} : {used:.1} % de la semaine utilisés (part d'un jour : {DAY_SHARE:.1} %){pace}", "{when}: {used:.1} % of the week used (a day's share: {DAY_SHARE:.1} %){pace}"), fast)
+}
+
 /// The reserve is near: one more turn, as big as the biggest so far (at least half a
 /// point of the week), would reach `limit` (100 − reserve).
 pub fn near_reserve(week: f32, limit: f32, turn: f32) -> bool {
@@ -596,6 +613,20 @@ mod tests {
         // Without any reset time, a real new week (a big drop) still counts from zero.
         let (used, _) = day_week_used(&[bare(30, 90.0), bare(31, 95.0), bare(35, 3.0)], now).unwrap();
         assert!((used - 8.0).abs() < 0.01, "{used}");
+    }
+
+    /// The figures themselves, not « 105 % de la part du jour »: 15 points of the week in
+    /// 24 h is a little faster than a day's share (14.3); over 3 h, 2 points is fast too.
+    #[test]
+    fn day_pace_reads_in_points_of_the_week() {
+        let (line, fast) = day_pace_line(15.0, 24 * HOUR);
+        assert!(line.contains("15.0") && line.contains("14.3") && !line.contains("105"), "{line}");
+        assert!(fast);
+        assert!(!day_pace_line(10.0, 24 * HOUR).1);
+        assert!(!day_pace_line(14.28, 24 * HOUR).1, "a day's share exactly is not too fast");
+        // Over 3 hours, a day's share is about 1.8 points.
+        assert!(day_pace_line(2.0, 3 * HOUR).1);
+        assert!(!day_pace_line(1.0, 3 * HOUR).1);
     }
 
     #[test]

@@ -945,13 +945,13 @@ impl NotesApp {
             ui.painter().vline(lx, egui::Rangef::new(bar.top() - 3.0, bar.bottom() + 3.0), egui::Stroke::new(2.0, super::projects::ORANGE));
             // The day's pace: what went from the week in 24 hours against a seventh of it.
             if let Some((used, span)) = self.orch.day_week {
-                let d = crate::usage::daily_pct(used);
-                let over = if span >= 23 * 3_600_000 { crate::tr!("sur 24 h", "over 24 h").to_string() } else { crate::trf!("depuis {}", "for the last {}", crate::usage::left_text(span)) };
-                let color = if d > 100.0 { super::projects::ORANGE } else { t.secondary };
+                let (line, fast) = crate::usage::day_pace_line(used, span);
+                let color = if fast { super::projects::ORANGE } else { t.secondary };
                 ui.add_space(4.0);
-                ui.label(RichText::new(crate::trf!("Aujourd'hui : {d:.0} % de la part du jour ({over})", "Today: {d:.0} % of the day's share ({over})")).size(12.5).color(color)).on_hover_text(crate::trf!(
-                    "{used:.1} % de la semaine utilisés, pour une part du jour d'un septième de la semaine (≈ 14,3 %). Au-delà de 100 %, le rythme épuiserait la semaine avant sa fin.",
-                    "{used:.1} % of the week used, against a day's share of one seventh of the week (≈ 14.3 %). Past 100 %, this pace would use up the week before it ends."
+                ui.add(egui::Label::new(RichText::new(line).size(12.5).color(color)).wrap()).on_hover_text(crate::trf!(
+                    "Ce qui est parti de l'abonnement de la semaine sur les dernières 24 h, par vous et par les IA. La part d'un jour est un septième de la semaine : à ce rythme, la semaine dure pile jusqu'à sa remise à zéro. Plus vite (en orange), elle s'épuiserait avant ; c'est {:.0} % de la part d'un jour.",
+                    "What went from the week's subscription over the last 24 hours, by you and by the AIs. A day's share is a seventh of the week: at that pace, the week lasts exactly until it resets. Faster (in orange), it would run out before; that is {:.0} % of a day's share.",
+                    crate::usage::daily_pct(used)
                 ));
             }
         });
