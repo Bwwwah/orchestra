@@ -21,6 +21,7 @@ mod model;
 mod project;
 mod richtext;
 mod screen;
+mod secret;
 mod secure;
 mod sessions;
 mod setup;

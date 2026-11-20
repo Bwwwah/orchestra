@@ -866,6 +866,39 @@ mod tests {
     }
 
     #[test]
+    fn live_code_never_lands_in_the_workspace_file() {
+        let _g = fresh_workspace();
+        // An older version wrote it in clear: it moves out at the first load.
+        let mut v: Value = serde_json::from_str(&std::fs::read_to_string(store::workspace_path()).unwrap_or_else(|_| {
+            save(&store::load()).unwrap();
+            std::fs::read_to_string(store::workspace_path()).unwrap()
+        }))
+        .unwrap();
+        v["settings"]["collab"]["live_code"] = json!("ancien-code-42");
+        std::fs::write(store::workspace_path(), v.to_string()).unwrap();
+        let ws = store::load();
+        assert_eq!(ws.settings.collab.live_code, "ancien-code-42");
+        save(&ws).unwrap();
+        let text = std::fs::read_to_string(store::workspace_path()).unwrap();
+        assert!(!text.contains("ancien-code-42") && !text.contains("live_code"), "{text}");
+        assert_eq!(store::load().settings.collab.live_code, "ancien-code-42");
+        // A new code replaces it; an empty one leaves it alone.
+        let mut ws = store::load();
+        ws.settings.collab.live_code = "nouveau-7".into();
+        save(&ws).unwrap();
+        ws.settings.collab.live_code.clear();
+        save(&ws).unwrap();
+        assert_eq!(store::load().settings.collab.live_code, "nouveau-7");
+        let f = store::data_dir().join(".live-code");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(std::fs::metadata(&f).unwrap().permissions().mode() & 0o777, 0o600);
+        }
+        assert!(!std::fs::read_to_string(store::workspace_path()).unwrap().contains("nouveau-7"));
+    }
+
+    #[test]
     fn ask_human_lands_in_the_inbox() {
         let _g = fresh_workspace();
         let pid = project_with_steps(&[]);

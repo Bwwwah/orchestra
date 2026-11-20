@@ -364,7 +364,9 @@ pub struct CollabSettings {
     pub live_address: String,
     #[serde(default)]
     pub live_port: u16,
-    #[serde(default)]
+    /// Kept in the Keychain (secret.rs), never written to workspace.json: read from it only
+    /// to move the code of older versions there.
+    #[serde(default, skip_serializing)]
     pub live_code: String,
     /// Live was switched on (it starts again with the app).
     #[serde(default)]
