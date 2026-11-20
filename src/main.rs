@@ -200,8 +200,9 @@ fn run_server(port: u16, code: &str) -> i32 {
             match msg {
                 LiveMsg::Hello { name, .. } => {
                     println!("+ {name}");
-                    server.send(&LiveMsg::Pages { pages: ws.pages.clone(), deleted: ws.deleted.clone() });
-                    server.send(&LiveMsg::Chat { msgs: ws.chat.values().cloned().collect() });
+                    for m in welcome(&ws) {
+                        server.send(&m);
+                    }
                 }
                 LiveMsg::Bye { name } => println!("- {name}"),
                 LiveMsg::Pages { pages, deleted } => {
@@ -226,6 +227,14 @@ fn run_server(port: u16, code: &str) -> i32 {
         }
         std::thread::sleep(std::time::Duration::from_millis(100));
     }
+}
+
+/// What the server gives to whoever joins: only the shared projects, their pages and
+/// discussions (`shared_copy`). The data folder it runs on may be someone's own, with
+/// private pages that must never reach the others.
+fn welcome(ws: &model::Workspace) -> Vec<live::LiveMsg> {
+    let out = ws.shared_copy();
+    vec![live::LiveMsg::Pages { pages: out.pages, deleted: out.deleted }, live::LiveMsg::Chat { msgs: out.chat.into_values().collect() }]
 }
 
 fn usage(msg: &str) -> i32 {
@@ -268,6 +277,34 @@ fn run_window(open: Option<String>) -> i32 {
             eprintln!("orchestra: impossible d'ouvrir la fenêtre : {e}");
             1
         }
+    }
+}
+
+#[cfg(test)]
+mod server_tests {
+    use crate::live::LiveMsg;
+
+    /// Someone joins the server: only the shared project comes, without its folder; never a
+    /// private page or a private project's discussion.
+    #[test]
+    fn the_server_welcomes_with_shared_projects_only() {
+        let mut ws = crate::model::Workspace::default();
+        let shared = ws.create_project("Partagé", "/Users/moi/code/app");
+        let private = ws.create_project("Privé", "");
+        let notes = ws.create_page("Notes perso", None);
+        ws.page_mut(&shared).unwrap().project.as_mut().unwrap().shared = true;
+        for (pid, txt) in [(&shared, "salut"), (&private, "secret")] {
+            ws.chat.insert(txt.into(), crate::model::ChatMsg { id: txt.into(), project: pid.clone(), author: "moi".into(), text: txt.into(), at: 1 });
+        }
+        let msgs = super::welcome(&ws);
+        let Some(LiveMsg::Pages { pages, .. }) = msgs.first() else { panic!("pages first") };
+        let ids: Vec<&str> = pages.iter().map(|p| p.id.as_str()).collect();
+        assert_eq!(ids, vec![shared.as_str()]);
+        assert!(!ids.contains(&notes.as_str()) && !ids.contains(&private.as_str()));
+        assert!(pages[0].project.as_ref().unwrap().folder.is_empty());
+        let Some(LiveMsg::Chat { msgs: chat }) = msgs.get(1) else { panic!("chat second") };
+        assert_eq!(chat.len(), 1);
+        assert_eq!(chat[0].text, "salut");
     }
 }
 
