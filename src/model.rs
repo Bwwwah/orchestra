@@ -591,6 +591,9 @@ pub struct RunRecord {
     pub endless: Option<EndConditions>,
 }
 
+/// Days of reports kept as they are in "Rapports des IA"; the older ones are too many.
+pub const REPORT_DAYS_KEPT: usize = 14;
+
 /// When an endless session stops. Each one is optional; the first reached stops it. The
 /// budget of the session, the global limit and the week's reserve always apply on top.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Default)]
@@ -921,6 +924,24 @@ Cmd/Ctrl+P or K to search all pages.").into();
             .or_else(|| self.pages.iter().filter(|p| !p.trashed).find(|p| p.title.to_lowercase().contains(&k)))
     }
 
+    /// "Rapports des IA" grows a page a day: the day pages beyond the `REPORT_DAYS_KEPT`
+    /// most recent ones are too many (to condense), oldest first. Only pages titled with a
+    /// day (YYYY-MM-DD) count, so a summary page put there is left alone.
+    pub fn old_report_days(&self) -> Vec<String> {
+        let root = self.settings.orch.reports_page.as_str();
+        if root.is_empty() {
+            return vec![];
+        }
+        let is_day = |t: &str| {
+            let b = t.as_bytes();
+            b.len() == 10 && b[4] == b'-' && b[7] == b'-' && b.iter().enumerate().all(|(i, c)| i == 4 || i == 7 || c.is_ascii_digit())
+        };
+        let mut days: Vec<&Page> = self.children(Some(root)).into_iter().filter(|p| is_day(&p.title)).collect();
+        days.sort_by(|a, b| a.title.cmp(&b.title));
+        let over = days.len().saturating_sub(REPORT_DAYS_KEPT);
+        days.into_iter().take(over).map(|p| p.id.clone()).collect()
+    }
+
     pub fn children(&self, parent: Option<&str>) -> Vec<&Page> {
         self.pages.iter().filter(|p| !p.trashed && p.parent.as_deref() == parent).collect()
     }
@@ -1080,6 +1101,32 @@ fn snippet(text: &str, q: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::original::*;
+
+    /// Beyond the most recent days kept, the oldest report days are found, and only days.
+    #[test]
+    fn too_many_report_days_are_found() {
+        let mut ws = super::Workspace::default();
+        assert!(ws.old_report_days().is_empty(), "no reports page yet");
+        let root = ws.create_page("Rapports des IA", None);
+        ws.settings.orch.reports_page = root.clone();
+        let kept = super::REPORT_DAYS_KEPT;
+        let mut ids = vec![];
+        for d in 1..=kept {
+            ids.push(ws.create_page(&format!("2026-10-{d:02}"), Some(root.clone())));
+        }
+        ws.create_page("Synthèse", Some(root.clone()));
+        assert!(ws.old_report_days().is_empty(), "exactly the days kept: not too many");
+        // Two older days and one newer, created in any order.
+        let old2 = ws.create_page("2026-09-02", Some(root.clone()));
+        let old1 = ws.create_page("2026-09-01", Some(root.clone()));
+        ws.create_page("2026-11-20", Some(root.clone()));
+        // The 3 oldest go over: 09-01, 09-02, then 10-01.
+        assert_eq!(ws.old_report_days(), vec![old1, old2, ids[0].clone()]);
+        // A trashed day doesn't count.
+        let i = ws.pages.iter().position(|p| p.id == ids[0]).unwrap();
+        ws.pages[i].trashed = true;
+        assert_eq!(ws.old_report_days().len(), 2);
+    }
 
     #[test]
     fn a_question_waits_until_answered() {

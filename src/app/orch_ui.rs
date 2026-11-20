@@ -1082,6 +1082,26 @@ impl NotesApp {
                 if self.orphans_card(ui, &t, actions) {
                     ui.add_space(14.0);
                 }
+                // Too many days of reports: said here, where they are made.
+                let old = self.ws.old_report_days().len();
+                if old > 0 {
+                    ui.horizontal_wrapped(|ui| {
+                        ui.label(RichText::new("📒").size(13.0));
+                        ui.label(
+                            RichText::new(crate::trf!(
+                                "{old} jour(s) de rapports au-delà des {} plus récents : la page « Rapports des IA » devient longue.",
+                                "{old} day(s) of reports beyond the {} most recent: the « AI reports » page is getting long.",
+                                crate::model::REPORT_DAYS_KEPT
+                            ))
+                            .size(12.5)
+                            .color(t.secondary),
+                        );
+                        if super::projects::action_link(ui, crate::tr!("Voir les rapports", "See the reports")).clicked() {
+                            actions.push(Action::Open(self.ws.settings.orch.reports_page.clone()));
+                        }
+                    });
+                    ui.add_space(14.0);
+                }
                 // The settings and limits come first: they frame every launch below.
                 self.limits_card(ui, &t);
                 ui.add_space(14.0);
