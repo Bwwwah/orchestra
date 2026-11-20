@@ -1168,6 +1168,7 @@ impl NotesApp {
         let mut watch: Option<Option<String>> = None;
         let n = self.orch.runs.len();
         let awake = self.orch.awake.held();
+        let (five, global) = (self.orch.five, self.ws.settings.orch.global_limit);
         super::projects::card(ui, t, 0.0, |ui| {
             super::projects::card_title(ui, crate::tr!("EN COURS", "RUNNING"), &n.to_string(), t);
             if awake {
@@ -1230,7 +1231,7 @@ impl NotesApp {
                         links(ui, r);
                     });
                 }
-                share_row(ui, &r.id, r.pct, r.limit, t);
+                share_row(ui, &r.id, r.pct, r.limit, five, global, t);
                 ui.horizontal(|ui| {
                     ui.add_space(20.0);
                     let mut job = egui::text::LayoutJob::single_section(r.last_line.clone(), egui::TextFormat::simple(FontId::proportional(12.5), t.tertiary));
@@ -1841,11 +1842,33 @@ fn split_rise(rise: f32, tokens: &[u64]) -> Vec<f32> {
 
 /// In a running session's card: the use of its share of the 5-hour window, as a bar and
 /// its figures.
+/// A running session on the 5-hour window (all in %, 0..100): what was used before it or by
+/// others (`0..before`), its own use (`before..window`), and where it will stop (`stop`):
+/// on its budget, or on the global limit if that comes first.
+#[derive(Debug, PartialEq)]
+struct WindowBar {
+    before: f32,
+    window: f32,
+    stop: f32,
+}
+
+fn window_bar(window: f32, pct: f32, limit: f32, global: f32) -> WindowBar {
+    let window = window.clamp(0.0, 100.0);
+    let before = (window - pct.max(0.0)).max(0.0);
+    WindowBar { before, window, stop: (before + limit).min(global).clamp(0.0, 100.0) }
+}
+
 /// Never wider than its card: the bar takes what the text leaves (the text was once given
 /// a fixed 150 px it didn't fit in, and the overflow widened every card below; see the
 /// tests). Too narrow for both side by side, the text goes under the bar.
-fn share_row(ui: &mut egui::Ui, id: &str, pct: f32, limit: f32, t: &Tone) {
-    let text = crate::trf!("{:.1} % utilisés sur un budget de {:.0} %", "{:.1} % used of a {:.0} % budget", pct, limit);
+/// With the 5-hour window's figure (`window`), the bar is that window: the use before the
+/// session, the session's own, and a tick where it stops. Without it, the session's
+/// share of its budget only.
+fn share_row(ui: &mut egui::Ui, id: &str, pct: f32, limit: f32, window: Option<f32>, global: f32, t: &Tone) {
+    let text = match window {
+        Some(w) => crate::trf!("fenêtre de 5 h : {w:.0} % · session : {pct:.1} / {limit:.0} %", "5-hour window: {w:.0} % · session: {pct:.1} / {limit:.0} %"),
+        None => crate::trf!("{:.1} % utilisés sur un budget de {:.0} %", "{:.1} % used of a {:.0} % budget", pct, limit),
+    };
     let font = FontId::proportional(12.5);
     let text_w = ui.fonts_mut(|f| f.layout_no_wrap(text.clone(), font.clone(), t.secondary)).size().x;
     let indent = 20.0;
@@ -1855,14 +1878,30 @@ fn share_row(ui: &mut egui::Ui, id: &str, pct: f32, limit: f32, t: &Tone) {
     let bar_w = if side_by_side { room - gap - text_w } else { room.max(0.0) };
     let draw_bar = |ui: &mut egui::Ui| {
         let (bar, _) = ui.allocate_exact_size(egui::vec2(bar_w, 8.0), egui::Sense::hover());
-        ui.painter().rect_filled(bar, 4.0, t.fill);
-        let frac = super::projects::smooth(ui, ("run-pct", id), (pct / limit.max(0.1)).clamp(0.0, 1.0));
-        ui.painter().rect_filled(egui::Rect::from_min_size(bar.min, egui::vec2(bar.width() * frac, 8.0)), 4.0, if frac > 0.85 { super::projects::ORANGE } else { super::projects::GREEN });
+        let p = ui.painter();
+        p.rect_filled(bar, 4.0, t.fill);
+        let x = |v: f32| bar.left() + bar.width() * (v / 100.0).clamp(0.0, 1.0);
+        match window {
+            Some(w) => {
+                let b = window_bar(w, pct, limit, global);
+                let end = super::projects::smooth(ui, ("run-window", id), b.window);
+                let near = b.window >= b.stop - (b.stop - b.before) * 0.15;
+                let p = ui.painter();
+                // Before the session (or by others): muted; the session's own: its colour.
+                p.rect_filled(egui::Rect::from_min_max(bar.min, egui::pos2(x(b.before), bar.bottom())), 4.0, t.tertiary.gamma_multiply(0.45));
+                p.rect_filled(egui::Rect::from_min_max(egui::pos2(x(b.before), bar.top()), egui::pos2(x(end.max(b.before)), bar.bottom())), 0.0, if near { super::projects::ORANGE } else { super::projects::GREEN });
+                p.vline(x(b.stop), egui::Rangef::new(bar.top() - 3.0, bar.bottom() + 3.0), egui::Stroke::new(2.0, super::projects::ORANGE));
+            }
+            None => {
+                let frac = super::projects::smooth(ui, ("run-pct", id), (pct / limit.max(0.1)).clamp(0.0, 1.0));
+                ui.painter().rect_filled(egui::Rect::from_min_size(bar.min, egui::vec2(bar.width() * frac, 8.0)), 4.0, if frac > 0.85 { super::projects::ORANGE } else { super::projects::GREEN });
+            }
+        }
     };
     let label = |ui: &mut egui::Ui| {
         ui.add(egui::Label::new(RichText::new(text.as_str()).font(font.clone()).color(t.secondary)).wrap()).on_hover_text(crate::tr!(
-            "Part de la fenêtre de 5 h utilisée par cette session depuis son lancement, et son budget : elle s'arrête en l'atteignant. Les sessions précédentes du projet ne comptent pas.",
-            "Share of the 5-hour window this session used since it started, and its budget: it stops on reaching it. The project's earlier sessions don't count."
+            "La barre est la fenêtre de 5 h de l'abonnement : en gris ce qui était utilisé avant cette session (ou par d'autres), en vert ce qu'elle a utilisé depuis son lancement. Le trait orange : où elle s'arrête, sur son budget ou sur la limite globale si elle vient avant. Les sessions précédentes du projet ne comptent pas dans son budget.",
+            "The bar is the subscription's 5-hour window: in grey what was used before this session (or by others), in green what it used since it started. The orange tick: where it stops, on its budget or on the global limit if that comes first. The project's earlier sessions don't count in its budget."
         ));
     };
     ui.horizontal(|ui| {
@@ -2089,7 +2128,7 @@ mod tests {
         let t = super::tone(false);
         egui::Frame::new().inner_margin(egui::Margin::same(12)).show(ui, |ui| {
             ui.set_width(ui.available_width());
-            super::share_row(ui, "run", 0.0, 20.0, &t);
+            super::share_row(ui, "run", 0.0, 20.0, Some(75.0), 90.0, &t);
         });
     }
 
@@ -2135,12 +2174,12 @@ mod tests {
     #[test]
     fn the_budget_row_fits_its_card() {
         for width in [140.0, 240.0, 300.0, 480.0, 1000.0] {
-            for (pct, limit) in [(0.0, 20.0), (123.4, 100.0)] {
+            for (pct, limit, window) in [(0.0, 20.0, None), (123.4, 100.0, None), (5.0, 90.0, Some(80.0)), (12.3, 100.0, Some(100.0))] {
                 let mut row = 0.0;
                 column(width, |ui| {
                     ui.scope(|ui| {
                         let t = super::tone(false);
-                        super::share_row(ui, "run", pct, limit, &t);
+                        super::share_row(ui, "run", pct, limit, window, 90.0, &t);
                         row = ui.min_rect().width();
                     });
                 });
@@ -2208,6 +2247,20 @@ mod tests {
         // A new window: counted from zero; an unknown reset time on both sides: the difference.
         assert_eq!(super::window_rise(Some((75.0, reset)), 2.0, Some(1_000_000 + 5 * 3_600_000)), 2.0);
         assert_eq!(super::window_rise(Some((10.0, None)), 12.0, None), 2.0);
+    }
+
+    /// The bar of a running session is the 5-hour window itself. The case reported: 75 %
+    /// used before it, 5 % since, a budget of 90 % and a global limit of 90 %: the window
+    /// reads 80 %, and it stops at the global limit (90 %), well before its budget.
+    #[test]
+    fn a_session_bar_is_the_five_hour_window() {
+        use super::{window_bar, WindowBar};
+        assert_eq!(window_bar(80.0, 5.0, 90.0, 90.0), WindowBar { before: 75.0, window: 80.0, stop: 90.0 });
+        // A small budget stops it first.
+        assert_eq!(window_bar(80.0, 5.0, 10.0, 90.0), WindowBar { before: 75.0, window: 80.0, stop: 85.0 });
+        // Its share can't start below zero, nor anything go past 100.
+        assert_eq!(window_bar(3.0, 5.0, 20.0, 100.0), WindowBar { before: 0.0, window: 3.0, stop: 20.0 });
+        assert_eq!(window_bar(120.0, 5.0, 50.0, 200.0).stop, 100.0);
     }
 
     #[test]
