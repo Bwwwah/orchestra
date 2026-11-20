@@ -1072,6 +1072,51 @@ mod tests {
         let _ = std::fs::remove_dir_all(repo);
     }
 
+    /// A merge that conflicts changes nothing in the project's folder (no half-done merge,
+    /// the person's own files untouched) and keeps the copy and its branch for later.
+    #[test]
+    fn a_conflicting_merge_leaves_the_project_as_it_was() {
+        let base = std::env::temp_dir().join(format!("orch-conflict-{}", uuid::Uuid::new_v4().simple()));
+        let repo = base.join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        let ok = |d: &Path, a: &[&str]| git(d, a).is_ok();
+        if !ok(&repo, &["init", "-b", "main"]) {
+            return;
+        }
+        let _ = git(&repo, &["config", "user.email", "t@t"]);
+        let _ = git(&repo, &["config", "user.name", "T"]);
+        std::fs::write(repo.join("a.txt"), "a\n").unwrap();
+        assert!(ok(&repo, &["add", "-A"]) && ok(&repo, &["commit", "-m", "a"]));
+        // The session's copy changes a.txt (left uncommitted: the merge commits it)…
+        let wt = base.join("copie");
+        assert!(ok(&repo, &["worktree", "add", "-b", "orchestra/essai", &wt.display().to_string()]));
+        std::fs::write(wt.join("a.txt"), "copie\n").unwrap();
+        // …and so does the project meanwhile, with a note of the person's not committed.
+        std::fs::write(repo.join("a.txt"), "projet\n").unwrap();
+        assert!(ok(&repo, &["commit", "-am", "projet"]));
+        std::fs::write(repo.join("note.txt"), "à moi\n").unwrap();
+        let head = git(&repo, &["rev-parse", "HEAD"]).unwrap();
+        let rec = crate::model::RunRecord {
+            title: "Essai".into(),
+            root: repo.display().to_string(),
+            worktree: wt.display().to_string(),
+            branch: "orchestra/essai".into(),
+            ..Default::default()
+        };
+        assert!(merge(&rec).is_err());
+        // It did get as far as the merge itself: the copy's work was committed on its branch.
+        assert!(git(&repo, &["log", "-1", "--format=%s", "orchestra/essai"]).unwrap().contains("Essai"));
+        assert_eq!(std::fs::read_to_string(repo.join("a.txt")).unwrap(), "projet\n");
+        assert_eq!(std::fs::read_to_string(repo.join("note.txt")).unwrap(), "à moi\n");
+        assert_eq!(git(&repo, &["rev-parse", "HEAD"]).unwrap(), head);
+        assert!(git(&repo, &["rev-parse", "-q", "--verify", "MERGE_HEAD"]).is_err());
+        assert_eq!(git(&repo, &["status", "--porcelain"]).unwrap().trim(), "?? note.txt");
+        assert!(wt.exists());
+        assert!(git(&repo, &["branch"]).unwrap().contains("orchestra/essai"));
+        let _ = git(&repo, &["worktree", "remove", "--force", &wt.display().to_string()]);
+        let _ = std::fs::remove_dir_all(base);
+    }
+
     /// Only copies no session needs are candidates: a running session's and a finished one
     /// not yet merged or discarded stay, even when the data folder moved.
     #[test]
