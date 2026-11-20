@@ -877,8 +877,30 @@ impl NotesApp {
     fn limits_card(&mut self, ui: &mut egui::Ui, t: &Tone) {
         let o = &mut self.ws.settings.orch;
         let before = o.clone();
+        // Folded by default to one line, so that the last finished sessions, just below,
+        // show without scrolling the page; unfolded on demand.
+        let open_key = egui::Id::unique("orch-limits-open");
+        let mut open: bool = ui.ctx().data(|d| d.get_temp(open_key)).unwrap_or(false);
         super::projects::card(ui, t, 0.0, |ui| {
-            super::projects::card_title(ui, crate::tr!("RÉGLAGES ET LIMITES", "SETTINGS AND LIMITS"), "", t);
+            let title = crate::tr!("RÉGLAGES ET LIMITES", "SETTINGS AND LIMITS");
+            ui.horizontal(|ui| {
+                let (r, _) = ui.allocate_exact_size(egui::vec2(4.0, 14.0), egui::Sense::hover());
+                ui.painter().rect_filled(r, 2.0, super::projects::accent_of(title));
+                ui.add_space(2.0);
+                ui.label(RichText::new(title).font(semibold(12.5)).color(t.secondary));
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    let label = if open { crate::tr!("Replier ▴", "Fold ▴") } else { crate::tr!("Modifier ▾", "Edit ▾") };
+                    if super::projects::action_link(ui, label).clicked() {
+                        open = !open;
+                    }
+                });
+            });
+            if !open {
+                ui.add_space(4.0);
+                ui.label(RichText::new(limits_summary(o)).size(12.5).color(t.tertiary));
+                return;
+            }
+            ui.add_space(8.0);
             // The 5-hour window's use is shown once, in the tile at the top (with this limit
             // as the tick of its ring): here, only the settings.
             let w = ui.available_width();
@@ -942,6 +964,7 @@ impl NotesApp {
                 ui.add(egui::TextEdit::singleline(&mut o.extra_tools).hint_text(crate::tr!("En plus, ex. Bash(just:*), Bash(docker compose:*)", "More, e.g. Bash(just:*), Bash(docker compose:*)")).desired_width(f32::INFINITY).font(FontId::monospace(12.5)));
             });
         });
+        ui.ctx().data_mut(|d| d.insert_temp(open_key, open));
         if *o != before {
             self.dirty_since.get_or_insert_with(Instant::now);
         }
@@ -1210,7 +1233,10 @@ impl NotesApp {
             // Five sessions in view, the others by scrolling: the list's height is that of its
             // first five rows (measured on the last frame, the rows wrap with the width).
             let height_key = egui::Id::unique("orch-done-height");
-            let five: f32 = ui.ctx().data(|d| d.get_temp(height_key)).unwrap_or(5.0 * 62.0);
+            // Never fewer than three rows in view before the list asks to scroll.
+            let three_key = egui::Id::unique("orch-done-height-3");
+            let three: f32 = ui.ctx().data(|d| d.get_temp(three_key)).unwrap_or(3.0 * 62.0);
+            let five: f32 = ui.ctx().data(|d| d.get_temp::<f32>(height_key)).unwrap_or(5.0 * 62.0).max(three);
             egui::ScrollArea::vertical().id_salt("orch-done-list").max_height(five).auto_shrink([false, true]).show(ui, |ui| {
             let top = ui.min_rect().top();
             for (i, r) in done.iter().enumerate() {
@@ -1273,8 +1299,11 @@ impl NotesApp {
                 });
                 super::projects::hover_end(ui, bg, row.response.rect, egui::Id::unique(("orch-done", &r.id)), t);
                 ui.add_space(8.0);
+                let h = row.response.rect.bottom() + 8.0 - top;
+                if i == 2 || i + 1 == done.len().min(3) {
+                    ui.ctx().data_mut(|d| d.insert_temp(three_key, h));
+                }
                 if i == 4 || i + 1 == done.len().min(5) {
-                    let h = row.response.rect.bottom() + 8.0 - top;
                     ui.ctx().data_mut(|d| d.insert_temp(height_key, h));
                 }
             }
@@ -1616,6 +1645,19 @@ fn project_color(title: &str) -> Color32 {
 }
 
 /// The mark and colour of a finished session: done, stopped on a limit or a block, failed.
+/// The settings of the folded "Settings and limits" card, on one line.
+fn limits_summary(o: &crate::model::OrchSettings) -> String {
+    let commits = if o.allow_commits { crate::tr!("commits autorisés", "commits allowed") } else { crate::tr!("sans commit", "no commits") };
+    let resume = if o.auto_resume { crate::tr!("reprise automatique", "automatic restart") } else { crate::tr!("sans reprise", "no restart") };
+    crate::trf!(
+        "Limite globale {:.0} % · {commits} · {resume} · bilan à {} h · {} tours au plus",
+        "Global limit {:.0} % · {commits} · {resume} · summary at {} h · {} turns at most",
+        o.global_limit,
+        o.report_hour,
+        o.max_turns
+    )
+}
+
 fn outcome_mark(outcome: &str, closed: &str, t: &Tone) -> (&'static str, Color32) {
     let o = outcome.to_lowercase();
     if !closed.is_empty() {
