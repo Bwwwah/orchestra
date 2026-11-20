@@ -701,6 +701,20 @@ pub fn due_resumes(runs: &[RunRecord], now: u64, running: &[&str]) -> Vec<usize>
     out
 }
 
+/// The sessions suspended until a quota resets (they start again by themselves later):
+/// the latest per project, none whose project has a session running, soonest first.
+pub fn suspended_runs(runs: &[RunRecord], now: u64, running: &[&str]) -> Vec<usize> {
+    let mut out: Vec<usize> = vec![];
+    for (i, r) in runs.iter().enumerate().rev() {
+        if r.resume_at <= now || running.contains(&r.project.as_str()) || out.iter().any(|&j| runs[j].project == r.project) {
+            continue;
+        }
+        out.push(i);
+    }
+    out.sort_by_key(|&i| runs[i].resume_at);
+    out
+}
+
 /// Whether a question asked (ask_human) about `project` since `since` still waits for the
 /// person's answer.
 pub fn question_pending(inbox: &[InboxMsg], project: &str, since: u64) -> bool {
@@ -1235,6 +1249,18 @@ mod tests {
         assert_eq!((sum2.as_str(), n2), (sum.as_str(), 1));
         assert!(ws.page(&sum).unwrap().blocks.iter().any(|b| b.text.contains("2026-10-03")));
         assert_eq!(ws.children(Some(&root)).iter().filter(|p| p.title.starts_with("Synthèse") || p.title.starts_with("Summary")).count(), 1);
+    }
+
+    /// Suspended until a quota resets: latest per project, not running, soonest first.
+    #[test]
+    fn suspended_sessions_are_listed() {
+        let run = |project: &str, resume_at: u64| super::RunRecord { project: project.into(), resume_at, ..Default::default() };
+        let runs = vec![run("a", 500), run("b", 300), run("a", 900), run("c", 0), run("d", 50)];
+        // Now = 100: d is due (not suspended any more), c never was; a's latest wins.
+        assert_eq!(super::suspended_runs(&runs, 100, &[]), vec![1, 2]);
+        // A project already running again isn't shown as suspended.
+        assert_eq!(super::suspended_runs(&runs, 100, &["b"]), vec![2]);
+        assert!(super::suspended_runs(&runs, 1000, &[]).is_empty());
     }
 
     #[test]

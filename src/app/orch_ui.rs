@@ -1073,6 +1073,10 @@ impl NotesApp {
                 if !self.orch.runs.is_empty() {
                     ui.add_space(14.0);
                 }
+                // Sessions waiting for the subscription's quota: still there, suspended.
+                if self.suspended_card(ui, &t, actions) {
+                    ui.add_space(14.0);
+                }
                 // The AIs' questions: those waiting (a paused session goes on once answered),
                 // then the answers of the last days.
                 if self.questions_card(ui, &t) {
@@ -1582,6 +1586,85 @@ impl NotesApp {
                 self.orch.runs[i].stop = Some(crate::tr!("arrêtée à la main", "stopped by hand").into());
             }
         }
+    }
+
+    /// The sessions stopped by the 5-hour or weekly limit that start again by themselves
+    /// once it resets: shown like the running ones, in orange, suspended. False when none.
+    fn suspended_card(&mut self, ui: &mut egui::Ui, t: &Tone, actions: &mut Vec<Action>) -> bool {
+        let now = crate::model::now_ms();
+        let running: Vec<&str> = self.orch.runs.iter().map(|r| r.project.as_str()).collect();
+        let list = crate::model::suspended_runs(&self.ws.runs, now, &running);
+        if list.is_empty() {
+            return false;
+        }
+        let orange = super::projects::ORANGE;
+        let mut cancel: Option<String> = None;
+        let mut add_tasks: Option<String> = None;
+        super::projects::card(ui, t, 0.0, |ui| {
+            super::projects::card_title(ui, crate::tr!("SUSPENDUES", "SUSPENDED"), &list.len().to_string(), t);
+            for &i in &list {
+                let r = &self.ws.runs[i];
+                egui::Frame::new().fill(orange.gamma_multiply(0.07)).stroke(egui::Stroke::new(1.0, orange.gamma_multiply(0.35))).corner_radius(10.0).inner_margin(egui::Margin::same(12)).show(ui, |ui| {
+                    ui.set_width(ui.available_width());
+                    ui.horizontal_wrapped(|ui| {
+                        // A still dot (pause sign) where a running session pulses.
+                        let (dot, _) = ui.allocate_exact_size(egui::vec2(12.0, 18.0), egui::Sense::hover());
+                        for dx in [-2.5, 2.5] {
+                            ui.painter().line_segment([dot.center() + egui::vec2(dx, -4.0), dot.center() + egui::vec2(dx, 4.0)], egui::Stroke::new(2.0, orange));
+                        }
+                        ui.label(RichText::new(&r.title).font(semibold(14.5)).color(t.text));
+                        ui.label(RichText::new(crate::tr!("suspendue", "suspended")).size(12.5).color(orange));
+                        if r.endless.is_some() {
+                            ui.label(RichText::new(crate::tr!("∞ sans fin", "∞ endless")).size(12.5).color(super::projects::BLUE));
+                        }
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            if super::projects::action_link(ui, crate::tr!("Annuler la reprise", "Cancel the restart"))
+                                .on_hover_text(crate::tr!("La session ne repartira pas d'elle-même", "The session won't start again by itself"))
+                                .clicked()
+                            {
+                                cancel = Some(r.project.clone());
+                            }
+                            if super::projects::action_link(ui, crate::tr!("+ Ajouter des tâches", "+ Add tasks")).on_hover_text(crate::tr!("L'IA les prendra à la reprise", "The AI takes them when it restarts")).clicked() {
+                                add_tasks = Some(r.project.clone());
+                            }
+                        });
+                    });
+                    ui.horizontal_wrapped(|ui| {
+                        ui.add_space(20.0);
+                        ui.label(
+                            RichText::new(crate::trf!(
+                                "Reprend toute seule à {} (dans {}), quand le quota de l'abonnement revient.",
+                                "Starts again by itself at {} (in {}), when the subscription's quota is back.",
+                                auto::hm(r.resume_at),
+                                crate::usage::left_text(r.resume_at.saturating_sub(now))
+                            ))
+                            .size(12.5)
+                            .color(t.secondary),
+                        );
+                    });
+                    if !r.outcome.is_empty() {
+                        ui.horizontal_wrapped(|ui| {
+                            ui.add_space(20.0);
+                            ui.label(RichText::new(crate::trf!("Mise en pause : {}", "Paused: {}", r.outcome)).size(12.0).color(t.tertiary));
+                        });
+                    }
+                });
+                ui.add_space(8.0);
+            }
+        });
+        if let Some(p) = cancel {
+            for x in self.ws.runs.iter_mut().filter(|x| x.project == p) {
+                x.resume_at = 0;
+            }
+            self.dirty_since.get_or_insert_with(Instant::now);
+        }
+        if let Some(p) = add_tasks {
+            super::projects::focus_steps(ui.ctx(), &p);
+            actions.push(Action::Open(p));
+        }
+        // The time left changes: keep it fresh.
+        ui.ctx().request_repaint_after(Duration::from_secs(30));
+        true
     }
 
     /// The AIs' questions (ask_human) on the Orchestration page: those still waiting, with
