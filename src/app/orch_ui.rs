@@ -526,32 +526,30 @@ impl NotesApp {
                             }
                             c.reached(crate::model::now_ms().saturating_sub(r.started_wall), steps_done, r.turns, r.done_streak)
                         });
-                        let reason = if let Some(s) = r.stop.clone() {
-                            Some(s)
-                        } else if too_long {
-                            Some(crate::tr!("un tour a duré trop longtemps", "a turn took too long").into())
-                        } else if let Some(why) = endless_end {
-                            Some(why)
-                        } else if sig == Signal::Done && r.endless.is_none() {
-                            Some(crate::tr!("mission terminée", "mission complete").into())
-                        } else if sig == Signal::Blocked {
-                            Some(crate::tr!("l'IA est bloquée", "the AI is blocked").into())
-                        } else if r.pct >= r.limit {
-                            Some(crate::trf!("limite du projet atteinte ({:.0} %)", "project limit reached ({:.0} %)", r.limit))
-                        } else if five.is_some_and(|f| f >= global) {
-                            r.quota_reset = self.orch.five_reset;
-                            Some(crate::trf!("limite globale atteinte ({global:.0} %)", "global limit reached ({global:.0} %)"))
-                        } else if self.orch.week.is_some_and(|w| crate::usage::near_reserve(w, week_limit, r.week_turn)) {
-                            // Paused before the next turn bites into the reserve; starts again once the week resets.
-                            r.quota_reset = self.orch.week_reset;
-                            Some(crate::trf!("pause : la réserve minimum de la semaine ({:.0} %) approche", "paused: the week's minimum reserve ({:.0} %) is near", 100.0 - week_limit))
-                        } else if !r.measured && r.turns >= 2 {
-                            Some(crate::tr!("utilisation de l'abonnement impossible à mesurer", "subscription use can't be measured").into())
-                        } else if r.endless.is_none() && r.turns >= r.max_turns {
-                            Some(crate::trf!("{} tours atteints", "{} turns reached", r.max_turns))
-                        } else {
-                            None
-                        };
+                        let stop = stop_reason(&TurnEnd {
+                            asked: r.stop.clone(),
+                            too_long,
+                            endless_end,
+                            signal: sig,
+                            endless: r.endless.is_some(),
+                            pct: r.pct,
+                            limit: r.limit,
+                            five,
+                            global,
+                            week: self.orch.week,
+                            week_limit,
+                            week_turn: r.week_turn,
+                            measured: r.measured,
+                            turns: r.turns,
+                            max_turns: r.max_turns,
+                        });
+                        // Stopped by a quota: when it resets, to start again then.
+                        match stop.as_ref().map(Stop::quota) {
+                            Some(Quota::FiveHours) => r.quota_reset = self.orch.five_reset,
+                            Some(Quota::Week) => r.quota_reset = self.orch.week_reset,
+                            _ => {}
+                        }
+                        let reason = stop.map(|s| s.text());
                         // A question to the person still unanswered: wait for it rather
                         // than send the AI on.
                         let asked = pause && reason.is_none() && crate::model::question_pending(&self.ws.inbox, &r.project, r.started_wall);
@@ -1834,6 +1832,108 @@ impl NotesApp {
 }
 
 
+/// What a session's turn ended on, to choose whether it stops.
+struct TurnEnd {
+    /// A stop already asked (by the person, or a limit seen during the turn).
+    asked: Option<String>,
+    too_long: bool,
+    /// Endless mode: the end condition reached, if any.
+    endless_end: Option<String>,
+    signal: Signal,
+    endless: bool,
+    /// The session's use of the 5-hour window, and its budget.
+    pct: f32,
+    limit: f32,
+    /// The 5-hour window, and the global limit.
+    five: Option<f32>,
+    global: f32,
+    /// The week, the share of it the AIs may use, and the most one turn took from it.
+    week: Option<f32>,
+    week_limit: f32,
+    week_turn: f32,
+    measured: bool,
+    turns: u32,
+    max_turns: u32,
+}
+
+/// Why a session stops after a turn.
+#[derive(Debug, Clone, PartialEq)]
+enum Stop {
+    Asked(String),
+    TooLong,
+    EndlessEnd(String),
+    MissionDone,
+    Blocked,
+    Budget(f32),
+    GlobalLimit(f32),
+    /// The week's reserve (in %) is near.
+    WeekReserve(f32),
+    Unmeasured,
+    Turns(u32),
+}
+
+/// The quota a stop waits for, to start again once it resets.
+#[derive(Debug, PartialEq)]
+enum Quota {
+    None,
+    FiveHours,
+    Week,
+}
+
+impl Stop {
+    fn quota(&self) -> Quota {
+        match self {
+            Stop::GlobalLimit(_) => Quota::FiveHours,
+            Stop::WeekReserve(_) => Quota::Week,
+            _ => Quota::None,
+        }
+    }
+
+    fn text(&self) -> String {
+        match self {
+            Stop::Asked(s) | Stop::EndlessEnd(s) => s.clone(),
+            Stop::TooLong => crate::tr!("un tour a duré trop longtemps", "a turn took too long").into(),
+            Stop::MissionDone => crate::tr!("mission terminée", "mission complete").into(),
+            Stop::Blocked => crate::tr!("l'IA est bloquée", "the AI is blocked").into(),
+            Stop::Budget(l) => crate::trf!("limite du projet atteinte ({l:.0} %)", "project limit reached ({l:.0} %)"),
+            Stop::GlobalLimit(g) => crate::trf!("limite globale atteinte ({g:.0} %)", "global limit reached ({g:.0} %)"),
+            Stop::WeekReserve(r) => crate::trf!("pause : la réserve minimum de la semaine ({r:.0} %) approche", "paused: the week's minimum reserve ({r:.0} %) is near"),
+            Stop::Unmeasured => crate::tr!("utilisation de l'abonnement impossible à mesurer", "subscription use can't be measured").into(),
+            Stop::Turns(n) => crate::trf!("{n} tours atteints", "{n} turns reached"),
+        }
+    }
+}
+
+/// Whether a session stops after a turn, and why: the first reason in this order. None:
+/// it goes on.
+fn stop_reason(t: &TurnEnd) -> Option<Stop> {
+    Some(if let Some(s) = &t.asked {
+        Stop::Asked(s.clone())
+    } else if t.too_long {
+        Stop::TooLong
+    } else if let Some(why) = &t.endless_end {
+        Stop::EndlessEnd(why.clone())
+    } else if t.signal == Signal::Done && !t.endless {
+        // Endless mode has its own end conditions instead of [[FINI]].
+        Stop::MissionDone
+    } else if t.signal == Signal::Blocked {
+        Stop::Blocked
+    } else if t.pct >= t.limit {
+        Stop::Budget(t.limit)
+    } else if t.five.is_some_and(|f| f >= t.global) {
+        Stop::GlobalLimit(t.global)
+    } else if t.week.is_some_and(|w| crate::usage::near_reserve(w, t.week_limit, t.week_turn)) {
+        // Paused before the next turn bites into the reserve; starts again once the week resets.
+        Stop::WeekReserve(100.0 - t.week_limit)
+    } else if !t.measured && t.turns >= 2 {
+        Stop::Unmeasured
+    } else if !t.endless && t.turns >= t.max_turns {
+        Stop::Turns(t.max_turns)
+    } else {
+        return None;
+    })
+}
+
 /// How much the 5-hour window rose since the last reading (`prev`: its figure and reset
 /// time then). A new window (another reset time) counts from zero; the first reading
 /// counts for nothing: what was used before it isn't anyone's.
@@ -2277,6 +2377,63 @@ mod tests {
         // Its share can't start below zero, nor anything go past 100.
         assert_eq!(window_bar(3.0, 5.0, 20.0, 100.0), WindowBar { before: 0.0, window: 3.0, stop: 20.0 });
         assert_eq!(window_bar(120.0, 5.0, 50.0, 200.0).stop, 100.0);
+    }
+
+    /// A turn that ends with nothing to stop on: under every limit, measured, few turns.
+    fn calm() -> super::TurnEnd {
+        super::TurnEnd {
+            asked: None,
+            too_long: false,
+            endless_end: None,
+            signal: super::Signal::Continue,
+            endless: false,
+            pct: 2.0,
+            limit: 20.0,
+            five: Some(30.0),
+            global: 60.0,
+            week: Some(40.0),
+            week_limit: 95.0,
+            week_turn: 1.0,
+            measured: true,
+            turns: 3,
+            max_turns: 30,
+        }
+    }
+
+    #[test]
+    fn a_session_goes_on_or_stops_for_the_first_reason() {
+        use super::{stop_reason, Quota, Signal, Stop, TurnEnd};
+        assert_eq!(stop_reason(&calm()), None);
+        let with = |f: &dyn Fn(&mut TurnEnd)| {
+            let mut t = calm();
+            f(&mut t);
+            stop_reason(&t)
+        };
+        assert_eq!(with(&|t| t.asked = Some("arrêtée à la main".into())), Some(Stop::Asked("arrêtée à la main".into())));
+        assert_eq!(with(&|t| t.too_long = true), Some(Stop::TooLong));
+        assert_eq!(with(&|t| t.signal = Signal::Done), Some(Stop::MissionDone));
+        assert_eq!(with(&|t| t.signal = Signal::Blocked), Some(Stop::Blocked));
+        assert_eq!(with(&|t| t.pct = 20.0), Some(Stop::Budget(20.0)));
+        assert_eq!(with(&|t| t.five = Some(60.0)), Some(Stop::GlobalLimit(60.0)));
+        assert_eq!(with(&|t| t.week = Some(94.5)), Some(Stop::WeekReserve(5.0)));
+        assert_eq!(with(&|t| t.measured = false), Some(Stop::Unmeasured));
+        assert_eq!(with(&|t| t.turns = 30), Some(Stop::Turns(30)));
+        // Unmeasured only from the second turn; unknown figures stop nothing.
+        assert_eq!(with(&|t| { t.measured = false; t.turns = 1 }), None);
+        assert_eq!(with(&|t| { t.five = None; t.week = None }), None);
+        // Endless: neither [[FINI]] nor the turn limit, its own end conditions instead.
+        assert_eq!(with(&|t| { t.endless = true; t.signal = Signal::Done; t.turns = 500 }), None);
+        assert_eq!(with(&|t| { t.endless = true; t.endless_end = Some("4 h écoulées".into()) }), Some(Stop::EndlessEnd("4 h écoulées".into())));
+        // The order: a stop asked comes before all, the budget before the global limit…
+        assert_eq!(with(&|t| { t.asked = Some("x".into()); t.too_long = true; t.pct = 99.0 }), Some(Stop::Asked("x".into())));
+        assert_eq!(with(&|t| { t.pct = 20.0; t.five = Some(90.0) }), Some(Stop::Budget(20.0)));
+        assert_eq!(with(&|t| { t.five = Some(90.0); t.week = Some(99.0) }), Some(Stop::GlobalLimit(60.0)));
+        // Only the quotas start again by themselves, each when its own window resets.
+        assert_eq!(Stop::GlobalLimit(60.0).quota(), Quota::FiveHours);
+        assert_eq!(Stop::WeekReserve(5.0).quota(), Quota::Week);
+        assert_eq!(Stop::Budget(20.0).quota(), Quota::None);
+        assert_eq!(Stop::MissionDone.quota(), Quota::None);
+        assert!(Stop::GlobalLimit(60.0).text().contains("60"));
     }
 
     #[test]
