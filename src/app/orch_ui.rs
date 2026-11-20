@@ -1069,7 +1069,7 @@ impl NotesApp {
                 ui.add_space(14.0);
                 self.stats_row(ui, &t);
                 ui.add_space(14.0);
-                self.running_card(ui, &t);
+                self.running_card(ui, &t, actions);
                 if !self.orch.runs.is_empty() {
                     ui.add_space(14.0);
                 }
@@ -1403,10 +1403,12 @@ impl NotesApp {
         }
     }
 
-    fn running_card(&mut self, ui: &mut egui::Ui, t: &Tone) {
+    fn running_card(&mut self, ui: &mut egui::Ui, t: &Tone, actions: &mut Vec<Action>) {
         if self.orch.runs.is_empty() {
             return;
         }
+        // « Ajouter des tâches »: the project whose page to open.
+        let mut add_tasks: Option<String> = None;
         let dark = ui.visuals().dark_mode;
         let watching = self.orch.watching.clone();
         let mut stop: Option<(usize, bool)> = None;
@@ -1453,6 +1455,12 @@ impl NotesApp {
                     let open = watching.as_deref() == Some(r.id.as_str());
                     if super::projects::action_link(ui, if open { crate::tr!("Masquer", "Hide") } else { crate::tr!("Regarder", "Watch") }).clicked() {
                         watch = Some(if open { None } else { Some(r.id.clone()) });
+                    }
+                    if super::projects::action_link(ui, crate::tr!("+ Ajouter des tâches", "+ Add tasks"))
+                        .on_hover_text(crate::tr!("Ouvre les étapes du projet : l'IA prendra les nouvelles sans que la session s'arrête", "Opens the project's steps: the AI takes the new ones without the session stopping"))
+                        .clicked()
+                    {
+                        add_tasks = Some(r.project.clone());
                     }
                 };
                 egui::Frame::new().fill(super::projects::GREEN.gamma_multiply(0.06)).stroke(egui::Stroke::new(1.0, super::projects::GREEN.gamma_multiply(0.3))).corner_radius(10.0).inner_margin(egui::Margin::same(12)).show(ui, |ui| {
@@ -1527,6 +1535,9 @@ impl NotesApp {
         });
         if let Some(w) = watch {
             self.orch.watching = w;
+        }
+        if let Some(p) = add_tasks {
+            actions.push(Action::Open(p));
         }
         if let Some((i, force)) = stop {
             if force {
