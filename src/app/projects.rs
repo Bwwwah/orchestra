@@ -1237,8 +1237,9 @@ fn steps_card(ui: &mut egui::Ui, cx: &mut Cx, extra: f32) -> f32 {
         ui.add_space(2.0);
         let adding_key = ("adding-step", page_id);
         let adding = flag(ui, adding_key);
-        ui.horizontal(|ui| {
-            let (r, plus) = ui.allocate_exact_size(egui::vec2(18.0, 22.0), egui::Sense::click());
+        // A row exactly as tall as the « + »: the text typed (or the label) is centred on it.
+        inline_row(ui, |ui| {
+            let (r, plus) = ui.allocate_exact_size(egui::vec2(18.0, INLINE_H), egui::Sense::click());
             let hover_row = ui.rect_contains_pointer(egui::Rect::from_min_size(r.min, egui::vec2(ui.available_width() + 18.0, 22.0)));
             let col = if adding || hover_row { t.secondary } else { t.tertiary };
             let c = r.center();
@@ -1246,10 +1247,8 @@ fn steps_card(ui: &mut egui::Ui, cx: &mut Cx, extra: f32) -> f32 {
             ui.painter().line_segment([c - egui::vec2(0.0, 5.0), c + egui::vec2(0.0, 5.0)], egui::Stroke::new(1.5, col));
             if adding {
                 let edit = ui.add(
-                    egui::TextEdit::singleline(new_step)
-                        .frame(egui::Frame::NONE)
+                    inline_edit(egui::TextEdit::singleline(new_step))
                         .hint_text(crate::tr!("Nouvelle étape, puis Entrée", "New step, then Enter"))
-                        .font(FontId::proportional(TEXT))
                         .desired_width(f32::INFINITY),
                 );
                 if !edit.has_focus() && !edit.lost_focus() && new_step.is_empty() && !ui.ctx().memory(|m| m.has_focus(edit.id)) {
@@ -1276,6 +1275,28 @@ fn steps_card(ui: &mut egui::Ui, cx: &mut Cx, extra: f32) -> f32 {
         card_rule(ui, t);
         ai_steps(ui, page_id, pr, ai, prefer, t);
     })
+}
+
+/// Height of a one-line field behind an icon (« + Ajouter une étape », « ? Question rapide »).
+const INLINE_H: f32 = 22.0;
+
+/// A row of exactly `INLINE_H`, its items centred on it. `ui.horizontal` centres each item
+/// on the row as it stands when the item is added, so a field after a taller icon sat high.
+fn inline_row<R>(ui: &mut egui::Ui, add: impl FnOnce(&mut egui::Ui) -> R) -> R {
+    ui.allocate_ui_with_layout(egui::vec2(ui.available_width(), INLINE_H), egui::Layout::left_to_right(egui::Align::Center), |ui| {
+        ui.set_min_height(INLINE_H);
+        add(ui)
+    })
+    .inner
+}
+
+/// A frameless one-line field, as tall as its row, its text centred vertically.
+fn inline_edit(edit: egui::TextEdit<'_>) -> egui::TextEdit<'_> {
+    edit.frame(egui::Frame::NONE)
+        .font(FontId::proportional(TEXT))
+        .margin(egui::Margin::symmetric(4, 0))
+        .min_size(egui::vec2(0.0, INLINE_H))
+        .align(egui::Align2::LEFT_CENTER)
 }
 
 /// Under the steps: ask the AI for steps (from the project or from a pasted text), and
@@ -2067,16 +2088,14 @@ fn quick_question(ui: &mut egui::Ui, cx: &mut Cx) {
     let asking = cx.ai.asking(page_id).map(String::from);
     let mut close = false;
     card(ui, t, 0.0, |ui| {
-        ui.horizontal(|ui| {
-            let (r, _) = ui.allocate_exact_size(egui::vec2(18.0, 22.0), egui::Sense::hover());
+        inline_row(ui, |ui| {
+            let (r, _) = ui.allocate_exact_size(egui::vec2(18.0, INLINE_H), egui::Sense::hover());
             ui.painter().text(r.center(), egui::Align2::CENTER_CENTER, "?", semibold(15.0), Color32::from_rgb(144, 101, 176));
             let send_w = 90.0;
             let edit = ui.add_enabled(
                 asking.is_none(),
-                egui::TextEdit::singleline(&mut text)
+                inline_edit(egui::TextEdit::singleline(&mut text))
                     .hint_text(crate::tr!("Question rapide à l'IA, ex. « telle fonctionnalité serait-elle intéressante ? »", "Quick question to the AI, e.g. « would this feature be worth it? »"))
-                    .frame(egui::Frame::NONE)
-                    .font(FontId::proportional(TEXT))
                     .char_limit(crate::sync::QUESTION_MAX)
                     .desired_width((ui.available_width() - send_w).max(80.0)),
             );
