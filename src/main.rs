@@ -10,6 +10,7 @@
 mod i18n;
 mod app;
 mod auto;
+mod awake;
 mod clip;
 mod collab;
 mod docs;
