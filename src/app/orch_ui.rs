@@ -1223,7 +1223,8 @@ impl NotesApp {
                 if let Some(why) = &r.stop {
                     ui.horizontal(|ui| {
                         ui.add_space(20.0);
-                        ui.label(RichText::new(crate::trf!("S'arrête : {why}", "Stopping: {why}")).size(12.5).color(super::projects::ORANGE));
+                        // Wrapped: a long reason must not widen the cards below.
+                        ui.add(egui::Label::new(RichText::new(crate::trf!("S'arrête : {why}", "Stopping: {why}")).size(12.5).color(super::projects::ORANGE)).wrap());
                     });
                 }
                 if watching.as_deref() == Some(r.id.as_str()) {
@@ -1830,18 +1831,41 @@ impl NotesApp {
 
 /// In a running session's card: the use of its share of the 5-hour window, as a bar and
 /// its figures.
+/// Never wider than its card: the bar takes what the text leaves (the text was once given
+/// a fixed 150 px it didn't fit in, and the overflow widened every card below; see the
+/// tests). Too narrow for both side by side, the text goes under the bar.
 fn share_row(ui: &mut egui::Ui, id: &str, pct: f32, limit: f32, t: &Tone) {
-    ui.horizontal(|ui| {
-        ui.add_space(20.0);
-        let w = (ui.available_width() - 150.0).max(80.0);
-        let (bar, _) = ui.allocate_exact_size(egui::vec2(w, 8.0), egui::Sense::hover());
+    let text = crate::trf!("{:.1} % utilisés sur un budget de {:.0} %", "{:.1} % used of a {:.0} % budget", pct, limit);
+    let font = FontId::proportional(12.5);
+    let text_w = ui.fonts_mut(|f| f.layout_no_wrap(text.clone(), font.clone(), t.secondary)).size().x;
+    let indent = 20.0;
+    let gap = ui.spacing().item_spacing.x;
+    let room = ui.available_width() - indent;
+    let side_by_side = room - gap - text_w >= 60.0;
+    let bar_w = if side_by_side { room - gap - text_w } else { room.max(0.0) };
+    let draw_bar = |ui: &mut egui::Ui| {
+        let (bar, _) = ui.allocate_exact_size(egui::vec2(bar_w, 8.0), egui::Sense::hover());
         ui.painter().rect_filled(bar, 4.0, t.fill);
         let frac = super::projects::smooth(ui, ("run-pct", id), (pct / limit.max(0.1)).clamp(0.0, 1.0));
         ui.painter().rect_filled(egui::Rect::from_min_size(bar.min, egui::vec2(bar.width() * frac, 8.0)), 4.0, if frac > 0.85 { super::projects::ORANGE } else { super::projects::GREEN });
-        ui.label(RichText::new(crate::trf!("{:.1} % utilisés sur un budget de {:.0} %", "{:.1} % used of a {:.0} % budget", pct, limit)).size(12.5).color(t.secondary)).on_hover_text(crate::tr!(
+    };
+    let label = |ui: &mut egui::Ui| {
+        ui.add(egui::Label::new(RichText::new(text.as_str()).font(font.clone()).color(t.secondary)).wrap()).on_hover_text(crate::tr!(
             "Part de la fenêtre de 5 h utilisée par cette session depuis son lancement, et son budget : elle s'arrête en l'atteignant. Les sessions précédentes du projet ne comptent pas.",
             "Share of the 5-hour window this session used since it started, and its budget: it stops on reaching it. The project's earlier sessions don't count."
         ));
+    };
+    ui.horizontal(|ui| {
+        ui.add_space(indent);
+        if side_by_side {
+            draw_bar(ui);
+            label(ui);
+        } else {
+            ui.vertical(|ui| {
+                draw_bar(ui);
+                label(ui);
+            });
+        }
     });
 }
 
@@ -2094,36 +2118,33 @@ mod tests {
         assert_eq!(after, 460.0);
     }
 
-    /// The cause: the budget row of a running session. Its bar takes all the width but
-    /// 150 px, kept for « 0.0 % utilisés sur un budget de 20 % », which needs more; the row
-    /// comes out wider than the card by exactly what the text lacks.
+    /// The cause was the budget row of a running session: its bar took all the width but
+    /// 150 px, kept for « 0.0 % utilisés sur un budget de 20 % », which needs more, so the
+    /// row came out wider than its card. Now it fills its card exactly, side by side when
+    /// there is room, the text under the bar when not, with large figures too.
     #[test]
-    fn the_budget_row_is_wider_than_its_card() {
-        let width = 480.0;
-        let (mut row, mut text, mut gap) = (0.0, 0.0, 0.0);
-        column(width, |ui| {
-            gap = ui.spacing().item_spacing.x;
-            let label = crate::trf!("{:.1} % utilisés sur un budget de {:.0} %", "{:.1} % used of a {:.0} % budget", 0.0, 20.0);
-            text = ui.fonts_mut(|f| f.layout_no_wrap(label, egui::FontId::proportional(12.5), egui::Color32::WHITE)).size().x;
-            ui.scope(|ui| {
-                let t = super::tone(false);
-                super::share_row(ui, "run", 0.0, 20.0, &t);
-                row = ui.min_rect().width();
-            });
-        });
-        // 20 px of indent, the bar (width − 20 − 150), the spacing, the text.
-        assert!((row - (width - 150.0 + gap + text)).abs() < 1.0, "rangée {row}, texte {text}");
-        assert!(text > 150.0 - gap, "le texte ({text} px) tient dans les 150 px gardés");
-        assert!(row > width);
+    fn the_budget_row_fits_its_card() {
+        for width in [140.0, 240.0, 300.0, 480.0, 1000.0] {
+            for (pct, limit) in [(0.0, 20.0), (123.4, 100.0)] {
+                let mut row = 0.0;
+                column(width, |ui| {
+                    ui.scope(|ui| {
+                        let t = super::tone(false);
+                        super::share_row(ui, "run", pct, limit, &t);
+                        row = ui.min_rect().width();
+                    });
+                });
+                assert!(row <= width + 0.5, "à {width} px ({pct} / {limit}) : rangée de {row} px");
+            }
+        }
     }
 
-    /// The gap seen when a session starts: the cards from the running one down come out
-    /// wider than the ones above. Kept ignored until the widths are made even.
+    /// The gap once seen when a session started: the cards from the running one down came
+    /// out 57.5 px wider than the ones above.
     #[test]
-    #[ignore = "reproduit l'écart de largeur des encadrés au lancement d'une session"]
     fn cards_keep_one_width_once_a_session_runs() {
         let mut uneven = vec![];
-        for width in [480.0, 620.0, 1000.0] {
+        for width in [320.0, 480.0, 620.0, 1000.0] {
             let [above, running, below] = card_widths(width);
             if (running - above).abs() >= 0.5 || (below - above).abs() >= 0.5 {
                 uneven.push(format!("à {width} px : au-dessus {above}, en cours {running}, en dessous {below}"));
