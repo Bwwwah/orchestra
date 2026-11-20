@@ -491,6 +491,31 @@ pub(super) fn card_title(ui: &mut egui::Ui, title: &str, extra: &str, t: &Tone) 
     ui.add_space(8.0);
 }
 
+/// A thin line across the card, between a list and its footer actions.
+pub(super) fn card_rule(ui: &mut egui::Ui, t: &Tone) {
+    ui.add_space(6.0);
+    let (r, _) = ui.allocate_exact_size(egui::vec2(ui.available_width(), 1.0), egui::Sense::hover());
+    ui.painter().hline(r.x_range(), r.center().y, egui::Stroke::new(1.0, t.border.gamma_multiply(0.7)));
+    ui.add_space(6.0);
+}
+
+/// A secondary action (delete, clear…): grey text that darkens under the pointer, quieter
+/// than the blue pills of the main actions.
+pub(super) fn quiet_link(ui: &mut egui::Ui, text: &str, t: &Tone) -> egui::Response {
+    let font = FontId::proportional(12.5);
+    let g = ui.painter().layout_no_wrap(text.to_string(), font, t.tertiary);
+    let (rect, resp) = ui.allocate_exact_size(g.size() + egui::vec2(4.0, 8.0), egui::Sense::click());
+    let a = ui.ctx().animate_bool_with_time(resp.id.with("hov"), resp.hovered(), 0.14);
+    let color = t.tertiary.lerp_to_gamma(t.secondary, a);
+    let pos = egui::pos2(rect.left() + 2.0, rect.center().y - g.size().y / 2.0);
+    ui.painter().galley_with_override_text_color(pos, g.clone(), color);
+    if a > 0.0 {
+        let y = pos.y + g.size().y + 0.5;
+        ui.painter().hline(pos.x..=pos.x + g.size().x, y, egui::Stroke::new(1.0, color.gamma_multiply(a)));
+    }
+    resp.on_hover_cursor(egui::CursorIcon::PointingHand)
+}
+
 fn flag(ui: &egui::Ui, key: (&str, &str)) -> bool {
     ui.ctx().data(|d| d.get_temp::<bool>(egui::Id::unique(key)).unwrap_or(false))
 }
@@ -643,11 +668,11 @@ fn session_row(ui: &mut egui::Ui, page_id: &str, s: &SessionInfo, t: &Tone) -> O
                     ui.label(RichText::new(crate::tr!("Id de session invalide : reprise impossible", "Invalid session id: can't resume")).size(12.5).color(t.tertiary));
                     return;
                 };
-                if ui.button(crate::tr!("Reprendre ici", "Resume here")).on_hover_text(crate::tr!("Rouvre la session dans le terminal intégré", "Reopens the session in the built-in terminal")).clicked() {
+                if action_link(ui, crate::tr!("Reprendre ici", "Resume here")).on_hover_text(crate::tr!("Rouvre la session dans le terminal intégré", "Reopens the session in the built-in terminal")).clicked() {
                     let title = format!("{} · {}", s.tool.label(), crate::richtext::one_line(&s.display_title(), 24));
                     super::term_ui::request(ui.ctx(), &title, &s.cwd, Some(resume));
                 }
-                if ui.button(crate::tr!("Terminal macOS", "macOS Terminal")).on_hover_text(&cmd).clicked() {
+                if action_link(ui, crate::tr!("Terminal macOS", "macOS Terminal")).on_hover_text(&cmd).clicked() {
                     msg = Some(match crate::sessions::open_in_terminal(&cmd) {
                         Ok(()) => super::notices::Notice::Ack(crate::tr!("Session rouverte dans le Terminal.", "Session reopened in the Terminal.").to_string()),
                         Err(e) => {
@@ -656,7 +681,7 @@ fn session_row(ui: &mut egui::Ui, page_id: &str, s: &SessionInfo, t: &Tone) -> O
                         }
                     });
                 }
-                if ui.button(crate::tr!("Copier la commande", "Copy the command")).on_hover_text(&cmd).clicked() {
+                if action_link(ui, crate::tr!("Copier la commande", "Copy the command")).on_hover_text(&cmd).clicked() {
                     ui.ctx().copy_text(cmd.clone());
                     msg = Some(super::notices::Notice::Ack(crate::tr!("Commande copiée.", "Command copied.").into()));
                 }
@@ -1136,7 +1161,7 @@ fn steps_card(ui: &mut egui::Ui, cx: &mut Cx, extra: f32) -> f32 {
             if row.inner.clicked() {
                 toggle_flag(ui, open_key);
             }
-            ui.add_space(2.0);
+            ui.add_space(4.0);
         }
         // While dragging: a line where the step would land; it moves there on release.
         if let Some(d) = dragging.clone() {
@@ -1173,17 +1198,16 @@ fn steps_card(ui: &mut egui::Ui, cx: &mut Cx, extra: f32) -> f32 {
                 if ro {
                     return;
                 }
-                ui.label(RichText::new("·").color(t.tertiary));
                 if confirming {
                     let sure = if done == 1 { crate::tr!("Confirmer : supprimer 1 étape terminée", "Confirm: delete 1 finished step").to_string() } else { crate::trf!("Confirmer : supprimer {done} étapes terminées", "Confirm: delete {done} finished steps") };
                     if ui.add(egui::Label::new(RichText::new(sure).size(13.0).color(Color32::from_rgb(224, 62, 62))).sense(egui::Sense::click())).on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
                         clear = true;
                         toggle_flag(ui, confirm_key);
                     }
-                    if link(ui, crate::tr!("Annuler", "Cancel")) {
+                    if quiet_link(ui, crate::tr!("Annuler", "Cancel"), t).clicked() {
                         toggle_flag(ui, confirm_key);
                     }
-                } else if link(ui, crate::tr!("Supprimer les terminées", "Delete finished ones")) {
+                } else if quiet_link(ui, crate::tr!("Supprimer les terminées", "Delete finished ones"), t).clicked() {
                     toggle_flag(ui, confirm_key);
                 }
             });
@@ -1246,6 +1270,8 @@ fn steps_card(ui: &mut egui::Ui, cx: &mut Cx, extra: f32) -> f32 {
                 }
             }
         });
+        // The AI's tools for the steps, set apart from the list by a thin line.
+        card_rule(ui, t);
         ai_steps(ui, page_id, pr, ai, prefer, t);
     })
 }
@@ -1256,7 +1282,6 @@ fn ai_steps(ui: &mut egui::Ui, page_id: &str, pr: &mut Project, ai: &mut super::
     let folder = pr.folder.trim().to_string();
     let folder_ok = !folder.is_empty() && crate::project::normalize_folder(&folder).is_dir();
     let existing: Vec<String> = pr.steps.iter().filter(|s| s.status != StepStatus::Done).map(|s| s.title.clone()).collect();
-    ui.add_space(6.0);
     if let Some(list) = ai.proposals.get_mut(page_id) {
         let mut add = false;
         let mut drop = false;
@@ -1435,7 +1460,8 @@ fn sessions_card(ui: &mut egui::Ui, cx: &mut Cx, extra: f32) -> f32 {
         }
         for s in others.iter().take(if all { usize::MAX } else { 3 }) {
             // Same columns as the rows above: a (hollow) dot, the tool, the title, the time.
-            ui.horizontal(|ui| {
+            let bg = hover_begin(ui);
+            let row = ui.horizontal(|ui| {
                 let (r, _) = ui.allocate_exact_size(egui::vec2(10.0, 20.0), egui::Sense::hover());
                 ui.painter().circle_stroke(r.center(), 3.5, egui::Stroke::new(1.2, t.border));
                 tool_chip(ui, &tool_label(&s.tool), t);
@@ -1446,20 +1472,40 @@ fn sessions_card(ui: &mut egui::Ui, cx: &mut Cx, extra: f32) -> f32 {
                 line(ui, job, room).on_hover_text(if s.location.is_empty() { &s.id } else { &s.location });
                 ui.label(RichText::new(when).size(12.5).color(t.tertiary));
             });
-            ui.add_space(2.0);
+            hover_end(ui, bg, row.response.rect, egui::Id::unique(("session-other", &s.id)), t);
+            ui.add_space(4.0);
         }
-        if live.len() > 4 || others.len() > 3 {
-            if link(ui, &if all { crate::tr!("Voir moins", "Show less").to_string() } else { crate::trf!("Voir les {n} sessions", "Show the {n} sessions") }) {
-                toggle_flag(ui, ("all-sessions", page_id));
-            }
-        } else if n > 0 {
-            ui.label(RichText::new(crate::tr!("Cliquer sur une session pour la reprendre.", "Click a session to resume it.")).size(12.0).color(t.tertiary));
+        if n > 0 {
+            card_rule(ui, t);
+        }
+        // Footer: see all (or a hint), then "Effacer l'historique", quieter, on the same line.
+        let key = ("clear-sessions", page_id);
+        let confirming = n > 0 && !pr.read_only && flag(ui, key);
+        if n > 0 && !confirming {
+            ui.horizontal_wrapped(|ui| {
+                ui.spacing_mut().item_spacing.x = 10.0;
+                if live.len() > 4 || others.len() > 3 {
+                    if link(ui, &if all { crate::tr!("Voir moins", "Show less").to_string() } else { crate::trf!("Voir les {n} sessions", "Show the {n} sessions") }) {
+                        toggle_flag(ui, ("all-sessions", page_id));
+                    }
+                } else {
+                    ui.label(RichText::new(crate::tr!("Cliquer sur une session pour la reprendre.", "Click a session to resume it.")).size(12.0).color(t.tertiary));
+                }
+                if !pr.read_only {
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if quiet_link(ui, crate::tr!("Effacer l'historique", "Clear the history"), t)
+                            .on_hover_text(crate::tr!("Retire les sessions passées de ce projet, sans supprimer leurs fichiers", "Removes the past sessions from this project, without deleting their files"))
+                            .clicked()
+                        {
+                            toggle_flag(ui, key);
+                        }
+                    });
+                }
+            });
         }
         // "Effacer l'historique": a second click confirms. The sessions' files stay on disk.
-        if n > 0 && !pr.read_only {
-            let key = ("clear-sessions", page_id);
-            ui.add_space(4.0);
-            if flag(ui, key) {
+        if confirming {
+            {
                 ui.horizontal_wrapped(|ui| {
                     let sure = crate::tr!("Confirmer : effacer l'historique", "Confirm: clear the history");
                     if ui
@@ -1470,16 +1516,11 @@ fn sessions_card(ui: &mut egui::Ui, cx: &mut Cx, extra: f32) -> f32 {
                         clear = true;
                         toggle_flag(ui, key);
                     }
-                    if link(ui, crate::tr!("Annuler", "Cancel")) {
+                    if quiet_link(ui, crate::tr!("Annuler", "Cancel"), t).clicked() {
                         toggle_flag(ui, key);
                     }
                 });
                 ui.label(RichText::new(crate::tr!("Les sessions disparaissent de ce projet ; leurs fichiers restent sur le disque et une session reprise réapparaît.", "The sessions leave this project; their files stay on disk and a resumed session shows up again.")).size(12.0).color(t.tertiary));
-            } else if action_link(ui, crate::tr!("Effacer l'historique", "Clear the history"))
-                .on_hover_text(crate::tr!("Retire les sessions passées de ce projet, sans supprimer leurs fichiers", "Removes the past sessions from this project, without deleting their files"))
-                .clicked()
-            {
-                toggle_flag(ui, key);
             }
         }
     });
