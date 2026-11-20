@@ -2018,47 +2018,103 @@ mod tests {
         assert_eq!(g(now + h), g(now));
     }
 
-    /// Lays out the Orchestration page's column as `orchestra_view` does (a fixed width), a
-    /// card drawn before a session starts, then the running session's card, then a card
-    /// after it; returns the widths of the three.
-    fn card_widths(width: f32) -> [f32; 3] {
-        use eframe::egui;
+    use eframe::egui;
+
+    /// Runs `add` in a column of `width` px, as `orchestra_view` sets it (`ui.set_width`),
+    /// without a window. Two passes: egui settles sizes on the second.
+    fn column(width: f32, mut add: impl FnMut(&mut egui::Ui)) {
         let ctx = egui::Context::default();
-        let t = super::tone(false);
-        let mut out = [0.0; 3];
-        // Two passes: egui settles sizes on the second frame.
         for _ in 0..2 {
             ctx.begin_pass(egui::RawInput { screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1400.0, 900.0))), ..Default::default() });
-            {
-                egui::Area::new(egui::Id::new("cards")).fixed_pos(egui::Pos2::ZERO).show(&ctx, |ui| {
-                    ui.vertical(|ui| {
-                        ui.set_width(width);
-                        let card = |ui: &mut egui::Ui, add: &mut dyn FnMut(&mut egui::Ui)| {
-                            let r = egui::Frame::new().inner_margin(egui::Margin::symmetric(18, 16)).show(ui, |ui| {
-                                ui.set_width(ui.available_width());
-                                add(ui);
-                            });
-                            r.response.rect.width()
-                        };
-                        out[0] = card(ui, &mut |ui| {
-                            ui.label("Cette semaine");
-                        });
-                        out[1] = card(ui, &mut |ui| {
-                            egui::Frame::new().inner_margin(egui::Margin::same(12)).show(ui, |ui| {
-                                ui.set_width(ui.available_width());
-                                super::share_row(ui, "run", 0.0, 20.0, &t);
-                            });
-                        });
-                        out[2] = card(ui, &mut |ui| {
-                            ui.label("Réglages et limites");
-                        });
-                    });
+            egui::Area::new(egui::Id::new("column")).fixed_pos(egui::Pos2::ZERO).show(&ctx, |ui| {
+                ui.vertical(|ui| {
+                    ui.set_width(width);
+                    add(ui);
                 });
-            }
+            });
             // No screen to send the textures to: drop them on purpose.
             ctx.end_pass().textures_delta.clear();
         }
+    }
+
+    /// A card as `projects::card` lays it out (full width, inner margin); its width.
+    fn card(ui: &mut egui::Ui, add: impl FnOnce(&mut egui::Ui)) -> f32 {
+        egui::Frame::new()
+            .inner_margin(egui::Margin::symmetric(18, 16))
+            .show(ui, |ui| {
+                ui.set_width(ui.available_width());
+                add(ui);
+            })
+            .response
+            .rect
+            .width()
+    }
+
+    /// The running session's card: its inner frame and the row of its budget.
+    fn running(ui: &mut egui::Ui) {
+        let t = super::tone(false);
+        egui::Frame::new().inner_margin(egui::Margin::same(12)).show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            super::share_row(ui, "run", 0.0, 20.0, &t);
+        });
+    }
+
+    /// A card drawn before a session starts, the running session's card, then a card
+    /// after it; the widths of the three.
+    fn card_widths(width: f32) -> [f32; 3] {
+        let mut out = [0.0; 3];
+        column(width, |ui| {
+            out[0] = card(ui, |ui| {
+                ui.label("Cette semaine");
+            });
+            out[1] = card(ui, running);
+            out[2] = card(ui, |ui| {
+                ui.label("Réglages et limites");
+            });
+        });
         out
+    }
+
+    /// The mechanism behind the gap: in an egui column, something wider than the column
+    /// widens it for everything that follows, never for what came before. The column has
+    /// no grid nor fixed widths of its own (the cards fill `ui.available_width()`).
+    #[test]
+    fn a_row_wider_than_the_column_widens_what_follows() {
+        let (mut before, mut after) = (0.0, 0.0);
+        column(400.0, |ui| {
+            before = card(ui, |ui| {
+                ui.label("avant");
+            });
+            ui.allocate_exact_size(egui::vec2(460.0, 10.0), egui::Sense::hover());
+            after = card(ui, |ui| {
+                ui.label("après");
+            });
+        });
+        assert_eq!(before, 400.0);
+        assert_eq!(after, 460.0);
+    }
+
+    /// The cause: the budget row of a running session. Its bar takes all the width but
+    /// 150 px, kept for « 0.0 % utilisés sur un budget de 20 % », which needs more; the row
+    /// comes out wider than the card by exactly what the text lacks.
+    #[test]
+    fn the_budget_row_is_wider_than_its_card() {
+        let width = 480.0;
+        let (mut row, mut text, mut gap) = (0.0, 0.0, 0.0);
+        column(width, |ui| {
+            gap = ui.spacing().item_spacing.x;
+            let label = crate::trf!("{:.1} % utilisés sur un budget de {:.0} %", "{:.1} % used of a {:.0} % budget", 0.0, 20.0);
+            text = ui.fonts_mut(|f| f.layout_no_wrap(label, egui::FontId::proportional(12.5), egui::Color32::WHITE)).size().x;
+            ui.scope(|ui| {
+                let t = super::tone(false);
+                super::share_row(ui, "run", 0.0, 20.0, &t);
+                row = ui.min_rect().width();
+            });
+        });
+        // 20 px of indent, the bar (width − 20 − 150), the spacing, the text.
+        assert!((row - (width - 150.0 + gap + text)).abs() < 1.0, "rangée {row}, texte {text}");
+        assert!(text > 150.0 - gap, "le texte ({text} px) tient dans les 150 px gardés");
+        assert!(row > width);
     }
 
     /// The gap seen when a session starts: the cards from the running one down come out
