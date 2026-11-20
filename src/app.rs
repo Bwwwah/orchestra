@@ -1066,6 +1066,7 @@ impl eframe::App for NotesApp {
         self.ai_tick(&ctx);
         self.ais_tick();
         self.orch_tick(&ctx);
+        self.install_tick(&ctx);
         self.update_tick(&ctx);
         self.versions.tick(&ctx);
         if let Some(m) = self.versions.status.take() {

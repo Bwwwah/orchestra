@@ -290,17 +290,6 @@ impl Ai {
             _ => None,
         }
     }
-    /// The official install command (run in the built-in terminal, in view).
-    pub fn install(self) -> Option<&'static str> {
-        match self {
-            Ai::ClaudeCode => Some("npm install -g @anthropic-ai/claude-code"),
-            Ai::Codex => Some("npm install -g @openai/codex"),
-            Ai::Gemini => Some("npm install -g @google/gemini-cli"),
-            // Mistral's Python package, through uv.
-            Ai::Vibe => Some("uv tool install mistral-vibe"),
-            _ => None,
-        }
-    }
     pub fn download_page(self) -> Option<&'static str> {
         match self {
             Ai::ClaudeDesktop => Some("https://claude.ai/download"),
@@ -349,6 +338,50 @@ pub struct AiState {
     pub installed: bool,
     /// Knows the dashboard's MCP server.
     pub plugged: bool,
+    /// How to install it here, when it isn't (None: installed, or nothing to offer).
+    pub install: Option<Install>,
+}
+
+/// How to install an AI on this machine.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Install {
+    /// A command for the built-in terminal (in view), and what it needs or brings along.
+    Run(String, &'static str),
+    /// A page to download it from (an app, or what its command needs).
+    Download(&'static str, &'static str),
+}
+
+/// Node.js's download page, for the npm packages when neither npm nor Homebrew is there.
+const NODE_PAGE: &str = "https://nodejs.org/en/download";
+
+/// How to install `ai`, given which commands this machine has (`has("npm")`…): the
+/// official command when its tool is there, else that tool first (Homebrew, or its
+/// maker's installer), else the page to download it from.
+pub fn install_plan(ai: Ai, has: impl Fn(&str) -> bool) -> Option<Install> {
+    let npm = |pkg: &str| {
+        if has("npm") {
+            Some(Install::Run(format!("npm install -g {pkg}"), crate::tr!("avec npm (Node.js)", "with npm (Node.js)")))
+        } else if has("brew") {
+            Some(Install::Run(format!("brew install node && npm install -g {pkg}"), crate::tr!("installe d'abord Node.js avec Homebrew", "installs Node.js first, with Homebrew")))
+        } else {
+            Some(Install::Download(NODE_PAGE, crate::tr!("Node.js requis : installez-le, puis revenez ici", "Node.js needed: install it, then come back here")))
+        }
+    };
+    match ai {
+        // Anthropic's own installer needs nothing else; npm when it is there.
+        Ai::ClaudeCode if has("npm") => npm("@anthropic-ai/claude-code"),
+        Ai::ClaudeCode => Some(Install::Run("curl -fsSL https://claude.ai/install.sh | bash".into(), crate::tr!("installateur officiel d'Anthropic", "Anthropic's official installer"))),
+        Ai::Codex => npm("@openai/codex"),
+        Ai::Gemini => npm("@google/gemini-cli"),
+        // Mistral's Python package, through uv (Astral's tool), installed first if needed.
+        Ai::Vibe if has("uv") => Some(Install::Run("uv tool install mistral-vibe".into(), crate::tr!("avec uv", "with uv"))),
+        Ai::Vibe if has("brew") => Some(Install::Run("brew install uv && uv tool install mistral-vibe".into(), crate::tr!("installe d'abord uv avec Homebrew", "installs uv first, with Homebrew"))),
+        Ai::Vibe => Some(Install::Run(
+            "curl -LsSf https://astral.sh/uv/install.sh | sh && ~/.local/bin/uv tool install mistral-vibe".into(),
+            crate::tr!("installe d'abord uv avec l'installateur d'Astral", "installs uv first, with Astral's installer"),
+        )),
+        Ai::ClaudeDesktop | Ai::Cursor => ai.download_page().map(|u| Install::Download(u, crate::tr!("page de téléchargement officielle", "official download page"))),
+    }
 }
 
 fn installed(ai: Ai, path: &str) -> bool {
@@ -385,7 +418,8 @@ pub fn states() -> Vec<AiState> {
         .into_iter()
         .map(|ai| {
             let installed = installed(ai, &path);
-            AiState { ai, installed, plugged: installed && plugged(ai, &path) }
+            let install = if installed { None } else { install_plan(ai, |c| crate::sync::which(c, &path).is_some()) };
+            AiState { ai, installed, plugged: installed && plugged(ai, &path), install }
         })
         .collect()
 }
@@ -470,6 +504,29 @@ pub fn summary(r: &Report) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The install offered depends on what the machine has: the tool's command when it is
+    /// there, that tool first otherwise, a download page as a last resort.
+    #[test]
+    fn install_plan_follows_what_the_machine_has() {
+        let run = |ai: Ai, tools: &[&str]| match install_plan(ai, |c| tools.contains(&c)) {
+            Some(Install::Run(cmd, _)) => cmd,
+            Some(Install::Download(url, _)) => format!("page {url}"),
+            None => "rien".into(),
+        };
+        assert_eq!(run(Ai::Codex, &["npm"]), "npm install -g @openai/codex");
+        assert_eq!(run(Ai::Codex, &["brew"]), "brew install node && npm install -g @openai/codex");
+        assert_eq!(run(Ai::Gemini, &[]), format!("page {NODE_PAGE}"));
+        // Claude Code needs no Node.js: Anthropic's installer when npm is missing.
+        assert_eq!(run(Ai::ClaudeCode, &["npm"]), "npm install -g @anthropic-ai/claude-code");
+        assert!(run(Ai::ClaudeCode, &[]).contains("https://claude.ai/install.sh"));
+        assert_eq!(run(Ai::Vibe, &["uv", "brew"]), "uv tool install mistral-vibe");
+        assert_eq!(run(Ai::Vibe, &["brew"]), "brew install uv && uv tool install mistral-vibe");
+        assert!(run(Ai::Vibe, &[]).starts_with("curl -LsSf https://astral.sh/uv/install.sh"));
+        assert_eq!(run(Ai::Cursor, &["npm"]), "page https://cursor.com/download");
+        // Every AI gets something to click.
+        assert!(Ai::ALL.iter().all(|a| install_plan(*a, |_| false).is_some()));
+    }
 
     #[test]
     fn json_settings_keep_everything_else() {
