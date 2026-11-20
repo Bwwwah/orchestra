@@ -111,10 +111,47 @@ pub struct Step {
     /// from elsewhere, to weigh it as a request rather than an order from this computer.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub received: bool,
+    /// The computer whose AI set the step « doing » (`store::computer_id`), and when: the
+    /// step is reserved, so that two AIs on a shared project never do the same step. Shared
+    /// with the other copies; cleared when the step leaves « doing ».
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub held_by: String,
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub held_at: u64,
 }
 
 /// Longest title of a step received from another computer.
 pub const RECEIVED_STEP_MAX: usize = 300;
+
+/// Whether the merge of a shared project takes their copy of a step over ours: the most
+/// recent edit wins, except when both copies hold a live reservation by two different
+/// computers (two AIs took the step before seeing each other): then the earlier one wins on
+/// both sides, and the other AI sees it lost at its next get_project_state.
+fn takes_theirs(ours: &Step, theirs: &Step) -> bool {
+    let now = now_ms();
+    let live = |s: &Step| s.status == StepStatus::Doing && !s.held_by.is_empty() && now < s.held_at.saturating_add(HOLD_MS);
+    if live(ours) && live(theirs) && ours.held_by != theirs.held_by {
+        return theirs.hold_key() < ours.hold_key();
+    }
+    theirs.updated > ours.updated
+}
+
+/// How long an AI's reservation of a step lasts without news: past that, the AI is taken as
+/// gone (stopped, computer off) and another may take the step.
+pub const HOLD_MS: u64 = 3 * 3600 * 1000;
+
+impl Step {
+    /// Reserved by an AI on another computer, and still within `HOLD_MS` at `now`.
+    pub fn held_elsewhere(&self, me: &str, now: u64) -> bool {
+        self.status == StepStatus::Doing && !self.held_by.is_empty() && self.held_by != me && now < self.held_at.saturating_add(HOLD_MS)
+    }
+
+    /// Order of two reservations of one step: the earlier wins, the computer id breaks a tie,
+    /// so both copies of a shared project pick the same AI.
+    fn hold_key(&self) -> (u64, &str) {
+        (self.held_at, self.held_by.as_str())
+    }
+}
 
 /// A conversation or coding session that worked on the project.
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -240,10 +277,12 @@ impl Project {
                 continue;
             }
             match self.steps.iter_mut().find(|s| s.id == ts.id) {
-                Some(s) if ts.updated > s.updated => {
+                Some(s) if takes_theirs(s, ts) => {
                     s.title = clean(ts);
                     s.status = ts.status;
                     s.updated = ts.updated;
+                    s.held_by = ts.held_by.clone();
+                    s.held_at = ts.held_at;
                     changed = true;
                 }
                 Some(_) => {}
@@ -284,7 +323,17 @@ impl Project {
 
     pub fn add_step(&mut self, title: &str, source: &str) -> String {
         let t = now_ms();
-        let s = Step { id: new_id(), title: crate::richtext::step_title(title, STEP_MAX), status: StepStatus::Todo, source: source.to_string(), created: t, updated: t, received: false };
+        let s = Step {
+            id: new_id(),
+            title: crate::richtext::step_title(title, STEP_MAX),
+            status: StepStatus::Todo,
+            source: source.to_string(),
+            created: t,
+            updated: t,
+            received: false,
+            held_by: String::new(),
+            held_at: 0,
+        };
         let id = s.id.clone();
         self.steps.push(s);
         self.touch();
@@ -297,8 +346,34 @@ impl Project {
             s.status = status;
             s.updated = now_ms();
             self.last_activity = s.updated;
+            if status != StepStatus::Doing {
+                s.held_by.clear();
+                s.held_at = 0;
+            }
         }
         true
+    }
+
+    /// An AI of computer `me` takes step `id`: « doing », reserved for `me`. Refused while an
+    /// AI of another computer holds it (see `Step::held_elsewhere`); taking it again renews
+    /// the reservation. Err holds who has it, for the AI.
+    pub fn claim_step(&mut self, id: &str, me: &str) -> Result<(), String> {
+        let now = now_ms();
+        let Some(s) = self.steps.iter_mut().find(|s| s.id == id) else { return Err(format!("no step {id}")) };
+        if s.held_elsewhere(me, now) {
+            let mins = (now - s.held_at) / 60_000;
+            return Err(crate::trf!(
+                "l'étape « {} » est déjà en cours, réservée il y a {mins} min par une IA d'un autre ordinateur du projet partagé : ne la fais pas, prends une autre étape ouverte",
+                "the step « {} » is already in progress, reserved {mins} min ago by an AI on another computer of the shared project: don't do it, take another open step",
+                s.title
+            ));
+        }
+        s.status = StepStatus::Doing;
+        s.held_by = me.to_string();
+        s.held_at = now;
+        s.updated = now;
+        self.last_activity = now;
+        Ok(())
     }
 
     /// The state of play. Any AI's Markdown is cleaned (see richtext.rs) and kept short.
@@ -367,10 +442,18 @@ impl Project {
 
     /// The step in progress, else the first one still to do.
     pub fn next_step(&self) -> Option<&Step> {
+        self.next_step_for("", 0)
+    }
+
+    /// The next step for an AI of computer `me` at `now`: those reserved by another
+    /// computer's AI are skipped. (`next_step` skips none.)
+    pub fn next_step_for(&self, me: &str, now: u64) -> Option<&Step> {
+        let free = |s: &&Step| me.is_empty() || !s.held_elsewhere(me, now);
         self.steps
             .iter()
+            .filter(free)
             .find(|s| s.status == StepStatus::Doing)
-            .or_else(|| self.steps.iter().find(|s| s.status == StepStatus::Todo))
+            .or_else(|| self.steps.iter().filter(free).find(|s| s.status == StepStatus::Todo))
     }
 
     /// Add a session, or refresh it if already known (same tool and id).
@@ -617,7 +700,8 @@ pub fn project_to_markdown(page: &Page) -> String {
     }
     let (done, total) = pr.progress();
     out.push_str(&crate::trf!("- étapes : {done}/{total} terminées\n", "- steps: {done}/{total} done\n"));
-    if let Some(n) = pr.next_step() {
+    let (me, now) = (crate::store::computer_id(), now_ms());
+    if let Some(n) = pr.next_step_for(&me, now) {
         out.push_str(&crate::trf!("- prochaine étape : {}\n", "- next step: {}\n", n.title));
     }
     out.push_str(crate::tr!("\n## État des lieux\n\n", "\n## Current state\n\n"));
@@ -643,7 +727,13 @@ pub fn project_to_markdown(page: &Page) -> String {
         let src = if s.source.is_empty() { String::new() } else { format!(" — {}", s.source) };
         // Written on another computer of the shared project: the AI weighs it as a request.
         let from = if s.received { crate::tr!(" — reçue d'un autre membre du projet partagé", " — received from another member of the shared project") } else { "" };
-        out.push_str(&format!("- [{mark}] {} (step_id: {}){src}{from}\n", s.title, s.id));
+        // Another computer's AI is on it: never take it as well.
+        let held = if s.held_elsewhere(&me, now) {
+            crate::tr!(" — réservée par une IA d'un autre ordinateur, ne la prends pas", " — reserved by an AI on another computer, don't take it")
+        } else {
+            ""
+        };
+        out.push_str(&format!("- [{mark}] {} (step_id: {}){src}{from}{held}\n", s.title, s.id));
     }
     out.push_str(crate::tr!("\n## Sessions IA\n\n", "\n## AI sessions\n\n"));
     if pr.sessions.is_empty() {

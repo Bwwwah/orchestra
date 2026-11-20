@@ -613,12 +613,15 @@ impl NotesApp {
         let ctx = ui.ctx().clone();
         let mut toggle: Option<(Ai, bool)> = None;
         let mut term: Option<(String, String, Option<String>)> = None;
+        let mut install: Option<Ai> = None;
+        let installing = self.ais.installing.map(|(a, ..)| a);
         for ai in Ai::ALL {
             let st = states.as_ref().and_then(|s| s.iter().find(|x| x.ai == ai).cloned());
             let state = match &st {
                 None => crate::tr!("vérification…", "checking…").to_string(),
                 Some(x) if x.plugged => crate::tr!("branchée", "plugged in").to_string(),
                 Some(x) if x.installed => crate::tr!("installée, pas branchée", "installed, not plugged in").to_string(),
+                Some(_) if installing == Some(ai) => crate::tr!("installation en cours dans le terminal ; branchée dès qu'elle est là", "installing in the terminal; plugged in as soon as it is there").to_string(),
                 Some(_) => crate::tr!("pas installée sur cette machine", "not installed on this computer").to_string(),
             };
             let desc = format!("{} · {state}", ai.what());
@@ -641,14 +644,24 @@ impl NotesApp {
                             term = Some((ai.label().to_string(), cmd.to_string(), (!input.is_empty()).then(|| input.to_string())));
                         }
                     }
-                } else if let Some(cmd) = ai.install() {
-                    let needs = if cmd.starts_with("uv ") { crate::tr!("uv requis, l'outil Python d'Astral", "uv needed, Astral's Python tool") } else { crate::tr!("Node.js requis", "Node.js needed") };
-                    if button(ui, crate::tr!("Installer", "Install"), t, l).on_hover_text(crate::trf!("Lance « {cmd} » dans le terminal intégré ({needs})", "Runs « {cmd} » in the built-in terminal ({needs})")).clicked() {
-                        term = Some((crate::trf!("Installation · {}", "Installing · {}", ai.label()), cmd.to_string(), None));
-                    }
-                } else if let Some(url) = ai.download_page() {
-                    if button(ui, crate::tr!("Télécharger", "Download"), t, l).clicked() {
-                        let _ = crate::opener::open_url(url);
+                } else {
+                    match &x.install {
+                        Some(crate::setup::Install::Run(cmd, how)) => {
+                            let label = if installing == Some(ai) { crate::tr!("Relancer l'installation", "Run the install again") } else { crate::tr!("Installer", "Install") };
+                            if button(ui, label, t, l)
+                                .on_hover_text(crate::trf!("Lance « {cmd} » dans le terminal intégré ({how}). Orchestra la branche dès qu'elle est installée.", "Runs « {cmd} » in the built-in terminal ({how}). Orchestra plugs it in as soon as it is installed."))
+                                .clicked()
+                            {
+                                term = Some((crate::trf!("Installation · {}", "Installing · {}", ai.label()), cmd.clone(), None));
+                                install = Some(ai);
+                            }
+                        }
+                        Some(crate::setup::Install::Download(url, why)) => {
+                            if button(ui, crate::tr!("Télécharger", "Download"), t, l).on_hover_text(format!("{why} · {url}")).clicked() {
+                                let _ = crate::opener::open_url(url);
+                            }
+                        }
+                        None => {}
                     }
                 }
             });
@@ -691,6 +704,9 @@ impl NotesApp {
         }
         if let Some((ai, on)) = toggle {
             self.set_ai(&ctx, ai, on);
+        }
+        if let Some(ai) = install {
+            self.watch_install(ai);
         }
         if let Some((title, cmd, input)) = term {
             let home = dirs::home_dir().map(|h| h.display().to_string()).unwrap_or_default();

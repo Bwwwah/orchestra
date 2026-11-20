@@ -370,8 +370,11 @@ impl NotesApp {
             let disk = store::load();
             crate::collab::merge(&mut self.ws, &disk);
             for m in &disk.inbox {
-                if !self.inbox_removed.contains(&m.id) && !self.ws.inbox.iter().any(|x| x.id == m.id) {
-                    self.ws.inbox.push(m.clone());
+                match self.ws.inbox.iter_mut().find(|x| x.id == m.id) {
+                    // An AI received the answer (written on disk by the MCP server).
+                    Some(x) => x.seen_at = x.seen_at.max(m.seen_at),
+                    None if !self.inbox_removed.contains(&m.id) => self.ws.inbox.push(m.clone()),
+                    None => {}
                 }
             }
             self.ws.inbox.sort_by_key(|m| m.at);
@@ -807,6 +810,14 @@ impl NotesApp {
         // A documentation folder shows what's inside it.
         let dir_tree = self.ws.page(&cur).and_then(|p| p.source.as_ref()).filter(|s| s.is_dir).map(|s| (s.rel.clone(), projects::page_tree(&self.ws, &cur)));
         let peers = if project_page { self.peers_in_project(&cur) } else { vec![] };
+        // The AIs' questions about this project, and the answers given (inbox).
+        let questions: Vec<crate::model::InboxMsg> = if project_page {
+            let mine: Vec<crate::model::InboxMsg> = self.ws.inbox.iter().filter(|m| m.project == cur).cloned().collect();
+            orch_ui::orch_questions(&mine, crate::model::now_ms(), u64::MAX).into_iter().map(|i| mine[i].clone()).collect()
+        } else {
+            vec![]
+        };
+        let mut answered: Option<(String, String)> = None;
         let focus = self.focus.take();
         let mut new_focus: Option<(String, Option<usize>)> = None;
         let mut focus_used = false;
@@ -911,7 +922,7 @@ impl NotesApp {
                                 let reviewing = self.reviews.contains_key(&page_id);
                                 let peers = peers.clone();
                                 let launchers = self.ais.launchers();
-                                let mut cx = projects::Cx { page_id: &page_id, pr, new_step: &mut self.new_step, t: &t, live, pages: &tree, actions, msg: None, reviewing, peers, vers: &mut self.versions, launchers, title: page_title.clone(), ai: &mut self.ai };
+                                let mut cx = projects::Cx { page_id: &page_id, pr, new_step: &mut self.new_step, t: &t, live, pages: &tree, actions, msg: None, reviewing, peers, vers: &mut self.versions, launchers, title: page_title.clone(), ai: &mut self.ai, questions: &questions, answered: &mut answered };
                                 let _p = Section::start("panneau projet");
                                 if let Some(m) = projects::project_panel(ui, &mut cx) {
                                     self.said.push(m);
@@ -969,6 +980,9 @@ impl NotesApp {
                 });
             });
         });
+        if let Some((id, text)) = answered {
+            self.save_answer_to(&id, text);
+        }
         if new_focus.is_some() {
             self.focus = new_focus;
         } else if !focus_used {
@@ -1052,6 +1066,7 @@ impl eframe::App for NotesApp {
         self.ai_tick(&ctx);
         self.ais_tick();
         self.orch_tick(&ctx);
+        self.install_tick(&ctx);
         self.update_tick(&ctx);
         self.versions.tick(&ctx);
         if let Some(m) = self.versions.status.take() {

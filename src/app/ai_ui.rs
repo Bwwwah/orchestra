@@ -16,6 +16,9 @@ pub struct Ais {
     pub usage: Option<crate::usage::Usage>,
     pub usage_read: Option<Instant>,
     pub tracking: bool,
+    /// An install started from the settings (built-in terminal): the AI, when it started,
+    /// and the last check of whether it is there yet. Plugged in as soon as it is.
+    pub installing: Option<(Ai, Instant, Instant)>,
 }
 
 impl Ais {
@@ -63,6 +66,39 @@ impl NotesApp {
             *states.lock().unwrap() = Some(crate::setup::states());
             ctx.request_repaint();
         });
+    }
+
+    /// Start installing `ai` (its command runs in the built-in terminal): from now on the
+    /// AIs are checked again every few seconds, and `ai` is plugged in once it is there.
+    pub(super) fn watch_install(&mut self, ai: Ai) {
+        let now = Instant::now();
+        self.ais.installing = Some((ai, now, now));
+    }
+
+    /// While an install runs: check every few seconds whether the AI is there; plug it in
+    /// as soon as it is. Gives up after a while (install cancelled or failed).
+    pub(super) fn install_tick(&mut self, ctx: &egui::Context) {
+        use std::time::Duration;
+        const EVERY: Duration = Duration::from_secs(5);
+        const GIVE_UP: Duration = Duration::from_secs(20 * 60);
+        let Some((ai, started, last)) = self.ais.installing else { return };
+        let there = self.ais.states.lock().unwrap().as_ref().and_then(|s| s.iter().find(|x| x.ai == ai).map(|x| x.installed));
+        if there == Some(true) {
+            self.ais.installing = None;
+            self.set_ai(ctx, ai, true);
+            self.info(crate::trf!("{} est installée et branchée à Orchestra.", "{} is installed and plugged into Orchestra.", ai.label()));
+            return;
+        }
+        if started.elapsed() > GIVE_UP {
+            self.ais.installing = None;
+            return;
+        }
+        // Once the first check is in (`there` known), one every few seconds.
+        if last.elapsed() >= EVERY && there.is_some() {
+            self.ais.installing = Some((ai, started, Instant::now()));
+            self.refresh_ais(ctx, false);
+        }
+        ctx.request_repaint_after(EVERY);
     }
 
     /// Plug (or unplug) one AI, then check them all again.

@@ -24,6 +24,28 @@ pub fn data_dir() -> PathBuf {
     dir
 }
 
+/// This computer's id, made once and kept in the data folder (never in workspace.json,
+/// which copies of a shared project exchange): it tells whose AI reserved a step.
+pub fn computer_id() -> String {
+    static ID: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    ID.get_or_init(|| {
+        if cfg!(test) {
+            return crate::model::new_id();
+        }
+        let path = data_dir().join(".computer-id");
+        let known = fs::read_to_string(&path).map(|s| s.trim().to_string()).unwrap_or_default();
+        if known.len() >= 8 && known.chars().all(|c| c.is_ascii_alphanumeric()) {
+            return known;
+        }
+        let id = uuid::Uuid::new_v4().simple().to_string();
+        let _ = fs::create_dir_all(data_dir());
+        let _ = write_atomic(&path, id.as_bytes());
+        // Two processes making it at once: read back what is on disk, so they agree.
+        fs::read_to_string(&path).map(|s| s.trim().to_string()).ok().filter(|s| !s.is_empty()).unwrap_or(id)
+    })
+    .clone()
+}
+
 pub fn workspace_path() -> PathBuf {
     data_dir().join("workspace.json")
 }

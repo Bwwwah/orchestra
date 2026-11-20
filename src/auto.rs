@@ -486,7 +486,8 @@ pub fn mission_prompt(title: &str, project_id: &str, branch: &str, mission: &str
          1. Appelle get_project_state avec project = « {project_id} » pour l'état des lieux et les étapes.\n\
          2. Mission : {mission}\n\
          3. Prends les étapes ouvertes une par une : passe-la « doing » avec update_step, fais le travail, vérifie-le \
-         (compilation, tests ; take_screenshot pour voir une interface à l'écran) quand c'est possible, puis passe-la « done ».\n\
+         (compilation, tests ; take_screenshot pour voir une interface à l'écran) quand c'est possible, puis passe-la « done ». \
+         Si update_step refuse « doing » parce qu'une IA d'un autre ordinateur a déjà réservé l'étape, prends l'étape ouverte suivante.\n\
          4. {commit_rule}\n\
          5. Si une décision humaine est nécessaire, appelle ask_human (project = « {project_id} ») avec une question courte, puis continue sur autre chose. \
          Les réponses de la personne apparaissent dans get_project_state (section « Questions posées ») : rappelle get_project_state avant chaque nouvelle étape et applique-les.\n\
@@ -500,7 +501,8 @@ pub fn mission_prompt(title: &str, project_id: &str, branch: &str, mission: &str
          1. Call get_project_state with project = « {project_id} » for the current state and the steps.\n\
          2. Mission: {mission}\n\
          3. Take the open steps one by one: set it to « doing » with update_step, do the work, check it \
-         (build, tests; take_screenshot to see an interface on screen) when possible, then set it to « done ».\n\
+         (build, tests; take_screenshot to see an interface on screen) when possible, then set it to « done ». \
+         If update_step refuses « doing » because an AI on another computer already reserved the step, take the next open step.\n\
          4. {commit_rule}\n\
          5. If a human decision is needed, call ask_human (project = « {project_id} ») with a short question, then go on with something else. \
          The person's answers show up in get_project_state (section « Questions posées »): call it again before each new step and apply them.\n\

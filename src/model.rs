@@ -523,6 +523,17 @@ pub struct InboxMsg {
     pub answer: String,
     #[serde(default, skip_serializing_if = "is_zero")]
     pub answered_at: u64,
+    /// When an AI last received the answer (get_project_state). Older than `answered_at`:
+    /// the answer, or its last edit, has not reached an AI yet.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub seen_at: u64,
+}
+
+impl InboxMsg {
+    /// An answer was given and an AI has received it since its last edit.
+    pub fn answer_seen(&self) -> bool {
+        !self.answer.trim().is_empty() && self.seen_at > 0 && self.seen_at >= self.answered_at
+    }
 }
 
 pub(crate) fn is_zero(x: &u64) -> bool {
@@ -673,6 +684,9 @@ pub fn question_pending(inbox: &[InboxMsg], project: &str, since: u64) -> bool {
     inbox.iter().any(|m| m.kind == "question" && m.project == project && m.answer.trim().is_empty() && m.at >= since)
 }
 
+/// How many of a project's latest questions its state of play shows the AIs.
+const QUESTIONS_SHOWN: usize = 15;
+
 impl Workspace {
     pub fn unread(&self) -> usize {
         self.inbox.iter().filter(|m| !m.read).count()
@@ -680,8 +694,21 @@ impl Workspace {
 
     /// The questions the AIs asked about a project and the person's answers, as Markdown
     /// for the AIs (MCP `get_project_state`). Newest first; None when there are none.
+    /// The answers `questions_markdown` hands an AI and that no AI had received since their
+    /// last edit: marked received at `now`. Returns their questions, for a notice.
+    pub fn mark_answers_seen(&mut self, project: &str, now: u64) -> Vec<String> {
+        let mut out = vec![];
+        for m in self.inbox.iter_mut().rev().filter(|m| m.kind == "question" && m.project == project).take(QUESTIONS_SHOWN) {
+            if !m.answer.trim().is_empty() && !m.answer_seen() {
+                m.seen_at = now.max(m.answered_at);
+                out.push(crate::richtext::one_line(m.text.trim(), 120));
+            }
+        }
+        out
+    }
+
     pub fn questions_markdown(&self, project: &str) -> Option<String> {
-        let qs: Vec<&InboxMsg> = self.inbox.iter().rev().filter(|m| m.kind == "question" && m.project == project).take(15).collect();
+        let qs: Vec<&InboxMsg> = self.inbox.iter().rev().filter(|m| m.kind == "question" && m.project == project).take(QUESTIONS_SHOWN).collect();
         if qs.is_empty() {
             return None;
         }
@@ -827,7 +854,7 @@ Cmd/Ctrl+P or K to search all pages.").into();
                 b
             },
             Block::new(BlockKind::Callout, crate::tr!("L'IA passe par MCP : le bouton rond en bas à droite explique comment brancher l'assistant de votre choix.", "AI goes through MCP: the round button at the bottom right explains how to plug in the assistant of your choice.")),
-            Block::new(BlockKind::Callout, crate::tr!("La collaboration passe par un branchement que vous choisissez : dossier partagé ou votre propre commande.", "Collaboration goes through a connection you choose: live, a shared folder or your own command.")),
+            Block::new(BlockKind::Callout, crate::tr!("La collaboration passe par un branchement que vous choisissez : en direct, dossier partagé ou votre propre commande.", "Collaboration goes through a connection you choose: live, a shared folder or your own command.")),
         ];
         let welcome_id = welcome.id.clone();
         ws.pages.push(welcome);
@@ -1143,5 +1170,29 @@ mod tests {
         ws.inbox[0].answer = "Oui, jusqu'à la v1.".into();
         let md = ws.questions_markdown("p1").unwrap();
         assert!(md.contains("Réponse de la personne : Oui, jusqu'à la v1."));
+    }
+
+    /// An answer is marked received once, when an AI gets it; again after an edit; never
+    /// an unanswered question nor another project's.
+    #[test]
+    fn answers_are_marked_received_once() {
+        let mut ws = super::Workspace::default();
+        ws.notify("question", "p1", "Q", "Garder l'API ?", None);
+        ws.notify("question", "p1", "Q", "Sans réponse", None);
+        ws.notify("question", "p2", "Q", "Autre projet", None);
+        assert!(ws.mark_answers_seen("p1", 10).is_empty(), "nothing answered yet");
+        for i in [0, 2] {
+            ws.inbox[i].answer = "oui".into();
+            ws.inbox[i].answered_at = 5;
+        }
+        assert_eq!(ws.mark_answers_seen("p1", 10), ["Garder l'API ?"]);
+        assert!(ws.inbox[0].answer_seen() && !ws.inbox[1].answer_seen() && !ws.inbox[2].answer_seen());
+        assert!(ws.mark_answers_seen("p1", 20).is_empty(), "only once");
+        // Edited after: received again at the next state of play.
+        ws.inbox[0].answer = "non".into();
+        ws.inbox[0].answered_at = 30;
+        assert!(!ws.inbox[0].answer_seen());
+        assert_eq!(ws.mark_answers_seen("p1", 40).len(), 1);
+        assert_eq!(ws.inbox[0].seen_at, 40);
     }
 }
