@@ -33,8 +33,8 @@ enum Action {
     Duplicate(String),
     OpenRow(String, String),
     InsertSubpage { page: String, at: usize },
-    /// "/kanban": a sub-page holding a database shown as a board, linked at block `at`.
-    InsertKanban { page: String, at: usize },
+    /// "/kanban", "/base"…: a sub-page holding a database shown in `view`, linked at block `at`.
+    InsertDatabase { page: String, at: usize, view: DbView },
     Export(String),
     NewProject(String, String),
     RevertDoc(String),
@@ -768,8 +768,8 @@ impl NotesApp {
                     self.navigate(id.clone());
                     self.focus = Some((format!("title-{id}"), None));
                 }
-                Action::InsertKanban { page, at } => {
-                    let id = insert_kanban(&mut self.ws, &page, at);
+                Action::InsertDatabase { page, at, view } => {
+                    let id = insert_database(&mut self.ws, &page, at, view);
                     self.expanded.insert(page);
                     self.navigate(id);
                 }
@@ -1940,13 +1940,18 @@ fn blocks_view(
     (new_focus, focus_used)
 }
 
-/// Make the Kanban sub-page of `page` and link it at block `at`; returns its id.
-fn insert_kanban(ws: &mut Workspace, page: &str, at: usize) -> String {
-    let mut p = Page::new(crate::tr!("Kanban", "Kanban"), Some(page.to_string()));
-    p.icon = "📋".into();
+/// Make a database sub-page of `page` shown in `view`, and link it at block `at`; returns its id.
+fn insert_database(ws: &mut Workspace, page: &str, at: usize, view: DbView) -> String {
+    let (title, icon) = match view {
+        DbView::Board => (crate::tr!("Kanban", "Kanban"), "📋"),
+        DbView::Table => (crate::tr!("Base de données", "Database"), "🗃️"),
+        DbView::List => (crate::tr!("Liste", "List"), "📝"),
+    };
+    let mut p = Page::new(title, Some(page.to_string()));
+    p.icon = icon.into();
     p.blocks.clear();
     let mut db = Database::new_default();
-    db.view = DbView::Board;
+    db.view = view;
     p.database = Some(db);
     let id = p.id.clone();
     ws.pages.push(p);
@@ -1970,10 +1975,14 @@ fn apply_item(
 ) {
     match item {
         slash::Item::Block(k) => apply_kind(b, k, i, page_id, actions, insert, new_focus),
-        slash::Item::Kanban => {
+        slash::Item::Database(view) => {
             b.text.clear();
             b.kind = BlockKind::PageLink;
-            actions.push(Action::InsertKanban { page: page_id.to_string(), at: i });
+            actions.push(Action::InsertDatabase { page: page_id.to_string(), at: i, view });
+        }
+        slash::Item::Today => {
+            b.text = format!("{} ", ai_ui::today_label());
+            *new_focus = Some((b.id.clone(), Some(b.text.chars().count())));
         }
     }
 }
@@ -2360,30 +2369,54 @@ mod tests {
     fn slash_menu_filters_in_notion_order() {
         use slash::Item;
         let all = slash::matches("/");
-        assert_eq!(all.len(), 14);
+        assert_eq!(all.len(), 17);
         assert_eq!(all[0].0, Item::Block(BlockKind::Paragraph));
-        assert_eq!(all[13].0, Item::Kanban);
+        assert_eq!(all[13].0, Item::Database(DbView::Table));
+        assert_eq!(all[14].0, Item::Database(DbView::Board));
+        assert_eq!(all[15].0, Item::Database(DbView::List));
+        assert_eq!(all[16].0, Item::Today);
         let l: Vec<Item> = slash::matches("/liste").into_iter().map(|x| x.0).collect();
-        assert_eq!(l, [BlockKind::Bullet, BlockKind::Numbered, BlockKind::Todo, BlockKind::Toggle].map(Item::Block));
+        let mut want = [BlockKind::Bullet, BlockKind::Numbered, BlockKind::Todo, BlockKind::Toggle].map(Item::Block).to_vec();
+        want.push(Item::Database(DbView::List));
+        assert_eq!(l, want);
         assert!(slash::matches("/zzz").is_empty());
         for q in ["/kanban", "/kan", "/tableau", "/board"] {
-            assert!(slash::matches(q).iter().any(|x| x.0 == Item::Kanban), "{q}");
+            assert!(slash::matches(q).iter().any(|x| x.0 == Item::Database(DbView::Board)), "{q}");
+        }
+        for q in ["/base", "/database", "/table"] {
+            assert!(slash::matches(q).iter().any(|x| x.0 == Item::Database(DbView::Table)), "{q}");
+        }
+        for q in ["/date", "/aujourd", "/today"] {
+            assert!(slash::matches(q).iter().any(|x| x.0 == Item::Today), "{q}");
         }
     }
 
     #[test]
-    fn slash_kanban_makes_a_board_subpage() {
-        let mut ws = Workspace::default();
-        let page = ws.create_page("Notes", None);
-        ws.page_mut(&page).unwrap().blocks = vec![Block::new(BlockKind::Paragraph, "/kanban")];
-        let id = insert_kanban(&mut ws, &page, 0);
-        let kb = ws.page(&id).unwrap();
-        assert_eq!(kb.parent.as_deref(), Some(page.as_str()));
-        let db = kb.database.as_ref().unwrap();
-        assert_eq!(db.view, DbView::Board);
-        assert!(db.columns.iter().any(|c| c.kind == ColumnKind::Select));
-        let link = &ws.page(&page).unwrap().blocks[0];
-        assert_eq!((link.kind, link.extra.as_str(), link.text.as_str()), (BlockKind::PageLink, id.as_str(), ""));
+    fn slash_database_makes_a_subpage_in_its_view() {
+        for view in [DbView::Board, DbView::Table, DbView::List] {
+            let mut ws = Workspace::default();
+            let page = ws.create_page("Notes", None);
+            ws.page_mut(&page).unwrap().blocks = vec![Block::new(BlockKind::Paragraph, "/base")];
+            let id = insert_database(&mut ws, &page, 0, view);
+            let kb = ws.page(&id).unwrap();
+            assert_eq!(kb.parent.as_deref(), Some(page.as_str()));
+            let db = kb.database.as_ref().unwrap();
+            assert_eq!(db.view, view);
+            assert!(db.columns.iter().any(|c| c.kind == ColumnKind::Select));
+            let link = &ws.page(&page).unwrap().blocks[0];
+            assert_eq!((link.kind, link.extra.as_str(), link.text.as_str()), (BlockKind::PageLink, id.as_str(), ""));
+        }
+    }
+
+    #[test]
+    fn slash_today_writes_the_date() {
+        let mut b = Block::new(BlockKind::Paragraph, "/date");
+        let (mut actions, mut insert, mut focus) = (vec![], None, None);
+        apply_item(&mut b, slash::Item::Today, 0, "p", &mut actions, &mut insert, &mut focus);
+        assert!(b.text.ends_with(' ') && b.text.chars().any(|c| c.is_ascii_digit()) && !b.text.starts_with('/'), "{}", b.text);
+        assert_eq!(b.kind, BlockKind::Paragraph);
+        assert!(actions.is_empty() && insert.is_none());
+        assert_eq!(focus, Some((b.id.clone(), Some(b.text.chars().count()))));
     }
 
     #[test]

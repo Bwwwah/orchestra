@@ -331,6 +331,27 @@ fn when(ms: u64) -> String {
     }
 }
 
+/// Today's local date, "20 novembre 2026" / "November 20, 2026" (the "/" menu's "Date du jour").
+pub(super) fn today_label() -> String {
+    date_label((crate::model::now_ms() as i64 + local_offset_ms()).div_euclid(86_400_000))
+}
+
+fn date_label(days: i64) -> String {
+    let (y, m, d) = civil(days);
+    let i = (m as usize).clamp(1, 12) - 1;
+    const FR: [&str; 12] = ["janvier", "février", "mars", "avril", "mai", "juin", "juillet", "août", "septembre", "octobre", "novembre", "décembre"];
+    const EN: [&str; 12] = ["January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"];
+    let (fr, en) = (FR[i], EN[i]);
+    crate::trf!("{d} {fr} {y}", "{en} {d}, {y}")
+}
+
+#[test]
+fn date_label_writes_the_day() {
+    assert_eq!(civil(20_412), (2025, 11, 20));
+    let s = date_label(20_412);
+    assert!(s == "20 novembre 2025" || s == "November 20, 2025", "{s}");
+}
+
 /// Days since 1970 → (year, month, day).
 fn civil(z: i64) -> (i64, u32, u32) {
     let z = z + 719_468;

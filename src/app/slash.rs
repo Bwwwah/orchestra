@@ -46,33 +46,49 @@ pub fn kind_icon(k: BlockKind) -> Icon {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Item {
     Block(BlockKind),
-    /// A sub-page holding a database shown as a Kanban board.
-    Kanban,
+    /// A sub-page holding a database shown in this view (table, Kanban board, list).
+    Database(DbView),
+    /// Today's date written in the block ("Date ou rappel" / "@today" in Notion).
+    Today,
 }
 
 impl Item {
     pub fn label(self) -> &'static str {
         match self {
             Item::Block(k) => k.label(),
-            Item::Kanban => crate::tr!("Kanban", "Kanban"),
+            Item::Database(DbView::Table) => crate::tr!("Base de données - Tableau", "Database - Table"),
+            Item::Database(DbView::Board) => crate::tr!("Kanban", "Kanban"),
+            Item::Database(DbView::List) => crate::tr!("Base de données - Liste", "Database - List"),
+            Item::Today => crate::tr!("Date du jour", "Today's date"),
         }
     }
     pub fn icon(self) -> Icon {
         match self {
             Item::Block(k) => kind_icon(k),
-            Item::Kanban => Icon::Board,
+            Item::Database(DbView::Table) => Icon::Database,
+            Item::Database(DbView::Board) => Icon::Board,
+            Item::Database(DbView::List) => Icon::BulletList,
+            Item::Today => Icon::Calendar,
         }
     }
     fn keywords(self) -> &'static [&'static str] {
         match self {
             Item::Block(k) => k.keywords(),
-            Item::Kanban => &["kanban", "tableau", "board", "colonnes", "base", "database", "tâches", "taches"],
+            Item::Database(DbView::Table) => &["base", "database", "bdd", "table", "tableau", "grille"],
+            Item::Database(DbView::Board) => &["kanban", "tableau", "board", "colonnes", "base", "database", "tâches", "taches"],
+            Item::Database(DbView::List) => &["base", "database", "liste", "list"],
+            Item::Today => &["date", "aujourd'hui", "aujourdhui", "today", "jour", "@today"],
         }
     }
 }
 
-/// Entries after the basic blocks ("Vues de base de données" in Notion).
-const VIEWS: [(Item, &str); 1] = [(Item::Kanban, "")];
+/// Entries after the basic blocks ("Vues de base de données" and "En ligne" in Notion).
+const VIEWS: [(Item, &str); 4] = [
+    (Item::Database(DbView::Table), ""),
+    (Item::Database(DbView::Board), ""),
+    (Item::Database(DbView::List), ""),
+    (Item::Today, "@"),
+];
 
 /// Entries matching what was typed after "/", in menu order.
 pub fn matches(text: &str) -> Vec<(Item, &'static str)> {
