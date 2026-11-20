@@ -79,11 +79,11 @@ impl Versions {
             runs_at: None,
             hot: None,
         });
-        if let Some((g, r)) = e.state.lock().unwrap().take() {
-            if g == e.generation {
-                e.last = Some(r);
-                e.stale = false;
-            }
+        if let Some((g, r)) = e.state.lock().unwrap().take()
+            && g == e.generation
+        {
+            e.last = Some(r);
+            e.stale = false;
         }
         if e.fetched.elapsed().as_secs() >= 15 {
             e.fetched = Instant::now();
@@ -288,6 +288,7 @@ fn sub_heading(ui: &mut egui::Ui, text: &str, t: &Tone) {
 }
 
 /// The card. `prefer`: the agent that worked on the project last.
+#[allow(clippy::too_many_arguments)]
 pub(super) fn versions_card(ui: &mut egui::Ui, v: &mut Versions, page_id: &str, folder: &str, title: &str, prefer: Option<crate::sessions::Tool>, t: &Tone, extra: f32) -> f32 {
     let ctx = ui.ctx().clone();
     let st = if folder.is_empty() { None } else { v.state(folder, &ctx) };
@@ -383,10 +384,10 @@ pub(super) fn versions_card(ui: &mut egui::Ui, v: &mut Versions, page_id: &str, 
                         });
                     }
                 }
-                if let Some(g) = &s.github {
-                    if super::projects::action_link(ui, crate::tr!("Ouvrir sur GitHub", "Open on GitHub")).clicked() {
-                        open_url(g);
-                    }
+                if let Some(g) = &s.github
+                    && super::projects::action_link(ui, crate::tr!("Ouvrir sur GitHub", "Open on GitHub")).clicked()
+                {
+                    open_url(g);
                 }
             });
             if !runs.is_empty() {
