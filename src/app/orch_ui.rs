@@ -1414,6 +1414,17 @@ impl NotesApp {
         let n = self.orch.runs.len();
         let awake = self.orch.awake.held();
         let (five, global) = (self.orch.five, self.ws.settings.orch.global_limit);
+        // The step each session is on (« doing », reserved by this computer).
+        let me = crate::store::computer_id();
+        let working_on: HashMap<String, String> = self
+            .orch
+            .runs
+            .iter()
+            .filter_map(|r| {
+                let steps = &self.ws.page(&r.project)?.project.as_ref()?.steps;
+                Some((r.id.clone(), current_step(steps, &me)?.to_string()))
+            })
+            .collect();
         super::projects::card(ui, t, 0.0, |ui| {
             super::projects::card_title(ui, crate::tr!("EN COURS", "RUNNING"), &n.to_string(), t);
             if awake {
@@ -1477,6 +1488,19 @@ impl NotesApp {
                     });
                 }
                 share_row(ui, &r.id, r.pct, r.limit, five, global, t);
+                // The task in hand, as a short sentence.
+                if let Some(step) = working_on.get(&r.id) {
+                    ui.add_space(2.0);
+                    ui.horizontal(|ui| {
+                        ui.add_space(20.0);
+                        ui.label(RichText::new("✦").size(13.0).color(super::projects::BLUE));
+                        let mut job = egui::text::LayoutJob::default();
+                        job.append(crate::tr!("En train de s'occuper de ", "Busy with "), 0.0, egui::TextFormat { font_id: FontId::proportional(13.5), color: t.secondary, italics: true, ..Default::default() });
+                        job.append(&format!("« {step} »"), 0.0, egui::TextFormat::simple(semibold(13.5), t.text));
+                        job.wrap = egui::text::TextWrapping::truncate_at_width(ui.available_width());
+                        super::projects::cut_label(ui, job).on_hover_text(step);
+                    });
+                }
                 ui.horizontal(|ui| {
                     ui.add_space(20.0);
                     let mut job = egui::text::LayoutJob::single_section(r.last_line.clone(), egui::TextFormat::simple(FontId::proportional(12.5), t.tertiary));
@@ -2227,6 +2251,16 @@ fn steps_since(before: &[(String, bool)], steps: &[crate::project::Step]) -> Ste
         done: steps.iter().filter(|s| done(s) && at_start(s) != Some(true)).map(|s| s.title.clone()).collect(),
         added_open: steps.iter().filter(|s| !done(s) && at_start(s).is_none() && !s.by_person()).count(),
     }
+}
+
+/// The step a session is on: « doing » and reserved by this computer (`me`), or not
+/// reserved at all; the most recently changed when there are several.
+fn current_step<'a>(steps: &'a [crate::project::Step], me: &str) -> Option<&'a str> {
+    steps
+        .iter()
+        .filter(|s| s.status == crate::project::StepStatus::Doing && (s.held_by.is_empty() || s.held_by == me))
+        .max_by_key(|s| s.updated)
+        .map(|s| s.title.as_str())
 }
 
 /// Open steps the person added (typed, accepted, received) since the turn began: `at_turn`
@@ -3232,6 +3266,29 @@ mod tests {
             p.add_step(&format!("Ajoutée par l'IA {i}"), "ia");
         }
         assert!(crate::auto::too_many_self_steps(super::steps_since(&before, &p.steps).added_open));
+    }
+
+    /// The step shown as « busy with »: doing, ours or unreserved, the latest changed.
+    #[test]
+    fn current_step_is_the_doing_one_of_this_computer() {
+        use crate::project::{Project, StepStatus};
+        let mut p = Project::default();
+        let a = p.add_step("A faire", "moi");
+        assert_eq!(super::current_step(&p.steps, "ici"), None);
+        let b = p.add_step("Chez un autre", "moi");
+        p.set_step_status(&b, StepStatus::Doing);
+        p.steps.iter_mut().find(|s| s.id == b).unwrap().held_by = "ailleurs".into();
+        assert_eq!(super::current_step(&p.steps, "ici"), None, "reserved by another computer");
+        p.set_step_status(&a, StepStatus::Doing);
+        p.steps.iter_mut().find(|s| s.id == a).unwrap().held_by = "ici".into();
+        assert_eq!(super::current_step(&p.steps, "ici"), Some("A faire"));
+        let c = p.add_step("Plus récente", "moi");
+        p.set_step_status(&c, StepStatus::Doing);
+        p.steps.iter_mut().find(|s| s.id == c).unwrap().updated = u64::MAX;
+        assert_eq!(super::current_step(&p.steps, "ici"), Some("Plus récente"));
+        p.set_step_status(&c, StepStatus::Done);
+        p.set_step_status(&a, StepStatus::Done);
+        assert_eq!(super::current_step(&p.steps, "ici"), None);
     }
 
     /// Steps the person adds during a turn reach the AI on the next one, even after a [[FINI]].
