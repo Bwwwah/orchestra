@@ -185,7 +185,6 @@ fn main() {
 /// work isn't lost when the others are offline. Runs until stopped (Ctrl+C).
 fn run_server(port: u16, code: &str) -> i32 {
     use live::LiveMsg;
-    let mut ws = store::load();
     let server = match live::host(port, code, std::sync::Arc::new(|| {})) {
         Ok(s) => s,
         Err(e) => {
@@ -200,24 +199,17 @@ fn run_server(port: u16, code: &str) -> i32 {
             match msg {
                 LiveMsg::Hello { name, .. } => {
                     println!("+ {name}");
-                    for m in welcome(&ws) {
+                    for m in welcome(&store::load()) {
                         server.send(&m);
                     }
                 }
                 LiveMsg::Bye { name } => println!("- {name}"),
-                LiveMsg::Pages { pages, deleted } => {
-                    let other = model::Workspace { pages, deleted, ..Default::default() };
-                    if (collab::merge(&mut ws, &other) > 0 || !other.deleted.is_empty())
-                        && let Err(e) = store::save(&ws) {
-                            eprintln!("orchestra: enregistrement impossible : {e}");
-                        }
-                }
-                LiveMsg::Chat { msgs } => {
-                    let mut new = false;
-                    for m in msgs {
-                        new |= ws.chat.insert(m.id.clone(), m).is_none();
-                    }
-                    if new
+                m @ (LiveMsg::Pages { .. } | LiveMsg::Chat { .. }) => {
+                    // From the read to the write, like the MCP server: what it or the window
+                    // wrote meanwhile is merged into, never overwritten by a copy kept in memory.
+                    let _lock = store::lock_workspace();
+                    let mut ws = store::load();
+                    if absorb(&mut ws, m)
                         && let Err(e) = store::save(&ws) {
                             eprintln!("orchestra: enregistrement impossible : {e}");
                         }
@@ -235,6 +227,24 @@ fn run_server(port: u16, code: &str) -> i32 {
 fn welcome(ws: &model::Workspace) -> Vec<live::LiveMsg> {
     let out = ws.shared_copy();
     vec![live::LiveMsg::Pages { pages: out.pages, deleted: out.deleted }, live::LiveMsg::Chat { msgs: out.chat.into_values().collect() }]
+}
+
+/// Merge what a peer sent into the server's copy; true when it is to be saved.
+fn absorb(ws: &mut model::Workspace, msg: live::LiveMsg) -> bool {
+    match msg {
+        live::LiveMsg::Pages { pages, deleted } => {
+            let other = model::Workspace { pages, deleted, ..Default::default() };
+            collab::merge(ws, &other) > 0 || !other.deleted.is_empty()
+        }
+        live::LiveMsg::Chat { msgs } => {
+            let mut new = false;
+            for m in msgs {
+                new |= ws.chat.insert(m.id.clone(), m).is_none();
+            }
+            new
+        }
+        _ => false,
+    }
 }
 
 fn usage(msg: &str) -> i32 {
@@ -305,6 +315,24 @@ mod server_tests {
         let Some(LiveMsg::Chat { msgs: chat }) = msgs.get(1) else { panic!("chat second") };
         assert_eq!(chat.len(), 1);
         assert_eq!(chat[0].text, "salut");
+    }
+
+    /// What a peer sends is merged into the copy read from the file: a page written there
+    /// meanwhile (by an AI through MCP) stays; a message already known isn't saved again.
+    #[test]
+    fn the_server_merges_into_what_is_on_file() {
+        let mut theirs = crate::model::Workspace::default();
+        let p = theirs.create_project("Partagé", "");
+        theirs.page_mut(&p).unwrap().project.as_mut().unwrap().shared = true;
+        let mut on_file = crate::model::Workspace::default();
+        let mcp = on_file.create_page("Écrite par une IA", None);
+        let pages = theirs.shared_copy().pages;
+        assert!(super::absorb(&mut on_file, LiveMsg::Pages { pages, deleted: Default::default() }));
+        assert!(on_file.page(&mcp).is_some() && on_file.page(&p).is_some());
+        let m = crate::model::ChatMsg { id: "m1".into(), project: p.clone(), author: "a".into(), text: "salut".into(), at: 1 };
+        assert!(super::absorb(&mut on_file, LiveMsg::Chat { msgs: vec![m.clone()] }));
+        assert!(!super::absorb(&mut on_file, LiveMsg::Chat { msgs: vec![m] }));
+        assert!(!super::absorb(&mut on_file, LiveMsg::Bye { name: "x".into() }));
     }
 }
 
