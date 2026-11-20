@@ -120,6 +120,19 @@ pub struct Step {
     pub held_at: u64,
 }
 
+/// `source` of a step typed by the person in the window.
+pub const SOURCE_PERSON: &str = "moi";
+/// `source` of a step an AI proposed in the window and the person accepted.
+pub const SOURCE_ACCEPTED: &str = "IA";
+
+impl Step {
+    /// Added by the person (typed, or an AI proposal they accepted) or received from another
+    /// member: not by an AI working through MCP (add_steps, whose default source is « ia »).
+    pub fn by_person(&self) -> bool {
+        self.received || self.source == SOURCE_PERSON || self.source == SOURCE_ACCEPTED
+    }
+}
+
 /// Longest title of a step received from another computer.
 pub const RECEIVED_STEP_MAX: usize = 300;
 

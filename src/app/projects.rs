@@ -1427,7 +1427,7 @@ fn steps_card(ui: &mut egui::Ui, cx: &mut Cx, extra: f32) -> f32 {
                 let enter = ui.input(|i| i.key_pressed(Key::Enter));
                 let esc = ui.input(|i| i.key_pressed(Key::Escape));
                 if edit.lost_focus() && enter && !new_step.trim().is_empty() {
-                    pr.add_step(new_step, "moi");
+                    pr.add_step(new_step, crate::project::SOURCE_PERSON);
                     new_step.clear();
                     edit.request_focus();
                 } else if esc || (edit.lost_focus() && new_step.trim().is_empty()) {
@@ -1506,7 +1506,7 @@ fn ai_steps(ui: &mut egui::Ui, page_id: &str, pr: &mut Project, ai: &mut super::
         if add {
             for (title, keep) in list.iter() {
                 if *keep {
-                    pr.add_step(title, "IA");
+                    pr.add_step(title, crate::project::SOURCE_ACCEPTED);
                 }
             }
         }

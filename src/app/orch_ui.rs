@@ -2197,7 +2197,8 @@ fn run_actions(ui: &mut egui::Ui, r: &crate::model::RunRecord, asking: Option<&'
 struct StepsSince {
     /// Titles of the steps done since the start (as they read now).
     done: Vec<String>,
-    /// Steps added since the start and not done yet.
+    /// Steps an AI added since the start and not done yet. Those the person added in the
+    /// meantime don't count: adding steps while a session runs never stops it.
     added_open: usize,
 }
 
@@ -2209,7 +2210,7 @@ fn steps_since(before: &[(String, bool)], steps: &[crate::project::Step]) -> Ste
     let at_start = |s: &crate::project::Step| before.iter().find(|(id, _)| *id == s.id).map(|(_, d)| *d);
     StepsSince {
         done: steps.iter().filter(|s| done(s) && at_start(s) != Some(true)).map(|s| s.title.clone()).collect(),
-        added_open: steps.iter().filter(|s| !done(s) && at_start(s).is_none()).count(),
+        added_open: steps.iter().filter(|s| !done(s) && at_start(s).is_none() && !s.by_person()).count(),
     }
 }
 
@@ -3174,6 +3175,23 @@ mod tests {
         // Only the new open step: the renamed one is not new, the twin still open is not new.
         assert_eq!(s.added_open, 1);
         assert!(p.steps.iter().any(|x| x.id == b && x.status == StepStatus::Todo));
+        // The person adds many steps meanwhile (typed, or AI proposals accepted, or received
+        // from a teammate): they never count as the AI piling up steps, so the endless
+        // session goes on.
+        for i in 0..10 {
+            p.add_step(&format!("À moi {i}"), crate::project::SOURCE_PERSON);
+            p.add_step(&format!("Proposée {i}"), crate::project::SOURCE_ACCEPTED);
+        }
+        let r = p.add_step("Reçue", "autre");
+        p.steps.iter_mut().find(|x| x.id == r).unwrap().received = true;
+        let s = super::steps_since(&before, &p.steps);
+        assert_eq!(s.added_open, 1);
+        assert!(!crate::auto::too_many_self_steps(s.added_open));
+        // An AI adding through MCP (default source « ia ») still counts.
+        for i in 0..7 {
+            p.add_step(&format!("Ajoutée par l'IA {i}"), "ia");
+        }
+        assert!(crate::auto::too_many_self_steps(super::steps_since(&before, &p.steps).added_open));
     }
 
     #[test]
