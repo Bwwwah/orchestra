@@ -1230,8 +1230,38 @@ fn summary_card(ui: &mut egui::Ui, cx: &mut Cx, folded_h: f32, extra: f32) -> f3
     })
 }
 
+fn steps_focus_key() -> egui::Id {
+    egui::Id::unique("steps-focus")
+}
+
+/// Arriving from « Ajouter des tâches » (Orchestration page): the project's page opens on
+/// its Steps card.
+pub(super) fn focus_steps(ctx: &egui::Context, page_id: &str) {
+    let now = ctx.input(|i| i.time);
+    ctx.data_mut(|d| d.insert_temp(steps_focus_key(), (page_id.to_string(), now)));
+}
+
+/// Seconds since this page was opened from « Ajouter des tâches », if it was.
+fn steps_focus_age(ctx: &egui::Context, page_id: &str) -> Option<f64> {
+    let (id, at): (String, f64) = ctx.data(|d| d.get_temp(steps_focus_key()))?;
+    (id == page_id).then(|| ctx.input(|i| i.time) - at)
+}
+
+/// Whether the Steps card should be brought into view now: during the first moments, while
+/// the cards come in and settle (their heights change the layout).
+fn take_steps_scroll(ctx: &egui::Context, page_id: &str) -> bool {
+    let go = steps_focus_age(ctx, page_id).is_some_and(|a| a < 0.6);
+    if go {
+        ctx.request_repaint();
+    }
+    go
+}
+
 fn steps_card(ui: &mut egui::Ui, cx: &mut Cx, extra: f32) -> f32 {
     let (page_id, t, ro) = (cx.page_id, cx.t, cx.pr.read_only);
+    if take_steps_scroll(ui.ctx(), page_id) {
+        ui.scroll_to_cursor(Some(egui::Align::TOP));
+    }
     let pr = &mut *cx.pr;
     let new_step = &mut *cx.new_step;
     let ai = &mut *cx.ai;

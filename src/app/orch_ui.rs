@@ -1537,6 +1537,7 @@ impl NotesApp {
             self.orch.watching = w;
         }
         if let Some(p) = add_tasks {
+            super::projects::focus_steps(ui.ctx(), &p);
             actions.push(Action::Open(p));
         }
         if let Some((i, force)) = stop {
