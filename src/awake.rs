@@ -7,23 +7,32 @@
 //! even if it crashes.
 
 use std::process::{Child, Stdio};
+use std::time::{Duration, Instant};
+
+/// The least time between two starts of the tool: one that fails or stops at once is not
+/// started again on every frame (60 processes a second).
+const RETRY_AFTER: Duration = Duration::from_secs(60);
 
 #[derive(Default)]
 pub struct Awake {
     child: Option<Child>,
+    last_start: Option<Instant>,
 }
 
 impl Awake {
     /// Holds the wake lock while `on`, lets it go otherwise. Cheap to call every frame.
     pub fn set(&mut self, on: bool) {
         if let Some(c) = self.child.as_mut() {
-            // The tool may have stopped on its own: start it again next time.
+            // The tool may have stopped on its own: start it again, a minute later at most.
             if !matches!(c.try_wait(), Ok(None)) {
                 self.child = None;
             }
         }
         match (on, self.child.is_some()) {
-            (true, false) => self.child = spawn(),
+            (true, false) if may_start(self.last_start, Instant::now()) => {
+                self.last_start = Some(Instant::now());
+                self.child = spawn();
+            }
             (false, true) => self.release(),
             _ => {}
         }
@@ -34,6 +43,8 @@ impl Awake {
     }
 
     fn release(&mut self) {
+        // Let go on purpose: the next start needn't wait (only a tool that failed does).
+        self.last_start = None;
         if let Some(mut c) = self.child.take() {
             let _ = c.kill();
             let _ = c.wait();
@@ -67,6 +78,10 @@ pub fn command(pid: u32) -> Option<Vec<String>> {
     }
 }
 
+fn may_start(last: Option<Instant>, now: Instant) -> bool {
+    last.is_none_or(|t| now.duration_since(t) >= RETRY_AFTER)
+}
+
 fn spawn() -> Option<Child> {
     let argv = command(std::process::id())?;
     crate::proc::command(&argv[0]).args(&argv[1..]).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).spawn().ok()
@@ -83,6 +98,17 @@ mod tests {
         }
     }
 
+    /// A tool that fails or stops at once is started again a minute later, not every frame.
+    #[test]
+    fn a_failing_tool_is_not_started_in_a_loop() {
+        use std::time::{Duration, Instant};
+        let t = Instant::now();
+        assert!(super::may_start(None, t));
+        assert!(!super::may_start(Some(t), t + Duration::from_millis(16)));
+        assert!(!super::may_start(Some(t), t + Duration::from_secs(59)));
+        assert!(super::may_start(Some(t), t + Duration::from_secs(60)));
+    }
+
     #[cfg(target_os = "macos")]
     #[test]
     fn lock_is_taken_and_given_back() {
@@ -93,5 +119,9 @@ mod tests {
         assert!(a.held());
         a.set(false);
         assert!(!a.held());
+        // Taken again at once after letting go on purpose.
+        a.set(true);
+        assert!(a.held());
+        a.set(false);
     }
 }
