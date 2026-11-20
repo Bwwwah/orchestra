@@ -472,6 +472,26 @@ impl NotesApp {
                     // While Claude Code works, its spinner redraws the screen every second: a
                     // screen still for minutes, with nothing written to the session either, is
                     // a question we didn't recognise. Answer it like a permission.
+                    // Claude Code's own limit is reached: no turn goes through until it resets.
+                    // Said in the session file, or only on the screen (still for a while, so
+                    // the AI isn't at work, and the message in its last lines).
+                    let on_screen = (idle > Duration::from_secs(30) && !r.reader.turn_over)
+                        .then(|| last_lines(&screen, 12))
+                        .filter(|tail| auto::is_limit_message(tail));
+                    if let Some(msg) = r.reader.limit_hit.clone().or(on_screen) {
+                        let now_ms = crate::model::now_ms();
+                        let reset = auto::limit_reset(&msg, now_ms)
+                            .or(if self.orch.week.is_some_and(|w| w >= 99.0) { self.orch.week_reset } else { self.orch.five_reset })
+                            .filter(|&t| t > now_ms)
+                            // Unknown: try again in an hour; still limited, it stops again.
+                            .unwrap_or(now_ms + 3_600_000);
+                        r.quota_reset = Some(reset);
+                        let why = Stop::SubscriptionLimit.text();
+                        r.stop = Some(why.clone());
+                        // No summary: Claude Code would refuse it too.
+                        finished.push((i, why, String::new()));
+                        continue;
+                    }
                     let frozen = idle > Duration::from_secs(180)
                         && !r.reader.turn_over
                         && r.reader.last_growth.is_none_or(|g| g.elapsed() > Duration::from_secs(180));
@@ -1940,6 +1960,8 @@ enum Stop {
     GlobalLimit(f32),
     /// The week's reserve (in %) is near.
     WeekReserve(f32),
+    /// Claude Code said the subscription's own limit is reached.
+    SubscriptionLimit,
     Unmeasured,
     Turns(u32),
 }
@@ -1970,6 +1992,7 @@ impl Stop {
             Stop::Budget(l) => crate::trf!("limite du projet atteinte ({l:.0} %)", "project limit reached ({l:.0} %)"),
             Stop::GlobalLimit(g) => crate::trf!("limite globale atteinte ({g:.0} %)", "global limit reached ({g:.0} %)"),
             Stop::WeekReserve(r) => crate::trf!("pause : la réserve minimum de la semaine ({r:.0} %) approche", "paused: the week's minimum reserve ({r:.0} %) is near"),
+            Stop::SubscriptionLimit => crate::tr!("limite de l'abonnement Claude atteinte", "Claude subscription limit reached").into(),
             Stop::Unmeasured => crate::tr!("utilisation de l'abonnement impossible à mesurer", "subscription use can't be measured").into(),
             Stop::Turns(n) => crate::trf!("{n} tours atteints", "{n} turns reached"),
         }
@@ -2004,6 +2027,12 @@ fn stop_reason(t: &TurnEnd) -> Option<Stop> {
     } else {
         return None;
     })
+}
+
+/// The last `n` lines of a terminal screen that hold something.
+fn last_lines(screen: &str, n: usize) -> String {
+    let lines: Vec<&str> = screen.lines().filter(|l| !l.trim().is_empty()).collect();
+    lines[lines.len().saturating_sub(n)..].join("\n")
 }
 
 /// How much the 5-hour window rose since the last reading (`prev`: its figure and reset
