@@ -138,6 +138,33 @@ fn level_color(pct: f32) -> Color32 {
 
 const CLAUDE: Color32 = Color32::from_rgb(204, 120, 92);
 
+/// "repart dans 2 h 14": the time left before the 5-hour window resets, for the header of
+/// the subscription tile. None when that time isn't known or has passed.
+fn five_reset_in(u: &crate::usage::Usage, now: u64) -> Option<String> {
+    let left = crate::usage::until(u.five()?.resets_at?, now)?;
+    Some(crate::trf!("repart dans {}", "resets in {}", crate::usage::left_text(left)))
+}
+
+#[cfg(test)]
+mod reset_tests {
+    use crate::usage::{Usage, Window};
+
+    #[test]
+    fn header_shows_time_left_before_the_five_hour_reset() {
+        let now = 1_000_000_000u64;
+        let win = |label: &str, resets_at: Option<u64>| Window { label: label.into(), pct: 40.0, resets_at };
+        let u = Usage { windows: vec![win("Session (5 h)", Some(now + (2 * 60 + 14) * 60_000)), win("Semaine", Some(now + 3 * 86_400_000))], at: now };
+        let s = super::five_reset_in(&u, now).unwrap();
+        assert!(s.ends_with("2 h 14"), "{s}");
+        // Passed, unknown, or no 5-hour window: nothing (the reading's age is shown instead).
+        assert!(super::five_reset_in(&u, now + 3 * 3_600_000).is_none());
+        let u = Usage { windows: vec![win("Session (5 h)", None)], at: now };
+        assert!(super::five_reset_in(&u, now).is_none());
+        let u = Usage { windows: vec![win("Semaine", Some(now + 1))], at: now };
+        assert!(super::five_reset_in(&u, now).is_none());
+    }
+}
+
 impl NotesApp {
     /// Bottom of the sidebar: the Claude subscription at a glance; details on hover.
     pub(super) fn usage_widget(&mut self, ui: &mut egui::Ui, t: &Tone) {
@@ -163,7 +190,11 @@ impl NotesApp {
             let (text, color) = if self.ais.tracking { (crate::tr!("en attente…", "waiting…"), t.tertiary) } else { (crate::tr!("Afficher", "Show"), super::projects::BLUE) };
             p.text(egui::pos2(rect.right() - 12.0, top), egui::Align2::RIGHT_CENTER, text, FontId::proportional(12.0), color);
         } else if let Some(u) = &usage {
-            p.text(egui::pos2(rect.right() - 12.0, top), egui::Align2::RIGHT_CENTER, super::chrome::relative_time(u.at), FontId::proportional(11.0), t.tertiary);
+            // The time left before the 5-hour window starts again; the reading's age when
+            // that time isn't known (or has passed: the next reading brings the new one).
+            let head = five_reset_in(u, crate::model::now_ms()).unwrap_or_else(|| super::chrome::relative_time(u.at));
+            p.text(egui::pos2(rect.right() - 12.0, top), egui::Align2::RIGHT_CENTER, head, FontId::proportional(11.0), t.tertiary);
+            ui.ctx().request_repaint_after(std::time::Duration::from_secs(30));
         }
         for (i, win) in shown.iter().enumerate() {
             let y = rect.top() + 34.0 + 20.0 * i as f32;
