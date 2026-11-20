@@ -84,6 +84,48 @@ pub fn ensure_permission(granted_version: &mut String) -> bool {
     }
 }
 
+/// Whether this app may record the screen right now, without asking (no system dialog).
+/// Always true off macOS. On macOS the answer only changes once the app is relaunched.
+pub fn granted() -> bool {
+    #[cfg(target_os = "macos")]
+    {
+        // SAFETY: plain CoreGraphics call with no arguments (macOS 10.15 and later).
+        unsafe { CGPreflightScreenCaptureAccess() }
+    }
+    #[cfg(not(target_os = "macos"))]
+    true
+}
+
+/// What to tell at launch, from the permission now and the last version that had it.
+#[derive(Debug, PartialEq, Eq)]
+pub enum AtLaunch {
+    /// Granted (or not macOS): nothing to say.
+    Fine,
+    /// Never granted: shown on the Orchestration page only, no message.
+    NeverGranted,
+    /// Granted to an earlier version, lost with the update: worth a message at launch.
+    LostWithUpdate,
+}
+
+pub fn at_launch(granted: bool, granted_version: &str, current: &str) -> AtLaunch {
+    if granted {
+        AtLaunch::Fine
+    } else if stale_after_update(granted_version, current) {
+        AtLaunch::LostWithUpdate
+    } else {
+        AtLaunch::NeverGranted
+    }
+}
+
+/// Open System Settings on Privacy & Security › Screen Recording.
+/// (A fixed address: `opener::open_url` takes https pages only.)
+pub fn open_settings() -> Result<(), String> {
+    if !cfg!(target_os = "macos") {
+        return Ok(());
+    }
+    Command::new("open").arg("x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture").stdin(Stdio::null()).spawn().map(|_| ()).map_err(|e| e.to_string())
+}
+
 /// The permission (now missing) was there for an earlier version: the entry left by the
 /// update is stale.
 #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
@@ -291,6 +333,14 @@ mod tests {
         // switched it off): nothing to reset, the system asks as usual.
         assert!(!stale_after_update("", "0.6.5"));
         assert!(!stale_after_update("0.6.5", "0.6.5"));
+    }
+
+    #[test]
+    fn what_to_tell_at_launch() {
+        assert_eq!(at_launch(true, "0.6.4", "0.6.5"), AtLaunch::Fine);
+        assert_eq!(at_launch(false, "0.6.4", "0.6.5"), AtLaunch::LostWithUpdate);
+        assert_eq!(at_launch(false, "", "0.6.5"), AtLaunch::NeverGranted);
+        assert_eq!(at_launch(false, "0.6.5", "0.6.5"), AtLaunch::NeverGranted);
     }
 
     #[test]

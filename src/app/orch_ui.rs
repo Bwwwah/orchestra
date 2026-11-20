@@ -202,6 +202,10 @@ pub struct Orch {
     awake: crate::awake::Awake,
     /// When closing the window last only hid it because sessions were running.
     close_held: Option<Instant>,
+    /// The « Screen Recording » permission at the last reading, and when it was read.
+    screen: Option<(bool, Instant)>,
+    /// The person put the permission card away for this launch.
+    screen_dismissed: bool,
 }
 
 /// `Orch::confirm_main` for the « Lancer la sélection » button.
@@ -856,6 +860,101 @@ impl NotesApp {
 
     // ------------------------------------------------------------------ the page
 
+    /// At launch: read the « Screen Recording » permission (no dialog). Granted: remember
+    /// this version as having it. Lost with an update: say so at once, with the way back.
+    pub(super) fn screen_at_launch(&mut self) {
+        if !cfg!(target_os = "macos") {
+            return;
+        }
+        let ok = crate::screen::granted();
+        self.orch.screen = Some((ok, Instant::now()));
+        match crate::screen::at_launch(ok, &self.ws.settings.screen_granted_version, crate::update::VERSION) {
+            crate::screen::AtLaunch::Fine => self.ws.settings.screen_granted_version = crate::update::VERSION.to_string(),
+            crate::screen::AtLaunch::LostWithUpdate => self.info(crate::tr!(
+                "La mise à jour a fait perdre à Orchestra l'autorisation « Enregistrement de l'écran » : les IA ne peuvent plus vérifier leur travail à l'écran. Page Orchestration › « Réaccorder » pour la retrouver.",
+                "The update made Orchestra lose the « Screen Recording » permission: the AIs can no longer check their work on screen. Orchestration page › « Grant again » to get it back."
+            )),
+            crate::screen::AtLaunch::NeverGranted => {}
+        }
+    }
+
+    /// The permission is missing: what it's for, and the two ways to give it back. Read
+    /// again every few seconds while the page is open (a cheap call, no dialog).
+    fn screen_card(&mut self, ui: &mut egui::Ui, t: &Tone) {
+        if !cfg!(target_os = "macos") || self.orch.screen_dismissed {
+            return;
+        }
+        let stale = self.orch.screen.is_none_or(|(_, at)| at.elapsed() > Duration::from_secs(3));
+        if stale {
+            let ok = crate::screen::granted();
+            if ok {
+                self.ws.settings.screen_granted_version = crate::update::VERSION.to_string();
+            }
+            self.orch.screen = Some((ok, Instant::now()));
+        }
+        if self.orch.screen.is_some_and(|(ok, _)| ok) {
+            return;
+        }
+        ui.ctx().request_repaint_after(Duration::from_secs(3));
+        let lost = !self.ws.settings.screen_granted_version.is_empty();
+        let mut ask = false;
+        let mut open = false;
+        egui::Frame::new()
+            .fill(super::projects::ORANGE.gamma_multiply(0.07))
+            .stroke(egui::Stroke::new(1.0, super::projects::ORANGE.gamma_multiply(0.45)))
+            .corner_radius(12.0)
+            .inner_margin(egui::Margin::symmetric(18, 14))
+            .show(ui, |ui| {
+                ui.set_width(ui.available_width());
+                let title = if lost { crate::tr!("Autorisation « Enregistrement de l'écran » perdue", "« Screen Recording » permission lost") } else { crate::tr!("Autorisation « Enregistrement de l'écran » manquante", "« Screen Recording » permission missing") };
+                ui.label(RichText::new(title).font(semibold(14.0)).color(super::projects::ORANGE));
+                ui.add(
+                    egui::Label::new(
+                        RichText::new(crate::tr!(
+                            "Sans elle, les IA lancées ici ne peuvent pas prendre de capture (take_screenshot) pour vérifier une interface. Cochez Orchestra dans Réglages Système › Confidentialité et sécurité › Enregistrement de l'écran, puis quittez et relancez Orchestra : macOS ne l'applique qu'au lancement suivant.",
+                            "Without it, the AIs started here can't take a screenshot (take_screenshot) to check an interface. Tick Orchestra in System Settings › Privacy & Security › Screen Recording, then quit and reopen Orchestra: macOS only applies it at the next launch."
+                        ))
+                        .size(12.5)
+                        .color(t.secondary),
+                    )
+                    .wrap(),
+                );
+                ui.add_space(4.0);
+                ui.horizontal_wrapped(|ui| {
+                    if ui.button(RichText::new(crate::tr!("Ouvrir les réglages", "Open the settings")).size(13.0)).clicked() {
+                        open = true;
+                    }
+                    let again = ui
+                        .button(RichText::new(crate::tr!("Réaccorder", "Grant again")).size(13.0))
+                        .on_hover_text(crate::tr!(
+                            "Efface l'ancienne entrée d'Orchestra dans les réglages si elle est restée d'une version précédente, puis macOS redemande l'autorisation",
+                            "Clears Orchestra's old entry in the settings if it was left by an earlier version, then macOS asks for the permission again"
+                        ));
+                    if again.clicked() {
+                        ask = true;
+                    }
+                    if super::projects::quiet_link(ui, crate::tr!("Plus tard", "Later"), t).clicked() {
+                        self.orch.screen_dismissed = true;
+                    }
+                });
+            });
+        ui.add_space(14.0);
+        if open {
+            if let Err(e) = crate::screen::open_settings() {
+                self.info(e);
+            }
+        }
+        if ask {
+            let mut v = self.ws.settings.screen_granted_version.clone();
+            let ok = crate::screen::ensure_permission(&mut v);
+            self.ws.settings.screen_granted_version = v;
+            self.orch.screen = Some((ok, Instant::now()));
+            if !ok {
+                let _ = crate::screen::open_settings();
+            }
+        }
+    }
+
     pub(super) fn orchestra_view(&mut self, ui: &mut egui::Ui, actions: &mut Vec<Action>) {
         let t = tone(ui.visuals().dark_mode);
         let avail = ui.available_width();
@@ -870,6 +969,7 @@ impl NotesApp {
                 ui.label(RichText::new(crate::tr!("Orchestration", "Orchestration")).font(bold(30.0)).color(t.text));
                 ui.label(RichText::new(crate::tr!("Des IA qui avancent seules sur vos projets, chacune dans une copie à part, dans les limites de votre abonnement.", "AIs that move your projects forward on their own, each in a separate copy, within your subscription's limits.")).color(t.secondary));
                 ui.add_space(14.0);
+                self.screen_card(ui, &t);
                 self.week_bar(ui, &t);
                 ui.add_space(14.0);
                 self.stats_row(ui, &t);

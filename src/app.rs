@@ -305,6 +305,8 @@ impl NotesApp {
             app.save_now();
         }
         app.known_mtime = store::modified(&store::workspace_path());
+        // The « Screen Recording » permission, lost with an update: said at once.
+        app.screen_at_launch();
         app.take_snapshot();
         setup_fonts(&cc.egui_ctx);
         setup_style(&cc.egui_ctx);
