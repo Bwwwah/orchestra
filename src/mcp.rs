@@ -445,8 +445,8 @@ fn call_tool(name: &str, args: &Value) -> Result<String, ToolError> {
                 _ => None,
             };
             let mut db = Database::new_default();
-            if let Some(cols) = args.get("columns").and_then(Value::as_array) {
-                if !cols.is_empty() {
+            if let Some(cols) = args.get("columns").and_then(Value::as_array)
+                && !cols.is_empty() {
                     db.columns = cols
                         .iter()
                         .map(|c| Column {
@@ -464,7 +464,6 @@ fn call_tool(name: &str, args: &Value) -> Result<String, ToolError> {
                         .collect();
                     db.rows.clear();
                 }
-            }
             let id = ws.create_page(title, parent);
             let p = ws.page_mut(&id).unwrap();
             p.blocks.clear();

@@ -472,7 +472,7 @@ impl Project {
             }
             None => self.sessions.push(s),
         }
-        self.sessions.sort_by(|a, b| b.last_activity.cmp(&a.last_activity));
+        self.sessions.sort_by_key(|s| std::cmp::Reverse(s.last_activity));
         let latest = self.sessions.first().map(|s| s.last_activity).unwrap_or(0);
         self.last_activity = self.last_activity.max(latest);
     }
@@ -866,7 +866,7 @@ mod tests {
         let doc = ws.create_page("Doc", Some(a.clone()));
         let b = ws.create_project("Privé", "");
         let notes = ws.create_page("Notes perso", None);
-        let mut edited = |id: &str| {
+        let edited = |id: &str| {
             let mut p = ws.page(id).unwrap().clone();
             p.title = "changé".into();
             p

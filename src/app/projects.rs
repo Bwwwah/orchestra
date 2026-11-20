@@ -240,7 +240,7 @@ impl NotesApp {
                                     .on_disabled_hover_text(crate::tr!("Fenêtre de choix ouverte", "Picker window open"));
                                 if browse.clicked() {
                                     let start = crate::project::normalize_folder(folder.trim());
-                                    folder_picker::start(ui.ctx(), start.is_dir().then_some(start).or_else(|| dirs::home_dir()));
+                                    folder_picker::start(ui.ctx(), start.is_dir().then_some(start).or_else(dirs::home_dir));
                                 }
                                 let fr = ui.add(egui::TextEdit::singleline(folder).hint_text(crate::tr!("~/Code/mon-projet", "~/Code/my-project")).font(FontId::monospace(13.0)).desired_width(f32::INFINITY));
                                 if title.is_empty() && folder.is_empty() && !fr.has_focus() && !busy {
@@ -1723,7 +1723,7 @@ impl NotesApp {
                 c.name = p.display_title();
             }
         }
-        out.sort_by(|a, b| b.last.cmp(&a.last));
+        out.sort_by_key(|x| std::cmp::Reverse(x.last));
         let month_ago = now().saturating_sub(30 * 24 * 3600 * 1000);
         for c in out.iter_mut().take(8) {
             c.checked = c.last >= month_ago;
@@ -2092,8 +2092,8 @@ fn review_key() -> egui::Id {
 impl NotesApp {
     /// Start the review a button asked for, and collect the finished ones.
     pub(super) fn review_tick(&mut self, ctx: &egui::Context) {
-        if let Some(r) = ctx.data_mut(|d| d.remove_temp::<ReviewRequest>(review_key())) {
-            if !self.reviews.contains_key(&r.page_id) {
+        if let Some(r) = ctx.data_mut(|d| d.remove_temp::<ReviewRequest>(review_key()))
+            && !self.reviews.contains_key(&r.page_id) {
                 let out: Arc<std::sync::Mutex<Option<_>>> = Arc::default();
                 let (o2, c2) = (out.clone(), ctx.clone());
                 std::thread::spawn(move || {
@@ -2103,7 +2103,6 @@ impl NotesApp {
                 });
                 self.reviews.insert(r.page_id.clone(), ReviewJob { result: out });
             }
-        }
         let done: Vec<String> = self.reviews.iter().filter(|(_, j)| j.result.lock().unwrap().is_some()).map(|(k, _)| k.clone()).collect();
         for id in done {
             let job = self.reviews.remove(&id).unwrap();

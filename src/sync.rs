@@ -229,8 +229,8 @@ fn run_agent(agent: &Agent, folder: &str, args: Vec<String>, path: &str, cancel:
     if low.contains("credit balance is too low") {
         return Err(crate::tr!("Claude Code est connecté avec une clé API sans crédit, pas à votre abonnement : lancez `claude`, puis `/login` et choisissez votre compte Claude (Pro / Max).", "Claude Code is signed in with an API key without credit, not your subscription: run `claude`, then `/login` and choose your Claude account (Pro / Max).").into());
     }
-    if agent.tool == Tool::ClaudeCode {
-        if let Ok(v) = serde_json::from_str::<serde_json::Value>(out.trim()) {
+    if agent.tool == Tool::ClaudeCode
+        && let Ok(v) = serde_json::from_str::<serde_json::Value>(out.trim()) {
             let result = v.get("result").and_then(|x| x.as_str()).unwrap_or("").to_string();
             if v.get("is_error").and_then(|x| x.as_bool()) == Some(true) {
                 return Err(crate::richtext::one_line(if result.is_empty() { "erreur" } else { &result }, 160));
@@ -238,7 +238,6 @@ fn run_agent(agent: &Agent, folder: &str, args: Vec<String>, path: &str, cancel:
             let turns = v.get("num_turns").and_then(|x| x.as_u64()).unwrap_or(0);
             return Ok((result, crate::trf!("terminé en {} s, {turns} échanges", "done in {} s, {turns} exchanges", start.elapsed().as_secs())));
         }
-    }
     if status.success() {
         Ok((out.trim().to_string(), crate::trf!("terminé en {} s", "done in {} s", start.elapsed().as_secs())))
     } else {
@@ -441,11 +440,10 @@ fn ask_args(tool: Tool, prompt: String, claude_tools: &str, max_turns: u32, imag
             }
             let mut dirs: Vec<String> = vec![];
             for i in images {
-                if let Some(d) = Path::new(i).parent().map(|d| d.display().to_string()).filter(|d| !d.is_empty()) {
-                    if !dirs.contains(&d) {
+                if let Some(d) = Path::new(i).parent().map(|d| d.display().to_string()).filter(|d| !d.is_empty())
+                    && !dirs.contains(&d) {
                         dirs.push(d);
                     }
-                }
             }
             for d in dirs {
                 a.push("--add-dir".into());
@@ -523,13 +521,11 @@ pub fn ask_with_images(folder: &str, prompt: String, claude_tools: &str, max_tur
     let args = ask_args(agent.tool, prompt, claude_tools, max_turns, images, weight);
     let res = run_agent(agent, folder, args, &path, &AtomicBool::new(false), PER_PROJECT);
     // Claude Code can't renew its sign-in headless: Codex answers instead, when installed.
-    if matches!(&res, Err(e) if e == AUTH_ERROR) && prefer != Some(Tool::Codex) {
-        if agents.iter().any(|a| a.tool == Tool::Codex) {
-            if let Ok(r) = ask_with_images(folder, prompt_copy, claude_tools, max_turns, Some(Tool::Codex), images, weight) {
+    if matches!(&res, Err(e) if e == AUTH_ERROR) && prefer != Some(Tool::Codex)
+        && agents.iter().any(|a| a.tool == Tool::Codex)
+            && let Ok(r) = ask_with_images(folder, prompt_copy, claude_tools, max_turns, Some(Tool::Codex), images, weight) {
                 return Ok(r);
             }
-        }
-    }
     let (answer, _) = res?;
     if answer.trim().is_empty() {
         return Err(crate::tr!("l'IA n'a rien répondu", "the AI answered nothing").into());

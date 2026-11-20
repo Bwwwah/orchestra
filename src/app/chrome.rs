@@ -386,7 +386,7 @@ impl NotesApp {
 
     /// One page of the tree (and its open sub-pages); returns its own row.
     fn tree_row(&self, ui: &mut egui::Ui, id: &str, depth: usize, actions: &mut Vec<Action>, t: &Tone) -> Option<egui::Response> {
-        let Some(p) = self.ws.page(id) else { return None };
+        let p = self.ws.page(id)?;
         let kids: Vec<String> = self.ws.children(Some(id)).iter().map(|c| c.id.clone()).collect();
         // In a project in "lecture seule", nothing can be added, and empty pages can't be
         // unfolded (there is nothing inside to show).
@@ -794,13 +794,12 @@ impl NotesApp {
         };
         let live_off = c.connector == ConnectorKind::Live && self.live.is_none();
         ui.horizontal(|ui| {
-            if let Some(inv) = invite {
-                if ui.button(crate::tr!("Copier l'invitation", "Copy the invitation")).on_hover_text(crate::tr!("Adresse et code à donner aux autres", "Address and code to give to the others")).clicked() {
+            if let Some(inv) = invite
+                && ui.button(crate::tr!("Copier l'invitation", "Copy the invitation")).on_hover_text(crate::tr!("Adresse et code à donner aux autres", "Address and code to give to the others")).clicked() {
                     ui.ctx().copy_text(inv);
                     self.ack(crate::tr!("Adresse et code copiés.", "Address and code copied."));
                     ui.close();
                 }
-            }
             if live_off && ui.button(crate::tr!("Démarrer", "Start")).clicked() {
                 self.start_live();
                 ui.close();
@@ -818,7 +817,7 @@ impl NotesApp {
     pub(super) fn home_view(&mut self, ui: &mut egui::Ui, actions: &mut Vec<Action>) {
         let t = tone(ui.visuals().dark_mode);
         let mut pages: Vec<&Page> = self.ws.pages.iter().filter(|p| !p.trashed).collect();
-        pages.sort_by(|a, b| b.updated.cmp(&a.updated));
+        pages.sort_by_key(|p| std::cmp::Reverse(p.updated));
         let now = HomeNow {
             plugged: self.ais.plugged().len(),
             projects: self.ws.projects().len(),

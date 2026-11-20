@@ -9,11 +9,10 @@ use std::time::SystemTime;
 
 /// Folder holding the workspace. `ORCHESTRA_DIR` overrides the default.
 pub fn data_dir() -> PathBuf {
-    if let Ok(d) = std::env::var("ORCHESTRA_DIR") {
-        if !d.trim().is_empty() {
+    if let Ok(d) = std::env::var("ORCHESTRA_DIR")
+        && !d.trim().is_empty() {
             return PathBuf::from(d);
         }
-    }
     let base = dirs::data_dir().unwrap_or_else(|| PathBuf::from("."));
     let dir = base.join("orchestra");
     // The app was called "Tableau IA" before: take its data along the first time.
@@ -140,11 +139,10 @@ pub fn save(ws: &Workspace) -> std::io::Result<()> {
     // The access code goes to the Keychain, never to the file. An empty one (a workspace
     // read without it) leaves the kept code alone; a failure doesn't stop the pages' save.
     let code = ws.settings.collab.live_code.trim();
-    if !code.is_empty() {
-        if let Err(e) = crate::secret::set_live_code(code) {
+    if !code.is_empty()
+        && let Err(e) = crate::secret::set_live_code(code) {
             eprintln!("orchestra: live code not kept: {e}");
         }
-    }
     let path = workspace_path();
     if let Some(dir) = path.parent() {
         fs::create_dir_all(dir)?;

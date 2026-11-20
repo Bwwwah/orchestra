@@ -266,11 +266,10 @@ fn find(dir: &Path, ok: impl Fn(&Path) -> bool + Copy) -> Option<PathBuf> {
         if ok(&p) {
             return Some(p);
         }
-        if p.is_dir() && p.extension().is_none_or(|x| x != "app") {
-            if let Some(f) = find(&p, ok) {
+        if p.is_dir() && p.extension().is_none_or(|x| x != "app")
+            && let Some(f) = find(&p, ok) {
                 return Some(f);
             }
-        }
     }
     None
 }

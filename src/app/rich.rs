@@ -34,14 +34,13 @@ fn runs(text: &str) -> Vec<(String, Style)> {
     let mut i = 0;
     while i < n {
         let ch = c[i];
-        if ch == '`' {
-            if let Some(end) = find(i + 1, &['`']).filter(|&e| e > i + 1) {
+        if ch == '`'
+            && let Some(end) = find(i + 1, &['`']).filter(|&e| e > i + 1) {
                 push(&mut out, &mut cur, st);
                 out.push((c[i + 1..end].iter().collect(), Style { code: true, ..st }));
                 i = end + 1;
                 continue;
             }
-        }
         let mut toggled = false;
         for (pat, bold) in [(['*', '*'], true), (['~', '~'], false)] {
             if i + 1 < n && c[i] == pat[0] && c[i + 1] == pat[1] {
@@ -109,35 +108,6 @@ pub(super) fn inline_job(text: &str, size: f32, color: Color32, bold_all: bool, 
         job.append(&txt, 0.0, f);
     }
     job
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn show(text: &str) -> String {
-        runs(text)
-            .into_iter()
-            .map(|(t, s)| {
-                let mut m = String::new();
-                if s.bold { m.push('B') }
-                if s.italic { m.push('I') }
-                if s.code { m.push('C') }
-                if s.strike { m.push('S') }
-                format!("[{m}]{t}")
-            })
-            .collect()
-    }
-
-    #[test]
-    fn nesting_and_underscores() {
-        assert_eq!(show("Travail **directement sur `main`**, ok"), "[]Travail [B]directement sur [BC]main[], ok");
-        assert_eq!(show("retirer USE_MOCK_MESSAGES"), "[]retirer USE_MOCK_MESSAGES");
-        assert_eq!(show("un _mot_ et *autre*"), "[]un [I]mot[] et [I]autre");
-        assert_eq!(show("2 * 3 = 6"), "[]2 * 3 = 6");
-        assert_eq!(show("**gras sans fin"), "[]**gras sans fin");
-        assert_eq!(show("~~barré~~"), "[S]barré");
-    }
 }
 
 /// A wrapped paragraph that uses exactly the width left on the line.
@@ -255,5 +225,34 @@ pub(super) fn markdown(ui: &mut egui::Ui, md: &str, size: f32, t: &Tone) {
                 ui.add_space(2.0);
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn show(text: &str) -> String {
+        runs(text)
+            .into_iter()
+            .map(|(t, s)| {
+                let mut m = String::new();
+                if s.bold { m.push('B') }
+                if s.italic { m.push('I') }
+                if s.code { m.push('C') }
+                if s.strike { m.push('S') }
+                format!("[{m}]{t}")
+            })
+            .collect()
+    }
+
+    #[test]
+    fn nesting_and_underscores() {
+        assert_eq!(show("Travail **directement sur `main`**, ok"), "[]Travail [B]directement sur [BC]main[], ok");
+        assert_eq!(show("retirer USE_MOCK_MESSAGES"), "[]retirer USE_MOCK_MESSAGES");
+        assert_eq!(show("un _mot_ et *autre*"), "[]un [I]mot[] et [I]autre");
+        assert_eq!(show("2 * 3 = 6"), "[]2 * 3 = 6");
+        assert_eq!(show("**gras sans fin"), "[]**gras sans fin");
+        assert_eq!(show("~~barré~~"), "[S]barré");
     }
 }

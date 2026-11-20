@@ -349,12 +349,11 @@ pub fn sync_project(ws: &mut Workspace, project_id: &str) -> Stats {
         .collect();
     for (id, edited) in gone {
         if edited {
-            if let Some(s) = ws.page_mut(&id).and_then(|p| p.source.as_mut()) {
-                if !s.missing {
+            if let Some(s) = ws.page_mut(&id).and_then(|p| p.source.as_mut())
+                && !s.missing {
                     s.missing = true;
                     st.kept += 1;
                 }
-            }
         } else {
             ws.set_trashed(&id, true);
             st.removed += 1;

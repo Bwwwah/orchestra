@@ -216,11 +216,10 @@ impl NotesApp {
                 }
             }
         }
-        if let Some(c) = &self.current {
-            if self.ws.page(c).is_none() {
+        if let Some(c) = &self.current
+            && self.ws.page(c).is_none() {
                 self.current = None;
             }
-        }
         changed
     }
 

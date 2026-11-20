@@ -651,11 +651,10 @@ impl NotesApp {
                     } else if button(ui, crate::tr!("Brancher", "Plug in"), t, l).clicked() {
                         toggle = Some((ai, true));
                     }
-                    if let Some((cmd, input)) = ai.login() {
-                        if button(ui, crate::tr!("Se connecter", "Sign in"), t, l).on_hover_text(crate::tr!("Ouvre l'IA dans le terminal intégré pour vous connecter à votre compte", "Opens the AI in the built-in terminal so you can sign in to your account")).clicked() {
+                    if let Some((cmd, input)) = ai.login()
+                        && button(ui, crate::tr!("Se connecter", "Sign in"), t, l).on_hover_text(crate::tr!("Ouvre l'IA dans le terminal intégré pour vous connecter à votre compte", "Opens the AI in the built-in terminal so you can sign in to your account")).clicked() {
                             term = Some((ai.label().to_string(), cmd.to_string(), (!input.is_empty()).then(|| input.to_string())));
                         }
-                    }
                 } else {
                     match &x.install {
                         Some(crate::setup::Install::Run(cmd, how)) => {
@@ -831,8 +830,8 @@ impl NotesApp {
                 self.start_live();
             }
         }
-        if let Some(s) = &status {
-            if s.hosting {
+        if let Some(s) = &status
+            && s.hosting {
                 let addr = s.address.clone();
                 let code = self.ws.settings.collab.live_code.clone();
                 row(ui, crate::tr!("À donner aux autres", "To give to the others"), &crate::trf!("Adresse {addr} · code {code}", "Address {addr} · code {code}"), t, |ui| {
@@ -842,7 +841,6 @@ impl NotesApp {
                     }
                 });
             }
-        }
         if !self.peers.is_empty() {
             section(ui, crate::tr!("Connectés", "Connected"), t, l);
             let titles: Vec<(String, String)> = self

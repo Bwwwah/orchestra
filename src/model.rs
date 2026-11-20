@@ -229,11 +229,10 @@ impl Database {
         if let Some(c) = self.columns.first() {
             row.cells.insert(c.id.clone(), title.to_string());
         }
-        if let Some(c) = self.columns.iter().find(|c| c.kind == ColumnKind::Select) {
-            if let Some(o) = c.options.first() {
+        if let Some(c) = self.columns.iter().find(|c| c.kind == ColumnKind::Select)
+            && let Some(o) = c.options.first() {
                 row.cells.insert(c.id.clone(), o.clone());
             }
-        }
         let id = row.id.clone();
         self.rows.push(row);
         id
@@ -615,21 +614,18 @@ impl EndConditions {
     /// `done_streak`: how many turns in a row the AI said it had nothing left — twice
     /// stops it anyway, so it never spends the budget going round in circles.
     pub fn reached(&self, elapsed_ms: u64, steps_done: u32, turns: u32, done_streak: u32) -> Option<String> {
-        if let Some(h) = self.hours.filter(|h| *h > 0.0) {
-            if elapsed_ms as f64 >= h as f64 * 3_600_000.0 {
+        if let Some(h) = self.hours.filter(|h| *h > 0.0)
+            && elapsed_ms as f64 >= h as f64 * 3_600_000.0 {
                 return Some(crate::trf!("durée atteinte ({h} h)", "time reached ({h} h)"));
             }
-        }
-        if let Some(n) = self.steps.filter(|n| *n > 0) {
-            if steps_done >= n {
+        if let Some(n) = self.steps.filter(|n| *n > 0)
+            && steps_done >= n {
                 return Some(crate::trf!("{n} étape(s) terminée(s)", "{n} step(s) done"));
             }
-        }
-        if let Some(n) = self.turns.filter(|n| *n > 0) {
-            if turns >= n {
+        if let Some(n) = self.turns.filter(|n| *n > 0)
+            && turns >= n {
                 return Some(crate::trf!("{n} tours atteints", "{n} turns reached"));
             }
-        }
         if done_streak >= 1 && self.when_done {
             return Some(crate::tr!("mission terminée", "mission complete").into());
         }
@@ -887,8 +883,8 @@ Cmd/Ctrl+P or K to search all pages.").into();
                 b.id = format!("start-b{i}");
             }
         }
-        if let Some(t) = ws.pages.iter_mut().find(|p| p.id == "start-taches") {
-            if let Some(db) = t.database.as_mut() {
+        if let Some(t) = ws.pages.iter_mut().find(|p| p.id == "start-taches")
+            && let Some(db) = t.database.as_mut() {
                 for (i, c) in db.columns.iter_mut().enumerate() {
                     let old = std::mem::replace(&mut c.id, format!("start-col{i}"));
                     for r in db.rows.iter_mut() {
@@ -901,7 +897,6 @@ Cmd/Ctrl+P or K to search all pages.").into();
                     r.id = format!("start-row{i}");
                 }
             }
-        }
         ws
     }
 
@@ -964,8 +959,8 @@ Cmd/Ctrl+P or K to search all pages.").into();
         let p = Page::new(title, parent.clone());
         let id = p.id.clone();
         self.pages.push(p);
-        if let Some(pid) = parent {
-            if let Some(par) = self.page_mut(&pid) {
+        if let Some(pid) = parent
+            && let Some(par) = self.page_mut(&pid) {
                 // A project lists its pages in its "Pages" card: no link at the bottom of its text.
                 if par.database.is_none() && par.project.is_none() {
                     let mut b = Block::new(BlockKind::PageLink, "");
@@ -974,7 +969,6 @@ Cmd/Ctrl+P or K to search all pages.").into();
                 }
                 par.touch();
             }
-        }
         id
     }
 
@@ -1005,13 +999,11 @@ Cmd/Ctrl+P or K to search all pages.").into();
         if !trashed {
             // A restored page whose parent is still in the trash goes to the top level.
             let parent = self.page(id).and_then(|p| p.parent.clone());
-            if let Some(par) = parent {
-                if self.page(&par).map(|p| p.trashed).unwrap_or(true) {
-                    if let Some(p) = self.page_mut(id) {
+            if let Some(par) = parent
+                && self.page(&par).map(|p| p.trashed).unwrap_or(true)
+                    && let Some(p) = self.page_mut(id) {
                         p.parent = None;
                     }
-                }
-            }
         }
     }
 
@@ -1056,11 +1048,10 @@ Cmd/Ctrl+P or K to search all pages.").into();
                 continue;
             }
             let mut hit = p.blocks.iter().map(|b| format!("{} {}", b.text, if b.kind == BlockKind::Toggle { &b.extra } else { "" })).find(|t| t.to_lowercase().contains(&q));
-            if hit.is_none() {
-                if let Some(db) = &p.database {
+            if hit.is_none()
+                && let Some(db) = &p.database {
                     hit = db.rows.iter().flat_map(|r| r.cells.values()).find(|v| v.to_lowercase().contains(&q)).cloned();
                 }
-            }
             if let Some(h) = hit {
                 out.push((p.id.clone(), snippet(&h, &q)));
             }

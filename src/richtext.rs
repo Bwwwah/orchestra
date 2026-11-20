@@ -107,17 +107,15 @@ pub fn inline(text: &str) -> String {
         // Image ![alt](url): dropped. Link [text](url): text.
         if (c == '[' || (c == '!' && chars.get(i + 1) == Some(&'['))) && !in_code_span(&chars, i) {
             let start = if c == '!' { i + 1 } else { i };
-            if let Some(close) = (start + 1..chars.len()).find(|&k| chars[k] == ']') {
-                if chars.get(close + 1) == Some(&'(') {
-                    if let Some(end) = (close + 2..chars.len()).find(|&k| chars[k] == ')') {
+            if let Some(close) = (start + 1..chars.len()).find(|&k| chars[k] == ']')
+                && chars.get(close + 1) == Some(&'(')
+                    && let Some(end) = (close + 2..chars.len()).find(|&k| chars[k] == ')') {
                         if c != '!' {
                             s.extend(&chars[start + 1..close]);
                         }
                         i = end + 1;
                         continue;
                     }
-                }
-            }
         }
         if c == '\\' && i + 1 < chars.len() && "\\`*_{}[]()#+-.!|>~".contains(chars[i + 1]) {
             s.push(chars[i + 1]);
@@ -128,7 +126,7 @@ pub fn inline(text: &str) -> String {
         i += 1;
     }
     // __bold__ → **bold** (the app's inline styles use asterisks), only when paired.
-    let out = if s.matches("__").count() % 2 == 0 { s.replace("__", "**") } else { s };
+    let out = if s.matches("__").count().is_multiple_of(2) { s.replace("__", "**") } else { s };
     out.trim().to_string()
 }
 
@@ -147,11 +145,10 @@ pub fn one_line(text: &str, max: usize) -> String {
             break;
         }
     }
-    if let Some((n, r)) = t.split_once(['.', ')']) {
-        if !n.is_empty() && n.len() <= 3 && n.chars().all(|c| c.is_ascii_digit()) && r.starts_with(' ') {
+    if let Some((n, r)) = t.split_once(['.', ')'])
+        && !n.is_empty() && n.len() <= 3 && n.chars().all(|c| c.is_ascii_digit()) && r.starts_with(' ') {
             t = r.trim().to_string();
         }
-    }
     let t = inline(&t).replace("**", "").replace('`', "");
     cut(&t, max)
 }
@@ -177,7 +174,7 @@ fn cut(t: &str, max: usize) -> String {
 
 fn indent_of(line: &str) -> u8 {
     let n = line.chars().take_while(|c| *c == ' ').count();
-    ((n + 1) / 2).min(4) as u8
+    n.div_ceil(2).min(4) as u8
 }
 
 fn table_cells(line: &str) -> Vec<String> {
@@ -298,14 +295,13 @@ pub fn parse(md: &str) -> Vec<RBlock> {
             continue;
         }
         // A list item's continuation line (indented, right after an item) joins it.
-        if raw.starts_with("  ") && para.is_empty() {
-            if let Some(RBlock::Bullet { text, .. } | RBlock::Numbered { text, .. } | RBlock::Todo { text, .. }) = out.last_mut() {
+        if raw.starts_with("  ") && para.is_empty()
+            && let Some(RBlock::Bullet { text, .. } | RBlock::Numbered { text, .. } | RBlock::Todo { text, .. }) = out.last_mut() {
                 text.push(' ');
                 text.push_str(&inline(t));
                 i += 1;
                 continue;
             }
-        }
         para.push(t.to_string());
         i += 1;
     }
@@ -370,7 +366,7 @@ mod tests {
     fn long_text_is_cut_cleanly() {
         let md = format!("```\n{}\n```", "x\n".repeat(500));
         let c = clean(&md, 100);
-        assert!(c.matches("```").count() % 2 == 0);
+        assert!(c.matches("```").count().is_multiple_of(2));
         assert!(c.ends_with("_(texte raccourci)_"));
     }
 

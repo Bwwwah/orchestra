@@ -457,11 +457,10 @@ pub fn join(address: &str, name: &str, code: &str, wake: Wake) -> Live {
     let out: Arc<dyn Fn(&LiveMsg) + Send + Sync> = Arc::new(move |msg: &LiveMsg| {
         let bytes = bytes_of(msg);
         let mut w = out_writer.lock().unwrap();
-        if let Some((s, sealer)) = w.as_mut() {
-            if sealer.send(s, &bytes).is_err() {
+        if let Some((s, sealer)) = w.as_mut()
+            && sealer.send(s, &bytes).is_err() {
                 *w = None;
             }
-        }
     });
     Live { inbox: rx, out, status, stop, listener_addr: None }
 }
@@ -567,7 +566,7 @@ mod tests {
         // (Only the stuck peer is there: a live peer of a debug build decodes big pages
         // slowly and would make the timing about it.)
         let mut p = Page::new("Grosse page", None);
-        p.blocks = vec![Block::new(BlockKind::Paragraph, &"x".repeat(128 * 1024))];
+        p.blocks = vec![Block::new(BlockKind::Paragraph, "x".repeat(128 * 1024))];
         let msg = LiveMsg::Pages { pages: vec![p], deleted: Default::default() };
         let big = msg.clone();
         let (done_tx, done_rx) = channel();

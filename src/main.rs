@@ -194,22 +194,20 @@ fn run_server(port: u16, code: &str) -> i32 {
                 LiveMsg::Bye { name } => println!("- {name}"),
                 LiveMsg::Pages { pages, deleted } => {
                     let other = model::Workspace { pages, deleted, ..Default::default() };
-                    if collab::merge(&mut ws, &other) > 0 || !other.deleted.is_empty() {
-                        if let Err(e) = store::save(&ws) {
+                    if (collab::merge(&mut ws, &other) > 0 || !other.deleted.is_empty())
+                        && let Err(e) = store::save(&ws) {
                             eprintln!("orchestra: enregistrement impossible : {e}");
                         }
-                    }
                 }
                 LiveMsg::Chat { msgs } => {
                     let mut new = false;
                     for m in msgs {
                         new |= ws.chat.insert(m.id.clone(), m).is_none();
                     }
-                    if new {
-                        if let Err(e) = store::save(&ws) {
+                    if new
+                        && let Err(e) = store::save(&ws) {
                             eprintln!("orchestra: enregistrement impossible : {e}");
                         }
-                    }
                 }
                 _ => {}
             }

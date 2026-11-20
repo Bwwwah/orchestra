@@ -29,11 +29,10 @@ impl Shot {
     pub fn tick(&mut self, ctx: &egui::Context) {
         self.frame += 1;
         // ORCHESTRA_SHOT_RESIZE=WxH: the window changes size on frame 30 (to test resizing).
-        if self.frame == 30 {
-            if let Some((w, h)) = std::env::var("ORCHESTRA_SHOT_RESIZE").ok().and_then(|v| v.split_once('x').and_then(|(w, h)| Some((w.parse::<f32>().ok()?, h.parse::<f32>().ok()?)))) {
+        if self.frame == 30
+            && let Some((w, h)) = std::env::var("ORCHESTRA_SHOT_RESIZE").ok().and_then(|v| v.split_once('x').and_then(|(w, h)| Some((w.parse::<f32>().ok()?, h.parse::<f32>().ok()?)))) {
                 ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(egui::vec2(w, h)));
             }
-        }
         if self.done.load(Ordering::SeqCst) {
             ctx.send_viewport_cmd(egui::ViewportCommand::Close);
             return;

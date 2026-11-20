@@ -133,12 +133,11 @@ impl NotesApp {
                             }
                             let has_sel = self.terms.get(self.term_active).is_some_and(|t| t.selected_text().is_some());
                             let label = if has_sel { crate::tr!("Copier la sélection", "Copy the selection") } else { crate::tr!("Copier l'écran", "Copy the screen") };
-                            if ui.add(egui::Button::new(RichText::new(label).size(12.0)).frame(false)).on_hover_text(crate::tr!("Ou sélectionnez à la souris puis Cmd+C", "Or select with the mouse then Cmd+C")).clicked() {
-                                if let Some(term) = self.terms.get(self.term_active) {
+                            if ui.add(egui::Button::new(RichText::new(label).size(12.0)).frame(false)).on_hover_text(crate::tr!("Ou sélectionnez à la souris puis Cmd+C", "Or select with the mouse then Cmd+C")).clicked()
+                                && let Some(term) = self.terms.get(self.term_active) {
                                     ui.ctx().copy_text(term.selected_text().unwrap_or_else(|| term.text()));
                                     self.ack(if has_sel { crate::tr!("Sélection copiée.", "Selection copied.") } else { crate::tr!("Contenu du terminal copié.", "Terminal content copied.") });
                                 }
-                            }
                             if ui.add(egui::Button::new(RichText::new("+ Shell").size(12.0)).frame(false)).on_hover_text(crate::tr!("Nouveau terminal", "New terminal")).clicked() {
                                 let cwd = self.terms.get(self.term_active).map(|t| t.cwd.clone()).unwrap_or_default();
                                 request(ui.ctx(), "Shell", &cwd, None);

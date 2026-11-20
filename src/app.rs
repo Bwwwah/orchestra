@@ -407,11 +407,10 @@ impl NotesApp {
             self.ws = store::load();
             self.known_mtime = m;
             self.take_snapshot();
-            if let Some(c) = &self.current {
-                if self.ws.page(c).is_none() {
+            if let Some(c) = &self.current
+                && self.ws.page(c).is_none() {
                     self.current = None;
                 }
-            }
         }
     }
 
@@ -453,12 +452,11 @@ impl NotesApp {
         if self.current.as_deref() == Some(id.as_str()) {
             return;
         }
-        if let Some(prev) = self.current.take() {
-            if let Some(t) = self.tabs.get_mut(self.active_tab) {
+        if let Some(prev) = self.current.take()
+            && let Some(t) = self.tabs.get_mut(self.active_tab) {
                 t.back.push(prev);
                 t.fwd.clear();
             }
-        }
         self.current = Some(id);
     }
 
@@ -776,13 +774,12 @@ impl NotesApp {
                     let p = Page::new("", Some(page.clone()));
                     let id = p.id.clone();
                     self.ws.pages.push(p);
-                    if let Some(par) = self.ws.page_mut(&page) {
-                        if let Some(b) = par.blocks.get_mut(at) {
+                    if let Some(par) = self.ws.page_mut(&page)
+                        && let Some(b) = par.blocks.get_mut(at) {
                             b.kind = BlockKind::PageLink;
                             b.text.clear();
                             b.extra = id.clone();
                         }
-                    }
                     self.expanded.insert(page);
                     self.navigate(id.clone());
                     self.focus = Some((format!("title-{id}"), None));
@@ -932,11 +929,10 @@ impl NotesApp {
                         tr.request_focus();
                         focus_used = true;
                     }
-                    if tr.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter)) {
-                        if let Some(b) = page.blocks.first() {
+                    if tr.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter))
+                        && let Some(b) = page.blocks.first() {
                             new_focus = Some((b.id.clone(), Some(0)));
                         }
-                    }
                     ui.add_space(20.0);
                     let page_id = page.id.clone();
                     let page_title = page.display_title();
@@ -1033,7 +1029,7 @@ impl NotesApp {
                 (p.id.clone(), title_with_icon(p), parent, p.updated)
             })
             .collect();
-        roots.sort_by(|a, b| b.3.cmp(&a.3));
+        roots.sort_by_key(|r| std::cmp::Reverse(r.3));
         // The row (or "*" for the whole trash) waiting for its second click.
         let confirm_id = egui::Id::unique("trash-confirm");
         let mut confirm: Option<String> = ui.ctx().data(|d| d.get_temp(confirm_id));
@@ -1288,11 +1284,10 @@ impl eframe::App for NotesApp {
             self.detect_changes();
         }
         self.live_tick();
-        if let Some(t) = self.dirty_since {
-            if t.elapsed() > Duration::from_millis(400) {
+        if let Some(t) = self.dirty_since
+            && t.elapsed() > Duration::from_millis(400) {
                 self.save_now();
             }
-        }
         let c = &self.ws.settings.collab;
         if c.auto_sync && c.connector != ConnectorKind::None && self.last_sync.elapsed() > Duration::from_secs(30) {
             self.run_sync(false);
@@ -1843,19 +1838,18 @@ fn blocks_view(
             // Screen readers announce the block's type ("Titre 1", "Liste de tâches"...).
             let kind_label = b.kind.label();
             resp.widget_info(|| egui::WidgetInfo::labeled(egui::Role::MultilineTextInput, true, kind_label));
-            if let Some((fid, at)) = focus {
-                if *fid == b.id {
+            if let Some((fid, at)) = focus
+                && *fid == b.id {
                     resp.request_focus();
                     let pos = at.unwrap_or_else(|| b.text.chars().count());
                     set_cursor(ui.ctx(), edit_id, pos);
                     focus_used = true;
                 }
-            }
             let cursor = out.cursor_range.map(|r| r.primary.index.0);
             if resp.has_focus() {
                 // Markdown shortcuts.
-                if b.kind == BlockKind::Paragraph && resp.changed() {
-                    if let Some((k, len)) = markdown_shortcut(&b.text) {
+                if b.kind == BlockKind::Paragraph && resp.changed()
+                    && let Some((k, len)) = markdown_shortcut(&b.text) {
                         b.kind = k;
                         b.text = b.text[len..].to_string();
                         if k == BlockKind::Divider {
@@ -1865,7 +1859,6 @@ fn blocks_view(
                             insert = Some((i + 1, nb));
                         }
                     }
-                }
                 let (enter, backspace, up, down, esc) = ui.input(|inp| {
                     (
                         inp.key_pressed(Key::Enter) && !inp.modifiers.shift && !inp.modifiers.command,
@@ -1908,11 +1901,10 @@ fn blocks_view(
                     if let Some(p) = &prev_id {
                         new_focus = Some((p.clone(), None));
                     }
-                } else if down && !b.text.contains('\n') && cursor.map(|c| c >= b.text.chars().count()).unwrap_or(true) {
-                    if let Some(nx) = &next_id {
+                } else if down && !b.text.contains('\n') && cursor.map(|c| c >= b.text.chars().count()).unwrap_or(true)
+                    && let Some(nx) = &next_id {
                         new_focus = Some((nx.clone(), Some(0)));
                     }
-                }
             }
         });
         let rect = row.response.rect;
@@ -2029,11 +2021,10 @@ fn blocks_view(
             page.blocks.insert(to + k, b);
         }
     } else {
-        if let Some(r) = remove {
-            if r < page.blocks.len() {
+        if let Some(r) = remove
+            && r < page.blocks.len() {
                 page.blocks.remove(r);
             }
-        }
         if let Some((at, b)) = insert {
             let at = at.min(page.blocks.len());
             page.blocks.insert(at, b);
@@ -2366,6 +2357,94 @@ pub fn setup_fonts(ctx: &egui::Context) {
     ctx.set_fonts(fonts);
 }
 
+/// ORCHESTRA_PROFILE=1: time every frame and print the average every 60 frames (to find
+/// what makes scrolling slow).
+struct Profile {
+    start: Option<Instant>,
+}
+
+impl Profile {
+    fn frame(ctx: &egui::Context, cpu: Option<f32>) -> Profile {
+        if std::env::var_os("ORCHESTRA_PROFILE").is_none() {
+            return Profile { start: None };
+        }
+        static LAST: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let n = LAST.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        if n.is_multiple_of(60) {
+            let dt = ctx.input(|i| i.unstable_dt);
+            let size = ctx.content_rect().size() * ctx.pixels_per_point();
+            eprintln!(
+                "image complète (interface + dessin) : {:.1} ms · {:.0} images/s · fenêtre {:.0}×{:.0} pixels",
+                cpu.unwrap_or(0.0) * 1000.0,
+                if dt > 0.0 { 1.0 / dt } else { 0.0 },
+                size.x,
+                size.y
+            );
+            Section::report();
+        }
+        ctx.request_repaint();
+        Profile { start: Some(Instant::now()) }
+    }
+}
+
+impl Drop for Profile {
+    fn drop(&mut self) {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static N: AtomicU64 = AtomicU64::new(0);
+        static TOTAL: AtomicU64 = AtomicU64::new(0);
+        static MAX: AtomicU64 = AtomicU64::new(0);
+        if let Some(s) = self.start {
+            let us = s.elapsed().as_micros() as u64;
+            TOTAL.fetch_add(us, Ordering::Relaxed);
+            MAX.fetch_max(us, Ordering::Relaxed);
+            if N.fetch_add(1, Ordering::Relaxed) % 60 == 59 {
+                eprintln!("ui(): moyenne {} µs, max {} µs", TOTAL.swap(0, Ordering::Relaxed) / 60, MAX.swap(0, Ordering::Relaxed));
+            }
+        }
+    }
+}
+
+/// Time spent in parts of the window (ORCHESTRA_PROFILE=1), reported with the frames.
+struct Section {
+    name: &'static str,
+    start: Option<Instant>,
+}
+
+static SECTIONS: std::sync::Mutex<Vec<(&'static str, u64, u64)>> = std::sync::Mutex::new(Vec::new());
+
+impl Section {
+    fn start(name: &'static str) -> Section {
+        let on = std::env::var_os("ORCHESTRA_PROFILE").is_some();
+        Section { name, start: on.then(Instant::now) }
+    }
+
+    fn report() {
+        let mut v = SECTIONS.lock().unwrap();
+        for (name, total, n) in v.iter() {
+            if *n > 0 {
+                eprintln!("   {name} : {} µs en moyenne", total / n);
+            }
+        }
+        v.clear();
+    }
+}
+
+impl Drop for Section {
+    fn drop(&mut self) {
+        if let Some(s) = self.start {
+            let us = s.elapsed().as_micros() as u64;
+            let mut v = SECTIONS.lock().unwrap();
+            match v.iter_mut().find(|x| x.0 == self.name) {
+                Some(x) => {
+                    x.1 += us;
+                    x.2 += 1;
+                }
+                None => v.push((self.name, us, 1)),
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2522,7 +2601,7 @@ mod tests {
         let d2 = ws.create_page("2026-11-20", Some(root.clone()));
         let other = ws.create_page("Notes", None);
         let sub = ws.create_page("Sous-page", Some(other.clone()));
-        assert_eq!(other_report_days(&ws, &d2), [d1.clone()]);
+        assert_eq!(other_report_days(&ws, &d2), std::slice::from_ref(&d1));
         assert_eq!(other_report_days(&ws, &d1), [d2]);
         // Pages outside the reports, and the reports page itself, fold nothing.
         assert!(other_report_days(&ws, &other).is_empty() && other_report_days(&ws, &sub).is_empty() && other_report_days(&ws, &root).is_empty());
@@ -2554,93 +2633,5 @@ mod tests {
         let from = handle_of(row_rect(&h, &b));
         drag(&mut h, from, from + egui::vec2(30.0, 2.0));
         assert_eq!(texts(&h), ["Alpha", "Beta", "Gamma"]);
-    }
-}
-
-/// ORCHESTRA_PROFILE=1: time every frame and print the average every 60 frames (to find
-/// what makes scrolling slow).
-struct Profile {
-    start: Option<Instant>,
-}
-
-impl Profile {
-    fn frame(ctx: &egui::Context, cpu: Option<f32>) -> Profile {
-        if std::env::var_os("ORCHESTRA_PROFILE").is_none() {
-            return Profile { start: None };
-        }
-        static LAST: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-        let n = LAST.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        if n % 60 == 0 {
-            let dt = ctx.input(|i| i.unstable_dt);
-            let size = ctx.content_rect().size() * ctx.pixels_per_point();
-            eprintln!(
-                "image complète (interface + dessin) : {:.1} ms · {:.0} images/s · fenêtre {:.0}×{:.0} pixels",
-                cpu.unwrap_or(0.0) * 1000.0,
-                if dt > 0.0 { 1.0 / dt } else { 0.0 },
-                size.x,
-                size.y
-            );
-            Section::report();
-        }
-        ctx.request_repaint();
-        Profile { start: Some(Instant::now()) }
-    }
-}
-
-impl Drop for Profile {
-    fn drop(&mut self) {
-        use std::sync::atomic::{AtomicU64, Ordering};
-        static N: AtomicU64 = AtomicU64::new(0);
-        static TOTAL: AtomicU64 = AtomicU64::new(0);
-        static MAX: AtomicU64 = AtomicU64::new(0);
-        if let Some(s) = self.start {
-            let us = s.elapsed().as_micros() as u64;
-            TOTAL.fetch_add(us, Ordering::Relaxed);
-            MAX.fetch_max(us, Ordering::Relaxed);
-            if N.fetch_add(1, Ordering::Relaxed) % 60 == 59 {
-                eprintln!("ui(): moyenne {} µs, max {} µs", TOTAL.swap(0, Ordering::Relaxed) / 60, MAX.swap(0, Ordering::Relaxed));
-            }
-        }
-    }
-}
-
-/// Time spent in parts of the window (ORCHESTRA_PROFILE=1), reported with the frames.
-struct Section {
-    name: &'static str,
-    start: Option<Instant>,
-}
-
-static SECTIONS: std::sync::Mutex<Vec<(&'static str, u64, u64)>> = std::sync::Mutex::new(Vec::new());
-
-impl Section {
-    fn start(name: &'static str) -> Section {
-        let on = std::env::var_os("ORCHESTRA_PROFILE").is_some();
-        Section { name, start: on.then(Instant::now) }
-    }
-
-    fn report() {
-        let mut v = SECTIONS.lock().unwrap();
-        for (name, total, n) in v.iter() {
-            if *n > 0 {
-                eprintln!("   {name} : {} µs en moyenne", total / n);
-            }
-        }
-        v.clear();
-    }
-}
-
-impl Drop for Section {
-    fn drop(&mut self) {
-        if let Some(s) = self.start {
-            let us = s.elapsed().as_micros() as u64;
-            let mut v = SECTIONS.lock().unwrap();
-            match v.iter_mut().find(|x| x.0 == self.name) {
-                Some(x) => {
-                    x.1 += us;
-                    x.2 += 1;
-                }
-                None => v.push((self.name, us, 1)),
-            }
-        }
     }
 }

@@ -402,11 +402,10 @@ pub fn runs_to_show(all: &[Run], st: &GitState) -> Vec<Run> {
             out.push(r.clone());
         }
     }
-    if out.is_empty() {
-        if let Some(r) = all.iter().find(|r| r.branch == st.branch) {
+    if out.is_empty()
+        && let Some(r) = all.iter().find(|r| r.branch == st.branch) {
             out.push(r.clone());
         }
-    }
     out.sort_by_key(|r| std::cmp::Reverse(r.at));
     out.truncate(2);
     out

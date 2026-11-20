@@ -270,7 +270,7 @@ impl Scanner {
             .map(|f| f.info.clone())
             .filter(|s| !s.cwd.is_empty() && s.user_messages + s.agent_messages > 0)
             .collect();
-        v.sort_by(|a, b| b.last_activity.cmp(&a.last_activity));
+        v.sort_by_key(|s| std::cmp::Reverse(s.last_activity));
         v
     }
 }

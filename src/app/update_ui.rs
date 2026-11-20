@@ -211,11 +211,10 @@ impl NotesApp {
                             ui.label(RichText::new(why).size(13.0).color(t.tertiary));
                         }
                     }
-                    if !repo.is_empty() && super::projects::action_link(ui, crate::tr!("Toutes les versions sur GitHub", "All versions on GitHub")).clicked() {
-                        if let Err(e) = crate::opener::open_url(&format!("https://github.com/{}/releases", repo.trim())) {
+                    if !repo.is_empty() && super::projects::action_link(ui, crate::tr!("Toutes les versions sur GitHub", "All versions on GitHub")).clicked()
+                        && let Err(e) = crate::opener::open_url(&format!("https://github.com/{}/releases", repo.trim())) {
                             self.fail(e);
                         }
-                    }
                 });
         }
         let hint = if built.is_empty() { "propriétaire/dépôt".to_string() } else { built.to_string() };

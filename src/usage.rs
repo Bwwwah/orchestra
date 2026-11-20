@@ -251,11 +251,10 @@ pub fn push_sample(h: &mut Vec<Sample>, s: Sample) -> bool {
     if s.five.is_none() && s.week.is_none() {
         return false;
     }
-    if let Some(l) = h.last() {
-        if s.at <= l.at || (l.five == s.five && l.week == s.week && near(l.five_reset, s.five_reset) && near(l.week_reset, s.week_reset)) {
+    if let Some(l) = h.last()
+        && (s.at <= l.at || (l.five == s.five && l.week == s.week && near(l.five_reset, s.five_reset) && near(l.week_reset, s.week_reset))) {
             return false;
         }
-    }
     let cut = s.at.saturating_sub(30 * HOUR);
     h.push(s);
     let first_kept = h.iter().position(|x| x.at >= cut).unwrap_or(h.len());
@@ -419,12 +418,11 @@ pub fn start_tracking(exe: &std::path::Path) -> Result<(), String> {
     let mut v: Value = if text.trim().is_empty() { json!({}) } else { serde_json::from_str(&text).map_err(|e| format!("{} illisible ({e}), laissé tel quel", f.display()))? };
     let obj = v.as_object_mut().ok_or("format inattendu")?;
     let mine = our_command(exe);
-    if let Some(prev) = obj.get("statusLine").and_then(|s| s["command"].as_str()) {
-        if !prev.ends_with(" statusline") {
+    if let Some(prev) = obj.get("statusLine").and_then(|s| s["command"].as_str())
+        && !prev.ends_with(" statusline") {
             std::fs::create_dir_all(crate::store::data_dir()).map_err(|e| e.to_string())?;
             std::fs::write(previous_file(), prev).map_err(|e| e.to_string())?;
         }
-    }
     obj.insert("statusLine".into(), json!({ "type": "command", "command": mine, "padding": 0 }));
     if !text.is_empty() {
         let bak = f.with_extension("json.bak");
@@ -502,8 +500,8 @@ pub fn statusline_main() {
         }
     }
     // The person's own status line, unchanged.
-    if let Ok(prev) = std::fs::read_to_string(previous_file()) {
-        if !prev.trim().is_empty() {
+    if let Ok(prev) = std::fs::read_to_string(previous_file())
+        && !prev.trim().is_empty() {
             let shell = if cfg!(windows) { ("cmd", "/C") } else { ("sh", "-c") };
             if let Ok(mut child) = crate::proc::command(shell.0)
                 .args([shell.1, prev.trim()])
@@ -518,7 +516,6 @@ pub fn statusline_main() {
                 return;
             }
         }
-    }
     // Ours: model, then the windows.
     let mut parts = vec![];
     if let Some(m) = v["model"]["display_name"].as_str() {

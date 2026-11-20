@@ -725,7 +725,7 @@ pub fn limit_reset(text: &str, now: u64) -> Option<u64> {
     }
     let lower = text.to_lowercase();
     let at = lower.find("resets")? + "resets".len();
-    let rest = lower[at..].trim_start_matches(|c: char| c == ' ' || c == ':').to_string();
+    let rest = lower[at..].trim_start_matches([' ', ':']).to_string();
     let rest = rest.strip_prefix("at ").unwrap_or(&rest);
     // A date first, for the weekly limit: "nov 24, 3pm".
     const MONTHS: [&str; 12] = ["jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec"];
@@ -736,7 +736,7 @@ pub fn limit_reset(text: &str, now: u64) -> Option<u64> {
         let day: String = after.chars().take_while(|c| c.is_ascii_digit()).collect();
         let d: u32 = day.parse().ok()?;
         date = Some((m as u32 + 1, d));
-        rest = after[day.len()..].trim_start_matches(|c: char| c == ',' || c == ' ');
+        rest = after[day.len()..].trim_start_matches([',', ' ']);
         rest = rest.strip_prefix("at ").unwrap_or(rest);
     }
     let hour: String = rest.chars().take_while(|c| c.is_ascii_digit()).collect();

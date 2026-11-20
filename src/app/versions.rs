@@ -79,12 +79,11 @@ impl Versions {
             runs_at: None,
             hot: None,
         });
-        if let Some((g, r)) = e.state.lock().unwrap().take() {
-            if g == e.generation {
+        if let Some((g, r)) = e.state.lock().unwrap().take()
+            && g == e.generation {
                 e.last = Some(r);
                 e.stale = false;
             }
-        }
         if e.fetched.elapsed().as_secs() >= 15 {
             e.fetched = Instant::now();
             let (slot, f, c, g) = (e.state.clone(), folder.to_string(), ctx.clone(), e.generation);
@@ -383,11 +382,10 @@ pub(super) fn versions_card(ui: &mut egui::Ui, v: &mut Versions, page_id: &str, 
                         });
                     }
                 }
-                if let Some(g) = &s.github {
-                    if super::projects::action_link(ui, crate::tr!("Ouvrir sur GitHub", "Open on GitHub")).clicked() {
+                if let Some(g) = &s.github
+                    && super::projects::action_link(ui, crate::tr!("Ouvrir sur GitHub", "Open on GitHub")).clicked() {
                         open_url(g);
                     }
-                }
             });
             if !runs.is_empty() {
                 ui.add_space(4.0);

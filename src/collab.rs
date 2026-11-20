@@ -48,11 +48,10 @@ impl Connector for SharedFolder {
             if !name.ends_with(".json") || name == mine {
                 continue;
             }
-            if let Ok(s) = std::fs::read_to_string(&p) {
-                if let Ok(ws) = serde_json::from_str::<Workspace>(&s) {
+            if let Ok(s) = std::fs::read_to_string(&p)
+                && let Ok(ws) = serde_json::from_str::<Workspace>(&s) {
                     out.push(ws);
                 }
-            }
         }
         Ok(out)
     }

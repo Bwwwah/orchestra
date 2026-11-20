@@ -250,13 +250,12 @@ impl NotesApp {
         if !self.ais.plugged().contains(&crate::setup::Ai::ClaudeCode) {
             return Err(crate::tr!("Claude Code n'est pas branché (Réglages › IA)", "Claude Code isn't plugged in (Settings › AI)").into());
         }
-        if let Some(f) = self.orch.five {
-            if f >= self.ws.settings.orch.global_limit {
+        if let Some(f) = self.orch.five
+            && f >= self.ws.settings.orch.global_limit {
                 let left = self.orch.five_reset.and_then(|r| crate::usage::until(r, crate::model::now_ms()));
                 let when = left.map(|l| crate::trf!(" ; la fenêtre de 5 h repart à zéro dans {}", "; the 5-hour window resets in {}", crate::usage::left_text(l))).unwrap_or_default();
                 return Err(crate::trf!("la limite globale ({:.0} %) est déjà atteinte{when}", "the global limit ({:.0} %) is already reached{when}", self.ws.settings.orch.global_limit));
             }
-        }
         let taken: f32 = self.orch.runs.iter().map(|r| r.limit).sum();
         if taken + limit > self.ws.settings.orch.global_limit + 0.01 {
             return Err(crate::trf!(
@@ -265,15 +264,14 @@ impl NotesApp {
                 self.ws.settings.orch.global_limit
             ));
         }
-        if let Some(w) = self.orch.week {
-            if crate::usage::near_reserve(w, self.ws.settings.orch.week_limit, 0.0) {
+        if let Some(w) = self.orch.week
+            && crate::usage::near_reserve(w, self.ws.settings.orch.week_limit, 0.0) {
                 return Err(crate::trf!(
                     "la réserve minimum de la semaine ({:.0} %) est atteinte ou trop proche",
                     "the week's minimum reserve ({:.0} %) is reached or too near",
                     self.ws.settings.orch.reserve()
                 ));
             }
-        }
         // The limits are checked with Claude Code's own figures: they come through the status line.
         if !crate::usage::tracking_on() {
             crate::usage::start_tracking(&std::env::current_exe().unwrap_or_default())?;
@@ -397,14 +395,13 @@ impl NotesApp {
         self.orch.awake.set(!self.orch.runs.is_empty());
         self.keep_running_on_close(ctx);
         // Developer aid: ORCHESTRA_AUTO_RUN=<project id> starts a session once Claude Code is seen.
-        if let Ok(pid) = std::env::var("ORCHESTRA_AUTO_RUN") {
-            if !pid.is_empty() && self.orch.runs.is_empty() && !self.ws.runs.iter().any(|r| r.project == pid) && self.ais.plugged().contains(&crate::setup::Ai::ClaudeCode) {
+        if let Ok(pid) = std::env::var("ORCHESTRA_AUTO_RUN")
+            && !pid.is_empty() && self.orch.runs.is_empty() && !self.ws.runs.iter().any(|r| r.project == pid) && self.ais.plugged().contains(&crate::setup::Ai::ClaudeCode) {
                 let (l, c) = (self.ws.settings.orch.default_limit, true);
                 if let Err(e) = self.launch_run(ctx, &pid, "", l, c, None) {
                     eprintln!("auto-run : {e}");
                 }
             }
-        }
         let now = Instant::now();
         let global = self.ws.settings.orch.global_limit;
         let week_limit = self.ws.settings.orch.week_limit;
@@ -537,11 +534,10 @@ impl NotesApp {
                         }
                         r.turns += 1;
                         // What this turn took from the week (a reset in between counts for nothing).
-                        if let (Some(a), Some(b)) = (r.week_at_turn, self.orch.week) {
-                            if b >= a {
+                        if let (Some(a), Some(b)) = (r.week_at_turn, self.orch.week)
+                            && b >= a {
                                 r.week_turn = r.week_turn.max(b - a);
                             }
-                        }
                         auto::push_copy_later(r.worktree.clone());
                         let sig = auto::signal(&r.reader.last_text);
                         r.last_line = crate::richtext::one_line(&auto::strip_markers(&r.reader.last_text), 140);
@@ -950,11 +946,10 @@ impl NotesApp {
                 });
             });
         ui.add_space(14.0);
-        if open {
-            if let Err(e) = crate::screen::open_settings() {
+        if open
+            && let Err(e) = crate::screen::open_settings() {
                 self.info(e);
             }
-        }
         if ask {
             let mut v = self.ws.settings.screen_granted_version.clone();
             let ok = crate::screen::ensure_permission(&mut v);
@@ -2399,6 +2394,148 @@ fn project_color(title: &str) -> Color32 {
     HUES[(hash(title) % HUES.len() as u64) as usize]
 }
 
+/// The end conditions of an endless session, each one ticked or not; the first reached stops it.
+fn end_conditions(ui: &mut egui::Ui, c: &mut crate::model::EndConditions, t: &Tone) {
+    let small = |s: &str| RichText::new(s).size(12.0).color(t.secondary);
+    let mut on = c.hours.is_some();
+    if ui.checkbox(&mut on, small(crate::tr!("une durée", "a time"))).changed() {
+        c.hours = if on { Some(4.0) } else { None };
+    }
+    if let Some(h) = c.hours.as_mut() {
+        ui.add(egui::DragValue::new(h).range(0.5..=72.0).speed(0.25).suffix(" h"));
+    }
+    let mut on = c.steps.is_some();
+    if ui.checkbox(&mut on, small(crate::tr!("des étapes faites", "steps done"))).changed() {
+        c.steps = if on { Some(5) } else { None };
+    }
+    if let Some(n) = c.steps.as_mut() {
+        ui.add(egui::DragValue::new(n).range(1..=500));
+    }
+    let mut on = c.turns.is_some();
+    if ui.checkbox(&mut on, small(crate::tr!("des tours", "turns"))).changed() {
+        c.turns = if on { Some(60) } else { None };
+    }
+    if let Some(n) = c.turns.as_mut() {
+        ui.add(egui::DragValue::new(n).range(1..=1000));
+    }
+    ui.checkbox(&mut c.when_done, small(crate::tr!("plus d'étape ouverte", "no open step left"))).on_hover_text(crate::tr!(
+        "Coché : la session s'arrête une fois les étapes faites. Décoché : l'IA crée elle-même les étapes suivantes et continue.",
+        "Ticked: the session stops once the steps are done. Unticked: the AI creates the next steps itself and goes on."
+    ));
+    if c.hours.is_none() && c.steps.is_none() && c.turns.is_none() && !c.when_done {
+        ui.label(RichText::new(crate::tr!("(budget seulement)", "(budget only)")).size(12.0).color(super::projects::ORANGE)).on_hover_text(crate::tr!(
+            "Sans condition, la session tourne jusqu'à son budget, la limite globale ou la réserve de la semaine (ou deux tours de suite sans rien à faire).",
+            "With no condition, the session runs until its budget, the global limit or the week's reserve (or two turns in a row with nothing to do)."
+        ));
+    }
+}
+
+/// The settings of the folded "Settings and limits" card, on one line.
+fn limits_summary(o: &crate::model::OrchSettings) -> String {
+    let commits = if o.allow_commits { crate::tr!("commits autorisés", "commits allowed") } else { crate::tr!("sans commit", "no commits") };
+    let resume = if o.auto_resume { crate::tr!("reprise automatique", "automatic restart") } else { crate::tr!("sans reprise", "no restart") };
+    crate::trf!(
+        "IA arrêtées à {:.0} % de la fenêtre de 5 h · {commits} · {resume} · bilan à {} h · {} tours au plus",
+        "AIs stop at {:.0} % of the 5-hour window · {commits} · {resume} · summary at {} h · {} turns at most",
+        o.global_limit,
+        o.report_hour,
+        o.max_turns
+    )
+}
+
+/// "Lancer": a filled button.
+/// Below this width, the week's reserve goes under the week's figure.
+const WEEK_ONE_LINE: f32 = 520.0;
+
+/// Below this width, a running session's links go under its title.
+const RUN_ONE_LINE: f32 = 460.0;
+
+/// Below this width, a project's controls in « Lancer une session » go under it.
+const LAUNCH_ONE_LINE: f32 = 620.0;
+
+/// What a project's launch controls work on.
+struct LaunchCx<'a> {
+    id: &'a String,
+    d: &'a mut Draft,
+    busy: bool,
+    plugged: bool,
+    /// What is left of the global limit for this project.
+    room: f32,
+    global: f32,
+    to_main: &'a mut HashMap<String, bool>,
+    start: &'a mut Vec<String>,
+    confirm_main: &'a mut Option<String>,
+    lk: &'a super::settings::Look,
+    t: &'a Tone,
+}
+
+/// A project's controls: start, commits, « sur main », budget. In the order of a
+/// right-to-left layout (start at the far right); left to right, start comes first.
+fn launch_controls(ui: &mut egui::Ui, c: LaunchCx<'_>) {
+    let LaunchCx { id, d, busy, plugged, room, global, to_main, start, confirm_main, lk, t } = c;
+    if busy {
+        // A pill where the other rows have « Lancer », so the controls stay in line.
+        let text = crate::tr!("En cours", "Running");
+        let g = ui.painter().layout_no_wrap(text.to_string(), semibold(13.0), super::projects::GREEN);
+        let (rect, _) = ui.allocate_exact_size(g.size() + egui::vec2(36.0, 12.0), egui::Sense::hover());
+        ui.painter().rect_filled(rect, 7.0, super::projects::GREEN.gamma_multiply(0.14));
+        super::projects::pulse_dot(ui, egui::pos2(rect.left() + 14.0, rect.center().y), super::projects::GREEN);
+        ui.painter().galley(egui::pos2(rect.left() + 24.0, rect.center().y - g.size().y / 2.0), g, super::projects::GREEN);
+    } else if !plugged {
+        start_button(ui, false, t).on_disabled_hover_text(crate::tr!("Branchez d'abord Claude Code", "Plug in Claude Code first"));
+    } else if room < 1.0 {
+        start_button(ui, false, t).on_disabled_hover_text(crate::trf!("La limite globale ({global:.0} %) est déjà répartie entre les autres projets", "The global limit ({global:.0} %) is already shared among the other projects"));
+    } else if start_button(ui, true, t).clicked() {
+        // Endless on main: the warning first, the start once confirmed.
+        if endless_on_main(d.endless, to_main.get(id).copied().unwrap_or(false)) {
+            *confirm_main = Some(id.clone());
+        } else {
+            start.push(id.clone());
+        }
+    }
+    ui.add_space(4.0);
+    super::settings::switch(ui, &mut d.commits, lk).on_hover_text(crate::tr!("L'IA peut faire des commits sur sa branche (Orchestra l'envoie sur GitHub après chaque tour)", "The AI may commit on its branch (Orchestra pushes it to GitHub after each turn)"));
+    ui.label(RichText::new("commits").size(12.0).color(t.tertiary));
+    ui.add_space(6.0);
+    if let Some(m) = to_main.get_mut(id) {
+        ui.checkbox(m, RichText::new(crate::tr!("sur main", "on main")).size(12.0).color(t.tertiary)).on_hover_text(crate::tr!(
+            "À la fin de chaque session, son travail est fusionné tout seul dans main (seulement si le dossier du projet est sur main ou master)",
+            "At the end of each session, its work is merged into main by itself (only when the project's folder is on main or master)"
+        ));
+        ui.add_space(6.0);
+    }
+    // A picked project keeps its share within the room left; the others only show it
+    // capped, so unpicking one doesn't shrink the rest for good.
+    if d.pick && !busy {
+        d.limit = d.limit.clamp(1.0, room.max(1.0));
+    }
+    let mut shown = if busy { d.limit } else { d.limit.clamp(1.0, room.max(1.0)) };
+    let dv = ui.add_enabled(!busy && room >= 1.0, egui::DragValue::new(&mut shown).range(1.0..=room.max(1.0)).speed(0.5).suffix(" %"));
+    if dv.changed() {
+        d.limit = shown;
+    }
+    dv.on_hover_text(crate::trf!(
+        "Budget de la prochaine session de ce projet : elle s'arrête après avoir utilisé cette part de la fenêtre de 5 h de l'abonnement, comptée depuis son lancement. Chaque session a son propre budget : en relancer une repart de zéro.\n{room:.0} % au plus ici, le reste de la limite globale ({global:.0} %) étant pris par les autres.",
+        "Budget of this project's next session: it stops after using this share of the subscription's 5-hour window, counted from its start. Each session has its own budget: starting another one begins again from zero.\n{room:.0} % at most here, the rest of the global limit ({global:.0} %) being taken by the others."
+    ));
+    ui.label(RichText::new(crate::tr!("budget par session", "budget per session")).size(12.0).color(t.tertiary));
+}
+
+fn start_button(ui: &mut egui::Ui, enabled: bool, t: &Tone) -> egui::Response {
+    let text = crate::tr!("Lancer", "Start");
+    let g = ui.painter().layout_no_wrap(text.to_string(), semibold(13.0), Color32::WHITE);
+    let sense = if enabled { egui::Sense::click() } else { egui::Sense::hover() };
+    let (rect, resp) = ui.allocate_exact_size(g.size() + egui::vec2(24.0, 12.0), sense);
+    let a = ui.ctx().animate_bool_with_time(resp.id.with("hov"), resp.hovered() && enabled, 0.15);
+    let base = if enabled { super::projects::BLUE } else { t.fill };
+    let fill = base.lerp_to_gamma(Color32::WHITE, 0.12 * a);
+    ui.painter().rect_filled(rect, 8.0, fill);
+    ui.painter().galley(rect.center() - g.size() / 2.0, g, if enabled { Color32::WHITE } else { t.tertiary });
+    let resp = if enabled { resp.on_hover_cursor(egui::CursorIcon::PointingHand) } else { resp };
+    // Disabled: report it so on_disabled_hover_text works.
+    if enabled { resp } else { resp.on_hover_text(crate::tr!("Branchez d'abord Claude Code", "Plug in Claude Code first")) }
+}
+
 /// The mark and colour of a finished session: done, stopped on a limit or a block, failed.
 #[cfg(test)]
 mod tests {
@@ -2713,146 +2850,4 @@ mod tests {
         let s = "### Fait\n- **une** chose\n\n\n### Reste\n- rien\n\n";
         assert_eq!(super::plain_text(s), "Fait\n- une chose\n\nReste\n- rien");
     }
-}
-
-/// The end conditions of an endless session, each one ticked or not; the first reached stops it.
-fn end_conditions(ui: &mut egui::Ui, c: &mut crate::model::EndConditions, t: &Tone) {
-    let small = |s: &str| RichText::new(s).size(12.0).color(t.secondary);
-    let mut on = c.hours.is_some();
-    if ui.checkbox(&mut on, small(crate::tr!("une durée", "a time"))).changed() {
-        c.hours = if on { Some(4.0) } else { None };
-    }
-    if let Some(h) = c.hours.as_mut() {
-        ui.add(egui::DragValue::new(h).range(0.5..=72.0).speed(0.25).suffix(" h"));
-    }
-    let mut on = c.steps.is_some();
-    if ui.checkbox(&mut on, small(crate::tr!("des étapes faites", "steps done"))).changed() {
-        c.steps = if on { Some(5) } else { None };
-    }
-    if let Some(n) = c.steps.as_mut() {
-        ui.add(egui::DragValue::new(n).range(1..=500));
-    }
-    let mut on = c.turns.is_some();
-    if ui.checkbox(&mut on, small(crate::tr!("des tours", "turns"))).changed() {
-        c.turns = if on { Some(60) } else { None };
-    }
-    if let Some(n) = c.turns.as_mut() {
-        ui.add(egui::DragValue::new(n).range(1..=1000));
-    }
-    ui.checkbox(&mut c.when_done, small(crate::tr!("plus d'étape ouverte", "no open step left"))).on_hover_text(crate::tr!(
-        "Coché : la session s'arrête une fois les étapes faites. Décoché : l'IA crée elle-même les étapes suivantes et continue.",
-        "Ticked: the session stops once the steps are done. Unticked: the AI creates the next steps itself and goes on."
-    ));
-    if c.hours.is_none() && c.steps.is_none() && c.turns.is_none() && !c.when_done {
-        ui.label(RichText::new(crate::tr!("(budget seulement)", "(budget only)")).size(12.0).color(super::projects::ORANGE)).on_hover_text(crate::tr!(
-            "Sans condition, la session tourne jusqu'à son budget, la limite globale ou la réserve de la semaine (ou deux tours de suite sans rien à faire).",
-            "With no condition, the session runs until its budget, the global limit or the week's reserve (or two turns in a row with nothing to do)."
-        ));
-    }
-}
-
-/// The settings of the folded "Settings and limits" card, on one line.
-fn limits_summary(o: &crate::model::OrchSettings) -> String {
-    let commits = if o.allow_commits { crate::tr!("commits autorisés", "commits allowed") } else { crate::tr!("sans commit", "no commits") };
-    let resume = if o.auto_resume { crate::tr!("reprise automatique", "automatic restart") } else { crate::tr!("sans reprise", "no restart") };
-    crate::trf!(
-        "IA arrêtées à {:.0} % de la fenêtre de 5 h · {commits} · {resume} · bilan à {} h · {} tours au plus",
-        "AIs stop at {:.0} % of the 5-hour window · {commits} · {resume} · summary at {} h · {} turns at most",
-        o.global_limit,
-        o.report_hour,
-        o.max_turns
-    )
-}
-
-/// "Lancer": a filled button.
-/// Below this width, the week's reserve goes under the week's figure.
-const WEEK_ONE_LINE: f32 = 520.0;
-
-/// Below this width, a running session's links go under its title.
-const RUN_ONE_LINE: f32 = 460.0;
-
-/// Below this width, a project's controls in « Lancer une session » go under it.
-const LAUNCH_ONE_LINE: f32 = 620.0;
-
-/// What a project's launch controls work on.
-struct LaunchCx<'a> {
-    id: &'a String,
-    d: &'a mut Draft,
-    busy: bool,
-    plugged: bool,
-    /// What is left of the global limit for this project.
-    room: f32,
-    global: f32,
-    to_main: &'a mut HashMap<String, bool>,
-    start: &'a mut Vec<String>,
-    confirm_main: &'a mut Option<String>,
-    lk: &'a super::settings::Look,
-    t: &'a Tone,
-}
-
-/// A project's controls: start, commits, « sur main », budget. In the order of a
-/// right-to-left layout (start at the far right); left to right, start comes first.
-fn launch_controls(ui: &mut egui::Ui, c: LaunchCx<'_>) {
-    let LaunchCx { id, d, busy, plugged, room, global, to_main, start, confirm_main, lk, t } = c;
-    if busy {
-        // A pill where the other rows have « Lancer », so the controls stay in line.
-        let text = crate::tr!("En cours", "Running");
-        let g = ui.painter().layout_no_wrap(text.to_string(), semibold(13.0), super::projects::GREEN);
-        let (rect, _) = ui.allocate_exact_size(g.size() + egui::vec2(36.0, 12.0), egui::Sense::hover());
-        ui.painter().rect_filled(rect, 7.0, super::projects::GREEN.gamma_multiply(0.14));
-        super::projects::pulse_dot(ui, egui::pos2(rect.left() + 14.0, rect.center().y), super::projects::GREEN);
-        ui.painter().galley(egui::pos2(rect.left() + 24.0, rect.center().y - g.size().y / 2.0), g, super::projects::GREEN);
-    } else if !plugged {
-        start_button(ui, false, t).on_disabled_hover_text(crate::tr!("Branchez d'abord Claude Code", "Plug in Claude Code first"));
-    } else if room < 1.0 {
-        start_button(ui, false, t).on_disabled_hover_text(crate::trf!("La limite globale ({global:.0} %) est déjà répartie entre les autres projets", "The global limit ({global:.0} %) is already shared among the other projects"));
-    } else if start_button(ui, true, t).clicked() {
-        // Endless on main: the warning first, the start once confirmed.
-        if endless_on_main(d.endless, to_main.get(id).copied().unwrap_or(false)) {
-            *confirm_main = Some(id.clone());
-        } else {
-            start.push(id.clone());
-        }
-    }
-    ui.add_space(4.0);
-    super::settings::switch(ui, &mut d.commits, lk).on_hover_text(crate::tr!("L'IA peut faire des commits sur sa branche (Orchestra l'envoie sur GitHub après chaque tour)", "The AI may commit on its branch (Orchestra pushes it to GitHub after each turn)"));
-    ui.label(RichText::new("commits").size(12.0).color(t.tertiary));
-    ui.add_space(6.0);
-    if let Some(m) = to_main.get_mut(id) {
-        ui.checkbox(m, RichText::new(crate::tr!("sur main", "on main")).size(12.0).color(t.tertiary)).on_hover_text(crate::tr!(
-            "À la fin de chaque session, son travail est fusionné tout seul dans main (seulement si le dossier du projet est sur main ou master)",
-            "At the end of each session, its work is merged into main by itself (only when the project's folder is on main or master)"
-        ));
-        ui.add_space(6.0);
-    }
-    // A picked project keeps its share within the room left; the others only show it
-    // capped, so unpicking one doesn't shrink the rest for good.
-    if d.pick && !busy {
-        d.limit = d.limit.clamp(1.0, room.max(1.0));
-    }
-    let mut shown = if busy { d.limit } else { d.limit.clamp(1.0, room.max(1.0)) };
-    let dv = ui.add_enabled(!busy && room >= 1.0, egui::DragValue::new(&mut shown).range(1.0..=room.max(1.0)).speed(0.5).suffix(" %"));
-    if dv.changed() {
-        d.limit = shown;
-    }
-    dv.on_hover_text(crate::trf!(
-        "Budget de la prochaine session de ce projet : elle s'arrête après avoir utilisé cette part de la fenêtre de 5 h de l'abonnement, comptée depuis son lancement. Chaque session a son propre budget : en relancer une repart de zéro.\n{room:.0} % au plus ici, le reste de la limite globale ({global:.0} %) étant pris par les autres.",
-        "Budget of this project's next session: it stops after using this share of the subscription's 5-hour window, counted from its start. Each session has its own budget: starting another one begins again from zero.\n{room:.0} % at most here, the rest of the global limit ({global:.0} %) being taken by the others."
-    ));
-    ui.label(RichText::new(crate::tr!("budget par session", "budget per session")).size(12.0).color(t.tertiary));
-}
-
-fn start_button(ui: &mut egui::Ui, enabled: bool, t: &Tone) -> egui::Response {
-    let text = crate::tr!("Lancer", "Start");
-    let g = ui.painter().layout_no_wrap(text.to_string(), semibold(13.0), Color32::WHITE);
-    let sense = if enabled { egui::Sense::click() } else { egui::Sense::hover() };
-    let (rect, resp) = ui.allocate_exact_size(g.size() + egui::vec2(24.0, 12.0), sense);
-    let a = ui.ctx().animate_bool_with_time(resp.id.with("hov"), resp.hovered() && enabled, 0.15);
-    let base = if enabled { super::projects::BLUE } else { t.fill };
-    let fill = base.lerp_to_gamma(Color32::WHITE, 0.12 * a);
-    ui.painter().rect_filled(rect, 8.0, fill);
-    ui.painter().galley(rect.center() - g.size() / 2.0, g, if enabled { Color32::WHITE } else { t.tertiary });
-    let resp = if enabled { resp.on_hover_cursor(egui::CursorIcon::PointingHand) } else { resp };
-    // Disabled: report it so on_disabled_hover_text works.
-    if enabled { resp } else { resp.on_hover_text(crate::tr!("Branchez d'abord Claude Code", "Plug in Claude Code first")) }
 }
