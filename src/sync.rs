@@ -267,8 +267,34 @@ fn run_one(agent: &Agent, folder: &str, path: &str, cancel: &AtomicBool) -> Resu
     run_agent(agent, folder, agent_args(agent.tool, &prompt(folder)), path, cancel, PER_PROJECT).map(|(_, report)| report)
 }
 
-/// What the agent is asked for the "Regard extérieur" card.
-pub fn review_prompt(folder: &str) -> String {
+/// What the agent is asked for the "Regard extérieur" card. `code`: a code project
+/// (similar products, features); otherwise documents — school work, paperwork or anything
+/// else — where useful resources and next actions replace similar projects.
+pub fn review_prompt(folder: &str, code: bool) -> String {
+    if !code {
+        return crate::trf!(
+            "Donne un regard extérieur sur le projet du dossier « {folder} » : un projet sans code (travail scolaire, \
+             démarche administrative ou autre). Parcours rapidement ses documents SANS RIEN MODIFIER ; si l'outil \
+             get_project_state du serveur orchestra est disponible, appelle-le avec folder = « {folder} » pour connaître \
+             l'état des lieux. Si tu peux chercher sur le web, cherche les ressources fiables qui aideraient (sites \
+             officiels, guides, modèles, échéances).\n\
+             Réponds UNIQUEMENT avec ce Markdown, en français, avec des mots simples et sans jargon technique, condensé \
+             (900 caractères au plus en tout, pas de tableau, pas d'introduction ni de conclusion) :\n\
+             ### Avis\n- 2 ou 3 puces : ce qui est bien avancé et ce qui manque ou risque de coincer, sans complaisance\n\
+             ### Ressources utiles\n- 2 ou 3 puces : nom — à quoi elle sert ici (écris « rien de notable » si tu n'en vois pas)\n\
+             ### Suggestions\n- 3 ou 4 puces : prochaines actions concrètes, la plus utile ou la plus urgente d'abord",
+            "Give an outside view of the project in the folder « {folder} »: a project without code (school work, \
+             paperwork or anything else). Look quickly through its documents WITHOUT CHANGING ANYTHING; if the orchestra \
+             server's get_project_state tool is available, call it with folder = « {folder} » to know the current state. \
+             If you can search the web, look for reliable resources that would help (official sites, guides, templates, \
+             deadlines).\n\
+             Answer ONLY with this Markdown, in English, in plain words without technical jargon, condensed (900 \
+             characters at most in all, no table, no introduction or conclusion):\n\
+             ### Opinion\n- 2 or 3 bullets: what is well under way and what is missing or may get stuck, frankly\n\
+             ### Useful resources\n- 2 or 3 bullets: name — what it is for here (write « nothing notable » if you see none)\n\
+             ### Suggestions\n- 3 or 4 bullets: concrete next actions, the most useful or urgent first"
+        );
+    }
     crate::trf!("Donne un regard extérieur sur le projet du dossier « {folder} ». Lis-le rapidement SANS RIEN MODIFIER \
          (README, structure, `git log --oneline -15`) ; si l'outil get_project_state du serveur orchestra est disponible, \
          appelle-le avec folder = « {folder} » pour connaître l'état des lieux. Si tu peux chercher sur le web, regarde \
@@ -299,7 +325,26 @@ pub struct Fill {
     pub review: String,
 }
 
-pub fn fill_prompt(folder: &str) -> String {
+/// `code`: see `review_prompt`; a project without code gets a plain-words review with
+/// useful resources in place of similar projects.
+pub fn fill_prompt(folder: &str, code: bool) -> String {
+    let base = fill_prompt_code(folder);
+    if code {
+        return base;
+    }
+    base + crate::tr!(
+        "\nCe projet n'est pas du code (travail scolaire, démarche administrative ou autre) : parcours ses documents plutôt \
+         que l'historique git, écris avec des mots simples sans jargon technique, et dans review remplace « ### Projets similaires » \
+         par « ### Ressources utiles » (2 ou 3 puces « nom — à quoi elle sert ici » : sites officiels, guides, modèles), \
+         les suggestions étant les prochaines actions concrètes.",
+        "\nThis project isn't code (school work, paperwork or anything else): look through its documents rather than the git \
+         history, write in plain words without technical jargon, and in review replace « ### Similar projects » with \
+         « ### Useful resources » (2 or 3 bullets « name — what it is for here »: official sites, guides, templates), \
+         the suggestions being the concrete next actions."
+    )
+}
+
+fn fill_prompt_code(folder: &str) -> String {
     crate::trf!("Remplis la fiche du projet du dossier « {folder} » dans un tableau de bord. Lis-le rapidement SANS RIEN MODIFIER \
          (README, structure des dossiers, `git log --oneline -20`, `git status`). Si tu peux chercher sur le web, regarde quels \
          projets ou produits similaires existent.\n\
@@ -344,7 +389,7 @@ pub fn parse_fill(answer: &str) -> Result<Fill, String> {
 
 /// Ask an agent to fill in a project's cards (read-only, web search allowed).
 pub fn ask_fill(folder: &str, prefer: Option<Tool>) -> Result<(Fill, Tool), String> {
-    let (answer, tool) = ask(folder, fill_prompt(folder), "Read,Glob,Grep,Bash(git log:*),Bash(git status:*),Bash(ls:*),WebSearch,WebFetch", 30, prefer)?;
+    let (answer, tool) = ask(folder, fill_prompt(folder, crate::project::shows_git_card(folder)),"Read,Glob,Grep,Bash(git log:*),Bash(git status:*),Bash(ls:*),WebSearch,WebFetch", 30, prefer)?;
     Ok((parse_fill(&answer)?, tool))
 }
 
@@ -582,7 +627,7 @@ pub fn ask_question(folder: &str, question: &str, prefer: Option<Tool>) -> Resul
 /// Ask an agent for a short outside view of a project (read-only, web search allowed).
 /// `prefer`: the agent that worked on the project last, when it is installed.
 pub fn ask_review(folder: &str, prefer: Option<Tool>) -> Result<(String, Tool), String> {
-    ask(folder, review_prompt(folder), "Read,Glob,Grep,Bash(git log:*),Bash(ls:*),WebSearch,WebFetch,mcp__orchestra__get_project_state", 30, prefer)
+    ask(folder, review_prompt(folder, crate::project::shows_git_card(folder)),"Read,Glob,Grep,Bash(git log:*),Bash(ls:*),WebSearch,WebFetch,mcp__orchestra__get_project_state", 30, prefer)
 }
 
 /// Where a folder's repository starts (the nearest folder holding `.git`), else itself.
@@ -735,6 +780,22 @@ mod tests {
         // A full question keeps the person's own default model.
         assert!(!ask_args(Tool::ClaudeCode, "p".into(), "Read", 3, &[], Weight::Full).contains(&"--model".to_string()));
         assert!(!ask_args(Tool::Codex, "p".into(), "Read", 3, &[], Weight::Full).contains(&"-c".to_string()));
+    }
+
+    #[test]
+    fn review_follows_the_project_kind() {
+        for code in [true, false] {
+            let (r, f) = (review_prompt("/tmp/x", code), fill_prompt("/tmp/x", code));
+            assert!(r.contains("/tmp/x") && f.contains("/tmp/x"));
+            assert!(r.contains("RIEN") || r.contains("NOTHING"));
+            assert!(r.contains("Suggestions"));
+        }
+        let (r, f) = (review_prompt("/tmp/x", false), fill_prompt("/tmp/x", false));
+        assert!(r.contains("Ressources utiles") || r.contains("Useful resources"));
+        assert!(!r.contains("git log"), "no git history for a project of documents");
+        assert!(f.contains("Ressources utiles") || f.contains("Useful resources"));
+        assert!(review_prompt("/tmp/x", true).contains("git log"));
+        assert!(!fill_prompt("/tmp/x", true).contains("Ressources utiles") && !fill_prompt("/tmp/x", true).contains("Useful resources"));
     }
 
     #[test]

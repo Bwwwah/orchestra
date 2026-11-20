@@ -2304,6 +2304,7 @@ fn review_card(ui: &mut egui::Ui, cx: &mut Cx) {
     let pr = &*cx.pr;
     let prefer = cx.live.first().map(|s| s.tool);
     let reviewing = cx.reviewing || cx.ai.filling(page_id);
+    let code = shows_git(ui.ctx(), &pr.folder);
     card(ui, t, 0.0, |ui| {
         let by = pr.review.as_ref().map(|r| format!("{} · {}", r.by, relative_time(r.at))).unwrap_or_default();
         card_title(ui, crate::tr!("REGARD EXTÉRIEUR", "OUTSIDE VIEW"), &by, t);
@@ -2320,7 +2321,12 @@ fn review_card(ui: &mut egui::Ui, cx: &mut Cx) {
         if reviewing {
             ui.horizontal(|ui| {
                 ui.add(egui::Spinner::new().size(14.0));
-                ui.label(RichText::new(crate::tr!("L'IA lit le projet et cherche des projets similaires… (1 à 3 minutes)", "The AI reads the project and looks for similar projects… (1 to 3 minutes)")).color(t.secondary));
+                let text = if code {
+                    crate::tr!("L'IA lit le projet et cherche des projets similaires… (1 à 3 minutes)", "The AI reads the project and looks for similar projects… (1 to 3 minutes)")
+                } else {
+                    crate::tr!("L'IA parcourt les documents et cherche des ressources utiles… (1 à 3 minutes)", "The AI looks through the documents and for useful resources… (1 to 3 minutes)")
+                };
+                ui.label(RichText::new(text).color(t.secondary));
             });
         } else if let Some(r) = &pr.review {
             review_sections(ui, &r.text, t);
@@ -2329,7 +2335,11 @@ fn review_card(ui: &mut egui::Ui, cx: &mut Cx) {
         } else {
             ui.add(
                 egui::Label::new(
-                    RichText::new(crate::tr!("Demandez à l'IA branchée sur ce projet un avis court et sans complaisance, les projets similaires apparus récemment, et des idées pour la suite.", "Ask the AI plugged into this project for a short, frank opinion, the similar projects that appeared recently, and ideas for what's next."))
+                    RichText::new(if code {
+                        crate::tr!("Demandez à l'IA branchée sur ce projet un avis court et sans complaisance, les projets similaires apparus récemment, et des idées pour la suite.", "Ask the AI plugged into this project for a short, frank opinion, the similar projects that appeared recently, and ideas for what's next.")
+                    } else {
+                        crate::tr!("Demandez à l'IA un avis court et sans complaisance sur ce projet, des ressources utiles (sites officiels, guides, modèles) et les prochaines actions.", "Ask the AI for a short, frank opinion on this project, useful resources (official sites, guides, templates) and the next actions.")
+                    })
                         .color(t.secondary),
                 )
                 .wrap(),
