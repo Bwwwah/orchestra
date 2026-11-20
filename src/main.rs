@@ -18,6 +18,7 @@ mod live;
 mod git;
 mod mcp;
 mod model;
+mod opener;
 mod project;
 mod richtext;
 mod screen;

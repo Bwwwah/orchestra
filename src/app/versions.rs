@@ -269,15 +269,12 @@ fn github_panel(ui: &mut egui::Ui, v: &mut Versions, page_id: &str, folder: &str
         });
 }
 
+/// GitHub pages: their addresses come from GitHub's answers and the repository's remote,
+/// so they go through the https-only opener.
 fn open_url(url: &str) {
-    let opener = if cfg!(target_os = "macos") {
-        "open"
-    } else if cfg!(windows) {
-        "explorer"
-    } else {
-        "xdg-open"
-    };
-    let _ = std::process::Command::new(opener).arg(url).spawn();
+    if let Err(e) = crate::opener::open_url(url) {
+        eprintln!("orchestra: {e}");
+    }
 }
 
 fn small(text: impl Into<String>, color: Color32) -> RichText {

@@ -492,8 +492,7 @@ impl NotesApp {
             }
             if button(ui, crate::tr!("Ouvrir le dossier", "Open the folder"), t, l).clicked() {
                 let _ = std::fs::create_dir_all(&dir);
-                let opener = if cfg!(target_os = "macos") { "open" } else if cfg!(windows) { "explorer" } else { "xdg-open" };
-                if let Err(e) = std::process::Command::new(opener).arg(&dir).spawn() {
+                if let Err(e) = crate::opener::open_path(&dir) {
                     self.fail(crate::trf!("Impossible d'ouvrir le dossier : {e}", "Couldn't open the folder: {e}"));
                 }
             }
@@ -648,8 +647,7 @@ impl NotesApp {
                     }
                 } else if let Some(url) = ai.download_page() {
                     if button(ui, crate::tr!("Télécharger", "Download"), t, l).clicked() {
-                        let opener = if cfg!(target_os = "macos") { "open" } else if cfg!(windows) { "explorer" } else { "xdg-open" };
-                        let _ = std::process::Command::new(opener).arg(url).spawn();
+                        let _ = crate::opener::open_url(url);
                     }
                 }
             });

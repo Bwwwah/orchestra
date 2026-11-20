@@ -1532,8 +1532,7 @@ impl NotesApp {
                             return;
                         }
                         if super::projects::action_link(ui, crate::tr!("Ouvrir la copie", "Open the copy")).clicked() {
-                            let opener = if cfg!(target_os = "macos") { "open" } else if cfg!(windows) { "explorer" } else { "xdg-open" };
-                            let _ = std::process::Command::new(opener).arg(&r.worktree).spawn();
+                            let _ = crate::opener::open_path(std::path::Path::new(&r.worktree));
                         }
                         let asking = confirm.as_ref().filter(|(id, _)| *id == r.id).map(|(_, a)| *a);
                         match asking {

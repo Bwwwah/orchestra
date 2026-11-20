@@ -1805,8 +1805,7 @@ pub(super) fn source_banner(ui: &mut egui::Ui, page_id: &str, src: &crate::docs:
                 actions.push(Action::RevertDoc(page_id.to_string()));
             }
             if !src.missing && link(ui, crate::tr!("Ouvrir le fichier", "Open the file")) {
-                let opener = if cfg!(target_os = "macos") { "open" } else if cfg!(windows) { "explorer" } else { "xdg-open" };
-                let _ = std::process::Command::new(opener).arg(&src.path).spawn();
+                let _ = crate::opener::open_path(std::path::Path::new(&src.path));
             }
         });
     });
