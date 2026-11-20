@@ -155,6 +155,9 @@ impl NotesApp {
             crate::usage::start_tracking(&std::env::current_exe().unwrap_or_default())?;
             self.ais.tracking = true;
         }
+        // The session checks interfaces with take_screenshot, which macOS only allows once
+        // Orchestra has the « Screen Recording » permission: ask for it now (once per launch).
+        crate::screen::ensure_permission();
         let steps_at_start: Vec<(String, bool)> = pr.steps.iter().map(|s| (s.title.clone(), s.status == crate::project::StepStatus::Done)).collect();
         let copy = auto::make_copy(&folder, &title)?;
         let agent = Agent::ClaudeCode;
@@ -659,10 +662,11 @@ impl NotesApp {
                 if let Some(msg) = self.launch_card(ui, &ctx, &t) {
                     self.notice(msg);
                 }
-                ui.add_space(14.0);
-                self.history_card(ui, &t, actions);
+                // The settings and limits come before the past sessions, which only grow.
                 ui.add_space(14.0);
                 self.limits_card(ui, &t);
+                ui.add_space(14.0);
+                self.history_card(ui, &t, actions);
                 ui.add_space(40.0);
             });
         });
@@ -765,7 +769,6 @@ impl NotesApp {
         let today = auto::local_day(crate::model::now_ms());
         let todays: Vec<&crate::model::RunRecord> = self.ws.runs.iter().filter(|r| !r.outcome.is_empty() && auto::local_day(r.started) == today).collect();
         let steps: usize = todays.iter().map(|r| r.steps_done.len()).sum();
-        let used_today: f32 = todays.iter().map(|r| r.pct).sum();
         let hour = self.ws.settings.orch.report_hour;
         let w = ui.available_width();
         let gap = 14.0;
@@ -781,22 +784,23 @@ impl NotesApp {
             // A soft wash of the accent in the corner.
             p.with_clip_rect(rect.shrink(1.0)).circle_filled(rect.right_top() + egui::vec2(-10.0, 10.0), 52.0 + 6.0 * a, accent.gamma_multiply(0.07));
             let x = rect.left() + 18.0;
-            let label = [crate::tr!("ABONNEMENT · 24 H", "SUBSCRIPTION · 24 H"), crate::tr!("IA AU TRAVAIL", "AIS AT WORK"), crate::tr!("AUJOURD'HUI", "TODAY")][i];
+            // Each figure once on the page: the week (and the day's pace) in the bar above, the
+            // 5-hour window here (the one the sessions stop at), counts in the other tiles.
+            let label = [crate::tr!("FENÊTRE DE 5 H", "5-HOUR WINDOW"), crate::tr!("IA AU TRAVAIL", "AIS AT WORK"), crate::tr!("AUJOURD'HUI", "TODAY")][i];
             p.text(egui::pos2(x, rect.top() + 16.0), egui::Align2::LEFT_TOP, label, semibold(11.5), t.tertiary);
             let (big, sub): (String, String) = match i {
-                // The last 24 hours up front; the current 5-hour window below and in the ring.
                 0 => (
-                    day.or(five).map(|f| format!("{f:.0} %")).unwrap_or_else(|| "—".into()),
+                    five.map(|f| format!("{f:.0} %")).unwrap_or_else(|| "—".into()),
                     match (five, five_left) {
-                        (Some(f), Some(l)) => crate::trf!("5 h : {f:.0} % · à zéro dans {}", "5 h: {f:.0} % · resets in {}", crate::usage::left_text(l)),
-                        (Some(f), None) => crate::trf!("5 h : {f:.0} % · limite {global:.0} %", "5 h: {f:.0} % · limit {global:.0} %"),
+                        (Some(_), Some(l)) => crate::trf!("à zéro dans {} · limite {global:.0} %", "resets in {} · limit {global:.0} %", crate::usage::left_text(l)),
+                        (Some(_), None) => crate::trf!("limite des sessions : {global:.0} %", "sessions' limit: {global:.0} %"),
                         _ => crate::tr!("inconnu pour l'instant", "unknown for now").into(),
                     },
                 ),
                 1 => (running.to_string(), if running == 0 { crate::trf!("{ready} projet(s) prêt(s) à lancer", "{ready} project(s) ready to start") } else { crate::trf!("sur {ready} projet(s) prêt(s)", "of {ready} project(s) ready") }),
                 _ => (
                     todays.len().to_string(),
-                    if todays.is_empty() { crate::trf!("session terminée · bilan à {hour} h", "finished session · summary at {hour} h") } else { crate::trf!("session(s) · {steps} étape(s) faite(s) · ≈ {used_today:.0} %", "session(s) · {steps} step(s) done · ≈ {used_today:.0} %") },
+                    if todays.is_empty() { crate::trf!("session terminée · bilan à {hour} h", "finished session · summary at {hour} h") } else { crate::trf!("session(s) · {steps} étape(s) faite(s)", "session(s) · {steps} step(s) done") },
                 ),
             };
             p.text(egui::pos2(x, rect.top() + 36.0), egui::Align2::LEFT_TOP, &big, bold(30.0), t.text);
@@ -811,23 +815,16 @@ impl NotesApp {
                         let c = egui::pos2(rect.right() - 50.0, rect.center().y + 4.0);
                         ring(ui, c, 28.0, five.map(|f| f / 100.0), global / 100.0, accent, t);
                     }
-                    // The details: limits and when each window starts again.
-                    let mut tip = vec![];
+                    // The details, on hover only.
+                    let mut tip = vec![crate::trf!(
+                        "Part de la fenêtre de 5 h de l'abonnement utilisée. Les sessions s'arrêtent à la limite globale ({global:.0} %), réglable plus bas.",
+                        "Share of the subscription's 5-hour window used. Sessions stop at the global limit ({global:.0} %), set below."
+                    )];
                     if let Some(d) = day {
-                        tip.push(crate::trf!(
-                            "Dernières 24 h : {d:.0} % (les fenêtres de 5 h de la journée, additionnées)",
-                            "Last 24 hours: {d:.0} % (the day's 5-hour windows, added up)"
-                        ));
+                        tip.push(crate::trf!("Dernières 24 h : {d:.0} % (les fenêtres de 5 h de la journée, additionnées)", "Last 24 hours: {d:.0} % (the day's 5-hour windows, added up)"));
                     }
-                    tip.push(crate::trf!("Limite globale : {global:.0} % de la fenêtre de 5 h", "Global limit: {global:.0} % of the 5-hour window"));
-                    if let Some(l) = five_left {
-                        tip.push(crate::trf!("Fenêtre de 5 h : repart à zéro dans {}", "5-hour window: resets in {}", crate::usage::left_text(l)));
-                    }
-                    if let Some(wk) = week {
-                        tip.push(match week_left {
-                            Some(l) => crate::trf!("Semaine : {wk:.0} %, repart à zéro dans {}", "Week: {wk:.0} %, resets in {}", crate::usage::left_text(l)),
-                            None => crate::trf!("Semaine : {wk:.0} %", "Week: {wk:.0} %"),
-                        });
+                    if let Some(l) = week_left.filter(|_| week.is_some()) {
+                        tip.push(crate::trf!("La semaine repart à zéro dans {}", "The week resets in {}", crate::usage::left_text(l)));
                     }
                     resp.on_hover_text(tip.join("\n"));
                 }
@@ -853,36 +850,13 @@ impl NotesApp {
     }
 
     fn limits_card(&mut self, ui: &mut egui::Ui, t: &Tone) {
-        let five = self.orch.five;
         let o = &mut self.ws.settings.orch;
         let before = o.clone();
         super::projects::card(ui, t, 0.0, |ui| {
             super::projects::card_title(ui, crate::tr!("RÉGLAGES ET LIMITES", "SETTINGS AND LIMITS"), "", t);
-            // The 5-hour window: what is used, and up to where the AIs may go.
+            // The 5-hour window's use is shown once, in the tile at the top (with this limit
+            // as the tick of its ring): here, only the settings.
             let w = ui.available_width();
-            let (area, _) = ui.allocate_exact_size(egui::vec2(w, 34.0), egui::Sense::hover());
-            let bar = egui::Rect::from_min_size(egui::pos2(area.left(), area.top() + 18.0), egui::vec2(w, 10.0));
-            let p = ui.painter();
-            p.rect_filled(bar, 5.0, t.fill);
-            let lx = bar.left() + bar.width() * o.global_limit / 100.0;
-            // Beyond the limit: hatched-looking darker zone.
-            p.rect_filled(egui::Rect::from_min_max(egui::pos2(lx, bar.top()), bar.max), egui::CornerRadius { nw: 0, sw: 0, ne: 5, se: 5 }, Color32::from_rgb(224, 62, 62).gamma_multiply(0.12));
-            if let Some(f) = five {
-                let frac = super::projects::smooth(ui, "orch-five", f / 100.0);
-                let color = if f >= o.global_limit { Color32::from_rgb(224, 62, 62) } else { super::projects::GREEN };
-                ui.painter().rect_filled(egui::Rect::from_min_size(bar.min, egui::vec2(bar.width() * frac, bar.height())), 5.0, color);
-            }
-            let p = ui.painter();
-            p.vline(lx, egui::Rangef::new(bar.top() - 3.0, bar.bottom() + 3.0), egui::Stroke::new(2.0, super::projects::ORANGE));
-            let lab = crate::trf!("limite {:.0} %", "limit {:.0} %", o.global_limit);
-            let align = if lx > bar.right() - 60.0 { egui::Align2::RIGHT_BOTTOM } else { egui::Align2::CENTER_BOTTOM };
-            p.text(egui::pos2(lx, bar.top() - 4.0), align, lab, FontId::proportional(11.5), super::projects::ORANGE);
-            let used = match five {
-                Some(f) => crate::trf!("{f:.0} % utilisés", "{f:.0} % used"),
-                None => crate::tr!("utilisation inconnue", "usage unknown").into(),
-            };
-            p.text(egui::pos2(bar.left(), bar.top() - 4.0), egui::Align2::LEFT_BOTTOM, used, FontId::proportional(11.5), t.secondary);
-            ui.add_space(10.0);
             let lk = super::settings::look(ui.visuals().dark_mode);
             let row = |ui: &mut egui::Ui, label: &str, hint: &str, add: &mut dyn FnMut(&mut egui::Ui)| {
                 ui.horizontal(|ui| {
@@ -902,7 +876,7 @@ impl NotesApp {
             let col_w = if two { (w - 28.0) / 2.0 } else { w };
             let mut left = |ui: &mut egui::Ui| {
                 ui.set_width(col_w);
-                row(ui, crate::tr!("Limite globale", "Global limit"), crate::tr!("Aucune session ne va au-delà, tous projets confondus", "No session goes past it, all projects together"), &mut |ui| {
+                row(ui, crate::tr!("Limite globale", "Global limit"), crate::tr!("De la fenêtre de 5 h : aucune session ne va au-delà, tous projets confondus", "Of the 5-hour window: no session goes past it, all projects together"), &mut |ui| {
                     ui.add(egui::DragValue::new(&mut o.global_limit).range(5.0..=100.0).speed(0.5).suffix(" %"));
                 });
                 row(ui, crate::tr!("Commits autorisés", "Commits allowed"), crate::tr!("Sur leur branche, envoyée sur GitHub par Orchestra", "On their branch, pushed to GitHub by Orchestra"), &mut |ui| {
@@ -994,7 +968,10 @@ impl NotesApp {
                     ui.painter().rect_filled(bar, 4.0, t.fill);
                     let frac = super::projects::smooth(ui, ("run-pct", &r.id), (r.pct / r.limit.max(0.1)).clamp(0.0, 1.0));
                     ui.painter().rect_filled(egui::Rect::from_min_size(bar.min, egui::vec2(bar.width() * frac, 8.0)), 4.0, if frac > 0.85 { super::projects::ORANGE } else { super::projects::GREEN });
-                    ui.label(RichText::new(format!("{:.1} / {:.0} %", r.pct, r.limit)).size(12.5).color(t.secondary));
+                    ui.label(RichText::new(crate::trf!("{:.1} % utilisés sur un budget de {:.0} %", "{:.1} % used of a {:.0} % budget", r.pct, r.limit)).size(12.5).color(t.secondary)).on_hover_text(crate::tr!(
+                        "Part de la fenêtre de 5 h utilisée par cette session depuis son lancement, et son budget : elle s'arrête en l'atteignant. Les sessions précédentes du projet ne comptent pas.",
+                        "Share of the 5-hour window this session used since it started, and its budget: it stops on reaching it. The project's earlier sessions don't count."
+                    ));
                 });
                 ui.horizontal(|ui| {
                     ui.add_space(20.0);
@@ -1135,7 +1112,11 @@ impl NotesApp {
                             if dv.changed() {
                                 d.limit = shown;
                             }
-                            dv.on_hover_text(crate::trf!("Part de la session de 5 h que ce projet peut utiliser : {room:.0} % au plus, le reste de la limite globale ({global:.0} %) étant pris par les autres", "Share of the 5-hour window this project may use: {room:.0} % at most, the rest of the global limit ({global:.0} %) being taken by the others"));
+                            dv.on_hover_text(crate::trf!(
+                                "Budget de la prochaine session de ce projet : elle s'arrête après avoir utilisé cette part de la fenêtre de 5 h de l'abonnement, comptée depuis son lancement. Chaque session a son propre budget : en relancer une repart de zéro.\n{room:.0} % au plus ici, le reste de la limite globale ({global:.0} %) étant pris par les autres.",
+                                "Budget of this project's next session: it stops after using this share of the subscription's 5-hour window, counted from its start. Each session has its own budget: starting another one begins again from zero.\n{room:.0} % at most here, the rest of the global limit ({global:.0} %) being taken by the others."
+                            ));
+                            ui.label(RichText::new(crate::tr!("budget par session", "budget per session")).size(12.0).color(t.tertiary));
                         });
                     });
                     ui.horizontal(|ui| {
@@ -1185,7 +1166,7 @@ impl NotesApp {
     }
 
     fn history_card(&mut self, ui: &mut egui::Ui, t: &Tone, actions: &mut Vec<Action>) {
-        let done: Vec<crate::model::RunRecord> = self.ws.runs.iter().rev().filter(|r| !r.outcome.is_empty()).take(20).cloned().collect();
+        let done: Vec<crate::model::RunRecord> = self.ws.runs.iter().rev().filter(|r| !r.outcome.is_empty()).take(50).cloned().collect();
         if done.is_empty() {
             return;
         }
@@ -1193,7 +1174,13 @@ impl NotesApp {
         let confirm = self.orch.confirm.clone();
         super::projects::card(ui, t, 0.0, |ui| {
             super::projects::card_title(ui, crate::tr!("SESSIONS TERMINÉES", "FINISHED SESSIONS"), &done.len().to_string(), t);
-            for r in &done {
+            // Five sessions in view, the others by scrolling: the list's height is that of its
+            // first five rows (measured on the last frame, the rows wrap with the width).
+            let height_key = egui::Id::unique("orch-done-height");
+            let five: f32 = ui.ctx().data(|d| d.get_temp(height_key)).unwrap_or(5.0 * 62.0);
+            egui::ScrollArea::vertical().id_salt("orch-done-list").max_height(five).auto_shrink([false, true]).show(ui, |ui| {
+            let top = ui.min_rect().top();
+            for (i, r) in done.iter().enumerate() {
                 let bg = super::projects::hover_begin(ui);
                 let row = ui.horizontal_top(|ui| {
                     let (b, _) = ui.allocate_exact_size(egui::vec2(26.0, 26.0), egui::Sense::hover());
@@ -1205,7 +1192,11 @@ impl NotesApp {
                         ui.spacing_mut().item_spacing.x = 8.0;
                         ui.label(RichText::new(&r.title).font(semibold(14.0)).color(t.text));
                         ui.label(RichText::new(format!("{} · {} → {}", auto::local_day(r.started), auto::hm(r.started), auto::hm(r.ended.max(r.started)))).size(12.5).color(t.tertiary));
-                        ui.label(RichText::new(crate::trf!("{} · {} étape(s) · ≈ {:.0} %", "{} · {} step(s) · ≈ {:.0} %", r.outcome, r.steps_done.len(), r.pct)).size(12.5).color(t.secondary));
+                        let used = if r.limit > 0.0 { crate::trf!("≈ {:.0} % / {:.0} % de budget", "≈ {:.0} % / {:.0} % budget", r.pct, r.limit) } else { format!("≈ {:.0} %", r.pct) };
+                        ui.label(RichText::new(crate::trf!("{} · {} étape(s) · {used}", "{} · {} step(s) · {used}", r.outcome, r.steps_done.len())).size(12.5).color(t.secondary)).on_hover_text(crate::tr!(
+                            "Part de la fenêtre de 5 h utilisée par cette session, sur le budget qu'elle avait",
+                            "Share of the 5-hour window this session used, out of the budget it had"
+                        ));
                     });
                     ui.horizontal_wrapped(|ui| {
                         ui.spacing_mut().item_spacing.x = 6.0;
@@ -1249,7 +1240,12 @@ impl NotesApp {
                 });
                 super::projects::hover_end(ui, bg, row.response.rect, egui::Id::unique(("orch-done", &r.id)), t);
                 ui.add_space(8.0);
+                if i == 4 || i + 1 == done.len().min(5) {
+                    let h = row.response.rect.bottom() + 8.0 - top;
+                    ui.ctx().data_mut(|d| d.insert_temp(height_key, h));
+                }
             }
+            });
         });
         if let Some((id, a)) = act {
             match a {

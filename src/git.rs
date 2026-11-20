@@ -177,6 +177,16 @@ pub fn gh_info() -> (bool, bool) {
 /// A GitHub repository for the project, then push (needs `gh`, signed in). When the folder
 /// isn't a git repository yet, it becomes one first (everything in a first commit).
 pub fn create_github(folder: &str, name: &str, private: bool) -> Result<String, String> {
+    // Checked before anything is done to the folder. The name goes to `gh` as an argument:
+    // one starting with "-" would be read as an option.
+    let name = name.trim();
+    if !valid_repo_name(name) {
+        return Err(crate::tr!(
+            "nom de dépôt invalide : lettres, chiffres, « . », « _ » et « - » seulement, sans « - » au début",
+            "invalid repository name: letters, digits, « . », « _ » and « - » only, not starting with « - »"
+        )
+        .into());
+    }
     let dir = crate::project::normalize_folder(folder);
     let root = match git(&dir, &["rev-parse", "--show-toplevel"]) {
         Ok(r) => PathBuf::from(r.trim()),
@@ -189,13 +199,20 @@ pub fn create_github(folder: &str, name: &str, private: bool) -> Result<String, 
         git(&root, &["add", "-A"])?;
         git(&root, &["commit", "-m", crate::tr!("Premier enregistrement", "First commit")])?;
     }
-    let name = name.trim();
-    if name.is_empty() || name.contains(char::is_whitespace) {
-        return Err(crate::tr!("nom de dépôt invalide (pas d'espace)", "invalid repository name (no spaces)").into());
-    }
     let vis = if private { "--private" } else { "--public" };
     run_in(&root, "gh", &["repo", "create", name, vis, "--source", ".", "--remote", "origin", "--push"])?;
     Ok(crate::trf!("Dépôt GitHub {} « {name} » créé et envoyé.", "{} GitHub repository « {name} » created and pushed.", if private { crate::tr!("privé", "Private") } else { "public" }))
+}
+
+/// A name GitHub accepts for a new repository and `gh` can't take for an option:
+/// [A-Za-z0-9._-], at most 100 characters, not starting with "-", not "." or "..".
+pub fn valid_repo_name(name: &str) -> bool {
+    !name.is_empty()
+        && name.len() <= 100
+        && !name.starts_with('-')
+        && name != "."
+        && name != ".."
+        && name.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
 }
 
 /// A repository name from a folder or title: "Bind — app mobile" → "bind-app-mobile".
@@ -481,7 +498,8 @@ pub fn suggest_commit(st: &GitState, prefer: Option<Tool>) -> Result<String, Str
         if recent.is_empty() { crate::tr!("(aucun)", "(none)").into() } else { recent.join("\n") },
         diff_for_prompt(&rd)
     );
-    let (answer, _) = crate::sync::ask(&st.root, prompt, "Bash(git diff:*),Bash(git status:*),Read", 4, prefer)?;
+    // Putting a diff into words: a lighter model is enough.
+    let (answer, _) = crate::sync::ask_light(&st.root, prompt, "Bash(git diff:*),Bash(git status:*),Read", 4, prefer)?;
     Ok(clean_answer(&answer))
 }
 
@@ -504,7 +522,7 @@ pub fn suggest_release(st: &GitState, prefer: Option<Tool>) -> Result<(String, S
          sections), in plain language for a user.\n\nCommits since the last version:\n{log}",
         st.last_tag.as_deref().unwrap_or("aucune")
     );
-    let (answer, _) = crate::sync::ask(&st.root, prompt, "Bash(git log:*),Bash(git diff:*),Read", 4, prefer)?;
+    let (answer, _) = crate::sync::ask_light(&st.root, prompt, "Bash(git log:*),Bash(git diff:*),Read", 4, prefer)?;
     let answer = clean_answer(&answer);
     let mut version = minor.clone();
     let mut notes = vec![];
@@ -561,6 +579,24 @@ mod tests {
         let mut st = GitState::default();
         parse_branch_line("No commits yet on main", &mut st);
         assert_eq!(st.branch, "main");
+    }
+
+    #[test]
+    fn repository_names() {
+        for ok in ["orchestra", "Bind-app_mobile.v2", "a", ".github", &"x".repeat(100)] {
+            assert!(valid_repo_name(ok), "{ok}");
+        }
+        for bad in ["", "-h", "--public", "a b", "owner/name", ".", "..", "café", "a;rm", "$(x)", &"x".repeat(101)] {
+            assert!(!valid_repo_name(bad), "{bad}");
+        }
+        // The names the app proposes pass.
+        assert!(valid_repo_name(&repo_name("Bind — app mobile")));
+        // Refused before the folder is touched (no git init, no commit).
+        let dir = std::env::temp_dir().join(format!("orch-ghname-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        assert!(create_github(dir.to_str().unwrap(), "--help", true).is_err());
+        assert!(!dir.join(".git").exists());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

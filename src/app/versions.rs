@@ -255,7 +255,7 @@ fn github_panel(ui: &mut egui::Ui, v: &mut Versions, page_id: &str, folder: &str
                     });
                     v.new_repo.insert(page_id.to_string(), (name.clone(), private));
                     ui.add_space(4.0);
-                    let ok = idle && !name.trim().is_empty() && !name.contains(char::is_whitespace);
+                    let ok = idle && crate::git::valid_repo_name(name.trim());
                     let r = ui.add_enabled(ok, egui::Button::new(RichText::new(crate::tr!("Créer sur GitHub", "Create on GitHub")).size(13.0)));
                     if r.on_hover_text(crate::tr!("Crée le dépôt sur votre compte, le relie à ce dossier et y envoie tout (gh repo create)", "Creates the repository on your account, links it to this folder and pushes everything (gh repo create)")).clicked() {
                         let (f, n) = (folder.to_string(), name.trim().to_string());

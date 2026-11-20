@@ -19,6 +19,9 @@ use std::io::{Read, Write};
 
 /// Largest message accepted (a big page with its database).
 const MAX_FRAME: usize = 32 * 1024 * 1024;
+/// Largest key-exchange message accepted (a SPAKE2 message is 33 bytes). Before the code is
+/// checked, a stranger must not make the host set aside 32 MB per connection.
+const MAX_HANDSHAKE_FRAME: usize = 64;
 
 pub struct Sender {
     cipher: ChaCha20Poly1305,
@@ -42,11 +45,11 @@ fn write_raw(w: &mut impl Write, bytes: &[u8]) -> std::io::Result<()> {
     w.flush()
 }
 
-fn read_raw(r: &mut impl Read) -> std::io::Result<Vec<u8>> {
+fn read_raw(r: &mut impl Read, max: usize) -> std::io::Result<Vec<u8>> {
     let mut len = [0u8; 4];
     r.read_exact(&mut len)?;
     let len = u32::from_be_bytes(len) as usize;
-    if len > MAX_FRAME {
+    if len > max {
         return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, crate::tr!("message trop long", "message too long")));
     }
     let mut buf = vec![0u8; len];
@@ -59,7 +62,7 @@ fn read_raw(r: &mut impl Read) -> std::io::Result<Vec<u8>> {
 pub fn handshake(stream: &mut (impl Read + Write), code: &str, hosting: bool) -> std::io::Result<(Sender, Receiver)> {
     let (state, outbound) = Spake2::<Ed25519Group>::start_symmetric(&Password::new(code.as_bytes()), &Identity::new(b"orchestra/direct/1"));
     write_raw(stream, &outbound)?;
-    let inbound = read_raw(stream)?;
+    let inbound = read_raw(stream, MAX_HANDSHAKE_FRAME)?;
     let shared = state.finish(&inbound).map_err(|_| std::io::Error::new(std::io::ErrorKind::InvalidData, crate::tr!("échange de clés invalide", "invalid key exchange")))?;
     let hk = Hkdf::<Sha256>::new(Some(b"orchestra"), &shared);
     let mut host_key = [0u8; 32];
@@ -92,7 +95,7 @@ pub enum RecvError {
 
 impl Receiver {
     pub fn recv(&mut self, r: &mut impl Read) -> Result<Vec<u8>, RecvError> {
-        let sealed = read_raw(r).map_err(|_| RecvError::Closed)?;
+        let sealed = read_raw(r, MAX_FRAME).map_err(|_| RecvError::Closed)?;
         let plain = self.cipher.decrypt(&nonce(self.counter), sealed.as_slice()).map_err(|_| RecvError::Refused)?;
         self.counter += 1;
         Ok(plain)
@@ -134,6 +137,35 @@ mod tests {
         let ((_, mut hrx, mut hs), (mut ptx, _, mut ps)) = pair("loutre-42", "loutre-43");
         ptx.send(&mut ps, b"bonjour").unwrap();
         assert_eq!(hrx.recv(&mut hs), Err(RecvError::Refused));
+    }
+
+    #[test]
+    fn handshake_refuses_an_oversized_key_message() {
+        use std::io::Cursor;
+        // What the other end "sent": a key message announcing 1 MB.
+        let mut incoming = (1024u32 * 1024).to_be_bytes().to_vec();
+        incoming.extend(vec![0u8; 1024 * 1024]);
+        struct Wire(Cursor<Vec<u8>>, Vec<u8>);
+        impl Read for Wire {
+            fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+                self.0.read(buf)
+            }
+        }
+        impl Write for Wire {
+            fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+                self.1.write(buf)
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        let mut wire = Wire(Cursor::new(incoming), vec![]);
+        let err = handshake(&mut wire, "loutre-42", true).err().expect("refused");
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
+        assert_eq!(wire.0.position(), 4, "only the length was read");
+        // Our own key message fits the limit, so a real exchange still works.
+        let sent = u32::from_be_bytes(wire.1[..4].try_into().unwrap()) as usize;
+        assert!(sent <= MAX_HANDSHAKE_FRAME, "SPAKE2 message of {sent} bytes");
     }
 
     #[test]

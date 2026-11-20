@@ -20,7 +20,7 @@ rebranchée. Le bouton rond en bas à droite n'apparaît que tant qu'aucune IA n
 | Outil | Pour |
 |---|---|
 | `list_pages`, `search_pages`, `read_page` | trouver et lire une page (en Markdown) |
-| `create_page`, `append_to_page`, `replace_page_content`, `update_page`, `update_block`, `trash_page` | écrire |
+| `create_page`, `append_to_page`, `replace_page_content`, `update_page`, `update_block`, `trash_page`, `restore_page` | écrire |
 | `create_database`, `query_database`, `add_database_row`, `update_database_row`, `delete_database_row` | les bases |
 | `list_projects`, `get_project_state` | où en est un projet (par id, titre ou dossier) |
 | `create_project`, `update_project` | statut, état des lieux (`done`, `in_progress`, `blockers`) |

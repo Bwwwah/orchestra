@@ -596,7 +596,7 @@ impl NotesApp {
             (crate::tr!("Trouver des pages", "Find pages"), "list_pages, search_pages"),
             (crate::tr!("Lire une page en Markdown", "Read a page as Markdown"), "read_page"),
             (crate::tr!("Écrire, résumer, traduire, compléter", "Write, summarise, translate, complete"), "create_page, append_to_page, replace_page_content"),
-            (crate::tr!("Modifier, renommer, ranger", "Edit, rename, organise"), "update_block, update_page, trash_page"),
+            (crate::tr!("Modifier, renommer, ranger", "Edit, rename, organise"), "update_block, update_page, trash_page, restore_page"),
             (crate::tr!("Gérer les bases de données", "Manage databases"), "create_database, query_database, add / update / delete_database_row"),
         ] {
             row(ui, name, what, t, |_| {});

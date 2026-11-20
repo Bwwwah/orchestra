@@ -165,9 +165,6 @@ impl NotesApp {
             }
         });
         ui.add_space(12.0);
-        if side_item(ui, SideIcon::Line(Icon::Library), crate::tr!("Bibliothèque", "Library"), self.view == View::Library, 0.0, &t).clicked() {
-            self.view = View::Library;
-        }
         if side_item(ui, SideIcon::Line(Icon::TodoList), crate::tr!("Projets", "Projects"), self.view == View::Projects, 0.0, &t).clicked() {
             self.view = View::Projects;
         }
@@ -220,16 +217,28 @@ impl NotesApp {
             let shared_roots: Vec<String> = self.ws.pages.iter().filter(|p| !p.trashed && is_shared(p)).map(|p| p.id.clone()).collect();
             if !shared_roots.is_empty() {
                 section_header(ui, crate::tr!("Projets partagés", "Shared projects"), &t);
+                let mut rows = vec![];
                 for id in shared_roots {
-                    self.tree_row(ui, &id, 0, actions, &t);
+                    let r = self.tree_row(ui, &id, 0, actions, &t);
+                    rows.push((id, r));
                 }
+                self.reorder_roots(ui, &rows);
                 ui.add_space(10.0);
             }
             section_header(ui, crate::tr!("Pages privées", "Private pages"), &t);
-            let roots: Vec<String> = self.ws.children(None).iter().filter(|p| !is_shared(p)).map(|p| p.id.clone()).collect();
+            // « Rapports des IA » stays last, and can't be dragged nor dropped around.
+            let reports = self.ws.settings.orch.reports_page.clone();
+            let (pinned, roots): (Vec<String>, Vec<String>) =
+                self.ws.children(None).iter().filter(|p| !is_shared(p)).map(|p| p.id.clone()).partition(|id| !reports.is_empty() && *id == reports);
+            let mut rows = vec![];
             for id in roots {
+                let r = self.tree_row(ui, &id, 0, actions, &t);
+                rows.push((id, r));
+            }
+            for id in pinned {
                 self.tree_row(ui, &id, 0, actions, &t);
             }
+            self.reorder_roots(ui, &rows);
             if add_row(ui, &t).clicked() {
                 actions.push(Action::NewPage(None));
             }
@@ -301,8 +310,39 @@ impl NotesApp {
         ui.data_mut(|d| d.insert_temp(bottom_key, h));
     }
 
-    fn tree_row(&self, ui: &mut egui::Ui, id: &str, depth: usize, actions: &mut Vec<Action>, t: &Tone) {
-        let Some(p) = self.ws.page(id) else { return };
+    /// Top-level pages of one sidebar section, put in order by dragging them: a line shows
+    /// where the page will land, it moves there on release. `rows`: each page's row, in order.
+    fn reorder_roots(&mut self, ui: &mut egui::Ui, rows: &[(String, Option<egui::Response>)]) {
+        let key = egui::Id::unique("sidebar-drag-page");
+        let rows: Vec<(&String, &egui::Response)> = rows.iter().filter_map(|(id, r)| r.as_ref().map(|r| (id, r))).collect();
+        if let Some((id, _)) = rows.iter().find(|(_, r)| r.drag_started()) {
+            ui.data_mut(|d| d.insert_temp(key, (*id).clone()));
+        }
+        let Some(dragged) = ui.data(|d| d.get_temp::<String>(key)) else { return };
+        // The drag belongs to another section.
+        if !rows.iter().any(|(id, _)| **id == dragged) {
+            return;
+        }
+        let (Some(pos), Some((_, first)), Some((last_id, last))) = (ui.ctx().pointer_latest_pos(), rows.first(), rows.last()) else { return };
+        ui.ctx().set_cursor_icon(egui::CursorIcon::Grabbing);
+        // Before the first row whose middle is below the pointer, else after the last one.
+        let (target, after, y) = match rows.iter().find(|(_, r)| pos.y < r.rect.center().y) {
+            Some((id, r)) => ((*id).clone(), false, r.rect.top()),
+            None => ((*last_id).clone(), true, last.rect.bottom()),
+        };
+        ui.painter().hline(first.rect.left() + 6.0..=first.rect.right() - 6.0, y, egui::Stroke::new(2.0, super::projects::BLUE));
+        if ui.input(|i| i.pointer.any_released() || !i.pointer.primary_down()) {
+            if self.ws.move_page_near(&dragged, &target, after) {
+                self.dirty_since.get_or_insert_with(Instant::now);
+            }
+            ui.data_mut(|d| d.remove::<String>(key));
+        }
+        ui.ctx().request_repaint();
+    }
+
+    /// One page of the tree (and its open sub-pages); returns its own row.
+    fn tree_row(&self, ui: &mut egui::Ui, id: &str, depth: usize, actions: &mut Vec<Action>, t: &Tone) -> Option<egui::Response> {
+        let Some(p) = self.ws.page(id) else { return None };
         let kids: Vec<String> = self.ws.children(Some(id)).iter().map(|c| c.id.clone()).collect();
         // In a project in "lecture seule", nothing can be added, and empty pages can't be
         // unfolded (there is nothing inside to show).
@@ -312,6 +352,11 @@ impl NotesApp {
         let selected = self.current.as_deref() == Some(id) && self.view == View::Page;
         let indent = depth as f32 * 12.0;
         let icon = page_icon(p).to_string();
+        // Top-level pages can be dragged to another place: a drag-only area under the row
+        // (clicks, the arrow, "+" and the menu stay the row's; the drag falls through to it).
+        let below = egui::Rect::from_min_size(ui.cursor().min, egui::vec2(ui.available_width(), SIDE_ROW));
+        let pinned = id == self.ws.settings.orch.reports_page;
+        let drag = (depth == 0 && !pinned).then(|| ui.interact(below, egui::Id::unique(("sidebar-reorder", id)), egui::Sense::drag()));
         let row = side_item(ui, SideIcon::Emoji(&icon), &p.display_title(), selected, indent, t);
         let rect = row.rect;
         let icon_rect = egui::Rect::from_center_size(egui::pos2(rect.left() + 18.0 + indent, rect.center().y), egui::vec2(22.0, 22.0));
@@ -389,6 +434,7 @@ impl NotesApp {
                 self.tree_row(ui, &k, depth + 1, actions, t);
             }
         }
+        drag.map(|d| d.with_new_rect(rect))
     }
 
     /// The tab strip: back/forward, Firefox-like tabs (the open one is a rounded card joining the page),
@@ -764,55 +810,6 @@ impl NotesApp {
                         }
                     }
                 });
-            });
-        });
-    }
-
-    /// Library: every page, most recently edited first.
-    pub(super) fn library_view(&mut self, ui: &mut egui::Ui, actions: &mut Vec<Action>) {
-        let t = tone(ui.visuals().dark_mode);
-        let mut pages: Vec<&Page> = self.ws.pages.iter().filter(|p| !p.trashed).collect();
-        pages.sort_by(|a, b| b.updated.cmp(&a.updated));
-        let avail = ui.available_width();
-        let width = 900.0f32.min(avail - 40.0).max(300.0);
-        ui.add_space(50.0);
-        ui.horizontal(|ui| {
-            ui.add_space(((avail - width) / 2.0).max(20.0));
-            ui.vertical(|ui| {
-                ui.set_width(width);
-                ui.label(RichText::new(crate::tr!("Bibliothèque", "Library")).font(bold(30.0)).color(t.text));
-                ui.add_space(20.0);
-                let head = ui.allocate_exact_size(egui::vec2(width, 30.0), egui::Sense::hover()).0;
-                ui.painter().text(head.left_center() + egui::vec2(8.0, 0.0), egui::Align2::LEFT_CENTER, crate::tr!("Nom", "Name"), FontId::proportional(13.0), t.secondary);
-                ui.painter().text(egui::pos2(head.right() - 260.0, head.center().y), egui::Align2::LEFT_CENTER, crate::tr!("Dans", "In"), FontId::proportional(13.0), t.secondary);
-                ui.painter().text(egui::pos2(head.right() - 110.0, head.center().y), egui::Align2::LEFT_CENTER, crate::tr!("Modifiée", "Edited"), FontId::proportional(13.0), t.secondary);
-                ui.painter().hline(head.x_range(), head.bottom(), egui::Stroke::new(1.0, t.border));
-                for p in pages {
-                    let (rect, resp) = ui.allocate_exact_size(egui::vec2(width, 36.0), egui::Sense::click());
-                    if resp.hovered() {
-                        ui.painter().rect_filled(rect, 6.0, t.hover);
-                    }
-                    let parent = p.parent.as_deref().and_then(|id| self.ws.page(id)).map(|pp| pp.display_title()).unwrap_or_else(|| "—".into());
-                    ui.painter().text(rect.left_center() + egui::vec2(10.0, 0.0), egui::Align2::LEFT_CENTER, page_icon(p), FontId::proportional(16.0), t.text);
-                    ui.painter().with_clip_rect(egui::Rect::from_min_max(rect.min, egui::pos2(rect.right() - 270.0, rect.bottom()))).text(
-                        rect.left_center() + egui::vec2(36.0, 0.0),
-                        egui::Align2::LEFT_CENTER,
-                        p.display_title(),
-                        FontId::proportional(14.0),
-                        t.text,
-                    );
-                    ui.painter().with_clip_rect(egui::Rect::from_min_max(egui::pos2(rect.right() - 260.0, rect.top()), egui::pos2(rect.right() - 120.0, rect.bottom()))).text(
-                        egui::pos2(rect.right() - 260.0, rect.center().y),
-                        egui::Align2::LEFT_CENTER,
-                        parent,
-                        FontId::proportional(14.0),
-                        t.secondary,
-                    );
-                    ui.painter().text(egui::pos2(rect.right() - 110.0, rect.center().y), egui::Align2::LEFT_CENTER, relative_time(p.updated), FontId::proportional(13.0), t.secondary);
-                    if resp.clicked() {
-                        actions.push(Action::Open(p.id.clone()));
-                    }
-                }
             });
         });
     }

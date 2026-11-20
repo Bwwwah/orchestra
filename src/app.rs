@@ -16,7 +16,6 @@ const ICONS: [&str; 20] = [
 enum View {
     Page,
     Home,
-    Library,
     Trash,
     Projects,
     Orchestra,
@@ -1120,9 +1119,6 @@ impl eframe::App for NotesApp {
             View::Page => self.page_view(ui, &mut actions),
             View::Home => {
                 egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| self.home_view(ui, &mut actions));
-            }
-            View::Library => {
-                egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| self.library_view(ui, &mut actions));
             }
             View::Trash => {
                 pad.show(ui, |ui| self.trash_view(ui, &mut actions));

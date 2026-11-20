@@ -15,12 +15,12 @@
 use crate::model::{Page, observe_clock};
 use crate::secure;
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
-use std::net::{Shutdown, TcpListener, TcpStream, ToSocketAddrs};
+use std::collections::{BTreeMap, HashMap};
+use std::net::{IpAddr, Shutdown, TcpListener, TcpStream, ToSocketAddrs};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{Receiver, Sender, channel};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 pub const DEFAULT_PORT: u16 = 7878;
 
@@ -134,6 +134,123 @@ fn bytes_of(msg: &LiveMsg) -> Vec<u8> {
     serde_json::to_vec(msg).unwrap_or_default()
 }
 
+/// How long writing one message to one peer may take (plus `PEER_MIN_RATE` for a big one).
+/// The host writes to every peer in turn, holding the list: a peer that stops reading
+/// (asleep, on a dead network) would otherwise block the sending to all of them, and the
+/// app with it.
+const PEER_WRITE_TIMEOUT: Duration = Duration::from_secs(5);
+/// Bytes per second a peer must at least take, so a big page still reaches a slow link.
+const PEER_MIN_RATE: u64 = 64 * 1024;
+
+/// A peer's stream with a deadline for the whole message. The socket's own write timeout
+/// starts again at every call that moves a few bytes, so alone it bounds nothing.
+struct Deadline<'a> {
+    stream: &'a TcpStream,
+    until: Instant,
+}
+
+impl<'a> Deadline<'a> {
+    fn new(stream: &'a TcpStream, len: usize) -> Self {
+        Deadline { stream, until: Instant::now() + PEER_WRITE_TIMEOUT + Duration::from_secs(len as u64 / PEER_MIN_RATE) }
+    }
+}
+
+impl std::io::Write for Deadline<'_> {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        // Small pieces with a short timeout each, the deadline checked in between: a long
+        // timeout on a big write is not kept to (macOS overshot 13 s by 5 s on a partial write).
+        let piece = &buf[..buf.len().min(64 * 1024)];
+        let mut s = self.stream;
+        loop {
+            let left = self.until.saturating_duration_since(Instant::now());
+            if left.is_zero() {
+                return Err(std::io::ErrorKind::TimedOut.into());
+            }
+            self.stream.set_write_timeout(Some(left.min(Duration::from_secs(1))))?;
+            match s.write(piece) {
+                Err(e) if matches!(e.kind(), std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut) => continue,
+                r => return r,
+            }
+        }
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        let mut s = self.stream;
+        s.flush()
+    }
+}
+
+/// Send `bytes` to every peer but `skip`. A peer whose write fails or times out is dropped
+/// and its connection closed: half a message may have left, the stream can't be used again.
+/// Closing it also ends its reading thread, which tells the others it left.
+fn send_to_all(clients: &Mutex<Vec<Client>>, bytes: &[u8], skip: Option<u64>) {
+    if let Ok(mut list) = clients.lock() {
+        list.retain_mut(|c| {
+            if Some(c.id) == skip || c.tx.send(&mut Deadline::new(&c.stream, bytes.len()), bytes).is_ok() {
+                return true;
+            }
+            let _ = c.stream.shutdown(Shutdown::Both);
+            false
+        });
+    }
+}
+
+/// Connections the host keeps at once, those still in their handshake included.
+const MAX_CONNECTIONS: usize = 32;
+/// Failed handshakes (wrong code, garbage, silence) an address may make before being shut out.
+const MAX_FAILURES: u32 = 5;
+/// How long failures are remembered, and how long an address that made too many stays shut out.
+const FAILURE_WINDOW: Duration = Duration::from_secs(10 * 60);
+
+/// Who may connect to the host: slows down guessing the code and caps the threads a stranger
+/// on the network can make it open.
+#[derive(Default)]
+struct Guard {
+    active: usize,
+    /// Per address: failures in the current window, and when that window started.
+    failures: HashMap<IpAddr, (u32, Instant)>,
+}
+
+impl Guard {
+    /// Take a connection slot for `ip`, or refuse it.
+    fn admit(&mut self, ip: IpAddr, now: Instant) -> bool {
+        self.failures.retain(|_, (_, since)| now.duration_since(*since) < FAILURE_WINDOW);
+        if self.failures.get(&ip).is_some_and(|(n, _)| *n >= MAX_FAILURES) || self.active >= MAX_CONNECTIONS {
+            return false;
+        }
+        self.active += 1;
+        true
+    }
+
+    fn release(&mut self) {
+        self.active = self.active.saturating_sub(1);
+    }
+
+    fn failed(&mut self, ip: IpAddr, now: Instant) {
+        let entry = self.failures.entry(ip).or_insert((0, now));
+        entry.0 += 1;
+        if entry.0 >= MAX_FAILURES {
+            // Shut out for a full window from the last failure.
+            entry.1 = now;
+        }
+    }
+
+    fn succeeded(&mut self, ip: IpAddr) {
+        self.failures.remove(&ip);
+    }
+}
+
+/// Gives back the connection slot when the peer's thread ends, however it ends.
+struct Slot(Arc<Mutex<Guard>>);
+
+impl Drop for Slot {
+    fn drop(&mut self) {
+        if let Ok(mut g) = self.0.lock() {
+            g.release();
+        }
+    }
+}
+
 /// Host on `port` (0 picks a free one). Peers must know `code`: it encrypts the connection.
 pub fn host(port: u16, code: &str, wake: Wake) -> std::io::Result<Live> {
     let listener = TcpListener::bind(("0.0.0.0", port))?;
@@ -143,6 +260,7 @@ pub fn host(port: u16, code: &str, wake: Wake) -> std::io::Result<Live> {
     let stop = Arc::new(AtomicBool::new(false));
     let status = Arc::new(Mutex::new(Status { hosting: true, connected: true, address: format!("{}:{}", local_ip(), addr.port()), ..Default::default() }));
     let next_id = Arc::new(AtomicU64::new(1));
+    let guard = Arc::new(Mutex::new(Guard::default()));
     {
         let (clients, stop, status, code, wake, tx) = (clients.clone(), stop.clone(), status.clone(), code.to_string(), wake.clone(), tx.clone());
         std::thread::spawn(move || {
@@ -151,27 +269,30 @@ pub fn host(port: u16, code: &str, wake: Wake) -> std::io::Result<Live> {
                     break;
                 }
                 let Ok(stream) = conn else { continue };
+                let Ok(ip) = stream.peer_addr().map(|a| a.ip()) else { continue };
+                if !guard.lock().is_ok_and(|mut g| g.admit(ip, Instant::now())) {
+                    let _ = stream.shutdown(Shutdown::Both);
+                    continue;
+                }
+                let slot = Slot(guard.clone());
                 let _ = stream.set_nodelay(true);
                 let id = next_id.fetch_add(1, Ordering::SeqCst);
                 let (clients, status, code, wake, tx, stop) = (clients.clone(), status.clone(), code.clone(), wake.clone(), tx.clone(), stop.clone());
-                std::thread::spawn(move || serve_peer(id, stream, clients, status, code, wake, tx, stop));
+                std::thread::spawn(move || serve_peer(id, ip, stream, slot, clients, status, code, wake, tx, stop));
             }
         });
     }
     let out_clients = clients.clone();
-    let out: Arc<dyn Fn(&LiveMsg) + Send + Sync> = Arc::new(move |msg: &LiveMsg| {
-        let bytes = bytes_of(msg);
-        if let Ok(mut list) = out_clients.lock() {
-            list.retain_mut(|c| c.tx.send(&mut c.stream, &bytes).is_ok());
-        }
-    });
+    let out: Arc<dyn Fn(&LiveMsg) + Send + Sync> = Arc::new(move |msg: &LiveMsg| send_to_all(&out_clients, &bytes_of(msg), None));
     Ok(Live { inbox: rx, out, status, stop, listener_addr: Some(addr) })
 }
 
 #[allow(clippy::too_many_arguments)]
 fn serve_peer(
     id: u64,
+    ip: IpAddr,
     mut stream: TcpStream,
+    slot: Slot,
     clients: Arc<Mutex<Vec<Client>>>,
     status: Arc<Mutex<Status>>,
     code: String,
@@ -179,10 +300,18 @@ fn serve_peer(
     tx: Sender<LiveMsg>,
     stop: Arc<AtomicBool>,
 ) {
+    let fail = |stream: &TcpStream| {
+        if let Ok(mut g) = slot.0.lock() {
+            g.failed(ip, Instant::now());
+        }
+        let _ = stream.shutdown(Shutdown::Both);
+    };
     // Key exchange, then the first message must be a Hello that opens with that key.
     let _ = stream.set_read_timeout(Some(Duration::from_secs(10)));
+    // Until it joins; then each message gets its own deadline (see `send_to_all`).
+    let _ = stream.set_write_timeout(Some(PEER_WRITE_TIMEOUT));
     let Ok((mut sealer, mut opener)) = secure::handshake(&mut stream, &code, true) else {
-        let _ = stream.shutdown(Shutdown::Both);
+        fail(&stream);
         return;
     };
     let Ok(mut reader) = stream.try_clone() else { return };
@@ -191,10 +320,13 @@ fn serve_peer(
         _ => {
             // Sealed with our key: a peer with another code can't open it, and knows why.
             let _ = sealer.send(&mut stream, &bytes_of(&LiveMsg::Disconnected { reason: crate::tr!("code incorrect", "wrong code").into() }));
-            let _ = stream.shutdown(Shutdown::Both);
+            fail(&stream);
             return;
         }
     };
+    if let Ok(mut g) = slot.0.lock() {
+        g.succeeded(ip);
+    }
     let _ = stream.set_read_timeout(None);
     if let Ok(mut list) = clients.lock() {
         if let Ok(s) = stream.try_clone() {
@@ -205,11 +337,7 @@ fn serve_peer(
         }
     }
     // Each peer has its own keys: what one sends is opened here and sealed again for each other.
-    let relay = |bytes: &[u8], clients: &Arc<Mutex<Vec<Client>>>| {
-        if let Ok(mut list) = clients.lock() {
-            list.retain_mut(|c| c.id == id || c.tx.send(&mut c.stream, bytes).is_ok());
-        }
-    };
+    let relay = |bytes: &[u8], clients: &Arc<Mutex<Vec<Client>>>| send_to_all(clients, bytes, Some(id));
     let hello = LiveMsg::Hello { name: name.clone(), code: String::new() };
     relay(&bytes_of(&hello), &clients);
     let _ = tx.send(hello);
@@ -361,6 +489,119 @@ mod tests {
             std::thread::sleep(Duration::from_millis(20));
         }
         None
+    }
+
+    #[test]
+    fn guard_shuts_out_an_address_after_too_many_failures_then_forgives() {
+        let mut g = Guard::default();
+        let (bad, good): (IpAddr, IpAddr) = ([10, 0, 0, 1].into(), [10, 0, 0, 2].into());
+        let t0 = Instant::now();
+        for _ in 0..MAX_FAILURES {
+            assert!(g.admit(bad, t0));
+            g.failed(bad, t0);
+            g.release();
+        }
+        assert!(!g.admit(bad, t0), "too many failures: shut out");
+        assert!(g.admit(good, t0), "another address is not affected");
+        g.release();
+        assert!(g.admit(bad, t0 + FAILURE_WINDOW), "forgiven after the window");
+        g.release();
+        // A success wipes the failures of that address.
+        g.failed(good, t0);
+        g.succeeded(good);
+        assert!(!g.failures.contains_key(&good));
+    }
+
+    #[test]
+    fn guard_caps_simultaneous_connections() {
+        let mut g = Guard::default();
+        let ip: IpAddr = [10, 0, 0, 3].into();
+        let now = Instant::now();
+        for _ in 0..MAX_CONNECTIONS {
+            assert!(g.admit(ip, now));
+        }
+        assert!(!g.admit(ip, now));
+        g.release();
+        assert!(g.admit(ip, now));
+    }
+
+    #[test]
+    fn host_closes_the_door_after_repeated_bad_handshakes() {
+        use std::io::{Read, Write};
+        let h = host(0, "secret", Arc::new(|| {})).unwrap();
+        let addr = format!("127.0.0.1:{}", h.port().unwrap());
+        // Garbage instead of a key exchange: each one is a failure.
+        for _ in 0..MAX_FAILURES {
+            let mut s = TcpStream::connect(&addr).unwrap();
+            let _ = s.write_all(&[0xff; 8]);
+            let _ = s.set_read_timeout(Some(Duration::from_secs(5)));
+            let _ = s.read(&mut [0u8; 64]); // wait until the host hangs up
+        }
+        std::thread::sleep(Duration::from_millis(100));
+        let mut s = TcpStream::connect(&addr).unwrap();
+        s.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
+        let start = Instant::now();
+        let n = s.read(&mut [0u8; 64]).unwrap_or(0);
+        assert_eq!(n, 0, "shut out: the host closes at once");
+        assert!(start.elapsed() < Duration::from_secs(1));
+    }
+
+    #[test]
+    fn a_peer_that_stops_reading_does_not_block_the_others() {
+        use crate::model::{Block, BlockKind};
+        let wake: Wake = Arc::new(|| {});
+        let h = host(0, "secret", wake.clone()).unwrap();
+        let addr = format!("127.0.0.1:{}", h.port().unwrap());
+        // A peer that says hello, then never reads again.
+        let mut stuck = TcpStream::connect(&addr).unwrap();
+        let (mut sealer, _) = secure::handshake(&mut stuck, "secret", false).unwrap();
+        sealer.send(&mut stuck, &bytes_of(&LiveMsg::Hello { name: "Endormi".into(), code: String::new() })).unwrap();
+        let start = Instant::now();
+        while h.status().peers < 1 {
+            assert!(start.elapsed() < Duration::from_secs(5), "stuck peer never joined");
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        // Big pages until the stuck peer's buffers are full and it is dropped. Each send is
+        // timed on its own: none may wait much longer than one message's deadline. Without
+        // it, one send would never return, and nobody else would get anything.
+        // (Only the stuck peer is there: a live peer of a debug build decodes big pages
+        // slowly and would make the timing about it.)
+        let mut p = Page::new("Grosse page", None);
+        p.blocks = vec![Block::new(BlockKind::Paragraph, &"x".repeat(128 * 1024))];
+        let msg = LiveMsg::Pages { pages: vec![p], deleted: Default::default() };
+        let big = msg.clone();
+        let (done_tx, done_rx) = channel();
+        std::thread::spawn(move || {
+            let mut slowest = Duration::ZERO;
+            for _ in 0..400 {
+                let t = Instant::now();
+                h.send(&msg);
+                slowest = slowest.max(t.elapsed());
+                if h.status().peers == 0 {
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            let _ = done_tx.send((h, slowest));
+        });
+        let (h, slowest) = done_rx.recv_timeout(Duration::from_secs(60)).expect("sending is stuck");
+        // At most the deadline of one message, plus sealing it (measured here) and some slack.
+        let len = bytes_of(&big).len();
+        let t = Instant::now();
+        sealer.send(&mut Vec::new(), &bytes_of(&big)).unwrap();
+        let seal = t.elapsed();
+        let deadline = PEER_WRITE_TIMEOUT + Duration::from_secs(len as u64 / PEER_MIN_RATE);
+        assert!(slowest < deadline + seal * 4 + Duration::from_secs(2), "one send took {slowest:?} (deadline {deadline:?}, sealing {seal:?})");
+        // The stuck peer was dropped and its connection closed; the host still serves others.
+        assert_eq!(h.status().peers, 0, "stuck peer still counted");
+        let _ = stuck.set_read_timeout(Some(Duration::from_secs(5)));
+        let mut sink = vec![];
+        assert!(std::io::Read::read_to_end(&mut stuck, &mut sink).is_ok(), "host closed the stuck connection");
+        let good = join(&addr, "Camille", "secret", wake);
+        assert!(wait_for(&good, |m| matches!(m, LiveMsg::Connected)).is_some());
+        h.send(&LiveMsg::Presence { name: "Hôte".into(), page: None, project: None, ai: false });
+        assert!(wait_for(&good, |m| matches!(m, LiveMsg::Presence { .. })).is_some());
+        drop(stuck);
     }
 
     #[test]

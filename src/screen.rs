@@ -5,6 +5,7 @@
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::time::{Duration, SystemTime};
 
 /// Pictures larger than this are given by path only, not inline.
 const INLINE_MAX: u64 = 3_500_000;
@@ -34,8 +35,61 @@ fn mime(p: &Path) -> &'static str {
     }
 }
 
+#[cfg(target_os = "macos")]
+#[link(name = "CoreGraphics", kind = "framework")]
+unsafe extern "C" {
+    fn CGPreflightScreenCaptureAccess() -> bool;
+    fn CGRequestScreenCaptureAccess() -> bool;
+}
+
+/// Whether this app may record the screen. On macOS, the AIs that Orchestra starts (the
+/// autonomous sessions, in its own hidden terminal) take their screenshots under its name:
+/// without the « Screen Recording » permission, `take_screenshot` gets no picture. When
+/// missing, the system is asked once per launch: it shows its dialog and lists Orchestra in
+/// System Settings › Privacy & Security, where the person switches it on.
+pub fn ensure_permission() -> bool {
+    #[cfg(target_os = "macos")]
+    {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        static ASKED: AtomicBool = AtomicBool::new(false);
+        // SAFETY: plain CoreGraphics calls with no arguments (macOS 10.15 and later).
+        if unsafe { CGPreflightScreenCaptureAccess() } {
+            return true;
+        }
+        if !ASKED.swap(true, Ordering::SeqCst) {
+            return unsafe { CGRequestScreenCaptureAccess() };
+        }
+        false
+    }
+    #[cfg(not(target_os = "macos"))]
+    true
+}
+
 pub fn shots_dir() -> PathBuf {
     std::env::temp_dir().join("orchestra-screenshots")
+}
+
+/// How long a screenshot is kept: long enough for the AI that asked to read it again.
+const KEEP_FOR: Duration = Duration::from_secs(24 * 3600);
+
+/// Delete the pictures of `dir` older than `max_age` (by modification time). Only .png and
+/// .jpg files: nothing else in the folder is touched. Returns how many went.
+fn prune_old(dir: &Path, max_age: Duration, now: SystemTime) -> usize {
+    let Ok(entries) = std::fs::read_dir(dir) else { return 0 };
+    let mut removed = 0;
+    for e in entries.flatten() {
+        let path = e.path();
+        let picture = matches!(path.extension().and_then(|x| x.to_str()), Some("png" | "jpg" | "jpeg"));
+        let Ok(meta) = e.metadata() else { continue };
+        if !picture || !meta.is_file() {
+            continue;
+        }
+        let old = meta.modified().ok().and_then(|m| now.duration_since(m).ok()).is_some_and(|age| age > max_age);
+        if old && std::fs::remove_file(&path).is_ok() {
+            removed += 1;
+        }
+    }
+    removed
 }
 
 /// Take a screenshot: of `app`'s front window when given (the app comes to the front), else
@@ -43,6 +97,7 @@ pub fn shots_dir() -> PathBuf {
 pub fn take(app: Option<&str>) -> Result<Shot, String> {
     let dir = shots_dir();
     std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    prune_old(&dir, KEEP_FOR, SystemTime::now());
     let app = app.map(str::trim).filter(|a| !a.is_empty());
     let shot = capture(&dir, app)?;
     if std::fs::metadata(&shot.path).map(|m| m.len()).unwrap_or(0) == 0 {
@@ -204,6 +259,31 @@ mod tests {
         assert_eq!(base64(b"foo"), "Zm9v");
         assert_eq!(base64(b"foobar"), "Zm9vYmFy");
         assert_eq!(base64(&[0xff, 0xfe, 0x00]), "//4A");
+    }
+
+    #[test]
+    fn old_screenshots_are_deleted_and_nothing_else() {
+        let dir = std::env::temp_dir().join(format!("orchestra-shots-test-{}", uuid::Uuid::new_v4().simple()));
+        std::fs::create_dir_all(dir.join("sous-dossier.png")).unwrap();
+        let now = SystemTime::now();
+        let make = |name: &str, age_h: u64| {
+            let p = dir.join(name);
+            let f = std::fs::File::create(&p).unwrap();
+            f.set_modified(now - Duration::from_secs(age_h * 3600)).unwrap();
+            p
+        };
+        let old_png = make("ancienne.png", 25);
+        let old_jpg = make("ancienne.jpg", 48);
+        let fresh = make("recente.png", 23);
+        let other = make("notes.txt", 100);
+        assert_eq!(prune_old(&dir, KEEP_FOR, now), 2);
+        assert!(!old_png.exists() && !old_jpg.exists());
+        assert!(fresh.exists(), "a picture of the last 24 h stays");
+        assert!(other.exists(), "only pictures are deleted");
+        assert!(dir.join("sous-dossier.png").is_dir(), "folders are left alone");
+        // A missing folder is not an error.
+        assert_eq!(prune_old(&dir.join("absent"), KEEP_FOR, now), 0);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
