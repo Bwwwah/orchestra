@@ -358,7 +358,7 @@ pub(super) fn versions_card(ui: &mut egui::Ui, v: &mut Versions, page_id: &str, 
                 } else {
                     let files: Vec<String> = s.changes.iter().take(12).map(|l| l.get(3..).unwrap_or(l).to_string()).collect();
                     let more = if s.changes.len() > 12 { crate::trf!("\n… et {} autres", "\n… and {} more", s.changes.len() - 12) } else { String::new() };
-                    ui.label(small(crate::trf!("{} modification(s) non enregistrée(s)", "{} unsaved change(s)", s.changes.len()), ORANGE)).on_hover_text(files.join("\n") + &more);
+                    ui.label(small(crate::trf!("{} modification{p} non enregistrée{p}", "{} unsaved change{p}", s.changes.len(), p = crate::i18n::plural(s.changes.len())), ORANGE)).on_hover_text(files.join("\n") + &more);
                 }
                 if s.ahead > 0 && s.behind > 0 {
                     ui.label(small(crate::trf!("Divergé : ↑ {} ici, ↓ {} sur GitHub", "Diverged: ↑ {} here, ↓ {} on GitHub", s.ahead, s.behind), ORANGE))
@@ -371,7 +371,7 @@ pub(super) fn versions_card(ui: &mut egui::Ui, v: &mut Versions, page_id: &str, 
                     ui.label(small(crate::tr!("= identique à GitHub", "= same as GitHub"), t.tertiary));
                 }
                 if s.since_tag > 0 && s.last_tag.is_some() {
-                    ui.label(small(crate::trf!("{} commit(s) depuis {}", "{} commit(s) since {}", s.since_tag, s.last_tag.as_deref().unwrap_or("")), t.tertiary));
+                    ui.label(small(crate::trf!("{} commit{p} depuis {}", "{} commit{p} since {}", s.since_tag, s.last_tag.as_deref().unwrap_or(""), p = crate::i18n::plural(s.since_tag as usize)), t.tertiary));
                 }
                 if s.remote.is_some() {
                     let r = ui.add_enabled_ui(busy.is_none(), |ui| super::projects::action_link(ui, crate::tr!("Vérifier", "Check"))).inner;

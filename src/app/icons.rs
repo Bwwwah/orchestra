@@ -15,6 +15,7 @@ pub enum Icon {
     Library,
     Database,
     Board,
+    Calendar,
     Plus,
     Sliders,
     Help,
@@ -107,6 +108,13 @@ pub fn paint(p: &egui::Painter, rect: Rect, icon: Icon, color: Color32) {
             for (x, h) in [(3.5, 12.0), (8.5, 8.0), (13.5, 10.0)] {
                 p.rect_stroke(Rect::from_min_max(at(x, 4.0), at(x + 3.0, 4.0 + h)), 1.0 * k, s, egui::StrokeKind::Middle);
             }
+        }
+        Icon::Calendar => {
+            p.rect_stroke(Rect::from_min_max(at(3.5, 5.0), at(16.5, 16.5)), 2.0 * k, s, egui::StrokeKind::Middle);
+            p.line_segment([at(3.5, 8.5), at(16.5, 8.5)], s);
+            p.line_segment([at(7.0, 3.5), at(7.0, 6.0)], s);
+            p.line_segment([at(13.0, 3.5), at(13.0, 6.0)], s);
+            p.circle_filled(at(7.5, 12.5), 1.0 * k, color);
         }
         Icon::Plus => {
             p.line_segment([at(4.5, 10.0), at(15.5, 10.0)], s);
@@ -253,5 +261,23 @@ pub fn button(ui: &mut egui::Ui, icon: Icon, size: f32, color: Color32, hover: C
         ui.painter().rect_filled(rect, 6.0, hover);
     }
     paint(ui.painter(), rect.shrink(size * 0.18), icon, color);
+    if tip.is_empty() { resp } else { resp.on_hover_text(tip) }
+}
+
+/// The small "×" that deletes a step, a message, an image…: `rest` when the pointer is
+/// elsewhere (transparent to hide it until its row is hovered), and `hover_fg` on a `hover_bg`
+/// pad while the pointer is on it, so it never sinks into the background.
+pub fn delete_cross(ui: &mut egui::Ui, size: f32, rest: Color32, hover_fg: Color32, hover_bg: Color32, tip: &str) -> egui::Response {
+    let (rect, resp) = ui.allocate_exact_size(vec2(size, size), egui::Sense::click());
+    let color = if resp.hovered() {
+        ui.painter().rect_filled(rect, 5.0, hover_bg);
+        hover_fg
+    } else {
+        rest
+    };
+    if color.a() > 0 {
+        paint(ui.painter(), rect.shrink(size * 0.22), Icon::Close, color);
+    }
+    let resp = resp.on_hover_cursor(egui::CursorIcon::PointingHand);
     if tip.is_empty() { resp } else { resp.on_hover_text(tip) }
 }

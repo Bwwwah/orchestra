@@ -501,6 +501,34 @@ pub(super) fn hover_begin(ui: &egui::Ui) -> egui::layers::ShapeIdx {
     ui.painter().add(egui::Shape::Noop)
 }
 
+/// A folder as shown on screen: the home directory abbreviated to « ~ », the same way
+/// everywhere (`/Users/name/Code/x` and `~/Code/x` read alike).
+pub(super) fn tilde(path: &str) -> String {
+    let home = std::env::var("HOME").or_else(|_| std::env::var("USERPROFILE")).unwrap_or_default();
+    tilde_in(path.trim(), &home)
+}
+
+fn tilde_in(path: &str, home: &str) -> String {
+    let home = home.trim_end_matches(['/', '\\']);
+    if home.is_empty() {
+        return path.to_string();
+    }
+    match path.strip_prefix(home) {
+        Some("") => "~".to_string(),
+        Some(rest) if rest.starts_with(['/', '\\']) => format!("~{rest}"),
+        _ => path.to_string(),
+    }
+}
+
+#[test]
+fn tilde_abbreviates_the_home_folder() {
+    assert_eq!(tilde_in("/Users/ana/Code/x", "/Users/ana"), "~/Code/x");
+    assert_eq!(tilde_in("/Users/ana", "/Users/ana/"), "~");
+    assert_eq!(tilde_in("/Users/anabel/x", "/Users/ana"), "/Users/anabel/x");
+    assert_eq!(tilde_in("~/Code/x", "/Users/ana"), "~/Code/x");
+    assert_eq!(tilde_in("/opt/x", ""), "/opt/x");
+}
+
 pub(super) fn hover_end(ui: &egui::Ui, idx: egui::layers::ShapeIdx, rect: egui::Rect, id: egui::Id, t: &Tone) -> f32 {
     let r = rect.expand2(egui::vec2(6.0, 2.0));
     let a = ui.ctx().animate_bool_with_time(id, ui.rect_contains_pointer(r), 0.14);
@@ -697,7 +725,8 @@ fn session_row(ui: &mut egui::Ui, page_id: &str, s: &SessionInfo, t: &Tone) -> O
     if open {
         egui::Frame::new().inner_margin(egui::Margin { left: 18, right: 0, top: 2, bottom: 6 }).show(ui, |ui| {
             ui.set_max_width(w - 18.0);
-            let mut meta = crate::trf!("{} message(s)", "{} message(s)", s.user_messages + s.agent_messages);
+            let n = s.user_messages + s.agent_messages;
+            let mut meta = crate::trf!("{n} message{p}", "{n} message{p}", p = crate::i18n::plural(n as usize));
             if s.tokens.billed > 0 {
                 meta.push_str(&crate::trf!(" · {} tokens", " · {} tokens", human_tokens(s.tokens.billed)));
             }
@@ -1033,7 +1062,7 @@ pub(super) fn project_panel(ui: &mut egui::Ui, cx: &mut Cx) -> Option<super::not
                     toggle_flag(ui, ("edit-folder", page_id));
                 }
             } else {
-                let r = ui.add(egui::Label::new(RichText::new(&pr.folder).font(FontId::monospace(12.5)).color(t.tertiary)).sense(egui::Sense::click()));
+                let r = ui.add(egui::Label::new(RichText::new(tilde(&pr.folder)).font(FontId::monospace(12.5)).color(t.tertiary)).sense(egui::Sense::click()));
                 if r.on_hover_text(if pr.read_only { crate::tr!("Lecture seule", "Read-only") } else { crate::tr!("Cliquer pour modifier le dossier", "Click to change the folder") }).clicked() && !pr.read_only {
                     toggle_flag(ui, ("edit-folder", page_id));
                 }
@@ -1228,10 +1257,13 @@ fn steps_card(ui: &mut egui::Ui, cx: &mut Cx, extra: f32) -> f32 {
                 } else {
                     line(ui, job, room)
                 };
-                let hovered = ui.rect_contains_pointer(ui.min_rect()) && !ro;
+                // The whole row up to its right edge, where the "×" sits: the cross must stay
+                // visible while the pointer is on it, not only over the text.
+                let row_rect = egui::Rect::from_min_max(ui.min_rect().min, egui::pos2(ui.max_rect().right(), ui.min_rect().bottom()));
+                let hovered = ui.rect_contains_pointer(row_rect) && !ro;
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Min), |ui| {
-                    let x = egui::Button::new(RichText::new("×").color(if hovered { t.secondary } else { t.card })).frame(false);
-                    if ui.add(x).on_hover_text(crate::tr!("Supprimer l'étape", "Delete the step")).clicked() {
+                    let rest = if hovered { t.secondary } else { Color32::TRANSPARENT };
+                    if icons::delete_cross(ui, 20.0, rest, t.text, t.selected, crate::tr!("Supprimer l'étape", "Delete the step")).clicked() {
                         remove = Some(s.id.clone());
                     }
                 });
@@ -1464,7 +1496,7 @@ fn ai_steps(ui: &mut egui::Ui, page_id: &str, pr: &mut Project, ai: &mut super::
                 ui.spacing_mut().item_spacing.x = 6.0;
                 let name = std::path::Path::new(p).file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_else(|| p.clone());
                 ui.label(RichText::new(crate::trf!("Image : {name}", "Image: {name}")).size(12.5).color(t.secondary)).on_hover_text(p.as_str());
-                if ui.add(egui::Button::new(RichText::new("×").size(13.0).color(t.tertiary)).frame(false)).on_hover_text(crate::tr!("Retirer l'image", "Remove the image")).clicked() {
+                if icons::delete_cross(ui, 18.0, t.tertiary, t.text, t.selected, crate::tr!("Retirer l'image", "Remove the image")).clicked() {
                     remove = Some(i);
                 }
             });
@@ -1737,7 +1769,7 @@ impl NotesApp {
                             }
                             chip(ui, c.tool.label(), t.secondary, egui::Sense::hover());
                             let room = ui.available_width() - 90.0;
-                            let job = egui::text::LayoutJob::single_section(c.folder.clone(), egui::TextFormat::simple(FontId::monospace(11.5), t.tertiary));
+                            let job = egui::text::LayoutJob::single_section(tilde(&c.folder), egui::TextFormat::simple(FontId::monospace(11.5), t.tertiary));
                             line(ui, job, room);
                             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                                 if c.last > 0 {
@@ -2008,7 +2040,7 @@ pub(super) fn folder_view(ui: &mut egui::Ui, rel: &str, pages: &[PageRow], t: &T
     let files = pages.iter().filter(|p| !p.has_kids).count();
     card(ui, t, 0.0, |ui| {
         let what = if rel.is_empty() { crate::tr!("Dossier", "Folder").to_string() } else { crate::trf!("Dossier {rel}", "Folder {rel}") };
-        card_title(ui, crate::tr!("CONTENU", "CONTENTS"), &crate::trf!("{files} fichier(s)", "{files} file(s)"), t);
+        card_title(ui, crate::tr!("CONTENU", "CONTENTS"), &crate::trf!("{files} fichier{s}", "{files} file{s}", s = crate::i18n::plural(files)), t);
         ui.label(RichText::new(what).font(FontId::monospace(12.0)).color(t.tertiary));
         ui.add_space(6.0);
         if pages.is_empty() {
@@ -2206,7 +2238,7 @@ fn quick_question(ui: &mut egui::Ui, cx: &mut Cx) {
             ui.horizontal(|ui| {
                 ui.add(egui::Label::new(RichText::new(&a.question).size(12.5).color(t.secondary).italics()).wrap());
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Min), |ui| {
-                    if ui.add(egui::Button::new(RichText::new("×").color(t.tertiary)).frame(false)).on_hover_text(crate::tr!("Fermer la réponse", "Close the answer")).clicked() {
+                    if icons::delete_cross(ui, 20.0, t.tertiary, t.text, t.selected, crate::tr!("Fermer la réponse", "Close the answer")).clicked() {
                         close = true;
                     }
                 });

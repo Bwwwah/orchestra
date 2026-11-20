@@ -200,11 +200,11 @@ impl NotesApp {
                 self.view = View::Home;
             }
             let ai = self.settings_tab == Some(SettingsTab::Ai);
-            if icons::button(ui, Icon::Sparkle, 30.0, if ai { t.text } else { t.secondary }, t.hover, crate::tr!("IA (MCP)", "AI (MCP)")).clicked() {
+            if icons::button(ui, Icon::Sparkle, 30.0, if ai { t.text } else { t.secondary }, t.hover, crate::tr!("Brancher et régler les IA (MCP)", "Plug in and set up the AIs (MCP)")).clicked() {
                 self.open_settings(SettingsTab::Ai);
             }
             let co = self.settings_tab == Some(SettingsTab::Collab);
-            if icons::button(ui, Icon::People, 30.0, if co { t.text } else { t.secondary }, t.hover, crate::tr!("Collaboration", "Collaboration")).clicked() {
+            if icons::button(ui, Icon::People, 30.0, if co { t.text } else { t.secondary }, t.hover, crate::tr!("Collaboration : partager des projets en équipe", "Collaboration: share projects with a team")).clicked() {
                 self.open_settings(SettingsTab::Collab);
             }
         });
@@ -692,7 +692,7 @@ impl NotesApp {
                     page.favorite = !fav;
                 }
                 if let Some(n) = reformatted {
-                    self.ack(crate::trf!("{n} bloc(s) remis en forme.", "{n} block(s) reformatted."));
+                    self.ack(crate::trf!("{n} bloc{s} remis en forme.", "{n} block{s} reformatted.", s = crate::i18n::plural(n)));
                 }
                 if icons::button(ui, Icon::Link, 28.0, t.text, t.hover, crate::tr!("Copier le lien (Cmd/Ctrl+L)", "Copy link (Cmd/Ctrl+L)")).clicked() {
                     ui.ctx().copy_text(format!("orchestra://page/{cur}"));
@@ -782,7 +782,7 @@ impl NotesApp {
                 Some(l) => {
                     let s = l.status();
                     let n = self.peers.len();
-                    let who = if n == 0 { crate::tr!("personne de connecté", "nobody connected").to_string() } else { crate::trf!("{n} connecté(s)", "{n} connected") };
+                    let who = if n == 0 { crate::tr!("personne de connecté", "nobody connected").to_string() } else { if crate::i18n::en() { format!("{n} connected") } else { format!("{n} connecté{}", crate::i18n::plural(n)) } };
                     if s.hosting { crate::trf!("En direct, chez vous ({}) · {who}", "Live, hosted here ({}) · {who}", s.address) } else if s.connected { crate::trf!("En direct, relié à {} · {who}", "Live, connected to {} · {who}", c.live_address) } else { crate::tr!("En direct : connexion en cours…", "Live: connecting…").to_string() }
                 }
             },
@@ -978,20 +978,23 @@ enum HomeTone {
 /// projects. What waits for the person comes first.
 fn home_status(n: &HomeNow) -> Vec<(String, HomeTone, HomeGo)> {
     let mut out = vec![];
+    let pl = crate::i18n::plural;
     if n.waiting > 0 {
-        out.push((crate::trf!("{} question(s) à répondre", "{} question(s) to answer", n.waiting), HomeTone::Alert, HomeGo::Inbox));
+        out.push((crate::trf!("{} question{s} à répondre", "{} question{s} to answer", n.waiting, s = pl(n.waiting)), HomeTone::Alert, HomeGo::Inbox));
     }
     if n.running > 0 {
-        out.push((crate::trf!("{} IA au travail", "{} AI(s) at work", n.running), HomeTone::Live, HomeGo::Orchestra));
+        // « IA » doesn't change in the plural; only the English text takes the mark.
+        let text = if crate::i18n::en() { format!("{} AI{} at work", n.running, pl(n.running)) } else { format!("{} IA au travail", n.running) };
+        out.push((text, HomeTone::Live, HomeGo::Orchestra));
     }
     if !n.checking {
         if n.plugged == 0 {
             out.push((crate::tr!("Aucune IA branchée", "No AI plugged in").to_string(), HomeTone::Alert, HomeGo::Ais));
         } else {
-            out.push((crate::trf!("{} IA branchée(s)", "{} AI(s) plugged in", n.plugged), HomeTone::Calm, HomeGo::Ais));
+            out.push((crate::trf!("{} IA branchée{s}", "{} AI{s} plugged in", n.plugged, s = pl(n.plugged)), HomeTone::Calm, HomeGo::Ais));
         }
     }
-    out.push((crate::trf!("{} projet(s)", "{} project(s)", n.projects), HomeTone::Calm, HomeGo::Projects));
+    out.push((crate::trf!("{} projet{s}", "{} project{s}", n.projects, s = pl(n.projects)), HomeTone::Calm, HomeGo::Projects));
     out
 }
 

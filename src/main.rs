@@ -19,6 +19,7 @@ mod git;
 mod mcp;
 mod model;
 mod opener;
+mod proc;
 mod project;
 mod richtext;
 mod screen;
@@ -40,6 +41,7 @@ Utilisation :
   orchestra orchestra://page/<id>  ouvre la fenêtre sur cette page
   orchestra mcp             serveur MCP (stdio) pour brancher une IA
   orchestra statusline      ligne d'état de Claude Code (relève l'utilisation de l'abonnement)
+  orchestra nettoyer        avant de désinstaller : remet la ligne d'état de Claude Code et débranche les IA
   orchestra export <dossier>  exporte toutes les pages en Markdown
   orchestra import <fichier.md>  importe un fichier Markdown comme page
   orchestra sync            synchronise une fois avec le branchement configuré
@@ -81,6 +83,14 @@ fn main() {
         Some("mcp") => mcp::run(),
         Some("statusline") => {
             usage::statusline_main();
+            0
+        }
+        // Before uninstalling (the Windows uninstaller runs it): nothing left behind that
+        // would try to start Orchestra again.
+        Some("nettoyer") | Some("cleanup") => {
+            for line in setup::clean_up_for_uninstall() {
+                println!("{line}");
+            }
             0
         }
         Some("export") => match args.get(1) {

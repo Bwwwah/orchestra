@@ -15,7 +15,7 @@ use serde_json::Value;
 use std::collections::HashSet;
 use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Agent {
@@ -193,7 +193,7 @@ pub fn permissions(allow_commits: bool, extra: &str) -> (Vec<String>, Vec<String
 
 fn git(dir: &Path, args: &[&str]) -> Result<String, String> {
     let p = crate::sync::shell_path();
-    let o = Command::new(crate::sync::which("git", &p).unwrap_or_else(|| "git".into()))
+    let o = crate::proc::command(crate::sync::which("git", &p).unwrap_or_else(|| "git".into()))
         .args(args)
         .current_dir(dir)
         .env("PATH", &p)
@@ -769,7 +769,7 @@ fn days_from_civil(y: i64, m: u32, d: u32) -> i64 {
 pub fn local_offset_ms() -> i64 {
     static OFF: std::sync::OnceLock<i64> = std::sync::OnceLock::new();
     *OFF.get_or_init(|| {
-        let out = Command::new("date").arg("+%z").output().ok().map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string()).unwrap_or_default();
+        let out = crate::proc::command("date").arg("+%z").output().ok().map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string()).unwrap_or_default();
         let b = out.as_bytes();
         if b.len() == 5 && (b[0] == b'+' || b[0] == b'-') {
             let v = (out[1..3].parse::<i64>().unwrap_or(0) * 60 + out[3..5].parse::<i64>().unwrap_or(0)) * 60_000;

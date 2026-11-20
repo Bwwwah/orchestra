@@ -33,8 +33,8 @@ enum Action {
     Duplicate(String),
     OpenRow(String, String),
     InsertSubpage { page: String, at: usize },
-    /// "/kanban": a sub-page holding a database shown as a board, linked at block `at`.
-    InsertKanban { page: String, at: usize },
+    /// "/kanban", "/base"…: a sub-page holding a database shown in `view`, linked at block `at`.
+    InsertDatabase { page: String, at: usize, view: DbView },
     Export(String),
     NewProject(String, String),
     RevertDoc(String),
@@ -100,6 +100,8 @@ pub struct NotesApp {
     /// What the start-up MCP setup did (filled by a background thread).
     mcp_report: std::sync::Arc<std::sync::Mutex<Option<crate::setup::Report>>>,
     mcp_report_shown: bool,
+    /// What « Avant de désinstaller » did (filled by a background thread).
+    uninstall_report: std::sync::Arc<std::sync::Mutex<Option<Vec<String>>>>,
     ais: ai_ui::Ais,
     orch: orch_ui::Orch,
     upd: update_ui::Upd,
@@ -193,6 +195,7 @@ impl NotesApp {
             term_open: false,
             term_focus: false,
             mcp_report: Default::default(),
+            uninstall_report: Default::default(),
             mcp_report_shown: false,
             ais: Default::default(),
             orch: Default::default(),
@@ -305,6 +308,8 @@ impl NotesApp {
             app.save_now();
         }
         app.known_mtime = store::modified(&store::workspace_path());
+        // The « Screen Recording » permission, lost with an update: said at once.
+        app.screen_at_launch();
         app.take_snapshot();
         setup_fonts(&cc.egui_ctx);
         setup_style(&cc.egui_ctx);
@@ -645,11 +650,24 @@ impl NotesApp {
         }
     }
 
+    /// "Rapports des IA" holds a page per day, each with a report per session: they would
+    /// soon push the person's own pages out of the sidebar. So its days open one at a time:
+    /// unfolding `day` (or opening a report in it) folds the other days.
+    fn fold_other_report_days(&mut self, day: &str) {
+        for other in other_report_days(&self.ws, day) {
+            self.expanded.remove(&other);
+        }
+    }
+
     fn apply(&mut self, actions: Vec<Action>) {
         for a in actions {
             match a {
                 Action::Open(id) => {
-                    for anc in self.ws.path_of(&id) {
+                    let path = self.ws.path_of(&id);
+                    for anc in &path {
+                        self.fold_other_report_days(anc);
+                    }
+                    for anc in path {
                         self.expanded.insert(anc);
                     }
                     self.navigate(id);
@@ -676,6 +694,7 @@ impl NotesApp {
                 }
                 Action::ToggleExpand(id) => {
                     if !self.expanded.remove(&id) {
+                        self.fold_other_report_days(&id);
                         self.expanded.insert(id);
                     }
                 }
@@ -768,8 +787,8 @@ impl NotesApp {
                     self.navigate(id.clone());
                     self.focus = Some((format!("title-{id}"), None));
                 }
-                Action::InsertKanban { page, at } => {
-                    let id = insert_kanban(&mut self.ws, &page, at);
+                Action::InsertDatabase { page, at, view } => {
+                    let id = insert_database(&mut self.ws, &page, at, view);
                     self.expanded.insert(page);
                     self.navigate(id);
                 }
@@ -1000,41 +1019,108 @@ impl NotesApp {
 
     // ---------------------------------------------------------------- other views
 
+    /// The trash, laid out like the other pages: a centred column, one row per page with its
+    /// parent and last edit, and nothing deleted for good on a single click.
     fn trash_view(&mut self, ui: &mut egui::Ui, actions: &mut Vec<Action>) {
-        ui.add_space(20.0);
-        ui.heading(crate::tr!("🗑 Corbeille", "🗑 Trash"));
-        ui.label(crate::tr!("Les pages restent ici jusqu'à ce que vous les supprimiez définitivement.", "Pages stay here until you delete them for good."));
-        ui.add_space(10.0);
-        let roots: Vec<(String, String)> = self
+        let t = tone(ui.visuals().dark_mode);
+        let mut roots: Vec<(String, String, String, u64)> = self
             .ws
             .pages
             .iter()
             .filter(|p| p.trashed && p.parent.as_deref().and_then(|pp| self.ws.page(pp)).map(|pp| !pp.trashed).unwrap_or(true))
-            .map(|p| (p.id.clone(), title_with_icon(p)))
+            .map(|p| {
+                let parent = p.parent.as_deref().and_then(|pp| self.ws.page(pp)).map(|pp| pp.display_title()).unwrap_or_default();
+                (p.id.clone(), title_with_icon(p), parent, p.updated)
+            })
             .collect();
-        if roots.is_empty() {
-            ui.label(RichText::new(crate::tr!("La corbeille est vide.", "The trash is empty.")).weak());
-            return;
-        }
-        for (id, t) in &roots {
-            ui.horizontal(|ui| {
-                ui.label(t);
-                if ui.button(crate::tr!("Restaurer", "Restore")).clicked() {
-                    actions.push(Action::Restore(id.clone()));
+        roots.sort_by(|a, b| b.3.cmp(&a.3));
+        // The row (or "*" for the whole trash) waiting for its second click.
+        let confirm_id = egui::Id::unique("trash-confirm");
+        let mut confirm: Option<String> = ui.ctx().data(|d| d.get_temp(confirm_id));
+        let avail = ui.available_width();
+        let width = 708.0f32.min(avail - 40.0).max(300.0);
+        ui.add_space(50.0);
+        ui.horizontal(|ui| {
+            ui.add_space(((avail - width) / 2.0).max(20.0));
+            ui.vertical(|ui| {
+                ui.set_width(width);
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new(crate::tr!("Corbeille", "Trash")).font(bold(30.0)).color(t.text));
+                    if !roots.is_empty() {
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            let all = confirm.as_deref() == Some("*");
+                            let text = if all { crate::trf!("Confirmer : supprimer {} page(s) pour de bon", "Confirm: delete {} page(s) for good", roots.len()) } else { crate::tr!("Vider la corbeille", "Empty the trash").to_string() };
+                            let color = if all { projects::ORANGE } else { t.text };
+                            if ui.button(RichText::new(text).size(14.0).color(color)).clicked() {
+                                if all {
+                                    actions.extend(roots.iter().map(|r| Action::DeleteForever(r.0.clone())));
+                                    confirm = None;
+                                } else {
+                                    confirm = Some("*".into());
+                                }
+                            }
+                        });
+                    }
+                });
+                ui.label(RichText::new(crate::tr!("Les pages restent ici jusqu'à ce que vous les supprimiez définitivement.", "Pages stay here until you delete them for good.")).color(t.secondary));
+                ui.add_space(20.0);
+                if roots.is_empty() {
+                    ui.label(RichText::new(crate::tr!("La corbeille est vide.", "The trash is empty.")).color(t.tertiary).italics());
+                    return;
                 }
-                if ui.button(crate::tr!("Supprimer définitivement", "Delete for good")).clicked() {
-                    actions.push(Action::DeleteForever(id.clone()));
+                for (id, title, parent, updated) in &roots {
+                    let bg = projects::hover_begin(ui);
+                    let row = ui.horizontal(|ui| {
+                        ui.set_min_height(30.0);
+                        ui.vertical(|ui| {
+                            ui.spacing_mut().item_spacing.y = 1.0;
+                            ui.label(RichText::new(title).size(14.5).color(t.text));
+                            let when = chrome::relative_time(*updated);
+                            let info = if parent.is_empty() { when } else { crate::trf!("dans {parent} · {when}", "in {parent} · {when}") };
+                            ui.label(RichText::new(info).size(12.0).color(t.tertiary));
+                        });
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            if confirm.as_deref() == Some(id.as_str()) {
+                                if projects::quiet_link(ui, crate::tr!("Annuler", "Cancel"), &t).clicked() {
+                                    confirm = None;
+                                }
+                                if ui.button(RichText::new(crate::tr!("Confirmer la suppression", "Confirm the deletion")).size(13.0).color(projects::ORANGE)).clicked() {
+                                    actions.push(Action::DeleteForever(id.clone()));
+                                    confirm = None;
+                                }
+                            } else {
+                                if projects::quiet_link(ui, crate::tr!("Supprimer définitivement", "Delete for good"), &t).clicked() {
+                                    confirm = Some(id.clone());
+                                }
+                                if projects::action_link(ui, crate::tr!("Restaurer", "Restore")).clicked() {
+                                    actions.push(Action::Restore(id.clone()));
+                                }
+                            }
+                        });
+                    });
+                    projects::hover_end(ui, bg, row.response.rect, egui::Id::unique(("trash-row", id)), &t);
+                    ui.add_space(6.0);
                 }
             });
-        }
-        ui.add_space(10.0);
-        if ui.button(crate::tr!("Vider la corbeille", "Empty the trash")).clicked() {
-            for (id, _) in roots {
-                actions.push(Action::DeleteForever(id));
+        });
+        ui.ctx().data_mut(|d| {
+            if let Some(c) = confirm {
+                d.insert_temp(confirm_id, c);
+            } else {
+                d.remove::<String>(confirm_id);
             }
-        }
+        });
     }
 
+}
+
+/// The day pages of "Rapports des IA" other than `day`, when `day` is one of them.
+fn other_report_days(ws: &Workspace, day: &str) -> Vec<String> {
+    let root = ws.settings.orch.reports_page.as_str();
+    if root.is_empty() || ws.page(day).and_then(|p| p.parent.as_deref()) != Some(root) {
+        return vec![];
+    }
+    ws.children(Some(root)).iter().map(|p| p.id.clone()).filter(|id| id != day).collect()
 }
 
 /// A block's content without its time.
@@ -1104,6 +1190,14 @@ impl eframe::App for NotesApp {
             }
         }
         self.shortcuts(&ctx, &mut actions);
+        let unplugged = self.uninstall_report.lock().unwrap().take();
+        if let Some(lines) = unplugged {
+            self.info(crate::trf!(
+                "{}\nVous pouvez maintenant quitter Orchestra et le supprimer.",
+                "{}\nYou can now quit Orchestra and remove it.",
+                lines.join("\n")
+            ));
+        }
         // Ctrl+` shows / hides the terminals, as in VS Code.
         if !self.terms.is_empty() && ctx.input_mut(|i| i.consume_key(egui::Modifiers::CTRL, egui::Key::Backtick)) {
             self.term_open = !self.term_open;
@@ -1208,10 +1302,21 @@ impl eframe::App for NotesApp {
 
     fn on_exit(&mut self) {
         self.save_on_exit();
+        self.stop_children();
     }
 }
 
 impl NotesApp {
+    /// Stop every program Orchestra started (terminals, autonomous sessions and what they
+    /// ran), so nothing keeps running, or holds the app's files, once it quits or is
+    /// replaced by an update.
+    pub(crate) fn stop_children(&mut self) {
+        for t in self.terms.iter_mut() {
+            t.stop();
+        }
+        self.stop_runs();
+    }
+
     fn save_on_exit(&mut self) {
         self.detect_changes();
         if self.dirty_since.is_some() {
@@ -1940,13 +2045,18 @@ fn blocks_view(
     (new_focus, focus_used)
 }
 
-/// Make the Kanban sub-page of `page` and link it at block `at`; returns its id.
-fn insert_kanban(ws: &mut Workspace, page: &str, at: usize) -> String {
-    let mut p = Page::new(crate::tr!("Kanban", "Kanban"), Some(page.to_string()));
-    p.icon = "📋".into();
+/// Make a database sub-page of `page` shown in `view`, and link it at block `at`; returns its id.
+fn insert_database(ws: &mut Workspace, page: &str, at: usize, view: DbView) -> String {
+    let (title, icon) = match view {
+        DbView::Board => (crate::tr!("Kanban", "Kanban"), "📋"),
+        DbView::Table => (crate::tr!("Base de données", "Database"), "🗃️"),
+        DbView::List => (crate::tr!("Liste", "List"), "📝"),
+    };
+    let mut p = Page::new(title, Some(page.to_string()));
+    p.icon = icon.into();
     p.blocks.clear();
     let mut db = Database::new_default();
-    db.view = DbView::Board;
+    db.view = view;
     p.database = Some(db);
     let id = p.id.clone();
     ws.pages.push(p);
@@ -1970,10 +2080,14 @@ fn apply_item(
 ) {
     match item {
         slash::Item::Block(k) => apply_kind(b, k, i, page_id, actions, insert, new_focus),
-        slash::Item::Kanban => {
+        slash::Item::Database(view) => {
             b.text.clear();
             b.kind = BlockKind::PageLink;
-            actions.push(Action::InsertKanban { page: page_id.to_string(), at: i });
+            actions.push(Action::InsertDatabase { page: page_id.to_string(), at: i, view });
+        }
+        slash::Item::Today => {
+            b.text = format!("{} ", ai_ui::today_label());
+            *new_focus = Some((b.id.clone(), Some(b.text.chars().count())));
         }
     }
 }
@@ -2360,30 +2474,69 @@ mod tests {
     fn slash_menu_filters_in_notion_order() {
         use slash::Item;
         let all = slash::matches("/");
-        assert_eq!(all.len(), 14);
+        assert_eq!(all.len(), 17);
         assert_eq!(all[0].0, Item::Block(BlockKind::Paragraph));
-        assert_eq!(all[13].0, Item::Kanban);
+        assert_eq!(all[13].0, Item::Database(DbView::Table));
+        assert_eq!(all[14].0, Item::Database(DbView::Board));
+        assert_eq!(all[15].0, Item::Database(DbView::List));
+        assert_eq!(all[16].0, Item::Today);
         let l: Vec<Item> = slash::matches("/liste").into_iter().map(|x| x.0).collect();
-        assert_eq!(l, [BlockKind::Bullet, BlockKind::Numbered, BlockKind::Todo, BlockKind::Toggle].map(Item::Block));
+        let mut want = [BlockKind::Bullet, BlockKind::Numbered, BlockKind::Todo, BlockKind::Toggle].map(Item::Block).to_vec();
+        want.push(Item::Database(DbView::List));
+        assert_eq!(l, want);
         assert!(slash::matches("/zzz").is_empty());
         for q in ["/kanban", "/kan", "/tableau", "/board"] {
-            assert!(slash::matches(q).iter().any(|x| x.0 == Item::Kanban), "{q}");
+            assert!(slash::matches(q).iter().any(|x| x.0 == Item::Database(DbView::Board)), "{q}");
+        }
+        for q in ["/base", "/database", "/table"] {
+            assert!(slash::matches(q).iter().any(|x| x.0 == Item::Database(DbView::Table)), "{q}");
+        }
+        for q in ["/date", "/aujourd", "/today"] {
+            assert!(slash::matches(q).iter().any(|x| x.0 == Item::Today), "{q}");
         }
     }
 
     #[test]
-    fn slash_kanban_makes_a_board_subpage() {
+    fn slash_database_makes_a_subpage_in_its_view() {
+        for view in [DbView::Board, DbView::Table, DbView::List] {
+            let mut ws = Workspace::default();
+            let page = ws.create_page("Notes", None);
+            ws.page_mut(&page).unwrap().blocks = vec![Block::new(BlockKind::Paragraph, "/base")];
+            let id = insert_database(&mut ws, &page, 0, view);
+            let kb = ws.page(&id).unwrap();
+            assert_eq!(kb.parent.as_deref(), Some(page.as_str()));
+            let db = kb.database.as_ref().unwrap();
+            assert_eq!(db.view, view);
+            assert!(db.columns.iter().any(|c| c.kind == ColumnKind::Select));
+            let link = &ws.page(&page).unwrap().blocks[0];
+            assert_eq!((link.kind, link.extra.as_str(), link.text.as_str()), (BlockKind::PageLink, id.as_str(), ""));
+        }
+    }
+
+    #[test]
+    fn report_days_open_one_at_a_time() {
         let mut ws = Workspace::default();
-        let page = ws.create_page("Notes", None);
-        ws.page_mut(&page).unwrap().blocks = vec![Block::new(BlockKind::Paragraph, "/kanban")];
-        let id = insert_kanban(&mut ws, &page, 0);
-        let kb = ws.page(&id).unwrap();
-        assert_eq!(kb.parent.as_deref(), Some(page.as_str()));
-        let db = kb.database.as_ref().unwrap();
-        assert_eq!(db.view, DbView::Board);
-        assert!(db.columns.iter().any(|c| c.kind == ColumnKind::Select));
-        let link = &ws.page(&page).unwrap().blocks[0];
-        assert_eq!((link.kind, link.extra.as_str(), link.text.as_str()), (BlockKind::PageLink, id.as_str(), ""));
+        let root = ws.create_page("Rapports des IA", None);
+        ws.settings.orch.reports_page = root.clone();
+        let d1 = ws.create_page("2026-11-19", Some(root.clone()));
+        let d2 = ws.create_page("2026-11-20", Some(root.clone()));
+        let other = ws.create_page("Notes", None);
+        let sub = ws.create_page("Sous-page", Some(other.clone()));
+        assert_eq!(other_report_days(&ws, &d2), [d1.clone()]);
+        assert_eq!(other_report_days(&ws, &d1), [d2]);
+        // Pages outside the reports, and the reports page itself, fold nothing.
+        assert!(other_report_days(&ws, &other).is_empty() && other_report_days(&ws, &sub).is_empty() && other_report_days(&ws, &root).is_empty());
+    }
+
+    #[test]
+    fn slash_today_writes_the_date() {
+        let mut b = Block::new(BlockKind::Paragraph, "/date");
+        let (mut actions, mut insert, mut focus) = (vec![], None, None);
+        apply_item(&mut b, slash::Item::Today, 0, "p", &mut actions, &mut insert, &mut focus);
+        assert!(b.text.ends_with(' ') && b.text.chars().any(|c| c.is_ascii_digit()) && !b.text.starts_with('/'), "{}", b.text);
+        assert_eq!(b.kind, BlockKind::Paragraph);
+        assert!(actions.is_empty() && insert.is_none());
+        assert_eq!(focus, Some((b.id.clone(), Some(b.text.chars().count()))));
     }
 
     #[test]

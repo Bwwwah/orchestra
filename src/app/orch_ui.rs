@@ -202,6 +202,10 @@ pub struct Orch {
     awake: crate::awake::Awake,
     /// When closing the window last only hid it because sessions were running.
     close_held: Option<Instant>,
+    /// The « Screen Recording » permission at the last reading, and when it was read.
+    screen: Option<(bool, Instant)>,
+    /// The person put the permission card away for this launch.
+    screen_dismissed: bool,
 }
 
 /// `Orch::confirm_main` for the « Lancer la sélection » button.
@@ -278,7 +282,8 @@ impl NotesApp {
         }
         // The session checks interfaces with take_screenshot, which macOS only allows once
         // Orchestra has the « Screen Recording » permission: ask for it now (once per launch).
-        crate::screen::ensure_permission();
+        let mut granted_version = self.ws.settings.screen_granted_version.clone();
+        crate::screen::ensure_permission(&mut granted_version);
         let steps_at_start: Vec<(String, bool)> = pr.steps.iter().map(|s| (s.id.clone(), s.status == crate::project::StepStatus::Done)).collect();
         let copy = auto::make_copy(&folder, &title)?;
         let agent = Agent::ClaudeCode;
@@ -309,6 +314,7 @@ impl NotesApp {
             x.resume_at = 0;
         }
         self.ws.runs.push(rec);
+        self.ws.settings.screen_granted_version = granted_version;
         self.dirty_since.get_or_insert_with(Instant::now);
         self.orch.runs.push(LiveRun {
             id,
@@ -364,9 +370,10 @@ impl NotesApp {
         ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
         ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(true));
         let n = self.orch.runs.len();
+        let s = crate::i18n::plural(n);
         self.info(crate::trf!(
-            "{n} session(s) autonome(s) en cours : Orchestra continue dans le Dock et garde le Mac éveillé. Fermez à nouveau pour quitter et les arrêter.",
-            "{n} autonomous session(s) running: Orchestra keeps going in the Dock and keeps the Mac awake. Close again to quit and stop them."
+            "{n} session{s} autonome{s} en cours : Orchestra continue dans le Dock et garde le Mac éveillé. Fermez à nouveau pour quitter et les arrêter.",
+            "{n} autonomous session{s} running: Orchestra keeps going in the Dock and keeps the Mac awake. Close again to quit and stop them."
         ));
     }
 
@@ -763,7 +770,8 @@ impl NotesApp {
         if let Some(x) = self.ws.runs.iter_mut().find(|x| x.id == id) {
             x.report = Some(page.clone());
         }
-        let mut text = crate::trf!("{why} · {} étape(s) · ≈ {:.0} % · {} commit(s)", "{why} · {} step(s) · ≈ {:.0} % · {} commit(s)", rec.steps_done.len(), rec.pct, commits.len());
+        let (e, c) = (crate::i18n::plural(rec.steps_done.len()), crate::i18n::plural(commits.len()));
+        let mut text = crate::trf!("{why} · {} étape{e} · ≈ {:.0} % · {} commit{c}", "{why} · {} step{e} · ≈ {:.0} % · {} commit{c}", rec.steps_done.len(), rec.pct, commits.len());
         if resume_at > 0 {
             text.push_str(&crate::trf!(
                 " · reprendra seule dans {} (après la remise à zéro du quota)",
@@ -852,6 +860,109 @@ impl NotesApp {
 
     // ------------------------------------------------------------------ the page
 
+    /// Stop the autonomous sessions' programs (and everything they started), before quitting
+    /// or replacing the app.
+    pub(super) fn stop_runs(&mut self) {
+        for r in self.orch.runs.iter_mut() {
+            r.term.stop();
+        }
+    }
+
+    /// At launch: read the « Screen Recording » permission (no dialog). Granted: remember
+    /// this version as having it. Lost with an update: say so at once, with the way back.
+    pub(super) fn screen_at_launch(&mut self) {
+        if !cfg!(target_os = "macos") {
+            return;
+        }
+        let ok = crate::screen::granted();
+        self.orch.screen = Some((ok, Instant::now()));
+        match crate::screen::at_launch(ok, &self.ws.settings.screen_granted_version, crate::update::VERSION) {
+            crate::screen::AtLaunch::Fine => self.ws.settings.screen_granted_version = crate::update::VERSION.to_string(),
+            crate::screen::AtLaunch::LostWithUpdate => self.info(crate::tr!(
+                "La mise à jour a fait perdre à Orchestra l'autorisation « Enregistrement de l'écran » : les IA ne peuvent plus vérifier leur travail à l'écran. Page Orchestration › « Réaccorder » pour la retrouver.",
+                "The update made Orchestra lose the « Screen Recording » permission: the AIs can no longer check their work on screen. Orchestration page › « Grant again » to get it back."
+            )),
+            crate::screen::AtLaunch::NeverGranted => {}
+        }
+    }
+
+    /// The permission is missing: what it's for, and the two ways to give it back. Read
+    /// again every few seconds while the page is open (a cheap call, no dialog).
+    fn screen_card(&mut self, ui: &mut egui::Ui, t: &Tone) {
+        if !cfg!(target_os = "macos") || self.orch.screen_dismissed {
+            return;
+        }
+        let stale = self.orch.screen.is_none_or(|(_, at)| at.elapsed() > Duration::from_secs(3));
+        if stale {
+            let ok = crate::screen::granted();
+            if ok {
+                self.ws.settings.screen_granted_version = crate::update::VERSION.to_string();
+            }
+            self.orch.screen = Some((ok, Instant::now()));
+        }
+        if self.orch.screen.is_some_and(|(ok, _)| ok) {
+            return;
+        }
+        ui.ctx().request_repaint_after(Duration::from_secs(3));
+        let lost = !self.ws.settings.screen_granted_version.is_empty();
+        let mut ask = false;
+        let mut open = false;
+        egui::Frame::new()
+            .fill(super::projects::ORANGE.gamma_multiply(0.07))
+            .stroke(egui::Stroke::new(1.0, super::projects::ORANGE.gamma_multiply(0.45)))
+            .corner_radius(12.0)
+            .inner_margin(egui::Margin::symmetric(18, 14))
+            .show(ui, |ui| {
+                ui.set_width(ui.available_width());
+                let title = if lost { crate::tr!("Autorisation « Enregistrement de l'écran » perdue", "« Screen Recording » permission lost") } else { crate::tr!("Autorisation « Enregistrement de l'écran » manquante", "« Screen Recording » permission missing") };
+                ui.label(RichText::new(title).font(semibold(14.0)).color(super::projects::ORANGE));
+                ui.add(
+                    egui::Label::new(
+                        RichText::new(crate::tr!(
+                            "Sans elle, les IA lancées ici ne peuvent pas prendre de capture (take_screenshot) pour vérifier une interface. Cochez Orchestra dans Réglages Système › Confidentialité et sécurité › Enregistrement de l'écran, puis quittez et relancez Orchestra : macOS ne l'applique qu'au lancement suivant.",
+                            "Without it, the AIs started here can't take a screenshot (take_screenshot) to check an interface. Tick Orchestra in System Settings › Privacy & Security › Screen Recording, then quit and reopen Orchestra: macOS only applies it at the next launch."
+                        ))
+                        .size(12.5)
+                        .color(t.secondary),
+                    )
+                    .wrap(),
+                );
+                ui.add_space(4.0);
+                ui.horizontal_wrapped(|ui| {
+                    if ui.button(RichText::new(crate::tr!("Ouvrir les réglages", "Open the settings")).size(13.0)).clicked() {
+                        open = true;
+                    }
+                    let again = ui
+                        .button(RichText::new(crate::tr!("Réaccorder", "Grant again")).size(13.0))
+                        .on_hover_text(crate::tr!(
+                            "Efface l'ancienne entrée d'Orchestra dans les réglages si elle est restée d'une version précédente, puis macOS redemande l'autorisation",
+                            "Clears Orchestra's old entry in the settings if it was left by an earlier version, then macOS asks for the permission again"
+                        ));
+                    if again.clicked() {
+                        ask = true;
+                    }
+                    if super::projects::quiet_link(ui, crate::tr!("Plus tard", "Later"), t).clicked() {
+                        self.orch.screen_dismissed = true;
+                    }
+                });
+            });
+        ui.add_space(14.0);
+        if open {
+            if let Err(e) = crate::screen::open_settings() {
+                self.info(e);
+            }
+        }
+        if ask {
+            let mut v = self.ws.settings.screen_granted_version.clone();
+            let ok = crate::screen::ensure_permission(&mut v);
+            self.ws.settings.screen_granted_version = v;
+            self.orch.screen = Some((ok, Instant::now()));
+            if !ok {
+                let _ = crate::screen::open_settings();
+            }
+        }
+    }
+
     pub(super) fn orchestra_view(&mut self, ui: &mut egui::Ui, actions: &mut Vec<Action>) {
         let t = tone(ui.visuals().dark_mode);
         let avail = ui.available_width();
@@ -866,6 +977,7 @@ impl NotesApp {
                 ui.label(RichText::new(crate::tr!("Orchestration", "Orchestration")).font(bold(30.0)).color(t.text));
                 ui.label(RichText::new(crate::tr!("Des IA qui avancent seules sur vos projets, chacune dans une copie à part, dans les limites de votre abonnement.", "AIs that move your projects forward on their own, each in a separate copy, within your subscription's limits.")).color(t.secondary));
                 ui.add_space(14.0);
+                self.screen_card(ui, &t);
                 self.week_bar(ui, &t);
                 ui.add_space(14.0);
                 self.stats_row(ui, &t);
@@ -1027,10 +1139,18 @@ impl NotesApp {
                         _ => crate::tr!("inconnu pour l'instant", "unknown for now").into(),
                     },
                 ),
-                1 => (running.to_string(), if running == 0 { crate::trf!("{ready} projet(s) prêt(s) à lancer", "{ready} project(s) ready to start") } else { crate::trf!("sur {ready} projet(s) prêt(s)", "of {ready} project(s) ready") }),
+                1 => {
+                    let s = crate::i18n::plural(ready);
+                    (running.to_string(), if running == 0 { crate::trf!("{ready} projet{s} prêt{s} à lancer", "{ready} project{s} ready to start") } else { crate::trf!("sur {ready} projet{s} prêt{s}", "of {ready} project{s} ready") })
+                }
                 _ => (
                     todays.len().to_string(),
-                    if todays.is_empty() { crate::trf!("session terminée · bilan à {hour} h", "finished session · summary at {hour} h") } else { crate::trf!("session(s) · {steps} étape(s) faite(s)", "session(s) · {steps} step(s) done") },
+                    if todays.is_empty() {
+                        crate::trf!("session terminée · bilan à {hour} h", "finished session · summary at {hour} h")
+                    } else {
+                        let (s, e) = (crate::i18n::plural(todays.len()), crate::i18n::plural(steps));
+                        crate::trf!("session{s} · {steps} étape{e} faite{e}", "session{s} · {steps} step{e} done")
+                    },
                 ),
             };
             p.text(egui::pos2(x, rect.top() + 36.0), egui::Align2::LEFT_TOP, &big, bold(30.0), t.text);
@@ -1419,10 +1539,10 @@ impl NotesApp {
                             ui.spacing_mut().item_spacing.y = 1.0;
                             ui.horizontal(|ui| {
                                 ui.label(RichText::new(title).font(semibold(14.5)).color(t.text));
-                                let (txt, col) = if busy { (crate::tr!("au travail", "at work").to_string(), super::projects::GREEN) } else if open == 0 { (crate::tr!("aucune étape ouverte", "no open step").to_string(), t.tertiary) } else { (crate::trf!("{open} étape(s) ouverte(s)", "{open} open step(s)"), t.secondary) };
+                                let (txt, col) = if busy { (crate::tr!("au travail", "at work").to_string(), super::projects::GREEN) } else if open == 0 { (crate::tr!("aucune étape ouverte", "no open step").to_string(), t.tertiary) } else { ({ let s = crate::i18n::plural(open); crate::trf!("{open} étape{s} ouverte{s}", "{open} open step{s}") }, t.secondary) };
                                 ui.label(RichText::new(txt).size(12.0).color(col));
                             });
-                            let mut job = egui::text::LayoutJob::single_section(folder.clone(), egui::TextFormat::simple(FontId::monospace(11.0), t.tertiary));
+                            let mut job = egui::text::LayoutJob::single_section(super::projects::tilde(folder), egui::TextFormat::simple(FontId::monospace(11.0), t.tertiary));
                             job.wrap = egui::text::TextWrapping::truncate_at_width(if wide { (ui.available_width() - 250.0).max(80.0) } else { ui.available_width().max(40.0) });
                             super::projects::cut_label(ui, job);
                         });
@@ -1524,7 +1644,8 @@ impl NotesApp {
                             confirm_main = Some(SELECTION.to_string());
                         }
                     }
-                    let note = crate::trf!("{} projet(s) en parallèle · {picked_sum:.0} % au total pour une limite globale de {global:.0} %", "{} project(s) in parallel · {picked_sum:.0} % in total for a global limit of {global:.0} %", picked.len());
+                    let s = crate::i18n::plural(picked.len());
+                    let note = crate::trf!("{} projet{s} en parallèle · {picked_sum:.0} % au total pour une limite globale de {global:.0} %", "{} project{s} in parallel · {picked_sum:.0} % in total for a global limit of {global:.0} %", picked.len());
                     ui.label(RichText::new(note).size(12.5).color(if picked_sum > global { super::projects::ORANGE } else { t.tertiary }));
                 });
             }
@@ -1589,7 +1710,7 @@ impl NotesApp {
                         ui.label(RichText::new(&r.title).font(semibold(14.0)).color(t.text));
                         ui.label(RichText::new(format!("{} · {} → {}", auto::local_day(r.started), auto::hm(r.started), auto::hm(r.ended.max(r.started)))).size(12.5).color(t.tertiary));
                         let used = if r.limit > 0.0 { crate::trf!("≈ {:.0} % / {:.0} % de budget", "≈ {:.0} % / {:.0} % budget", r.pct, r.limit) } else { format!("≈ {:.0} %", r.pct) };
-                        ui.label(RichText::new(crate::trf!("{} · {} étape(s) · {used}", "{} · {} step(s) · {used}", r.outcome, r.steps_done.len())).size(12.5).color(t.secondary)).on_hover_text(crate::tr!(
+                        ui.label(RichText::new(crate::trf!("{} · {} étape{e} · {used}", "{} · {} step{e} · {used}", r.outcome, r.steps_done.len(), e = crate::i18n::plural(r.steps_done.len()))).size(12.5).color(t.secondary)).on_hover_text(crate::tr!(
                             "Part de la fenêtre de 5 h utilisée par cette session, sur le budget qu'elle avait",
                             "Share of the 5-hour window this session used, out of the budget it had"
                         ));
@@ -1835,7 +1956,7 @@ impl NotesApp {
                                         }
                                     }
                                 });
-                                let x = ui.add(egui::Button::new(RichText::new("×").size(16.0).color(t.tertiary)).frame(false)).on_hover_text(crate::tr!("Supprimer", "Delete"));
+                                let x = super::icons::delete_cross(ui, 22.0, t.tertiary, t.text, t.selected, crate::tr!("Supprimer", "Delete"));
                                 if x.clicked() {
                                     remove = Some(i);
                                 }
@@ -2083,8 +2204,8 @@ fn window_bar(window: f32, pct: f32, limit: f32, global: f32) -> WindowBar {
 /// share of its budget only.
 fn share_row(ui: &mut egui::Ui, id: &str, pct: f32, limit: f32, window: Option<f32>, global: f32, t: &Tone) {
     let text = match window {
-        Some(w) => crate::trf!("fenêtre de 5 h : {w:.0} % · cette session : {pct:.1} % (budget {limit:.0} %)", "5-hour window: {w:.0} % · this session: {pct:.1} % (budget {limit:.0} %)"),
-        None => crate::trf!("{:.1} % utilisés sur un budget de {:.0} %", "{:.1} % used of a {:.0} % budget", pct, limit),
+        Some(w) => crate::trf!("fenêtre de 5 h : {w:.0} % · cette session : {} % (budget {limit:.0} %)", "5-hour window: {w:.0} % · this session: {} % (budget {limit:.0} %)", crate::i18n::dec1(pct)),
+        None => crate::trf!("{} % utilisés sur un budget de {:.0} %", "{} % used of a {:.0} % budget", crate::i18n::dec1(pct), limit),
     };
     let font = FontId::proportional(12.5);
     let text_w = ui.fonts_mut(|f| f.layout_no_wrap(text.clone(), font.clone(), t.secondary)).size().x;
@@ -2801,8 +2922,13 @@ struct LaunchCx<'a> {
 fn launch_controls(ui: &mut egui::Ui, c: LaunchCx<'_>) {
     let LaunchCx { id, d, busy, plugged, room, global, to_main, start, confirm_main, lk, t } = c;
     if busy {
-        let (r, _) = ui.allocate_exact_size(egui::vec2(16.0, 16.0), egui::Sense::hover());
-        super::projects::pulse_dot(ui, r.center(), super::projects::GREEN);
+        // A pill where the other rows have « Lancer », so the controls stay in line.
+        let text = crate::tr!("En cours", "Running");
+        let g = ui.painter().layout_no_wrap(text.to_string(), semibold(13.0), super::projects::GREEN);
+        let (rect, _) = ui.allocate_exact_size(g.size() + egui::vec2(36.0, 12.0), egui::Sense::hover());
+        ui.painter().rect_filled(rect, 7.0, super::projects::GREEN.gamma_multiply(0.14));
+        super::projects::pulse_dot(ui, egui::pos2(rect.left() + 14.0, rect.center().y), super::projects::GREEN);
+        ui.painter().galley(egui::pos2(rect.left() + 24.0, rect.center().y - g.size().y / 2.0), g, super::projects::GREEN);
     } else if !plugged {
         start_button(ui, false, t).on_disabled_hover_text(crate::tr!("Branchez d'abord Claude Code", "Plug in Claude Code first"));
     } else if room < 1.0 {

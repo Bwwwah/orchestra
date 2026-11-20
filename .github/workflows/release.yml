@@ -57,6 +57,17 @@ jobs:
 
       - name: macOS (app universelle, .dmg et .zip)
         if: matrix.name == 'macOS'
+        env:
+          # Always the same signing certificate, so that macOS keeps the app's permissions
+          # (Screen Recording…) after an update. Without these secrets: ad-hoc signature,
+          # with a warning. See packaging/sign-macos.sh and docs/permissions-macos.md.
+          MACOS_CERT_P12: ${{ secrets.MACOS_CERT_P12 }}
+          MACOS_CERT_PASSWORD: ${{ secrets.MACOS_CERT_PASSWORD }}
+          MACOS_SIGN_IDENTITY: ${{ secrets.MACOS_SIGN_IDENTITY }}
+          # Notarization by Apple (Developer ID): see packaging/notarize-macos.sh.
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          APPLE_APP_PASSWORD: ${{ secrets.APPLE_APP_PASSWORD }}
         run: |
           sh packaging/build-macos.sh
           mkdir -p out

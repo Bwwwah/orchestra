@@ -14,6 +14,10 @@ pub struct Upd {
     checked: Option<Instant>,
     started: Option<Instant>,
     pub available: Option<Release>,
+    /// The latest published version, newer or not: its notes are shown in the settings.
+    latest: Option<Release>,
+    /// The settings show the release notes (asked before the check came back: shown then).
+    notes_open: bool,
     pub last: Option<Result<String, String>>,
     install: Slot<Result<std::path::PathBuf, String>>,
     installing: bool,
@@ -53,6 +57,9 @@ impl NotesApp {
         }
         if let Some(r) = self.upd.check.lock().unwrap().take() {
             self.upd.checking = false;
+            if let Ok(rel) = &r {
+                self.upd.latest = Some(rel.clone());
+            }
             match r {
                 Ok(rel) if update::newer(&rel.tag, update::VERSION) => {
                     self.upd.last = Some(Ok(crate::trf!("Version {} disponible.", "Version {} available.", rel.tag)));
@@ -92,6 +99,8 @@ impl NotesApp {
     fn restart_now(&mut self) {
         if let Some(p) = self.upd.ready.clone() {
             self.save_now();
+            // `exit` below runs no destructor: the terminals and sessions are stopped first.
+            self.stop_children();
             update::restart(&p);
             std::process::exit(0);
         }
@@ -160,6 +169,54 @@ impl NotesApp {
                 Err(e) => (e.clone(), super::projects::ORANGE),
             };
             ui.label(RichText::new(text).size(13.0).color(color));
+        }
+        // What's in the latest version: its notes, fetched with the check.
+        let repo = self.update_repo();
+        super::settings::row(ui, crate::tr!("Notes de version", "Release notes"), crate::tr!("Ce qui a changé dans la dernière version publiée.", "What changed in the latest published version."), t, |ui| {
+            let label = if self.upd.notes_open { crate::tr!("Masquer", "Hide") } else { crate::tr!("Voir", "Show") };
+            if super::settings::button(ui, label, t, l).clicked() {
+                self.upd.notes_open = !self.upd.notes_open;
+                if self.upd.notes_open && self.upd.latest.is_none() {
+                    self.check_updates(&ctx);
+                }
+            }
+        });
+        if self.upd.notes_open {
+            egui::Frame::new()
+                .fill(t.card)
+                .stroke(egui::Stroke::new(1.0, t.border))
+                .corner_radius(10.0)
+                .inner_margin(egui::Margin::symmetric(14, 10))
+                .show(ui, |ui| {
+                    ui.set_width(ui.available_width());
+                    match &self.upd.latest {
+                        Some(rel) => {
+                            ui.label(RichText::new(rel.tag.as_str()).font(semibold(14.0)).color(t.text));
+                            if rel.notes.trim().is_empty() {
+                                ui.label(RichText::new(crate::tr!("Pas de notes pour cette version.", "No notes for this version.")).size(13.0).color(t.tertiary).italics());
+                            } else {
+                                egui::ScrollArea::vertical().id_salt("release-notes").max_height(320.0).show(ui, |ui| {
+                                    super::rich::markdown(ui, &rel.notes, 13.0, t);
+                                });
+                            }
+                        }
+                        None if self.upd.checking => {
+                            ui.horizontal(|ui| {
+                                ui.add(egui::Spinner::new().size(12.0));
+                                ui.label(RichText::new(crate::tr!("Lecture des versions publiées…", "Reading the published versions…")).size(13.0).color(t.secondary));
+                            });
+                        }
+                        None => {
+                            let why = if repo.is_empty() { crate::tr!("Indiquez le dépôt GitHub ci-dessous.", "Set the GitHub repository below.") } else { crate::tr!("Notes indisponibles pour l'instant.", "Notes unavailable for now.") };
+                            ui.label(RichText::new(why).size(13.0).color(t.tertiary));
+                        }
+                    }
+                    if !repo.is_empty() && super::projects::action_link(ui, crate::tr!("Toutes les versions sur GitHub", "All versions on GitHub")).clicked() {
+                        if let Err(e) = crate::opener::open_url(&format!("https://github.com/{}/releases", repo.trim())) {
+                            self.fail(e);
+                        }
+                    }
+                });
         }
         let hint = if built.is_empty() { "propriétaire/dépôt".to_string() } else { built.to_string() };
         super::settings::row(ui, crate::tr!("Dépôt", "Repository"), crate::tr!("propriétaire/dépôt sur GitHub. Privé : chaque personne doit y avoir accès et être connectée avec « gh ».", "owner/repository on GitHub. Private: each person needs access to it and to be signed in with « gh »."), t, |ui| {

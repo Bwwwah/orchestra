@@ -10,7 +10,7 @@
 
 use crate::sessions::Tool;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
@@ -66,7 +66,7 @@ fn read_shell_path() -> String {
     {
         use std::os::unix::process::CommandExt;
         let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".into());
-        let mut cmd = Command::new(&shell);
+        let mut cmd = crate::proc::command(&shell);
         cmd.args(["-lic", "printf '__PATH__%s\\n' \"$PATH\""]).stdin(Stdio::null()).stderr(Stdio::null());
         // An interactive shell takes over its terminal (job control). When Orchestra runs as
         // the MCP server of a Claude Code session, that terminal is Claude Code's, which
@@ -183,7 +183,7 @@ fn run_agent(agent: &Agent, folder: &str, args: Vec<String>, path: &str, cancel:
     if !dir.is_dir() {
         return Err(crate::tr!("dossier introuvable", "folder not found").into());
     }
-    let mut cmd = Command::new(&agent.bin);
+    let mut cmd = crate::proc::command(&agent.bin);
     for k in API_KEY_VARS {
         cmd.env_remove(k);
     }

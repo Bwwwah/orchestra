@@ -230,9 +230,85 @@ pub fn restore_cmd(cmd: Option<&str>) -> Option<String> {
     })
 }
 
+impl Term {
+    /// Stop the shell and everything it started (claude, node, a build…), not only the
+    /// shell: otherwise they keep running after Orchestra, and on Windows they hold its
+    /// files, which then can't be replaced or uninstalled.
+    pub fn stop(&mut self) {
+        if !matches!(self.child.try_wait(), Ok(None)) {
+            return;
+        }
+        if let Some(pid) = self.child.process_id() {
+            let _ = crate::proc::command(tree_kill_program()).args(tree_kill_args(pid)).stdin(std::process::Stdio::null()).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null()).status();
+        }
+        let _ = self.child.kill();
+    }
+}
+
+/// Windows: `taskkill /F /T` ends the process and its whole tree. Elsewhere the shell leads
+/// its own session in the pseudo-terminal (portable-pty calls setsid), so its process group
+/// holds what it ran: `kill -TERM -- -<pid>` reaches all of it.
+fn tree_kill_program() -> &'static str {
+    if cfg!(windows) { "taskkill" } else { "kill" }
+}
+
+fn tree_kill_args(pid: u32) -> Vec<String> {
+    if cfg!(windows) {
+        vec!["/F".into(), "/T".into(), "/PID".into(), pid.to_string()]
+    } else {
+        vec!["-TERM".into(), "--".into(), format!("-{pid}")]
+    }
+}
+
 impl Drop for Term {
     fn drop(&mut self) {
-        let _ = self.child.kill();
+        self.stop();
+    }
+}
+
+#[cfg(test)]
+mod stop_tests {
+    #[test]
+    fn the_whole_tree_is_named() {
+        let a = super::tree_kill_args(4242);
+        if cfg!(windows) {
+            assert_eq!(a, ["/F", "/T", "/PID", "4242"]);
+        } else {
+            assert_eq!(a, ["-TERM", "--", "-4242"]);
+        }
+    }
+
+    /// A shell that started a long command: stopping the terminal ends that command too.
+    #[cfg(unix)]
+    #[test]
+    fn stopping_ends_what_the_shell_started() {
+        let dir = std::env::temp_dir().join(format!("orchestra-stop-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let pidfile = dir.join("pid");
+        let cmd = format!("sleep 60 & echo $! > '{}'; wait", pidfile.display());
+        let mut t = super::Term::spawn_once("test", &dir.display().to_string(), &cmd, || {}).unwrap();
+        let mut pid = String::new();
+        for _ in 0..100 {
+            pid = std::fs::read_to_string(&pidfile).unwrap_or_default().trim().to_string();
+            if !pid.is_empty() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        assert!(!pid.is_empty(), "the command didn't start");
+        let alive = |p: &str| std::process::Command::new("kill").args(["-0", p]).status().is_ok_and(|s| s.success());
+        assert!(alive(&pid));
+        t.stop();
+        let mut gone = false;
+        for _ in 0..40 {
+            if !alive(&pid) {
+                gone = true;
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(gone, "sleep {pid} still runs after stop()");
     }
 }
 

@@ -377,6 +377,11 @@ pub struct CollabSettings {
 pub struct Settings {
     #[serde(default)]
     pub dark: bool,
+    /// The last version of Orchestra that had the « Screen Recording » permission. When a
+    /// later version doesn't, its entry in System Settings is a stale one left by the update:
+    /// see `screen::ensure_permission`.
+    #[serde(default)]
+    pub screen_granted_version: String,
     #[serde(default)]
     pub collab: CollabSettings,
     #[serde(default)]

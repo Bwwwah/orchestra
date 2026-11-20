@@ -48,6 +48,28 @@ macro_rules! trf {
     };
 }
 
+/// The plural mark for `n` things: "s" or "". In French 0 and 1 take the singular
+/// (« 0 projet », « 1 projet », « 2 projets »), in English only 1 does. Used as
+/// `trf!("{n} projet{s}", "{n} project{s}", s = plural(n))`, instead of « projet(s) ».
+pub fn plural(n: usize) -> &'static str {
+    plural_in(n, en())
+}
+
+fn plural_in(n: usize, en: bool) -> &'static str {
+    if (en && n != 1) || (!en && n > 1) { "s" } else { "" }
+}
+
+/// A number with one decimal, with a decimal comma in French (« 14,3 ») and a point in
+/// English (« 14.3 »).
+pub fn dec1(x: f32) -> String {
+    dec1_in(x, en())
+}
+
+fn dec1_in(x: f32, en: bool) -> String {
+    let s = format!("{x:.1}");
+    if en { s } else { s.replace('.', ",") }
+}
+
 #[cfg(test)]
 mod tests {
     #[test]
@@ -55,5 +77,16 @@ mod tests {
         let n = 3;
         assert_eq!(crate::tr!("Projets", "Projects"), "Projets");
         assert_eq!(crate::trf!("{n} pages", "{n} pages!"), "3 pages");
+    }
+
+    #[test]
+    fn plurals_and_decimals() {
+        use super::{dec1_in, plural_in};
+        assert_eq!([0, 1, 2].map(|n| plural_in(n, false)), ["", "", "s"]);
+        assert_eq!([0, 1, 2].map(|n| plural_in(n, true)), ["s", "", "s"]);
+        assert_eq!(dec1_in(14.2857, false), "14,3");
+        assert_eq!(dec1_in(14.2857, true), "14.3");
+        let s = super::plural(3);
+        assert_eq!(crate::trf!("{} projet{s} prêt{s}", "{} project{s} ready", 3), "3 projets prêts");
     }
 }

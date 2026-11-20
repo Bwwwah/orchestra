@@ -17,7 +17,7 @@
 use crate::model::{Block, ConnectorKind, Page, Workspace};
 use std::io::Write;
 use std::path::PathBuf;
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 
 pub trait Connector {
     /// Name shown in the window.
@@ -76,11 +76,11 @@ impl UserCommand {
     fn run(&self, arg: &str, input: Option<String>) -> Result<String, String> {
         let shell_line = format!("{} {}", self.command, arg);
         let mut cmd = if cfg!(windows) {
-            let mut c = Command::new("cmd");
+            let mut c = crate::proc::command("cmd");
             c.args(["/C", &shell_line]);
             c
         } else {
-            let mut c = Command::new("sh");
+            let mut c = crate::proc::command("sh");
             c.args(["-c", &shell_line]);
             c
         };

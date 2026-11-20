@@ -382,7 +382,8 @@ pub fn day_pace_line(used: f32, span: u64) -> (String, bool) {
     let fast = used > share + 0.05;
     let when = if full { crate::tr!("Ces 24 h", "These 24 h").to_string() } else { crate::trf!("Depuis {}", "Last {}", left_text(span)) };
     let pace = if fast { crate::tr!(" · plus vite que la part d'un jour", " · faster than a day's share") } else { "" };
-    (crate::trf!("{when} : {used:.1} % de la semaine utilisés (part d'un jour : {DAY_SHARE:.1} %){pace}", "{when}: {used:.1} % of the week used (a day's share: {DAY_SHARE:.1} %){pace}"), fast)
+    let (used, day) = (crate::i18n::dec1(used), crate::i18n::dec1(DAY_SHARE));
+    (crate::trf!("{when} : {used} % de la semaine utilisés (part d'un jour : {day} %){pace}", "{when}: {used} % of the week used (a day's share: {day} %){pace}"), fast)
 }
 
 /// The reserve is near: one more turn, as big as the biggest so far (at least half a
@@ -435,22 +436,54 @@ pub fn start_tracking(exe: &std::path::Path) -> Result<(), String> {
     std::fs::write(&f, serde_json::to_string_pretty(&v).unwrap_or_default() + "\n").map_err(|e| e.to_string())
 }
 
-/// Put the person's own status line back (or none).
+/// Put the person's own status line back (or none). Only while Claude Code's status line is
+/// still ours: one the person set since then stays.
 pub fn stop_tracking() -> Result<(), String> {
     let f = settings_file();
     let Ok(text) = std::fs::read_to_string(&f) else { return Ok(()) };
     let mut v: Value = serde_json::from_str(&text).map_err(|e| e.to_string())?;
-    let obj = v.as_object_mut().ok_or("format inattendu")?;
-    match std::fs::read_to_string(previous_file()) {
-        Ok(prev) if !prev.trim().is_empty() => {
-            obj.insert("statusLine".into(), json!({ "type": "command", "command": prev.trim() }));
-        }
-        _ => {
-            obj.remove("statusLine");
-        }
+    let prev = std::fs::read_to_string(previous_file()).ok();
+    if !restore_status_line(&mut v, prev.as_deref())? {
+        return Ok(());
     }
     let _ = std::fs::remove_file(previous_file());
     std::fs::write(&f, serde_json::to_string_pretty(&v).unwrap_or_default() + "\n").map_err(|e| e.to_string())
+}
+
+/// In Claude Code's settings `v`: ours replaced by the person's previous status line, or
+/// removed when there was none. False (and `v` untouched) when the status line isn't ours.
+fn restore_status_line(v: &mut Value, prev: Option<&str>) -> Result<bool, String> {
+    if !v["statusLine"]["command"].as_str().is_some_and(|c| c.ends_with(" statusline")) {
+        return Ok(false);
+    }
+    let obj = v.as_object_mut().ok_or("format inattendu")?;
+    match prev.map(str::trim).filter(|p| !p.is_empty()) {
+        Some(p) => {
+            obj.insert("statusLine".into(), json!({ "type": "command", "command": p }));
+        }
+        None => {
+            obj.remove("statusLine");
+        }
+    }
+    Ok(true)
+}
+
+#[test]
+fn only_our_status_line_is_given_back() {
+    let ours = || json!({ "model": "x", "statusLine": { "type": "command", "command": "'/Applications/Orchestra.app/Contents/MacOS/orchestra' statusline" } });
+    // Ours, with the person's previous one: it comes back.
+    let mut v = ours();
+    assert!(restore_status_line(&mut v, Some("~/bin/ma-ligne.sh\n")).unwrap());
+    assert_eq!(v["statusLine"]["command"], "~/bin/ma-ligne.sh");
+    assert_eq!(v["model"], "x");
+    // Ours, none before: removed.
+    let mut v = ours();
+    assert!(restore_status_line(&mut v, None).unwrap());
+    assert!(v.get("statusLine").is_none());
+    // One the person set since: left as it is.
+    let mut v = json!({ "statusLine": { "type": "command", "command": "~/bin/autre.sh" } });
+    assert!(!restore_status_line(&mut v, Some("~/bin/ma-ligne.sh")).unwrap());
+    assert_eq!(v["statusLine"]["command"], "~/bin/autre.sh");
 }
 
 /// `orchestra statusline`: called by Claude Code with its JSON on stdin.
@@ -472,7 +505,7 @@ pub fn statusline_main() {
     if let Ok(prev) = std::fs::read_to_string(previous_file()) {
         if !prev.trim().is_empty() {
             let shell = if cfg!(windows) { ("cmd", "/C") } else { ("sh", "-c") };
-            if let Ok(mut child) = std::process::Command::new(shell.0)
+            if let Ok(mut child) = crate::proc::command(shell.0)
                 .args([shell.1, prev.trim()])
                 .stdin(std::process::Stdio::piped())
                 .stdout(std::process::Stdio::inherit())
@@ -620,7 +653,8 @@ mod tests {
     #[test]
     fn day_pace_reads_in_points_of_the_week() {
         let (line, fast) = day_pace_line(15.0, 24 * HOUR);
-        assert!(line.contains("15.0") && line.contains("14.3") && !line.contains("105"), "{line}");
+        // French by default in tests: decimal commas.
+        assert!(line.contains("15,0 %") && line.contains("14,3 %") && !line.contains("105"), "{line}");
         assert!(fast);
         assert!(!day_pace_line(10.0, 24 * HOUR).1);
         assert!(!day_pace_line(14.28, 24 * HOUR).1, "a day's share exactly is not too fast");
