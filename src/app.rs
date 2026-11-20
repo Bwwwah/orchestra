@@ -645,11 +645,24 @@ impl NotesApp {
         }
     }
 
+    /// "Rapports des IA" holds a page per day, each with a report per session: they would
+    /// soon push the person's own pages out of the sidebar. So its days open one at a time:
+    /// unfolding `day` (or opening a report in it) folds the other days.
+    fn fold_other_report_days(&mut self, day: &str) {
+        for other in other_report_days(&self.ws, day) {
+            self.expanded.remove(&other);
+        }
+    }
+
     fn apply(&mut self, actions: Vec<Action>) {
         for a in actions {
             match a {
                 Action::Open(id) => {
-                    for anc in self.ws.path_of(&id) {
+                    let path = self.ws.path_of(&id);
+                    for anc in &path {
+                        self.fold_other_report_days(anc);
+                    }
+                    for anc in path {
                         self.expanded.insert(anc);
                     }
                     self.navigate(id);
@@ -676,6 +689,7 @@ impl NotesApp {
                 }
                 Action::ToggleExpand(id) => {
                     if !self.expanded.remove(&id) {
+                        self.fold_other_report_days(&id);
                         self.expanded.insert(id);
                     }
                 }
@@ -1093,6 +1107,15 @@ impl NotesApp {
         });
     }
 
+}
+
+/// The day pages of "Rapports des IA" other than `day`, when `day` is one of them.
+fn other_report_days(ws: &Workspace, day: &str) -> Vec<String> {
+    let root = ws.settings.orch.reports_page.as_str();
+    if root.is_empty() || ws.page(day).and_then(|p| p.parent.as_deref()) != Some(root) {
+        return vec![];
+    }
+    ws.children(Some(root)).iter().map(|p| p.id.clone()).filter(|id| id != day).collect()
 }
 
 /// A block's content without its time.
@@ -2464,6 +2487,21 @@ mod tests {
             let link = &ws.page(&page).unwrap().blocks[0];
             assert_eq!((link.kind, link.extra.as_str(), link.text.as_str()), (BlockKind::PageLink, id.as_str(), ""));
         }
+    }
+
+    #[test]
+    fn report_days_open_one_at_a_time() {
+        let mut ws = Workspace::default();
+        let root = ws.create_page("Rapports des IA", None);
+        ws.settings.orch.reports_page = root.clone();
+        let d1 = ws.create_page("2026-11-19", Some(root.clone()));
+        let d2 = ws.create_page("2026-11-20", Some(root.clone()));
+        let other = ws.create_page("Notes", None);
+        let sub = ws.create_page("Sous-page", Some(other.clone()));
+        assert_eq!(other_report_days(&ws, &d2), [d1.clone()]);
+        assert_eq!(other_report_days(&ws, &d1), [d2]);
+        // Pages outside the reports, and the reports page itself, fold nothing.
+        assert!(other_report_days(&ws, &other).is_empty() && other_report_days(&ws, &sub).is_empty() && other_report_days(&ws, &root).is_empty());
     }
 
     #[test]

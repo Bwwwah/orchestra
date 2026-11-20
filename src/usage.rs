@@ -382,7 +382,8 @@ pub fn day_pace_line(used: f32, span: u64) -> (String, bool) {
     let fast = used > share + 0.05;
     let when = if full { crate::tr!("Ces 24 h", "These 24 h").to_string() } else { crate::trf!("Depuis {}", "Last {}", left_text(span)) };
     let pace = if fast { crate::tr!(" · plus vite que la part d'un jour", " · faster than a day's share") } else { "" };
-    (crate::trf!("{when} : {used:.1} % de la semaine utilisés (part d'un jour : {DAY_SHARE:.1} %){pace}", "{when}: {used:.1} % of the week used (a day's share: {DAY_SHARE:.1} %){pace}"), fast)
+    let (used, day) = (crate::i18n::dec1(used), crate::i18n::dec1(DAY_SHARE));
+    (crate::trf!("{when} : {used} % de la semaine utilisés (part d'un jour : {day} %){pace}", "{when}: {used} % of the week used (a day's share: {day} %){pace}"), fast)
 }
 
 /// The reserve is near: one more turn, as big as the biggest so far (at least half a
@@ -620,7 +621,8 @@ mod tests {
     #[test]
     fn day_pace_reads_in_points_of_the_week() {
         let (line, fast) = day_pace_line(15.0, 24 * HOUR);
-        assert!(line.contains("15.0") && line.contains("14.3") && !line.contains("105"), "{line}");
+        // French by default in tests: decimal commas.
+        assert!(line.contains("15,0 %") && line.contains("14,3 %") && !line.contains("105"), "{line}");
         assert!(fast);
         assert!(!day_pace_line(10.0, 24 * HOUR).1);
         assert!(!day_pace_line(14.28, 24 * HOUR).1, "a day's share exactly is not too fast");

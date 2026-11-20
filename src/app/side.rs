@@ -287,7 +287,7 @@ impl NotesApp {
                 }
             }
             let _ = pr;
-            ui.label(RichText::new(crate::trf!("{} message(s)", "{} message(s)", s.user_messages + s.agent_messages)).size(11.5).color(t.tertiary));
+            ui.label(RichText::new(crate::trf!("{} message{p}", "{} message{p}", s.user_messages + s.agent_messages, p = crate::i18n::plural((s.user_messages + s.agent_messages) as usize))).size(11.5).color(t.tertiary));
         });
         let _ = BLUE;
     }

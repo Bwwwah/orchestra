@@ -364,9 +364,10 @@ impl NotesApp {
         ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
         ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(true));
         let n = self.orch.runs.len();
+        let s = crate::i18n::plural(n);
         self.info(crate::trf!(
-            "{n} session(s) autonome(s) en cours : Orchestra continue dans le Dock et garde le Mac éveillé. Fermez à nouveau pour quitter et les arrêter.",
-            "{n} autonomous session(s) running: Orchestra keeps going in the Dock and keeps the Mac awake. Close again to quit and stop them."
+            "{n} session{s} autonome{s} en cours : Orchestra continue dans le Dock et garde le Mac éveillé. Fermez à nouveau pour quitter et les arrêter.",
+            "{n} autonomous session{s} running: Orchestra keeps going in the Dock and keeps the Mac awake. Close again to quit and stop them."
         ));
     }
 
@@ -763,7 +764,8 @@ impl NotesApp {
         if let Some(x) = self.ws.runs.iter_mut().find(|x| x.id == id) {
             x.report = Some(page.clone());
         }
-        let mut text = crate::trf!("{why} · {} étape(s) · ≈ {:.0} % · {} commit(s)", "{why} · {} step(s) · ≈ {:.0} % · {} commit(s)", rec.steps_done.len(), rec.pct, commits.len());
+        let (e, c) = (crate::i18n::plural(rec.steps_done.len()), crate::i18n::plural(commits.len()));
+        let mut text = crate::trf!("{why} · {} étape{e} · ≈ {:.0} % · {} commit{c}", "{why} · {} step{e} · ≈ {:.0} % · {} commit{c}", rec.steps_done.len(), rec.pct, commits.len());
         if resume_at > 0 {
             text.push_str(&crate::trf!(
                 " · reprendra seule dans {} (après la remise à zéro du quota)",
@@ -1027,10 +1029,18 @@ impl NotesApp {
                         _ => crate::tr!("inconnu pour l'instant", "unknown for now").into(),
                     },
                 ),
-                1 => (running.to_string(), if running == 0 { crate::trf!("{ready} projet(s) prêt(s) à lancer", "{ready} project(s) ready to start") } else { crate::trf!("sur {ready} projet(s) prêt(s)", "of {ready} project(s) ready") }),
+                1 => {
+                    let s = crate::i18n::plural(ready);
+                    (running.to_string(), if running == 0 { crate::trf!("{ready} projet{s} prêt{s} à lancer", "{ready} project{s} ready to start") } else { crate::trf!("sur {ready} projet{s} prêt{s}", "of {ready} project{s} ready") })
+                }
                 _ => (
                     todays.len().to_string(),
-                    if todays.is_empty() { crate::trf!("session terminée · bilan à {hour} h", "finished session · summary at {hour} h") } else { crate::trf!("session(s) · {steps} étape(s) faite(s)", "session(s) · {steps} step(s) done") },
+                    if todays.is_empty() {
+                        crate::trf!("session terminée · bilan à {hour} h", "finished session · summary at {hour} h")
+                    } else {
+                        let (s, e) = (crate::i18n::plural(todays.len()), crate::i18n::plural(steps));
+                        crate::trf!("session{s} · {steps} étape{e} faite{e}", "session{s} · {steps} step{e} done")
+                    },
                 ),
             };
             p.text(egui::pos2(x, rect.top() + 36.0), egui::Align2::LEFT_TOP, &big, bold(30.0), t.text);
@@ -1419,7 +1429,7 @@ impl NotesApp {
                             ui.spacing_mut().item_spacing.y = 1.0;
                             ui.horizontal(|ui| {
                                 ui.label(RichText::new(title).font(semibold(14.5)).color(t.text));
-                                let (txt, col) = if busy { (crate::tr!("au travail", "at work").to_string(), super::projects::GREEN) } else if open == 0 { (crate::tr!("aucune étape ouverte", "no open step").to_string(), t.tertiary) } else { (crate::trf!("{open} étape(s) ouverte(s)", "{open} open step(s)"), t.secondary) };
+                                let (txt, col) = if busy { (crate::tr!("au travail", "at work").to_string(), super::projects::GREEN) } else if open == 0 { (crate::tr!("aucune étape ouverte", "no open step").to_string(), t.tertiary) } else { ({ let s = crate::i18n::plural(open); crate::trf!("{open} étape{s} ouverte{s}", "{open} open step{s}") }, t.secondary) };
                                 ui.label(RichText::new(txt).size(12.0).color(col));
                             });
                             let mut job = egui::text::LayoutJob::single_section(super::projects::tilde(folder), egui::TextFormat::simple(FontId::monospace(11.0), t.tertiary));
@@ -1524,7 +1534,8 @@ impl NotesApp {
                             confirm_main = Some(SELECTION.to_string());
                         }
                     }
-                    let note = crate::trf!("{} projet(s) en parallèle · {picked_sum:.0} % au total pour une limite globale de {global:.0} %", "{} project(s) in parallel · {picked_sum:.0} % in total for a global limit of {global:.0} %", picked.len());
+                    let s = crate::i18n::plural(picked.len());
+                    let note = crate::trf!("{} projet{s} en parallèle · {picked_sum:.0} % au total pour une limite globale de {global:.0} %", "{} project{s} in parallel · {picked_sum:.0} % in total for a global limit of {global:.0} %", picked.len());
                     ui.label(RichText::new(note).size(12.5).color(if picked_sum > global { super::projects::ORANGE } else { t.tertiary }));
                 });
             }
@@ -1589,7 +1600,7 @@ impl NotesApp {
                         ui.label(RichText::new(&r.title).font(semibold(14.0)).color(t.text));
                         ui.label(RichText::new(format!("{} · {} → {}", auto::local_day(r.started), auto::hm(r.started), auto::hm(r.ended.max(r.started)))).size(12.5).color(t.tertiary));
                         let used = if r.limit > 0.0 { crate::trf!("≈ {:.0} % / {:.0} % de budget", "≈ {:.0} % / {:.0} % budget", r.pct, r.limit) } else { format!("≈ {:.0} %", r.pct) };
-                        ui.label(RichText::new(crate::trf!("{} · {} étape(s) · {used}", "{} · {} step(s) · {used}", r.outcome, r.steps_done.len())).size(12.5).color(t.secondary)).on_hover_text(crate::tr!(
+                        ui.label(RichText::new(crate::trf!("{} · {} étape{e} · {used}", "{} · {} step{e} · {used}", r.outcome, r.steps_done.len(), e = crate::i18n::plural(r.steps_done.len()))).size(12.5).color(t.secondary)).on_hover_text(crate::tr!(
                             "Part de la fenêtre de 5 h utilisée par cette session, sur le budget qu'elle avait",
                             "Share of the 5-hour window this session used, out of the budget it had"
                         ));
@@ -2083,8 +2094,8 @@ fn window_bar(window: f32, pct: f32, limit: f32, global: f32) -> WindowBar {
 /// share of its budget only.
 fn share_row(ui: &mut egui::Ui, id: &str, pct: f32, limit: f32, window: Option<f32>, global: f32, t: &Tone) {
     let text = match window {
-        Some(w) => crate::trf!("fenêtre de 5 h : {w:.0} % · cette session : {pct:.1} % (budget {limit:.0} %)", "5-hour window: {w:.0} % · this session: {pct:.1} % (budget {limit:.0} %)"),
-        None => crate::trf!("{:.1} % utilisés sur un budget de {:.0} %", "{:.1} % used of a {:.0} % budget", pct, limit),
+        Some(w) => crate::trf!("fenêtre de 5 h : {w:.0} % · cette session : {} % (budget {limit:.0} %)", "5-hour window: {w:.0} % · this session: {} % (budget {limit:.0} %)", crate::i18n::dec1(pct)),
+        None => crate::trf!("{} % utilisés sur un budget de {:.0} %", "{} % used of a {:.0} % budget", crate::i18n::dec1(pct), limit),
     };
     let font = FontId::proportional(12.5);
     let text_w = ui.fonts_mut(|f| f.layout_no_wrap(text.clone(), font.clone(), t.secondary)).size().x;

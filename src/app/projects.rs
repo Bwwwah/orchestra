@@ -725,7 +725,8 @@ fn session_row(ui: &mut egui::Ui, page_id: &str, s: &SessionInfo, t: &Tone) -> O
     if open {
         egui::Frame::new().inner_margin(egui::Margin { left: 18, right: 0, top: 2, bottom: 6 }).show(ui, |ui| {
             ui.set_max_width(w - 18.0);
-            let mut meta = crate::trf!("{} message(s)", "{} message(s)", s.user_messages + s.agent_messages);
+            let n = s.user_messages + s.agent_messages;
+            let mut meta = crate::trf!("{n} message{p}", "{n} message{p}", p = crate::i18n::plural(n as usize));
             if s.tokens.billed > 0 {
                 meta.push_str(&crate::trf!(" · {} tokens", " · {} tokens", human_tokens(s.tokens.billed)));
             }
@@ -2039,7 +2040,7 @@ pub(super) fn folder_view(ui: &mut egui::Ui, rel: &str, pages: &[PageRow], t: &T
     let files = pages.iter().filter(|p| !p.has_kids).count();
     card(ui, t, 0.0, |ui| {
         let what = if rel.is_empty() { crate::tr!("Dossier", "Folder").to_string() } else { crate::trf!("Dossier {rel}", "Folder {rel}") };
-        card_title(ui, crate::tr!("CONTENU", "CONTENTS"), &crate::trf!("{files} fichier(s)", "{files} file(s)"), t);
+        card_title(ui, crate::tr!("CONTENU", "CONTENTS"), &crate::trf!("{files} fichier{s}", "{files} file{s}", s = crate::i18n::plural(files)), t);
         ui.label(RichText::new(what).font(FontId::monospace(12.0)).color(t.tertiary));
         ui.add_space(6.0);
         if pages.is_empty() {

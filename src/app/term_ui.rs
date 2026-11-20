@@ -354,7 +354,7 @@ pub(super) fn terminal_view(ui: &mut egui::Ui, term: &mut Term, bg: Color32, dar
             }
         }
         if s.scrollback() > 0 {
-            let label = crate::trf!("historique : {} ligne(s) plus haut", "history: {} line(s) up", s.scrollback());
+            let label = crate::trf!("historique : {} ligne{p} plus haut", "history: {} line{p} up", s.scrollback(), p = crate::i18n::plural(s.scrollback()));
             painter.text(rect.right_top() + egui::vec2(-8.0, 4.0), egui::Align2::RIGHT_TOP, label, FontId::proportional(11.5), Color32::from_rgb(35, 131, 226));
         }
     });
