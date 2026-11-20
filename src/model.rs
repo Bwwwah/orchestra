@@ -667,6 +667,12 @@ pub fn due_resumes(runs: &[RunRecord], now: u64, running: &[&str]) -> Vec<usize>
     out
 }
 
+/// Whether a question asked (ask_human) about `project` since `since` still waits for the
+/// person's answer.
+pub fn question_pending(inbox: &[InboxMsg], project: &str, since: u64) -> bool {
+    inbox.iter().any(|m| m.kind == "question" && m.project == project && m.answer.trim().is_empty() && m.at >= since)
+}
+
 impl Workspace {
     pub fn unread(&self) -> usize {
         self.inbox.iter().filter(|m| !m.read).count()
@@ -1051,6 +1057,21 @@ fn snippet(text: &str, q: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::original::*;
+
+    #[test]
+    fn a_question_waits_until_answered() {
+        let q = |project: &str, at: u64, answer: &str| super::InboxMsg { kind: "question".into(), project: project.into(), at, answer: answer.into(), ..Default::default() };
+        let mut inbox = vec![q("p", 100, "")];
+        assert!(super::question_pending(&inbox, "p", 50));
+        // Another project's question, or one from before the session, doesn't hold it.
+        assert!(!super::question_pending(&inbox, "x", 50));
+        assert!(!super::question_pending(&inbox, "p", 200));
+        inbox[0].answer = "oui".into();
+        assert!(!super::question_pending(&inbox, "p", 50));
+        // A blank answer isn't one.
+        inbox[0].answer = "  ".into();
+        assert!(super::question_pending(&inbox, "p", 50));
+    }
 
     #[test]
     fn endless_sessions_stop_on_their_conditions() {

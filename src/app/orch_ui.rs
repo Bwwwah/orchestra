@@ -43,9 +43,9 @@ pub enum Wait {
 impl Wait {
     pub fn label(self) -> &'static str {
         match self {
-            Wait::Trust => crate::tr!("En pause : Claude Code demande si le dossier est sûr. Répondez dans le terminal (« Regarder »), puis « Reprendre ».", "Paused: Claude Code asks whether the folder is safe. Answer in the terminal (« Watch »), then « Resume »."),
-            Wait::Permission => crate::tr!("En pause : Claude Code demande une autorisation. Répondez dans le terminal (« Regarder »), puis « Reprendre ».", "Paused: Claude Code asks for a permission. Answer in the terminal (« Watch »), then « Resume »."),
-            Wait::Question => crate::tr!("En pause : l'IA attend la réponse à sa question (boîte de réception), puis « Reprendre ».", "Paused: the AI waits for the answer to its question (inbox), then « Resume »."),
+            Wait::Trust => crate::tr!("En pause : Claude Code demande si le dossier est sûr. Répondez dans le terminal (« Regarder ») : la session repart ensuite.", "Paused: Claude Code asks whether the folder is safe. Answer in the terminal (« Watch »): the session goes on afterwards."),
+            Wait::Permission => crate::tr!("En pause : Claude Code demande une autorisation. Répondez dans le terminal (« Regarder ») : la session repart ensuite.", "Paused: Claude Code asks for a permission. Answer in the terminal (« Watch »): the session goes on afterwards."),
+            Wait::Question => crate::tr!("En pause : l'IA attend la réponse à sa question (boîte de réception) ; elle repart dès qu'elle l'a.", "Paused: the AI waits for the answer to its question (inbox); it goes on as soon as it has it."),
         }
     }
 }
@@ -93,6 +93,8 @@ pub struct LiveRun {
     done_streak: u32,
     /// Paused, waiting for the person (with `Phase::Waiting`).
     pub waiting: Option<Wait>,
+    /// The screen when the pause began: the answer given in the terminal changes it.
+    paused_screen: u64,
 }
 
 impl LiveRun {
@@ -100,7 +102,21 @@ impl LiveRun {
     fn pause(&mut self, why: Wait) {
         self.waiting = Some(why);
         self.phase = Phase::Waiting;
+        self.paused_screen = self.screen_hash;
         self.last_line = why.label().into();
+    }
+
+    /// The person answered what the session waits for: in the terminal (the question is
+    /// gone from a screen that moved since the pause), or in the inbox (`question_left`:
+    /// one of its questions still has no answer).
+    fn answered(&self, screen: &str, idle: Duration, question_left: bool) -> bool {
+        let moved = self.screen_hash != self.paused_screen && idle > Duration::from_millis(1500);
+        match self.waiting {
+            Some(Wait::Trust) => moved && auto::read_screen(screen) != Screen::Trust,
+            Some(Wait::Permission) => moved && auto::read_screen(screen) != Screen::Permission,
+            Some(Wait::Question) => !question_left,
+            None => false,
+        }
     }
 
     /// Leave the pause (« Reprendre »). A question still on the screen is refused, as
@@ -116,7 +132,10 @@ impl LiveRun {
                 self.stop = Some(crate::tr!("le dossier n'a pas été accepté dans Claude Code", "the folder wasn't accepted in Claude Code").into());
                 self.phase = Phase::Starting(now);
             }
-            Wait::Trust => self.phase = Phase::Starting(now),
+            Wait::Trust => {
+                self.phase = Phase::Starting(now);
+                self.last_line = crate::tr!("Démarrage de Claude Code…", "Starting Claude Code…").into();
+            }
             Wait::Permission if still == Screen::Permission => {
                 self.term.write(b"\x1b");
                 self.denials += 1;
@@ -324,6 +343,7 @@ impl NotesApp {
             endless,
             done_streak: 0,
             waiting: None,
+            paused_screen: 0,
         });
         Ok(())
     }
@@ -534,9 +554,7 @@ impl NotesApp {
                         };
                         // A question to the person still unanswered: wait for it rather
                         // than send the AI on.
-                        let asked = pause
-                            && reason.is_none()
-                            && self.ws.inbox.iter().any(|m| m.kind == "question" && m.project == r.project && m.answer.trim().is_empty() && m.at >= r.started_wall);
+                        let asked = pause && reason.is_none() && crate::model::question_pending(&self.ws.inbox, &r.project, r.started_wall);
                         if asked {
                             r.pause(Wait::Question);
                             paused.push((r.project.clone(), r.title.clone(), Wait::Question));
@@ -554,8 +572,13 @@ impl NotesApp {
                         r.phase = Phase::Typed(now);
                     }
                 }
-                // Paused: nothing moves until the person answers.
-                Phase::Waiting => {}
+                // Paused: nothing moves until the person answers, then the AI goes on.
+                Phase::Waiting => {
+                    let left = crate::model::question_pending(&self.ws.inbox, &r.project, r.started_wall);
+                    if r.answered(&screen, idle, left) {
+                        r.resume();
+                    }
+                }
                 Phase::Closing(t) => {
                     if t.elapsed() > Duration::from_secs(3) || r.term.exited() {
                         finished.push((i, String::new(), String::new()));
