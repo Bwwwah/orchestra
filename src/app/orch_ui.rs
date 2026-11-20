@@ -1096,6 +1096,18 @@ impl NotesApp {
                             .size(12.5)
                             .color(t.secondary),
                         );
+                        if super::projects::action_link(ui, crate::tr!("Condenser en une synthèse", "Condense into a summary"))
+                            .on_hover_text(crate::tr!(
+                                "Les jours les plus anciens deviennent une seule page « Synthèse des anciens rapports » (titres et étapes terminées) ; les pages de ces jours vont à la corbeille, d'où elles peuvent revenir.",
+                                "The oldest days become one « Summary of older reports » page (titles and finished steps); those days' pages go to the trash, where they can be brought back from."
+                            ))
+                            .clicked()
+                            && let Some((page, n)) = self.ws.condense_old_reports()
+                        {
+                            self.dirty_since.get_or_insert_with(Instant::now);
+                            self.ack(crate::trf!("{n} jour(s) de rapports condensés en une synthèse.", "{n} day(s) of reports condensed into a summary."));
+                            actions.push(Action::Open(page));
+                        }
                         if super::projects::action_link(ui, crate::tr!("Voir les rapports", "See the reports")).clicked() {
                             actions.push(Action::Open(self.ws.settings.orch.reports_page.clone()));
                         }

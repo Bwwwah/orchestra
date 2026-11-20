@@ -594,6 +594,25 @@ pub struct RunRecord {
 /// Days of reports kept as they are in "Rapports des IA"; the older ones are too many.
 pub const REPORT_DAYS_KEPT: usize = 14;
 
+/// The steps a session report lists under « Étapes terminées » (« aucune » left out).
+fn finished_steps(report: &Page) -> Vec<String> {
+    let heading = |k: BlockKind| matches!(k, BlockKind::Heading1 | BlockKind::Heading2 | BlockKind::Heading3);
+    let mut out = vec![];
+    let mut inside = false;
+    for b in &report.blocks {
+        if heading(b.kind) {
+            let t = b.text.trim().to_lowercase();
+            inside = t == "étapes terminées" || t == "steps finished";
+        } else if inside && matches!(b.kind, BlockKind::Bullet | BlockKind::Numbered) {
+            let t = b.text.trim();
+            if !t.is_empty() && t != "aucune" && t != "none" {
+                out.push(t.to_string());
+            }
+        }
+    }
+    out
+}
+
 /// When an endless session stops. Each one is optional; the first reached stops it. The
 /// budget of the session, the global limit and the week's reserve always apply on top.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Default)]
@@ -942,6 +961,55 @@ Cmd/Ctrl+P or K to search all pages.").into();
         days.into_iter().take(over).map(|p| p.id.clone()).collect()
     }
 
+    /// Condense the report days that are too many (`old_report_days`) into one summary page
+    /// under "Rapports des IA": per day, each report's title and the steps it finished. The
+    /// day pages then go to the trash (they can be brought back from there). Returns the
+    /// summary page and how many days went into it; None when there was nothing to do.
+    pub fn condense_old_reports(&mut self) -> Option<(String, usize)> {
+        let days = self.old_report_days();
+        if days.is_empty() {
+            return None;
+        }
+        let root = self.settings.orch.reports_page.clone();
+        let mut md = String::new();
+        for day in &days {
+            let Some(d) = self.page(day) else { continue };
+            md.push_str(&format!("## {}\n\n", d.title));
+            let reports = self.children(Some(day));
+            if reports.is_empty() {
+                md.push_str(crate::tr!("- (aucun rapport)\n", "- (no report)\n"));
+            }
+            for r in reports {
+                let steps = finished_steps(r);
+                if steps.is_empty() {
+                    md.push_str(&format!("- {}\n", r.display_title()));
+                } else {
+                    md.push_str(&format!("- **{}** : {}\n", r.display_title(), steps.join(" ; ")));
+                }
+            }
+            md.push('\n');
+        }
+        let blocks = crate::store::page_from_markdown(&md, "").blocks;
+        let title = crate::tr!("Synthèse des anciens rapports", "Summary of older reports");
+        let existing = self.children(Some(&root)).iter().find(|p| p.title == title).map(|p| p.id.clone());
+        let id = existing.unwrap_or_else(|| {
+            let id = self.create_page(title, Some(root.clone()));
+            if let Some(p) = self.page_mut(&id) {
+                p.icon = "🗂".into();
+                p.blocks.clear();
+            }
+            id
+        });
+        if let Some(p) = self.page_mut(&id) {
+            p.blocks.extend(blocks);
+            p.touch();
+        }
+        for day in &days {
+            self.set_trashed(day, true);
+        }
+        Some((id, days.len()))
+    }
+
     pub fn children(&self, parent: Option<&str>) -> Vec<&Page> {
         self.pages.iter().filter(|p| !p.trashed && p.parent.as_deref() == parent).collect()
     }
@@ -1126,6 +1194,47 @@ mod tests {
         let i = ws.pages.iter().position(|p| p.id == ids[0]).unwrap();
         ws.pages[i].trashed = true;
         assert_eq!(ws.old_report_days().len(), 2);
+    }
+
+    /// The days over go into one summary page (titles and finished steps), then to the trash;
+    /// a second pass adds to the same summary.
+    #[test]
+    fn old_report_days_condense_into_one_summary() {
+        let mut ws = super::Workspace::default();
+        assert!(ws.condense_old_reports().is_none(), "nothing to condense");
+        let root = ws.create_page("Rapports des IA", None);
+        ws.settings.orch.reports_page = root.clone();
+        let report = |ws: &mut super::Workspace, day: &str, title: &str, steps: &str| {
+            let mut p = crate::store::page_from_markdown(&format!("# x\n\n## Étapes terminées\n\n{steps}\n\n## Commits\n\n- `abc Message`\n"), title);
+            p.title = title.into();
+            p.parent = Some(day.to_string());
+            ws.pages.push(p);
+        };
+        let mut days = vec![];
+        for d in 1..=super::REPORT_DAYS_KEPT + 2 {
+            days.push(ws.create_page(&format!("2026-10-{d:02}"), Some(root.clone())));
+        }
+        report(&mut ws, &days[0], "Orchestra · 09:00", "- Écrire les tests\n- Corriger le bug");
+        report(&mut ws, &days[0], "Site · 14:00", "- aucune");
+        let (sum, n) = ws.condense_old_reports().unwrap();
+        assert_eq!(n, 2);
+        let text: Vec<String> = ws.page(&sum).unwrap().blocks.iter().map(|b| b.text.clone()).collect();
+        let all = text.join("\n");
+        assert!(all.contains("2026-10-01") && all.contains("2026-10-02"));
+        assert!(all.contains("Orchestra · 09:00") && all.contains("Écrire les tests ; Corriger le bug"));
+        assert!(all.contains("Site · 14:00") && !all.contains("aucune ;"));
+        assert!(!all.contains("abc Message"), "commits are left out");
+        // The two days are in the trash with their reports; the recent ones stay.
+        assert!(ws.page(&days[0]).unwrap().trashed && ws.page(&days[1]).unwrap().trashed);
+        assert!(ws.pages.iter().filter(|p| p.parent.as_deref() == Some(days[0].as_str())).all(|p| p.trashed));
+        assert!(!ws.page(&days[2]).unwrap().trashed);
+        assert!(ws.old_report_days().is_empty());
+        // A new day later: the oldest kept one goes into the same summary.
+        ws.create_page("2026-11-01", Some(root.clone()));
+        let (sum2, n2) = ws.condense_old_reports().unwrap();
+        assert_eq!((sum2.as_str(), n2), (sum.as_str(), 1));
+        assert!(ws.page(&sum).unwrap().blocks.iter().any(|b| b.text.contains("2026-10-03")));
+        assert_eq!(ws.children(Some(&root)).iter().filter(|p| p.title.starts_with("Synthèse") || p.title.starts_with("Summary")).count(), 1);
     }
 
     #[test]
