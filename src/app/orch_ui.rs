@@ -74,6 +74,7 @@ pub struct LiveRun {
     stop: Option<String>,
     summarizing: bool,
     pub last_line: String,
+    /// The project's steps when the session started: (step id, done).
     steps_at_start: Vec<(String, bool)>,
     screen_hash: u64,
     screen_changed: Instant,
@@ -278,7 +279,7 @@ impl NotesApp {
         // The session checks interfaces with take_screenshot, which macOS only allows once
         // Orchestra has the « Screen Recording » permission: ask for it now (once per launch).
         crate::screen::ensure_permission();
-        let steps_at_start: Vec<(String, bool)> = pr.steps.iter().map(|s| (s.title.clone(), s.status == crate::project::StepStatus::Done)).collect();
+        let steps_at_start: Vec<(String, bool)> = pr.steps.iter().map(|s| (s.id.clone(), s.status == crate::project::StepStatus::Done)).collect();
         let copy = auto::make_copy(&folder, &title)?;
         let agent = Agent::ClaudeCode;
         let o = &self.ws.settings.orch;
@@ -515,12 +516,11 @@ impl NotesApp {
                         r.done_streak = if sig == Signal::Done { r.done_streak + 1 } else { 0 };
                         // Endless mode: its own end conditions replace [[FINI]] and the turn limit.
                         let endless_end = r.endless.as_ref().and_then(|c| {
-                            let before = &r.steps_at_start;
                             let steps = self.ws.page(&r.project).and_then(|p| p.project.as_ref()).map(|pr| pr.steps.clone()).unwrap_or_default();
-                            let done = |s: &crate::project::Step| s.status == crate::project::StepStatus::Done;
-                            let steps_done = steps.iter().filter(|s| done(s) && !before.iter().any(|(b, d)| *b == s.title && *d)).count() as u32;
+                            let p = steps_since(&r.steps_at_start, &steps);
+                            let steps_done = p.done.len() as u32;
                             // Steps the AI added itself and hasn't done yet.
-                            let added_open = steps.iter().filter(|s| !done(s) && !before.iter().any(|(b, _)| *b == s.title)).count();
+                            let added_open = p.added_open;
                             if auto::too_many_self_steps(added_open) {
                                 return Some(crate::trf!("l'IA a ajouté {added_open} étapes sans les faire", "the AI added {added_open} steps without doing them"));
                             }
@@ -722,13 +722,7 @@ impl NotesApp {
         let now = crate::model::now_ms();
         let resume_at = r.quota_reset.filter(|&reset| self.ws.settings.orch.auto_resume && reset > now).map(crate::model::resume_time).unwrap_or(0);
         let before = r.steps_at_start.clone();
-        let done_now: Vec<String> = self
-            .ws
-            .page(&project)
-            .and_then(|p| p.project.as_ref())
-            .map(|pr| pr.steps.iter().filter(|s| s.status == crate::project::StepStatus::Done).map(|s| s.title.clone()).collect())
-            .unwrap_or_default();
-        let newly: Vec<String> = done_now.into_iter().filter(|t| !before.iter().any(|(b, d)| b == t && *d)).collect();
+        let newly: Vec<String> = self.ws.page(&project).and_then(|p| p.project.as_ref()).map(|pr| steps_since(&before, &pr.steps).done).unwrap_or_default();
         let Some(rec) = self.ws.runs.iter_mut().find(|x| x.id == id) else { return };
         rec.ended = crate::model::now_ms();
         rec.outcome = why.clone();
@@ -1832,6 +1826,27 @@ impl NotesApp {
 }
 
 
+/// A session's work on the steps since it started.
+#[derive(Debug, PartialEq)]
+struct StepsSince {
+    /// Titles of the steps done since the start (as they read now).
+    done: Vec<String>,
+    /// Steps added since the start and not done yet.
+    added_open: usize,
+}
+
+/// Compared by step id, not by title: a step renamed during the session stays the same
+/// step (it used to count as new, and as done twice), and two steps with one title stay
+/// two. `before`: (step id, done) at the start.
+fn steps_since(before: &[(String, bool)], steps: &[crate::project::Step]) -> StepsSince {
+    let done = |s: &crate::project::Step| s.status == crate::project::StepStatus::Done;
+    let at_start = |s: &crate::project::Step| before.iter().find(|(id, _)| *id == s.id).map(|(_, d)| *d);
+    StepsSince {
+        done: steps.iter().filter(|s| done(s) && at_start(s) != Some(true)).map(|s| s.title.clone()).collect(),
+        added_open: steps.iter().filter(|s| !done(s) && at_start(s).is_none()).count(),
+    }
+}
+
 /// What a session's turn ended on, to choose whether it stops.
 struct TurnEnd {
     /// A stop already asked (by the person, or a limit seen during the turn).
@@ -2434,6 +2449,33 @@ mod tests {
         assert_eq!(Stop::Budget(20.0).quota(), Quota::None);
         assert_eq!(Stop::MissionDone.quota(), Quota::None);
         assert!(Stop::GlobalLimit(60.0).text().contains("60"));
+    }
+
+    /// Steps counted by id: renamed, twins and new ones each count once, and right.
+    #[test]
+    fn steps_since_the_start_go_by_id() {
+        use crate::project::{Project, StepStatus};
+        let mut p = Project::default();
+        let a = p.add_step("Écrire les tests", "moi");
+        let b = p.add_step("Doublon", "moi");
+        let c = p.add_step("Doublon", "moi");
+        let d = p.add_step("Déjà faite", "moi");
+        p.set_step_status(&d, StepStatus::Done);
+        let before: Vec<(String, bool)> = p.steps.iter().map(|s| (s.id.clone(), s.status == StepStatus::Done)).collect();
+        assert_eq!(super::steps_since(&before, &p.steps), super::StepsSince { done: vec![], added_open: 0 });
+        // During the session: A renamed then done, one of the twins done, a new step added
+        // and another added then done.
+        p.steps.iter_mut().find(|s| s.id == a).unwrap().title = "Écrire les tests (unitaires)".into();
+        p.set_step_status(&a, StepStatus::Done);
+        p.set_step_status(&c, StepStatus::Done);
+        p.add_step("Nouvelle étape", "claude-code");
+        let e = p.add_step("Nouvelle et faite", "claude-code");
+        p.set_step_status(&e, StepStatus::Done);
+        let s = super::steps_since(&before, &p.steps);
+        assert_eq!(s.done, vec!["Écrire les tests (unitaires)".to_string(), "Doublon".into(), "Nouvelle et faite".into()]);
+        // Only the new open step: the renamed one is not new, the twin still open is not new.
+        assert_eq!(s.added_open, 1);
+        assert!(p.steps.iter().any(|x| x.id == b && x.status == StepStatus::Todo));
     }
 
     #[test]
