@@ -537,8 +537,25 @@ pub fn ask_with_images(folder: &str, prompt: String, claude_tools: &str, max_tur
 pub const QUESTION_MAX: usize = 1000;
 
 /// The prompt of a quick question about a project: a short, direct answer, read-only.
-fn question_prompt(folder: &str, question: &str) -> String {
+/// `code`: a code project (feature ideas, code); otherwise a project of documents —
+/// school work, paperwork or anything else — where the answer stays about its content.
+fn question_prompt(folder: &str, question: &str, code: bool) -> String {
     let q: String = question.trim().chars().take(QUESTION_MAX).collect();
+    if !code {
+        return crate::trf!(
+            "Question rapide sur le projet du dossier « {folder} » (un projet sans code : travail scolaire, \
+             démarche administrative ou autre). Ne modifie RIEN. Lis les documents du dossier seulement si c'est \
+             utile pour répondre juste. Réponds dans la langue de la question, directement, en 150 mots au plus, \
+             sans préambule, avec des mots simples et sans jargon technique : un avis franc, et si c'est une \
+             démarche ou une idée, dis si elle vaut le coup, ce qu'elle demanderait et par quoi commencer.\
+             \n\nQuestion :\n{q}",
+            "Quick question about the project in the folder « {folder} » (a project without code: school work, \
+             paperwork or anything else). Change NOTHING. Read the folder's documents only if it helps to answer \
+             right. Answer in the question's language, directly, in 150 words at most, no preamble, in plain \
+             words without technical jargon: a frank opinion, and if it's a task or an idea, say whether it's \
+             worth it, what it would take and where to start.\n\nQuestion:\n{q}"
+        );
+    }
     crate::trf!(
         "Question rapide sur le projet du dossier « {folder} ». Ne modifie RIEN. Regarde le code ou l'historique \
          seulement si c'est utile pour répondre juste. Réponds dans la langue de la question, directement, \
@@ -557,7 +574,8 @@ pub fn ask_question(folder: &str, question: &str, prefer: Option<Tool>) -> Resul
         return Err(crate::tr!("question vide", "empty question").into());
     }
     let dir = if !folder.trim().is_empty() && crate::project::normalize_folder(folder).is_dir() { crate::project::normalize_folder(folder).display().to_string() } else { dirs::home_dir().unwrap_or_default().display().to_string() };
-    let (answer, tool) = ask(&dir, question_prompt(&dir, question), "Read,Glob,Grep,Bash(git log:*),Bash(ls:*)", 12, prefer)?;
+    let code = crate::project::shows_git_card(&dir);
+    let (answer, tool) = ask(&dir, question_prompt(&dir, question, code),"Read,Glob,Grep,Bash(git log:*),Bash(ls:*)", 12, prefer)?;
     Ok((answer.trim().to_string(), tool))
 }
 
@@ -722,10 +740,17 @@ mod tests {
     #[test]
     fn quick_questions_are_bounded_and_read_only() {
         let long = "é".repeat(QUESTION_MAX + 500);
-        let p = question_prompt("/tmp/x", &long);
-        assert!(p.contains("/tmp/x"));
-        assert_eq!(p.matches('é').count() - question_prompt("/tmp/x", "").matches('é').count(), QUESTION_MAX, "the question is cut at QUESTION_MAX");
-        assert!(p.contains("RIEN") || p.contains("NOTHING"));
+        for code in [true, false] {
+            let p = question_prompt("/tmp/x", &long, code);
+            assert!(p.contains("/tmp/x"));
+            assert_eq!(p.matches('é').count() - question_prompt("/tmp/x", "", code).matches('é').count(), QUESTION_MAX, "the question is cut at QUESTION_MAX");
+            assert!(p.contains("RIEN") || p.contains("NOTHING"));
+        }
+        // A project without code: no talk of code, its documents instead.
+        let p = question_prompt("/tmp/x", "?", false);
+        assert!(!p.contains("code »") && !p.contains("dans le code") && !p.contains("in the code"));
+        assert!(p.contains("documents"));
+        assert!(question_prompt("/tmp/x", "?", true).contains("code"));
         assert!(ask_question("/tmp/x", "   ", None).is_err(), "an empty question never reaches an agent");
     }
 

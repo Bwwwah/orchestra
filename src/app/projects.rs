@@ -2235,6 +2235,11 @@ fn quick_question(ui: &mut egui::Ui, cx: &mut Cx) {
     let text_key = egui::Id::unique(("quick-question", page_id));
     let mut text: String = ui.ctx().data(|d| d.get_temp(text_key)).unwrap_or_default();
     let asking = cx.ai.asking(page_id).map(String::from);
+    let hint = if shows_git(ui.ctx(), &folder) {
+        crate::tr!("Question rapide à l'IA, ex. « telle fonctionnalité serait-elle intéressante ? »", "Quick question to the AI, e.g. « would this feature be worth it? »")
+    } else {
+        crate::tr!("Question rapide à l'IA, ex. « que me reste-t-il à rendre ? », « quel document manque ? »", "Quick question to the AI, e.g. « what do I still have to hand in? », « which document is missing? »")
+    };
     let mut close = false;
     card(ui, t, 0.0, |ui| {
         inline_row(ui, |ui| {
@@ -2244,7 +2249,7 @@ fn quick_question(ui: &mut egui::Ui, cx: &mut Cx) {
             let edit = ui.add_enabled(
                 asking.is_none(),
                 inline_edit(egui::TextEdit::singleline(&mut text))
-                    .hint_text(crate::tr!("Question rapide à l'IA, ex. « telle fonctionnalité serait-elle intéressante ? »", "Quick question to the AI, e.g. « would this feature be worth it? »"))
+                    .hint_text(hint)
                     .char_limit(crate::sync::QUESTION_MAX)
                     .desired_width((ui.available_width() - send_w).max(80.0)),
             );
