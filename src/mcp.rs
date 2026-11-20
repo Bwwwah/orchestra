@@ -802,6 +802,22 @@ fn str_list(args: &Value, key: &str) -> Vec<String> {
         .unwrap_or_default()
 }
 
+/// How an interactive AI session should use the branches (the autonomous ones follow
+/// their own mission, in a copy already on the right branch).
+fn branch_rule(on_main: bool) -> String {
+    let dev = crate::auto::DEV;
+    if on_main {
+        format!("\nBranches : ce projet autorise le travail directement sur main. N'ouvre pas de branche par session ; s'il faut isoler un travail risqué, utilise la branche `{dev}`.\n")
+    } else {
+        format!(
+            "\nBranches : sauf si la personne te demande de travailler sur main, travaille sur la branche `{dev}` \
+             (git switch {dev}, ou git switch -c {dev} depuis main si elle n'existe pas) et garde-la d'une session à l'autre. \
+             Ne crée pas une branche par session : une autre branche seulement pour un travail vraiment à part, à fusionner dans `{dev}` puis supprimer une fois fini. \
+             (Les sessions autonomes d'Orchestra suivent leur propre mission.)\n"
+        )
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1075,21 +1091,5 @@ mod tests {
         let m = ws.inbox.iter().find(|m| m.kind == "question").expect("question in the inbox");
         assert_eq!(m.project, pid);
         assert!(m.title.contains("Projet test"));
-    }
-}
-
-/// How an interactive AI session should use the branches (the autonomous ones follow
-/// their own mission, in a copy already on the right branch).
-fn branch_rule(on_main: bool) -> String {
-    let dev = crate::auto::DEV;
-    if on_main {
-        format!("\nBranches : ce projet autorise le travail directement sur main. N'ouvre pas de branche par session ; s'il faut isoler un travail risqué, utilise la branche `{dev}`.\n")
-    } else {
-        format!(
-            "\nBranches : sauf si la personne te demande de travailler sur main, travaille sur la branche `{dev}` \
-             (git switch {dev}, ou git switch -c {dev} depuis main si elle n'existe pas) et garde-la d'une session à l'autre. \
-             Ne crée pas une branche par session : une autre branche seulement pour un travail vraiment à part, à fusionner dans `{dev}` puis supprimer une fois fini. \
-             (Les sessions autonomes d'Orchestra suivent leur propre mission.)\n"
-        )
     }
 }

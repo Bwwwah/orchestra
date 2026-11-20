@@ -940,7 +940,7 @@ mod tests {
         assert_eq!(back.code, Some(false));
         // The AIs read the kind in the state of play.
         let mut page = Page::new("École", None);
-        page.project = Some(Project::new(&s("ecole")));
+        page.project = Some(Project::new(s("ecole")));
         let md = project_to_markdown(&page);
         assert!(md.contains("sans code") || md.contains("without code"));
         assert!(md.contains("détecté") || md.contains("detected"));
