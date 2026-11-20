@@ -97,6 +97,10 @@ pub struct Orch {
     started: bool,
     /// Finished sessions to merge into main by themselves, once their terminal is closed.
     to_main: Vec<String>,
+    /// Keeps the computer awake while sessions run.
+    awake: crate::awake::Awake,
+    /// When closing the window last only hid it because sessions were running.
+    close_held: Option<Instant>,
 }
 
 fn default_mission() -> &'static str {
@@ -224,6 +228,25 @@ impl NotesApp {
 
     /// Once per frame: move every session along, follow the use of the subscription,
     /// write the day's report when it is time.
+    /// Closing the window while autonomous sessions run only puts it in the Dock: Orchestra
+    /// goes on driving them. Closing it again within a minute quits for real.
+    fn keep_running_on_close(&mut self, ctx: &egui::Context) {
+        if !ctx.input(|i| i.viewport().close_requested()) || self.orch.runs.is_empty() {
+            return;
+        }
+        if self.orch.close_held.is_some_and(|t| t.elapsed() < Duration::from_secs(60)) {
+            return;
+        }
+        self.orch.close_held = Some(Instant::now());
+        ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+        ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(true));
+        let n = self.orch.runs.len();
+        self.info(crate::trf!(
+            "{n} session(s) autonome(s) en cours : Orchestra continue dans le Dock et garde le Mac éveillé. Fermez à nouveau pour quitter et les arrêter.",
+            "{n} autonomous session(s) running: Orchestra keeps going in the Dock and keeps the Mac awake. Close again to quit and stop them."
+        ));
+    }
+
     pub(super) fn orch_tick(&mut self, ctx: &egui::Context) {
         if !self.orch.started {
             self.orch.started = true;
@@ -235,6 +258,8 @@ impl NotesApp {
         }
         self.usage_tick();
         self.resume_tick(ctx);
+        self.orch.awake.set(!self.orch.runs.is_empty());
+        self.keep_running_on_close(ctx);
         // Developer aid: ORCHESTRA_AUTO_RUN=<project id> starts a session once Claude Code is seen.
         if let Ok(pid) = std::env::var("ORCHESTRA_AUTO_RUN") {
             if !pid.is_empty() && self.orch.runs.is_empty() && !self.ws.runs.iter().any(|r| r.project == pid) && self.ais.plugged().contains(&crate::setup::Ai::ClaudeCode) {
@@ -931,8 +956,16 @@ impl NotesApp {
         let mut stop: Option<(usize, bool)> = None;
         let mut watch: Option<Option<String>> = None;
         let n = self.orch.runs.len();
+        let awake = self.orch.awake.held();
         super::projects::card(ui, t, 0.0, |ui| {
             super::projects::card_title(ui, crate::tr!("EN COURS", "RUNNING"), &n.to_string(), t);
+            if awake {
+                ui.label(RichText::new(crate::tr!(
+                    "L'ordinateur reste éveillé (sur secteur, même capot rabattu). Fermer la fenêtre ne coupe pas les sessions.",
+                    "The computer stays awake (on mains power, lid closed too). Closing the window does not stop the sessions."
+                )).size(12.0).color(t.tertiary));
+                ui.add_space(6.0);
+            }
             for (i, r) in self.orch.runs.iter_mut().enumerate() {
                 egui::Frame::new().fill(super::projects::GREEN.gamma_multiply(0.06)).stroke(egui::Stroke::new(1.0, super::projects::GREEN.gamma_multiply(0.3))).corner_radius(10.0).inner_margin(egui::Margin::same(12)).show(ui, |ui| {
                 ui.set_width(ui.available_width());
