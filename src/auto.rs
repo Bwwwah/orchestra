@@ -91,9 +91,21 @@ const DENIED: &[&str] = &[
     "Bash(git push:*)", "Bash(git reset:*)", "Bash(git checkout:*)", "Bash(git switch:*)", "Bash(git restore:*)", "Bash(git rebase:*)",
     "Bash(git clean:*)", "Bash(git branch:*)", "Bash(git worktree:*)", "Bash(git remote:*)", "Bash(git config:*)", "Bash(git filter-branch:*)",
     "Bash(git stash:*)", "Bash(git tag:*)", "Bash(git update-ref:*)",
+    // Code given on the command line or read from the terminal: a way round every rule above.
+    "Bash(python -c:*)", "Bash(python3 -c:*)", "Bash(python - :*)", "Bash(python3 - :*)", "Bash(python <<:*)", "Bash(python3 <<:*)",
+    "Bash(node -e:*)", "Bash(node --eval:*)", "Bash(node -p:*)", "Bash(node --print:*)", "Bash(node - :*)", "Bash(node <<:*)",
+    "Bash(perl:*)", "Bash(ruby:*)", "Bash(php:*)", "Bash(lua:*)", "Bash(tclsh:*)", "Bash(awk:*)", "Bash(gawk:*)",
+    "Bash(deno:*)", "Bash(bun:*)", "Bash(npx:*)", "Bash(bunx:*)", "Bash(npm exec:*)", "Bash(pnpm dlx:*)", "Bash(pnpm exec:*)", "Bash(yarn dlx:*)",
+    "Bash(pip install:*)", "Bash(pip3 install:*)", "Bash(npm install -g:*)", "Bash(cargo install:*)", "Bash(go run:*)",
     "WebFetch", "WebSearch",
     "Read(~/.ssh/**)", "Read(~/.aws/**)", "Read(~/.gnupg/**)", "Read(~/.config/gh/**)", "Read(~/.netrc)", "Read(~/.git-credentials)", "Read(~/Library/Keychains/**)",
     "Edit(~/.ssh/**)", "Edit(~/.zshrc)", "Edit(~/.bashrc)", "Edit(~/.profile)", "Edit(~/.gitconfig)", "Edit(~/.claude/**)",
+];
+
+/// Tools that run whatever code they are given, refused as a whole in the extra rules.
+const INTERPRETERS: &[&str] = &[
+    "python", "python3", "node", "perl", "ruby", "php", "lua", "deno", "bun", "awk", "osascript",
+    "npm", "pnpm", "yarn", "npx", "cargo", "make", "go", "pip", "pip3", "uv", "java", "swift", "sh", "bash", "zsh",
 ];
 
 /// One extra rule from the settings, if it stays a restriction: a tool without a pattern
@@ -113,6 +125,8 @@ fn extra_rule_ok(rule: &str) -> bool {
         return false;
     }
     match tool {
+        // An interpreter as a whole runs any code: only a precise use of it (`python -m pytest`).
+        "Bash" if INTERPRETERS.contains(&bare) => false,
         "Bash" => !DENIED.iter().any(|d| {
             let d = d.strip_prefix("Bash(").and_then(|d| d.strip_suffix(":*)")).unwrap_or("");
             !d.is_empty() && (bare == d || bare.starts_with(&format!("{d} ")))
@@ -722,6 +736,13 @@ mod tests {
         for ok in ["Bash(just:*)", "Bash(docker compose:*)", "mcp__other"] {
             assert!(allowed.iter().any(|a| a == ok), "{ok}");
         }
+        // Inline code is refused, and an interpreter as a whole can't come back through the settings.
+        for d in ["Bash(python -c:*)", "Bash(python3 -c:*)", "Bash(node -e:*)", "Bash(perl:*)", "Bash(npx:*)", "Bash(npm exec:*)"] {
+            assert!(denied.iter().any(|x| x == d), "{d}");
+        }
+        let (allowed, _) = permissions(false, "Bash(python:*), Bash(python3:*), Bash(node:*), Bash(npm:*), Bash(python -c:*), Bash(node -e x:*), Bash(perl -e:*), Bash(python -m pytest:*)");
+        assert!(!allowed.iter().any(|a| ["Bash(python:*)", "Bash(python3:*)", "Bash(node:*)", "Bash(npm:*)", "Bash(python -c:*)", "Bash(node -e x:*)", "Bash(perl -e:*)"].contains(&a.as_str())));
+        assert!(allowed.iter().any(|a| a == "Bash(python -m pytest:*)"));
         let cmd = Agent::ClaudeCode.command(false, "");
         assert!(cmd.contains("--disallowedTools") && cmd.contains("Bash(rm:*)"));
     }
