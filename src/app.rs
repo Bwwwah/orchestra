@@ -1246,7 +1246,7 @@ impl eframe::App for NotesApp {
                 egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| self.projects_view(ui, &mut actions));
             }
             View::Orchestra => {
-                egui::ScrollArea::vertical().auto_shrink([false, false]).id_salt("orchestra").show(ui, |ui| self.orchestra_view(ui, &mut actions));
+                egui::ScrollArea::vertical().auto_shrink([false, false]).id_salt("orchestra").show(ui, |ui| self.orchestra_view(ui));
             }
             View::Inbox => {
                 egui::ScrollArea::vertical().auto_shrink([false, false]).id_salt("inbox").show(ui, |ui| self.inbox_view(ui, &mut actions));

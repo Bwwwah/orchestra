@@ -191,7 +191,6 @@ pub struct Orch {
     usage_polled: Option<Instant>,
     resume_checked: Option<Instant>,
     daily_checked: Option<Instant>,
-    confirm: Option<(String, &'static str)>,
     /// An endless session on main waiting for the person to confirm the warning: a project
     /// id, or SELECTION for « Lancer la sélection ».
     confirm_main: Option<String>,
@@ -963,7 +962,7 @@ impl NotesApp {
         }
     }
 
-    pub(super) fn orchestra_view(&mut self, ui: &mut egui::Ui, actions: &mut Vec<Action>) {
+    pub(super) fn orchestra_view(&mut self, ui: &mut egui::Ui) {
         let t = tone(ui.visuals().dark_mode);
         let avail = ui.available_width();
         let width = 1000.0f32.min(avail - 40.0).max(320.0);
@@ -997,8 +996,6 @@ impl NotesApp {
                 if let Some(msg) = self.launch_card(ui, &ctx, &t) {
                     self.notice(msg);
                 }
-                ui.add_space(14.0);
-                self.history_card(ui, &t, actions);
                 ui.add_space(40.0);
             });
         });
@@ -1677,118 +1674,6 @@ impl NotesApp {
             }
         }
         msg
-    }
-
-    fn history_card(&mut self, ui: &mut egui::Ui, t: &Tone, actions: &mut Vec<Action>) {
-        let done: Vec<crate::model::RunRecord> = self.ws.runs.iter().rev().filter(|r| !r.outcome.is_empty()).take(50).cloned().collect();
-        if done.is_empty() {
-            return;
-        }
-        let mut act: Option<(String, &'static str)> = None;
-        let confirm = self.orch.confirm.clone();
-        super::projects::card(ui, t, 0.0, |ui| {
-            super::projects::card_title(ui, crate::tr!("SESSIONS TERMINÉES", "FINISHED SESSIONS"), &done.len().to_string(), t);
-            // Five sessions in view, the others by scrolling: the list's height is that of its
-            // first five rows (measured on the last frame, the rows wrap with the width).
-            let height_key = egui::Id::unique("orch-done-height");
-            // Never fewer than three rows in view before the list asks to scroll.
-            let three_key = egui::Id::unique("orch-done-height-3");
-            let three: f32 = ui.ctx().data(|d| d.get_temp(three_key)).unwrap_or(3.0 * 62.0);
-            let five: f32 = ui.ctx().data(|d| d.get_temp::<f32>(height_key)).unwrap_or(5.0 * 62.0).max(three);
-            egui::ScrollArea::vertical().id_salt("orch-done-list").max_height(five).auto_shrink([false, true]).show(ui, |ui| {
-            let top = ui.min_rect().top();
-            for (i, r) in done.iter().enumerate() {
-                let bg = super::projects::hover_begin(ui);
-                let row = ui.horizontal_top(|ui| {
-                    let (b, _) = ui.allocate_exact_size(egui::vec2(26.0, 26.0), egui::Sense::hover());
-                    let (mark, col) = outcome_mark(&r.outcome, &r.closed, t);
-                    ui.painter().circle_filled(b.center(), 12.0, col.gamma_multiply(0.15));
-                    ui.painter().text(b.center(), egui::Align2::CENTER_CENTER, mark, FontId::proportional(13.0), col);
-                    ui.vertical(|ui| {
-                    ui.horizontal_wrapped(|ui| {
-                        ui.spacing_mut().item_spacing.x = 8.0;
-                        ui.label(RichText::new(&r.title).font(semibold(14.0)).color(t.text));
-                        ui.label(RichText::new(format!("{} · {} → {}", auto::local_day(r.started), auto::hm(r.started), auto::hm(r.ended.max(r.started)))).size(12.5).color(t.tertiary));
-                        let used = if r.limit > 0.0 { crate::trf!("≈ {:.0} % / {:.0} % de budget", "≈ {:.0} % / {:.0} % budget", r.pct, r.limit) } else { format!("≈ {:.0} %", r.pct) };
-                        ui.label(RichText::new(crate::trf!("{} · {} étape{e} · {used}", "{} · {} step{e} · {used}", r.outcome, r.steps_done.len(), e = crate::i18n::plural(r.steps_done.len()))).size(12.5).color(t.secondary)).on_hover_text(crate::tr!(
-                            "Part de la fenêtre de 5 h utilisée par cette session, sur le budget qu'elle avait",
-                            "Share of the 5-hour window this session used, out of the budget it had"
-                        ));
-                    });
-                    ui.horizontal_wrapped(|ui| {
-                        ui.spacing_mut().item_spacing.x = 6.0;
-                        ui.label(RichText::new(&r.branch).font(FontId::monospace(11.5)).color(t.tertiary));
-                        if let Some(p) = &r.report {
-                            if super::projects::action_link(ui, crate::tr!("Rapport", "Report")).clicked() {
-                                actions.push(Action::Open(p.clone()));
-                            }
-                        }
-                        if !r.closed.is_empty() {
-                            ui.label(RichText::new(&r.closed).size(12.5).color(t.tertiary));
-                            return;
-                        }
-                        if super::projects::action_link(ui, crate::tr!("Ouvrir la copie", "Open the copy")).clicked() {
-                            let _ = crate::opener::open_path(std::path::Path::new(&r.worktree));
-                        }
-                        let asking = confirm.as_ref().filter(|(id, _)| *id == r.id).map(|(_, a)| *a);
-                        match asking {
-                            Some(a) => {
-                                let what = if a == "merge" { crate::tr!("Fusionner dans votre branche actuelle ?", "Merge into your current branch?") } else { crate::tr!("Supprimer la copie et sa branche, définitivement ?", "Delete the copy and its branch, for good?") };
-                                ui.label(RichText::new(what).size(12.5).color(super::projects::ORANGE));
-                                if super::projects::action_link(ui, crate::tr!("Oui", "Yes")).clicked() {
-                                    act = Some((r.id.clone(), a));
-                                }
-                                if super::projects::action_link(ui, crate::tr!("Non", "No")).clicked() {
-                                    act = Some((r.id.clone(), "cancel"));
-                                }
-                            }
-                            None => {
-                                if super::projects::action_link(ui, crate::tr!("Fusionner", "Merge")).on_hover_text(crate::tr!("Intègre ce travail dans la branche ouverte dans le dossier du projet", "Brings this work into the branch open in the project's folder")).clicked() {
-                                    act = Some((r.id.clone(), "ask-merge"));
-                                }
-                                if super::projects::action_link(ui, crate::tr!("Abandonner", "Discard")).clicked() {
-                                    act = Some((r.id.clone(), "ask-discard"));
-                                }
-                            }
-                        }
-                    });
-                    });
-                });
-                super::projects::hover_end(ui, bg, row.response.rect, egui::Id::unique(("orch-done", &r.id)), t);
-                ui.add_space(8.0);
-                let h = row.response.rect.bottom() + 8.0 - top;
-                if i == 2 || i + 1 == done.len().min(3) {
-                    ui.ctx().data_mut(|d| d.insert_temp(three_key, h));
-                }
-                if i == 4 || i + 1 == done.len().min(5) {
-                    ui.ctx().data_mut(|d| d.insert_temp(height_key, h));
-                }
-            }
-            });
-        });
-        if let Some((id, a)) = act {
-            match a {
-                "ask-merge" => self.orch.confirm = Some((id, "merge")),
-                "ask-discard" => self.orch.confirm = Some((id, "discard")),
-                "cancel" => self.orch.confirm = None,
-                _ => {
-                    self.orch.confirm = None;
-                    if let Some(rec) = self.ws.runs.iter().find(|r| r.id == id).cloned() {
-                        let res = if a == "merge" { auto::merge(&rec) } else { auto::discard(&rec) };
-                        match res {
-                            Ok(m) => {
-                                if let Some(x) = self.ws.runs.iter_mut().find(|r| r.id == id) {
-                                    x.closed = if a == "merge" { crate::tr!("fusionné", "merged").into() } else { crate::tr!("abandonné", "discarded").into() };
-                                }
-                                self.dirty_since.get_or_insert_with(Instant::now);
-                                self.info(m);
-                            }
-                            Err(e) => self.fail(format!("{} : {e}", rec.title)),
-                        }
-                    }
-                }
-            }
-        }
     }
 
     // ------------------------------------------------------------------ the inbox
@@ -2873,22 +2758,6 @@ fn limits_summary(o: &crate::model::OrchSettings) -> String {
         o.report_hour,
         o.max_turns
     )
-}
-
-fn outcome_mark(outcome: &str, closed: &str, t: &Tone) -> (&'static str, Color32) {
-    let o = outcome.to_lowercase();
-    if !closed.is_empty() {
-        return ("✔", t.tertiary);
-    }
-    if o.contains("termin") || o.contains("finish") || o.contains("fini") || o.contains("done") {
-        ("✔", super::projects::GREEN)
-    } else if o.contains("bloq") || o.contains("block") || o.contains("limit") {
-        ("!", super::projects::ORANGE)
-    } else if o.contains("erreur") || o.contains("error") || o.contains("interromp") || o.contains("interrupt") {
-        ("×", Color32::from_rgb(224, 62, 62))
-    } else {
-        ("■", t.tertiary)
-    }
 }
 
 /// "Lancer": a filled button.
