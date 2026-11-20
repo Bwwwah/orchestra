@@ -226,6 +226,30 @@ impl Project {
     }
 
     /// Delete every finished step; returns how many went.
+    /// Move step `id` just before step `before`, or, with None, just after the last step not
+    /// yet done (the end of the open list, as shown). False when nothing moved.
+    pub fn move_step(&mut self, id: &str, before: Option<&str>) -> bool {
+        if before == Some(id) {
+            return false;
+        }
+        let Some(from) = self.steps.iter().position(|s| s.id == id) else { return false };
+        if before.is_some_and(|b| !self.steps.iter().any(|s| s.id == b)) {
+            return false;
+        }
+        let old: Vec<String> = self.steps.iter().map(|s| s.id.clone()).collect();
+        let s = self.steps.remove(from);
+        let to = match before {
+            Some(b) => self.steps.iter().position(|s| s.id == b).unwrap_or(self.steps.len()),
+            None => self.steps.iter().rposition(|s| s.status != StepStatus::Done).map_or(0, |i| i + 1),
+        };
+        self.steps.insert(to, s);
+        let moved = self.steps.iter().map(|s| s.id.as_str()).ne(old.iter().map(String::as_str));
+        if moved {
+            self.touch();
+        }
+        moved
+    }
+
     pub fn remove_done_steps(&mut self) -> usize {
         let before = self.steps.len();
         self.steps.retain(|s| s.status != StepStatus::Done);
@@ -497,6 +521,27 @@ mod tests {
         assert_eq!(p.progress(), (0, 1));
         assert_eq!(p.steps[0].id, b);
         assert_eq!(p.remove_done_steps(), 0);
+    }
+
+    #[test]
+    fn steps_are_reordered() {
+        let mut p = Project::new("");
+        let ids: Vec<String> = ["A", "B", "C", "D"].iter().map(|t| p.add_step(t, "moi")).collect();
+        let order = |p: &Project| p.steps.iter().map(|s| s.title.as_str()).collect::<String>();
+        p.set_step_status(&ids[3], StepStatus::Done); // D done: shown apart, after the open ones
+        assert!(p.move_step(&ids[2], Some(&ids[0])));
+        assert_eq!(order(&p), "CABD");
+        // To the end of the open list: before the done step.
+        assert!(p.move_step(&ids[2], None));
+        assert_eq!(order(&p), "ABCD");
+        assert!(!p.move_step(&ids[2], None), "already there");
+        assert!(!p.move_step(&ids[1], Some(&ids[1])));
+        assert!(!p.move_step("absent", None));
+        assert!(!p.move_step(&ids[0], Some("absent")));
+        assert_eq!(order(&p), "ABCD");
+        // The next step follows the new order.
+        p.move_step(&ids[1], Some(&ids[0]));
+        assert_eq!(p.next_step().unwrap().title, "B");
     }
 
     #[test]

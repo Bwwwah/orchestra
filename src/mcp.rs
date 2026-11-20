@@ -124,6 +124,12 @@ fn tools() -> Vec<Value> {
         tool("update_page", "Rename a page, change its icon, favourite it or move it.", json!({"page": page, "title":{"type":"string"},"icon":{"type":"string"},"favorite":{"type":"boolean"},"parent":{"type":"string","description":"New parent page, or empty for top level"}}), &["page"]),
         tool("trash_page", "Move a page and its sub-pages to the trash.", json!({"page": page}), &["page"]),
         tool(
+            "restore_page",
+            "Bring a page and its sub-pages back from the trash. A page whose parent is still in the trash comes back at the top level.",
+            json!({"page":{"type":"string","description":"Id or title of the trashed page (list_pages with include_trash shows them)"}}),
+            &["page"],
+        ),
+        tool(
             "create_database",
             "Create a page holding a database. The first column is the row title.",
             json!({"title":{"type":"string"},"parent":{"type":"string"},"columns":{"type":"array","items":{"type":"object","properties":{"name":{"type":"string"},"kind":{"type":"string","enum":["text","number","select","checkbox","date"]},"options":{"type":"array","items":{"type":"string"}}},"required":["name"]}}}),
@@ -227,6 +233,30 @@ fn need<'a>(args: &'a Value, key: &str) -> Result<&'a str, String> {
 
 fn page_id(ws: &Workspace, key: &str) -> Result<String, String> {
     ws.find_page(key).map(|p| p.id.clone()).ok_or_else(|| format!("no page matches \"{key}\""))
+}
+
+/// A page in the trash, by id, exact title, or a piece of title found in no other trashed page.
+fn trashed_page_id(ws: &Workspace, key: &str) -> Result<String, String> {
+    if let Some(p) = ws.page(key.trim()) {
+        return if p.trashed { Ok(p.id.clone()) } else { Err(format!("page \"{}\" is not in the trash", p.display_title())) };
+    }
+    let k = key.trim().to_lowercase();
+    if k.is_empty() {
+        return Err("missing argument: page".into());
+    }
+    let trashed = || ws.pages.iter().filter(|p| p.trashed);
+    if let Some(p) = trashed().find(|p| p.title.to_lowercase() == k) {
+        return Ok(p.id.clone());
+    }
+    let hits: Vec<_> = trashed().filter(|p| p.title.to_lowercase().contains(&k)).collect();
+    match hits.as_slice() {
+        [] => Err(format!("no page in the trash matches \"{key}\"")),
+        [p] => Ok(p.id.clone()),
+        many => {
+            let list: Vec<String> = many.iter().map(|p| format!("- {} (id: {})", p.display_title(), p.id)).collect();
+            Err(format!("\"{key}\" matches {} pages in the trash; name one by its id:\n{}", many.len(), list.join("\n")))
+        }
+    }
 }
 
 fn save(ws: &Workspace) -> Result<(), String> {
@@ -364,6 +394,13 @@ fn call_tool(name: &str, args: &Value) -> Result<String, ToolError> {
             ws.set_trashed(&id, true);
             save(&ws)?;
             Ok(format!("page {id} moved to the trash"))
+        }
+        "restore_page" => {
+            let id = trashed_page_id(&ws, need(args, "page")?)?;
+            ws.set_trashed(&id, false);
+            save(&ws)?;
+            let top = ws.page(&id).is_some_and(|p| p.parent.is_none());
+            Ok(format!("page {id} restored{}", if top { " (at the top level)" } else { "" }))
         }
         "create_database" => {
             let title = need(args, "title")?;
@@ -587,17 +624,9 @@ fn call_tool(name: &str, args: &Value) -> Result<String, ToolError> {
         }
         "update_step" => {
             let id = project_id(&ws, need(args, "project")?)?;
-            let key = need(args, "step")?.trim().to_lowercase();
             let p = ws.page_mut(&id).unwrap();
             let pr = p.project.as_mut().unwrap();
-            let sid = pr
-                .steps
-                .iter()
-                .find(|x| x.id == key)
-                .or_else(|| pr.steps.iter().find(|x| x.title.to_lowercase() == key))
-                .or_else(|| pr.steps.iter().find(|x| x.title.to_lowercase().contains(&key)))
-                .map(|x| x.id.clone())
-                .ok_or_else(|| format!("no step matches \"{key}\""))?;
+            let sid = find_step(pr, need(args, "step")?)?;
             if let Some(st) = s(args, "status") {
                 let st = project::StepStatus::from_name(st).ok_or_else(|| format!("unknown step status {st}"))?;
                 pr.set_step_status(&sid, st);
@@ -660,6 +689,28 @@ fn summary_arg(args: &Value) -> Option<String> {
     Some(project::summary_from_parts(&done, &doing, &blockers, notes))
 }
 
+/// The step named by `key`: its id, its exact title, or a piece of its title found in no
+/// other step. Several steps holding the piece is an error, never a guess: changing the
+/// wrong step's status would go unnoticed.
+fn find_step(pr: &project::Project, key: &str) -> Result<String, String> {
+    let key = key.trim().to_lowercase();
+    if key.is_empty() {
+        return Err("missing argument: step".into());
+    }
+    if let Some(x) = pr.steps.iter().find(|x| x.id == key).or_else(|| pr.steps.iter().find(|x| x.title.to_lowercase() == key)) {
+        return Ok(x.id.clone());
+    }
+    let hits: Vec<_> = pr.steps.iter().filter(|x| x.title.to_lowercase().contains(&key)).collect();
+    match hits.as_slice() {
+        [] => Err(format!("no step matches \"{key}\"")),
+        [x] => Ok(x.id.clone()),
+        many => {
+            let list: Vec<String> = many.iter().map(|x| format!("- {} (step_id: {})", x.title, x.id)).collect();
+            Err(format!("\"{key}\" matches {} steps; name one by its step_id:\n{}", many.len(), list.join("\n")))
+        }
+    }
+}
+
 fn project_id(ws: &Workspace, key: &str) -> Result<String, String> {
     ws.find_project(key).map(|p| p.id.clone()).ok_or_else(|| format!("no project matches \"{key}\""))
 }
@@ -669,4 +720,136 @@ fn str_list(args: &Value, key: &str) -> Vec<String> {
         .and_then(Value::as_array)
         .map(|a| a.iter().filter_map(Value::as_str).map(str::trim).filter(|x| !x.is_empty()).map(String::from).collect())
         .unwrap_or_default()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::{Mutex, MutexGuard, OnceLock};
+
+    /// call_tool reads and writes the workspace file: every test here runs alone, against a
+    /// workspace of its own in a temporary folder (never the real one).
+    fn fresh_workspace() -> MutexGuard<'static, ()> {
+        static LOCK: Mutex<()> = Mutex::new(());
+        static DIR: OnceLock<std::path::PathBuf> = OnceLock::new();
+        let guard = LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = DIR.get_or_init(|| {
+            let d = std::env::temp_dir().join(format!("orchestra-mcp-{}", uuid::Uuid::new_v4().simple()));
+            // SAFETY: set once, before any test of this module touches the workspace.
+            unsafe { std::env::set_var("ORCHESTRA_DIR", &d) };
+            d
+        });
+        assert!(store::workspace_path().starts_with(dir), "tests must not touch the real workspace");
+        store::save(&Workspace::default()).unwrap();
+        guard
+    }
+
+    fn call(name: &str, args: Value) -> Result<String, String> {
+        call_tool(name, &args).map_err(|e| match e {
+            ToolError::Unknown => "unknown tool".into(),
+            ToolError::Failed(m) => m,
+        })
+    }
+
+    fn project_with_steps(steps: &[&str]) -> String {
+        let out = call("create_project", json!({"title": "Projet test", "steps": steps})).unwrap();
+        out.strip_prefix("created project ").unwrap().to_string()
+    }
+
+    fn steps(pid: &str) -> Vec<project::Step> {
+        store::load().page(pid).unwrap().project.clone().unwrap().steps
+    }
+
+    #[test]
+    fn update_step_refuses_an_ambiguous_piece_of_title() {
+        let _g = fresh_workspace();
+        let pid = project_with_steps(&["Sécurité : limiter le handshake", "Sécurité : assainir le tag", "Écrire la doc"]);
+        let err = call("update_step", json!({"project": pid, "step": "sécurité", "status": "done"})).unwrap_err();
+        assert!(err.contains("matches 2 steps"), "{err}");
+        assert!(steps(&pid).iter().all(|s| s.status == project::StepStatus::Todo), "nothing changed");
+        // A piece found in one step only is fine, whatever its case.
+        call("update_step", json!({"project": pid, "step": "ASSAINIR", "status": "doing"})).unwrap();
+        let st = steps(&pid);
+        assert_eq!(st[1].status, project::StepStatus::Doing);
+        assert_eq!(st[0].status, project::StepStatus::Todo);
+    }
+
+    #[test]
+    fn update_step_by_id_or_exact_title() {
+        let _g = fresh_workspace();
+        // The exact title wins even though it is also a piece of another title.
+        let pid = project_with_steps(&["Tests", "Tests de bout en bout"]);
+        call("update_step", json!({"project": pid, "step": "tests", "status": "done"})).unwrap();
+        let st = steps(&pid);
+        assert_eq!(st[0].status, project::StepStatus::Done);
+        assert_eq!(st[1].status, project::StepStatus::Todo);
+        call("update_step", json!({"project": pid, "step": st[1].id, "title": "Tests E2E"})).unwrap();
+        assert_eq!(steps(&pid)[1].title, "Tests E2E");
+        let err = call("update_step", json!({"project": pid, "step": "inexistante"})).unwrap_err();
+        assert!(err.contains("no step matches"), "{err}");
+        assert!(call("update_step", json!({"project": pid, "step": "  "})).is_err());
+    }
+
+    #[test]
+    fn add_steps_and_project_state() {
+        let _g = fresh_workspace();
+        let pid = project_with_steps(&[]);
+        let out = call("add_steps", json!({"project": "Projet test", "steps": ["Un", " ", "Deux"]})).unwrap();
+        assert!(out.starts_with("2 step(s) added"), "{out}");
+        assert!(call("add_steps", json!({"project": pid, "steps": []})).is_err());
+        let state = call("get_project_state", json!({"project": pid})).unwrap();
+        assert!(state.contains("Un") && state.contains("Deux"), "{state}");
+    }
+
+    #[test]
+    fn pages_round_trip_and_errors() {
+        let _g = fresh_workspace();
+        call("create_page", json!({"title": "Notes", "markdown": "Premier paragraphe"})).unwrap();
+        call("append_to_page", json!({"page": "Notes", "markdown": "- un point"})).unwrap();
+        let md = call("read_page", json!({"page": "Notes"})).unwrap();
+        assert!(md.contains("Premier paragraphe") && md.contains("un point"), "{md}");
+        assert!(call("read_page", json!({"page": "Absente"})).unwrap_err().contains("no page matches"));
+        assert!(call("read_page", json!({})).unwrap_err().contains("missing argument: page"));
+        assert_eq!(call("outil_inconnu", json!({})).unwrap_err(), "unknown tool");
+    }
+
+    #[test]
+    fn restore_page_brings_a_page_and_its_children_back() {
+        let _g = fresh_workspace();
+        let parent = call("create_page", json!({"title": "Archives"})).unwrap().strip_prefix("created page ").unwrap().to_string();
+        let child = call("create_page", json!({"title": "Compte rendu", "parent": parent})).unwrap().strip_prefix("created page ").unwrap().to_string();
+        call("create_page", json!({"title": "Compte rendu bis"})).unwrap();
+        call("trash_page", json!({"page": "Archives"})).unwrap();
+        assert!(store::load().page(&child).unwrap().trashed, "children go to the trash too");
+        // Not in the trash, unknown, or ambiguous: refused.
+        assert!(call("restore_page", json!({"page": "Compte rendu bis"})).unwrap_err().contains("no page in the trash"));
+        assert!(call("restore_page", json!({"page": "Absente"})).is_err());
+        let live = store::load().pages.iter().find(|p| p.title == "Compte rendu bis").unwrap().id.clone();
+        assert!(call("restore_page", json!({"page": live})).unwrap_err().contains("not in the trash"));
+        // By title (trashed pages are not found by find_page): page and child come back.
+        call("restore_page", json!({"page": "archives"})).unwrap();
+        let ws = store::load();
+        assert!(!ws.page(&parent).unwrap().trashed);
+        assert!(!ws.page(&child).unwrap().trashed);
+        assert_eq!(ws.page(&child).unwrap().parent.as_deref(), Some(parent.as_str()));
+        // A child restored alone, its parent still trashed, comes back at the top level.
+        call("trash_page", json!({"page": parent})).unwrap();
+        let out = call("restore_page", json!({"page": child})).unwrap();
+        assert!(out.contains("top level"), "{out}");
+        let ws = store::load();
+        assert!(ws.page(&parent).unwrap().trashed);
+        assert_eq!(ws.page(&child).unwrap().parent, None);
+        assert!(tools().iter().any(|t| t["name"] == "restore_page"));
+    }
+
+    #[test]
+    fn ask_human_lands_in_the_inbox() {
+        let _g = fresh_workspace();
+        let pid = project_with_steps(&[]);
+        call("ask_human", json!({"project": pid, "question": "On garde le port 7878 ?"})).unwrap();
+        let ws = store::load();
+        let m = ws.inbox.iter().find(|m| m.kind == "question").expect("question in the inbox");
+        assert_eq!(m.project, pid);
+        assert!(m.title.contains("Projet test"));
+    }
 }

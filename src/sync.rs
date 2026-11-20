@@ -12,7 +12,7 @@ use crate::sessions::Tool;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 /// API keys found in the environment make Claude Code / Codex bill API credits instead of
@@ -32,18 +32,27 @@ pub struct Agent {
 /// The PATH of the person's own shell. Apps opened from the Finder get a bare PATH, where
 /// `claude` (often installed with npm / nvm) and `node` are missing.
 ///
-/// Starting the shell takes about a second: the answer is kept a few minutes (git alone asks
-/// for it a dozen times to read one repository).
+/// Starting the shell takes about a second and git alone asks for the PATH a dozen times to
+/// read one repository: the shell is started once per process. Threads asking at the same
+/// time wait for that one answer rather than each starting a shell. A program installed
+/// later in a folder already on the PATH is still found (`which` looks at the folders).
 pub fn shell_path() -> String {
-    static CACHE: Mutex<Option<(Instant, String)>> = Mutex::new(None);
-    if let Some((at, p)) = CACHE.lock().unwrap().as_ref() {
-        if at.elapsed() < Duration::from_secs(300) {
-            return p.clone();
-        }
-    }
-    let p = read_shell_path();
-    *CACHE.lock().unwrap() = Some((Instant::now(), p.clone()));
-    p
+    static PATH: OnceLock<String> = OnceLock::new();
+    PATH.get_or_init(read_shell_path).clone()
+}
+
+#[cfg(all(test, unix))]
+#[test]
+fn shell_path_is_read_once_and_shared() {
+    let start = Instant::now();
+    let a = shell_path();
+    let first = start.elapsed();
+    let t = Instant::now();
+    let others: Vec<String> = (0..8).map(|_| std::thread::spawn(shell_path)).map(|h| h.join().unwrap()).collect();
+    assert!(others.iter().all(|p| *p == a), "every caller sees the same PATH");
+    // The first call may start a shell; the next ones must not.
+    assert!(t.elapsed() < Duration::from_millis(50), "later calls took {:?} (first {first:?})", t.elapsed());
+    assert!(!a.is_empty());
 }
 
 #[cfg(unix)]
@@ -408,12 +417,28 @@ pub fn ask_tasks(folder: &str, existing: &[String], prefer: Option<Tool>) -> Res
     Ok(tasks)
 }
 
+/// How much thinking a question needs, to spend no more of the subscription than it takes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Weight {
+    /// Putting given material into shape (a text into tasks, a diff into a commit message,
+    /// commits into release notes): a lighter model does it as well, for fewer tokens.
+    Light,
+    /// Reading and judging a project (filling it in, proposing steps, an outside view, a
+    /// search): the person's own default model.
+    Full,
+}
+
 /// The command line for one question to an agent. Images: Codex takes them with `--image`;
-/// Claude Code reads them itself, from their folders added with `--add-dir`.
-fn ask_args(tool: Tool, prompt: String, claude_tools: &str, max_turns: u32, images: &[String]) -> Vec<String> {
+/// Claude Code reads them itself, from their folders added with `--add-dir`. A light
+/// question runs on Sonnet (Claude Code) or with low reasoning effort (Codex).
+fn ask_args(tool: Tool, prompt: String, claude_tools: &str, max_turns: u32, images: &[String], weight: Weight) -> Vec<String> {
     match tool {
         Tool::ClaudeCode => {
             let mut a: Vec<String> = vec!["-p".into(), prompt, "--output-format".into(), "json".into(), "--max-turns".into(), max_turns.to_string(), "--allowedTools".into(), claude_tools.into()];
+            if weight == Weight::Light {
+                a.push("--model".into());
+                a.push("sonnet".into());
+            }
             let mut dirs: Vec<String> = vec![];
             for i in images {
                 if let Some(d) = Path::new(i).parent().map(|d| d.display().to_string()).filter(|d| !d.is_empty()) {
@@ -430,6 +455,10 @@ fn ask_args(tool: Tool, prompt: String, claude_tools: &str, max_turns: u32, imag
         }
         Tool::Codex => {
             let mut a: Vec<String> = vec!["exec".into(), "--sandbox".into(), "read-only".into(), "--skip-git-repo-check".into()];
+            if weight == Weight::Light {
+                a.push("-c".into());
+                a.push("model_reasoning_effort=\"low\"".into());
+            }
             for i in images {
                 a.push(format!("--image={i}"));
             }
@@ -461,7 +490,7 @@ pub fn text_to_tasks(folder: &str, text: &str, images: &[String], prefer: Option
          and chatter, keep a logical order. One task = one short action (you may prefix it with a short area followed by « : »).\n\
          Answer ONLY with the list, one task per line starting with « - ». {tools_rule}\n\nText:\n{text}");
     let dir = if !folder.trim().is_empty() && crate::project::normalize_folder(folder).is_dir() { folder.to_string() } else { dirs::home_dir().unwrap_or_default().display().to_string() };
-    let (answer, _) = ask_with_images(&dir, prompt, "Read", 3 + images.len() as u32, prefer, images)?;
+    let (answer, _) = ask_with_images(&dir, prompt, "Read", 3 + images.len() as u32, prefer, images, Weight::Light)?;
     let tasks = parse_tasks(&answer);
     if tasks.is_empty() {
         return Err(crate::tr!("l'IA n'a trouvé aucune tâche dans ce texte", "the AI found no task in this text").into());
@@ -472,12 +501,17 @@ pub fn text_to_tasks(folder: &str, text: &str, images: &[String], prefer: Option
 /// Ask an agent one question in `folder` and return its answer. Claude Code may use only
 /// `claude_tools`; Codex runs read-only. `prefer`: the agent to use when installed.
 pub fn ask(folder: &str, prompt: String, claude_tools: &str, max_turns: u32, prefer: Option<Tool>) -> Result<(String, Tool), String> {
-    ask_with_images(folder, prompt, claude_tools, max_turns, prefer, &[])
+    ask_with_images(folder, prompt, claude_tools, max_turns, prefer, &[], Weight::Full)
+}
+
+/// Like `ask`, for a question that only puts given material into shape (see `Weight::Light`).
+pub fn ask_light(folder: &str, prompt: String, claude_tools: &str, max_turns: u32, prefer: Option<Tool>) -> Result<(String, Tool), String> {
+    ask_with_images(folder, prompt, claude_tools, max_turns, prefer, &[], Weight::Light)
 }
 
 /// Like `ask`, with images the agent may look at: Codex gets them with `--image`, Claude Code
 /// reads them (its `Read` tool must be allowed) from folders added with `--add-dir`.
-pub fn ask_with_images(folder: &str, prompt: String, claude_tools: &str, max_turns: u32, prefer: Option<Tool>, images: &[String]) -> Result<(String, Tool), String> {
+pub fn ask_with_images(folder: &str, prompt: String, claude_tools: &str, max_turns: u32, prefer: Option<Tool>, images: &[String], weight: Weight) -> Result<(String, Tool), String> {
     let path = shell_path();
     let agents = detect(&path);
     let agent = agents
@@ -486,12 +520,12 @@ pub fn ask_with_images(folder: &str, prompt: String, claude_tools: &str, max_tur
         .or_else(|| agents.first())
         .ok_or(crate::tr!("Ni Claude Code ni Codex n'ont été trouvés sur cette machine.", "Neither Claude Code nor Codex was found on this computer."))?;
     let prompt_copy = prompt.clone();
-    let args = ask_args(agent.tool, prompt, claude_tools, max_turns, images);
+    let args = ask_args(agent.tool, prompt, claude_tools, max_turns, images, weight);
     let res = run_agent(agent, folder, args, &path, &AtomicBool::new(false), PER_PROJECT);
     // Claude Code can't renew its sign-in headless: Codex answers instead, when installed.
     if matches!(&res, Err(e) if e == AUTH_ERROR) && prefer != Some(Tool::Codex) {
         if agents.iter().any(|a| a.tool == Tool::Codex) {
-            if let Ok(r) = ask_with_images(folder, prompt_copy, claude_tools, max_turns, Some(Tool::Codex), images) {
+            if let Ok(r) = ask_with_images(folder, prompt_copy, claude_tools, max_turns, Some(Tool::Codex), images, weight) {
                 return Ok(r);
             }
         }
@@ -637,16 +671,28 @@ mod tests {
     #[test]
     fn images_reach_the_agents() {
         let imgs = vec!["/tmp/x/a.png".to_string(), "/tmp/x/b.jpg".to_string()];
-        let c = ask_args(Tool::ClaudeCode, "p".into(), "Read", 5, &imgs);
+        let c = ask_args(Tool::ClaudeCode, "p".into(), "Read", 5, &imgs, Weight::Full);
         // Claude reads them itself: their folder is added once.
         assert_eq!(c.iter().filter(|a| *a == "--add-dir").count(), 1);
         assert!(c.windows(2).any(|w| w[0] == "--add-dir" && w[1] == "/tmp/x"));
-        let x = ask_args(Tool::Codex, "p".into(), "Read", 5, &imgs);
+        let x = ask_args(Tool::Codex, "p".into(), "Read", 5, &imgs, Weight::Full);
         assert!(x.contains(&"--image=/tmp/x/a.png".to_string()) && x.contains(&"--image=/tmp/x/b.jpg".to_string()));
         assert_eq!(x.last().map(String::as_str), Some("p"));
         // Without images, nothing changes.
-        assert!(!ask_args(Tool::ClaudeCode, "p".into(), "Read", 5, &[]).contains(&"--add-dir".to_string()));
+        assert!(!ask_args(Tool::ClaudeCode, "p".into(), "Read", 5, &[], Weight::Full).contains(&"--add-dir".to_string()));
         assert!(is_image(Path::new("/a/B.PNG")) && is_image(Path::new("c.webp")) && !is_image(Path::new("notes.txt")) && !is_image(Path::new("dir")));
+    }
+
+    #[test]
+    fn light_questions_use_a_lighter_model() {
+        let c = ask_args(Tool::ClaudeCode, "p".into(), "Read", 3, &[], Weight::Light);
+        assert!(c.windows(2).any(|w| w[0] == "--model" && w[1] == "sonnet"));
+        let x = ask_args(Tool::Codex, "p".into(), "Read", 3, &[], Weight::Light);
+        assert!(x.windows(2).any(|w| w[0] == "-c" && w[1] == "model_reasoning_effort=\"low\""));
+        assert_eq!(x.last().map(String::as_str), Some("p"), "the prompt stays last, after « -- »");
+        // A full question keeps the person's own default model.
+        assert!(!ask_args(Tool::ClaudeCode, "p".into(), "Read", 3, &[], Weight::Full).contains(&"--model".to_string()));
+        assert!(!ask_args(Tool::Codex, "p".into(), "Read", 3, &[], Weight::Full).contains(&"-c".to_string()));
     }
 
     #[test]

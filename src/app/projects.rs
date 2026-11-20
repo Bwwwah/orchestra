@@ -271,7 +271,7 @@ impl NotesApp {
 
                 // Cards, three per row on a wide window.
                 if projects.is_empty() {
-                    ui.label(RichText::new(crate::tr!("Aucun projet pour l'instant : créez-en un à partir d'un dossier ci-dessous.", "No project yet: create one from a folder below.")).color(t.secondary));
+                    ui.label(RichText::new(crate::tr!("Aucun projet pour l'instant : synchronisez avec l'IA ou ajoutez-en un ci-dessous.", "No project yet: sync with the AI or add one below.")).color(t.secondary));
                 }
                 let gap = 14.0;
                 let cols = ((width + gap) / (300.0 + gap)).floor().max(1.0);
@@ -340,53 +340,61 @@ impl NotesApp {
                         }
                     }
                 });
-                self.unassigned_view(ui, width, actions, &t);
+                self.more_projects_view(ui, width, &t);
             });
         });
     }
 }
 
 impl NotesApp {
-    /// Folders where Claude Code / Codex worked that no project holds yet.
-    fn unassigned_view(&self, ui: &mut egui::Ui, width: f32, actions: &mut Vec<Action>, t: &Tone) {
-        if self.agents.unassigned.is_empty() {
+    /// Below the cards: bring in more projects, by syncing with the AIs (every folder where
+    /// Claude Code or Codex worked is offered there) or by adding one by hand.
+    fn more_projects_view(&mut self, ui: &mut egui::Ui, width: f32, t: &Tone) {
+        if self.sync_dialog.is_some() || self.sync_run.is_some() || self.new_project.is_some() {
             return;
         }
         ui.add_space(28.0);
-        ui.label(RichText::new(crate::tr!("Dossiers avec des sessions IA, sans projet", "Folders with AI sessions, without a project")).font(semibold(16.0)).color(t.text));
-        ui.label(RichText::new(crate::tr!("Détectés dans les sessions Claude Code et Codex de cette machine.", "Found in this computer's Claude Code and Codex sessions.")).size(13.0).color(t.secondary));
-        ui.add_space(8.0);
-        for (folder, list) in self.agents.unassigned.iter().take(12) {
-            egui::Frame::new().stroke(egui::Stroke::new(1.0, t.border)).corner_radius(8.0).inner_margin(10).show(ui, |ui| {
-                ui.set_width(width - 22.0);
+        let waiting = self.agents.unassigned.len();
+        egui::Frame::new().fill(t.card).stroke(egui::Stroke::new(1.0, t.border)).corner_radius(14.0).inner_margin(egui::Margin::symmetric(24, 22)).show(ui, |ui| {
+            ui.set_width(width - 50.0);
+            ui.vertical_centered(|ui| {
+                ui.label(RichText::new(crate::tr!("D'autres projets à suivre ?", "More projects to follow?")).font(semibold(17.0)).color(t.text));
+                ui.add_space(4.0);
+                let line = match waiting {
+                    0 => crate::tr!("Les IA font l'état des lieux de vos dossiers, ou ajoutez un projet vous-même.", "The AIs write where your folders stand, or add a project yourself.").to_string(),
+                    1 => crate::tr!("1 dossier où une IA a travaillé n'a pas encore de projet.", "1 folder where an AI worked has no project yet.").to_string(),
+                    n => crate::trf!("{n} dossiers où une IA a travaillé n'ont pas encore de projet.", "{n} folders where an AI worked have no project yet."),
+                };
+                ui.label(RichText::new(line).size(13.5).color(t.secondary));
+                ui.add_space(14.0);
+                // Two buttons side by side, centred.
+                let (bw, bh, gap) = (220.0, 38.0, 12.0);
+                let total = bw * 2.0 + gap;
                 ui.horizontal(|ui| {
-                    let name = std::path::Path::new(folder).file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_else(|| folder.clone());
-                    let btn_w = 130.0;
-                    let room = (ui.available_width() - btn_w).max(60.0);
-                    ui.vertical(|ui| {
-                        ui.set_width(room);
-                        ui.label(RichText::new(&name).font(semibold(14.0)).color(t.text));
-                        let mut job = egui::text::LayoutJob::single_section(folder.clone(), egui::TextFormat::simple(FontId::monospace(11.0), t.tertiary));
-                        job.wrap = egui::text::TextWrapping::truncate_at_width(room);
-                        cut_label(ui, job);
-                        let last = list.iter().map(|s| s.last_activity).max().unwrap_or(0);
-                        let tools: Vec<&str> = {
-                            let mut v: Vec<&str> = list.iter().map(|s| s.tool.label()).collect();
-                            v.dedup();
-                            v
-                        };
-                        ui.label(RichText::new(crate::trf!("{} session(s) · {} · {}", "{} session(s) · {} · {}", list.len(), tools.join(", "), relative_time(last))).size(12.0).color(t.secondary));
-                    });
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        if ui.button(crate::tr!("Créer le projet", "Create the project")).on_hover_text(crate::tr!("Une IA le remplit ensuite : état des lieux, statut, regard extérieur", "An AI then fills it in: current state, status, outside view")).clicked() {
-                            actions.push(Action::NewProject(name.clone(), folder.clone()));
-                            super::ai_fill::request(ui.ctx(), super::ai_fill::AiReq::FillFolder { folder: folder.clone() });
-                        }
-                    });
+                    ui.add_space(((ui.available_width() - total) / 2.0).max(0.0));
+                    ui.spacing_mut().item_spacing.x = gap;
+                    let sync = egui::Button::new(RichText::new(crate::tr!("Synchroniser avec l'IA", "Sync with the AI")).size(14.5).color(Color32::WHITE))
+                        .fill(BLUE)
+                        .corner_radius(10.0)
+                        .min_size(egui::vec2(bw, bh));
+                    if ui
+                        .add(sync)
+                        .on_hover_text(crate::tr!("Choisissez les dossiers : Claude Code (ou Codex) crée les projets et fait leur état des lieux", "Pick the folders: Claude Code (or Codex) creates the projects and writes where they stand"))
+                        .clicked()
+                    {
+                        self.sync_dialog = Some(self.sync_candidates());
+                    }
+                    let add = egui::Button::new(RichText::new(crate::tr!("+ Ajouter un projet", "+ Add a project")).size(14.5).color(t.text))
+                        .fill(t.fill)
+                        .stroke(egui::Stroke::new(1.0, t.border))
+                        .corner_radius(10.0)
+                        .min_size(egui::vec2(bw, bh));
+                    if ui.add(add).on_hover_text(crate::tr!("À partir d'un dossier ; astuce : glissez-le sur la fenêtre", "From a folder; tip: drop it on the window")).clicked() {
+                        self.new_project = Some((String::new(), String::new()));
+                    }
                 });
             });
-            ui.add_space(6.0);
-        }
+        });
     }
 }
 
@@ -1054,6 +1062,11 @@ fn steps_card(ui: &mut egui::Ui, cx: &mut Cx, extra: f32) -> f32 {
         if pr.steps.is_empty() {
             ui.label(RichText::new(crate::tr!("Aucune étape. Ajoutez-en une, demandez des suggestions à l'IA, ou collez un texte à transformer en étapes.", "No step. Add one, ask the AI for suggestions, or paste a text to turn into steps.")).color(t.tertiary).italics());
         }
+        // Open steps are put in order by dragging them by their handle (left of the circle).
+        let drag_key = egui::Id::unique(("step-drag", page_id));
+        let mut dragging: Option<String> = ui.ctx().data(|d| d.get_temp(drag_key));
+        let open_count = pr.steps.iter().filter(|s| s.status != StepStatus::Done).count();
+        let mut open_rows: Vec<(String, egui::Rect)> = vec![];
         for i in rows {
             let s = &pr.steps[i];
             let open_key = ("step-open", s.id.as_str());
@@ -1062,6 +1075,22 @@ fn steps_card(ui: &mut egui::Ui, cx: &mut Cx, extra: f32) -> f32 {
             let color = if s.status == StepStatus::Done { t.tertiary } else { t.text };
             let bg = hover_begin(ui);
             let row = ui.horizontal_top(|ui| {
+                if !ro {
+                    let (hr, h) = ui.allocate_exact_size(egui::vec2(10.0, 22.0), egui::Sense::drag());
+                    if s.status != StepStatus::Done && open_count > 1 {
+                        let active = h.hovered() || h.dragged() || dragging.as_deref() == Some(s.id.as_str());
+                        let col = if active { t.secondary } else { t.border };
+                        for dy in [-5.0, 0.0, 5.0] {
+                            for dx in [-2.0, 2.0] {
+                                ui.painter().circle_filled(hr.center() + egui::vec2(dx, dy), 1.3, col);
+                            }
+                        }
+                        if h.drag_started() {
+                            dragging = Some(s.id.clone());
+                        }
+                        h.on_hover_cursor(egui::CursorIcon::Grab).on_hover_text(crate::tr!("Glisser pour changer l'ordre", "Drag to change the order"));
+                    }
+                }
                 if step_icon(ui, &s.id, s.status, t).clicked() && !ro {
                     cycle = Some(s.id.clone());
                 }
@@ -1098,11 +1127,40 @@ fn steps_card(ui: &mut egui::Ui, cx: &mut Cx, extra: f32) -> f32 {
                 resp
             });
             hover_end(ui, bg, row.response.rect, egui::Id::unique(("step-row", &s.id)), t);
+            if dragging.as_deref() == Some(s.id.as_str()) {
+                ui.painter().rect_filled(row.response.rect.expand2(egui::vec2(6.0, 2.0)), 6.0, BLUE.gamma_multiply(0.08));
+            }
+            if s.status != StepStatus::Done {
+                open_rows.push((s.id.clone(), row.response.rect));
+            }
             if row.inner.clicked() {
                 toggle_flag(ui, open_key);
             }
             ui.add_space(2.0);
         }
+        // While dragging: a line where the step would land; it moves there on release.
+        if let Some(d) = dragging.clone() {
+            let released = ui.input(|i| i.pointer.any_released() || !i.pointer.primary_down());
+            if let (Some(pos), Some((_, first))) = (ui.ctx().pointer_latest_pos(), open_rows.first()) {
+                ui.ctx().set_cursor_icon(egui::CursorIcon::Grabbing);
+                let target = open_rows.iter().find(|(_, r)| pos.y < r.center().y).map(|(id, r)| (id.clone(), r.top() - 1.0));
+                let y = target.as_ref().map(|(_, y)| *y).or_else(|| open_rows.last().map(|(_, r)| r.bottom() + 1.0)).unwrap_or(first.top());
+                ui.painter().hline(first.left()..=first.right(), y, egui::Stroke::new(2.0, BLUE));
+                if released {
+                    pr.move_step(&d, target.as_ref().map(|(id, _)| id.as_str()));
+                }
+            }
+            if released {
+                dragging = None;
+            }
+            ui.ctx().request_repaint();
+        }
+        ui.ctx().data_mut(|data| match &dragging {
+            Some(d) => {
+                data.insert_temp(drag_key, d.clone());
+            }
+            None => data.remove::<String>(drag_key),
+        });
         if done > 0 {
             // "Supprimer les terminées": a second click confirms, nothing goes on one slip.
             let confirm_key = ("clear-done", page_id);

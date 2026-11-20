@@ -102,7 +102,7 @@ Kinds: text, heading 1/2/3, to-do, bulleted, numbered, toggle, quote, callout, c
 ## AI — MCP
 
 * `notes-libres mcp`: JSON-RPC 2.0 over stdin/stdout, one message per line, protocol version `2025-06-18` (echoes the client's requested version).
-* Tools: list_pages, search_pages, read_page, create_page, append_to_page, replace_page_content, update_block, update_page, trash_page, create_database, query_database, add_database_row, update_database_row, delete_database_row. Pages may be named by id or title.
+* Tools: list_pages, search_pages, read_page, create_page, append_to_page, replace_page_content, update_block, update_page, trash_page, restore_page, create_database, query_database, add_database_row, update_database_row, delete_database_row. Pages may be named by id or title.
 * Resources: every page as `page://<id>` in Markdown.
 
 
@@ -150,7 +150,8 @@ Kinds: text, heading 1/2/3, to-do, bulleted, numbered, toggle, quote, callout, c
   (double-click maximises).
 * Sidebar 268 px wide (resizable, remembered). Rows about 31 px apart, and the search box is
   32 px high with a ⌘K badge. Order: "Accueil" pill (always shaded) with two icon shortcuts,
-  Nouvelle page, a second item, Bibliothèque, the sections, then the bottom items, a card and
+  Nouvelle page, a second item, Projets, Orchestration, Boîte de réception (no Bibliothèque
+  any more), the sections, then the bottom items, a card and
   the workspace switcher. Line icons, not emoji, except page icons.
 * Tabs at most 200 px wide. Tab strip 36 px tall, with thin lines between tabs; the
   open tab joins the page.

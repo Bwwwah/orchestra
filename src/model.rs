@@ -859,6 +859,21 @@ Cmd/Ctrl+P or K to search all pages.").into();
         id
     }
 
+    /// Put page `id` just before (or, with `after`, just after) page `target` in the order
+    /// pages are listed (the sidebar lists the pages of one level in the workspace's order).
+    /// False when nothing moved.
+    pub fn move_page_near(&mut self, id: &str, target: &str, after: bool) -> bool {
+        if id == target || self.page(target).is_none() {
+            return false;
+        }
+        let Some(from) = self.pages.iter().position(|p| p.id == id) else { return false };
+        let p = self.pages.remove(from);
+        let at = self.pages.iter().position(|p| p.id == target).unwrap_or(self.pages.len()) + usize::from(after);
+        let moved = at != from;
+        self.pages.insert(at, p);
+        moved
+    }
+
     /// Move a page and its sub-pages to the trash (or bring them back).
     pub fn set_trashed(&mut self, id: &str, trashed: bool) {
         let mut ids = self.descendants(id);
@@ -955,6 +970,23 @@ fn snippet(text: &str, q: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::original::*;
+
+    #[test]
+    fn top_level_pages_are_reordered() {
+        let mut ws = super::Workspace::default();
+        let ids: Vec<String> = ["A", "B", "C"].iter().map(|t| ws.create_page(t, None)).collect();
+        let kid = ws.create_page("A1", Some(ids[0].clone()));
+        let roots = |ws: &super::Workspace| ws.children(None).iter().map(|p| p.title.clone()).collect::<String>();
+        assert_eq!(roots(&ws), "ABC");
+        assert!(ws.move_page_near(&ids[2], &ids[0], false));
+        assert_eq!(roots(&ws), "CAB");
+        assert!(ws.move_page_near(&ids[2], &ids[1], true));
+        assert_eq!(roots(&ws), "ABC");
+        assert!(!ws.move_page_near(&ids[2], &ids[2], false));
+        assert!(!ws.move_page_near(&ids[0], "absent", false));
+        // Sub-pages stay under their parent.
+        assert_eq!(ws.children(Some(&ids[0])).iter().map(|p| p.id.clone()).collect::<Vec<_>>(), vec![kid]);
+    }
 
     #[test]
     fn zoom_is_clamped_like_the_original() {

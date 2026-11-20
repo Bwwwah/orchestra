@@ -275,10 +275,8 @@ pub fn record(u: &Usage) -> Vec<Sample> {
     let mut h = history();
     if push_sample(&mut h, u.sample()) {
         let _ = std::fs::create_dir_all(crate::store::data_dir());
-        let tmp = history_file().with_extension("json.tmp");
-        if std::fs::write(&tmp, serde_json::to_string(&h).unwrap_or_default()).is_ok() {
-            let _ = std::fs::rename(&tmp, history_file());
-        }
+        // Several Claude Code sessions run this at once: each through a temporary file of its own.
+        let _ = crate::store::write_atomic(&history_file(), serde_json::to_string(&h).unwrap_or_default().as_bytes());
     }
     h
 }
@@ -432,10 +430,7 @@ pub fn statusline_main() {
     if v.get("rate_limits").is_some_and(|r| r.is_object()) {
         let out = json!({ "rate_limits": v["rate_limits"], "at": crate::model::now_ms() });
         let _ = std::fs::create_dir_all(crate::store::data_dir());
-        let tmp = captured_file().with_extension("json.tmp");
-        if std::fs::write(&tmp, out.to_string()).is_ok() {
-            let _ = std::fs::rename(&tmp, captured_file());
-        }
+        let _ = crate::store::write_atomic(&captured_file(), out.to_string().as_bytes());
         // The 24-hour figures need every reading, Orchestra open or not.
         let windows = from_rate_limits(&v["rate_limits"]);
         if !windows.is_empty() {

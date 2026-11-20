@@ -73,13 +73,26 @@ pub fn save(ws: &Workspace) -> std::io::Result<()> {
     if let Some(dir) = path.parent() {
         fs::create_dir_all(dir)?;
     }
-    let tmp = path.with_extension("json.tmp");
-    {
+    write_atomic(&path, serde_json::to_string_pretty(ws).unwrap_or_default().as_bytes())
+}
+
+/// Write `bytes` to `path` through a temporary file with a unique name, then a rename.
+/// The app and the MCP server save the same file (and several Claude Code sessions the same
+/// usage files): a shared temporary name would let one truncate or rename the other's
+/// half-written file.
+pub fn write_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("workspace.json");
+    let tmp = path.with_file_name(format!(".{name}.{}.tmp", uuid::Uuid::new_v4().simple()));
+    let written = (|| {
         let mut f = fs::File::create(&tmp)?;
-        f.write_all(serde_json::to_string_pretty(ws).unwrap_or_default().as_bytes())?;
+        f.write_all(bytes)?;
         f.sync_all()?;
+        fs::rename(&tmp, path)
+    })();
+    if written.is_err() {
+        let _ = fs::remove_file(&tmp);
     }
-    fs::rename(tmp, path)
+    written
 }
 
 pub fn page_to_markdown(ws: &Workspace, page: &Page) -> String {
@@ -256,6 +269,30 @@ pub fn reformat_page(page: &mut Page) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn concurrent_atomic_writes_never_mix_or_leave_temp_files() {
+        let dir = std::env::temp_dir().join(format!("orchestra-store-{}", uuid::Uuid::new_v4().simple()));
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("workspace.json");
+        let a = "a".repeat(200_000);
+        let b = "b".repeat(300_000);
+        std::thread::scope(|s| {
+            for i in 0..8 {
+                let (path, body) = (&path, if i % 2 == 0 { &a } else { &b });
+                s.spawn(move || {
+                    for _ in 0..10 {
+                        write_atomic(path, body.as_bytes()).unwrap();
+                    }
+                });
+            }
+        });
+        let got = fs::read_to_string(&path).unwrap();
+        assert!(got == a || got == b, "file mixes two writes");
+        let left: Vec<_> = fs::read_dir(&dir).unwrap().map(|e| e.unwrap().file_name()).collect();
+        assert_eq!(left, vec![std::ffi::OsString::from("workspace.json")]);
+        let _ = fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn raw_table_lines_become_one_block() {
