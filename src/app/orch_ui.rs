@@ -1694,8 +1694,21 @@ impl NotesApp {
                     };
                     ui.label(RichText::new(empty).color(t.tertiary).italics());
                 }
+                let (now, offset) = (crate::model::now_ms(), auto::local_offset_ms());
+                let mut group = "";
                 for i in shown {
                     let m = &self.ws.inbox[i];
+                    // A heading per day, newest first.
+                    let g = day_group(m.at, now, offset);
+                    if g != group {
+                        if !group.is_empty() {
+                            ui.add_space(10.0);
+                        }
+                        group = g;
+                        ui.label(RichText::new(g.to_uppercase()).font(semibold(11.5)).color(t.tertiary));
+                        ui.add_space(6.0);
+                    }
+                    let to_answer = m.kind == "question" && m.answer.trim().is_empty();
                     let (accent, kind) = match m.kind.as_str() {
                         "question" => (Color32::from_rgb(144, 101, 176), crate::tr!("Question", "Question")),
                         "fin" => (super::projects::GREEN, crate::tr!("Session", "Session")),
@@ -1707,7 +1720,8 @@ impl NotesApp {
                     let bg = super::projects::hover_begin(ui);
                     let card = egui::Frame::new()
                         .fill(if m.read { Color32::TRANSPARENT } else { t.card })
-                        .stroke(egui::Stroke::new(1.0, t.border))
+                        // A question still waiting for its answer stands out.
+                        .stroke(egui::Stroke::new(1.0, if to_answer { accent.gamma_multiply(0.55) } else { t.border }))
                         .corner_radius(10.0)
                         .inner_margin(egui::Margin { left: 16, right: 10, top: 10, bottom: 10 })
                         .show(ui, |ui| {
@@ -1718,7 +1732,11 @@ impl NotesApp {
                                     ui.horizontal(|ui| {
                                         kind_badge(ui, kind, accent);
                                         if let Some(p) = &project {
-                                            ui.label(RichText::new(p).size(12.0).color(t.tertiary));
+                                            // The project's own colour, as on the Orchestration page.
+                                            ui.add_space(2.0);
+                                            let (dot, _) = ui.allocate_exact_size(egui::vec2(8.0, 14.0), egui::Sense::hover());
+                                            ui.painter().circle_filled(dot.center(), 3.5, project_color(p));
+                                            ui.label(RichText::new(p).size(12.0).color(t.secondary));
                                         }
                                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                                             ui.label(RichText::new(super::chrome::relative_time(m.at)).size(12.0).color(t.tertiary));
@@ -1730,9 +1748,23 @@ impl NotesApp {
                                     });
                                     ui.add_space(3.0);
                                     ui.add(egui::Label::new(RichText::new(&m.title).font(if m.read { FontId::proportional(14.5) } else { semibold(14.5) }).color(t.text)).wrap());
-                                    if !m.text.is_empty() {
+                                    let body = plain_text(&m.text);
+                                    if !body.is_empty() {
                                         ui.add_space(2.0);
-                                        ui.add(egui::Label::new(RichText::new(&m.text).size(13.0).color(t.secondary)).wrap());
+                                        // Long texts (session summaries) folded to a few lines.
+                                        let more_id = egui::Id::unique(("inbox-more", &m.id));
+                                        let all = ui.data(|d| d.get_temp::<bool>(more_id)).unwrap_or(false);
+                                        let mut job = egui::text::LayoutJob::single_section(body, egui::TextFormat::simple(FontId::proportional(13.0), t.secondary));
+                                        job.wrap.max_width = ui.available_width();
+                                        if !all {
+                                            job.wrap.max_rows = TEXT_LINES;
+                                        }
+                                        let galley = ui.fonts_mut(|f| f.layout_job(job));
+                                        let cut = galley.elided;
+                                        ui.label(galley);
+                                        if (cut || all) && super::projects::action_link(ui, if all { crate::tr!("Réduire", "Show less") } else { crate::tr!("Afficher tout", "Show all") }).clicked() {
+                                            ui.data_mut(|d| d.insert_temp(more_id, !all));
+                                        }
                                     }
                                 });
                                 let x = ui.add(egui::Button::new(RichText::new("×").size(16.0).color(t.tertiary)).frame(false)).on_hover_text(crate::tr!("Supprimer", "Delete"));
@@ -1807,6 +1839,38 @@ impl NotesApp {
     }
 }
 
+
+/// The group of an inbox message, by its local day: today, yesterday, this week, older.
+/// `offset`: the local time's offset from UTC (ms).
+fn day_group(at: u64, now: u64, offset: i64) -> &'static str {
+    let day = |ms: u64| (ms as i64 + offset).div_euclid(86_400_000);
+    match day(now) - day(at) {
+        i64::MIN..=0 => crate::tr!("Aujourd'hui", "Today"),
+        1 => crate::tr!("Hier", "Yesterday"),
+        2..=6 => crate::tr!("Cette semaine", "This week"),
+        _ => crate::tr!("Plus ancien", "Older"),
+    }
+}
+
+/// An inbox message's text for reading: Markdown headings and bold marks dropped (session
+/// summaries are written in Markdown), blank lines squeezed.
+fn plain_text(text: &str) -> String {
+    let mut out: Vec<String> = vec![];
+    for line in text.lines() {
+        let l = line.trim_end().trim_start_matches('#').trim_start().replace("**", "");
+        if l.is_empty() && out.last().is_none_or(|p| p.is_empty()) {
+            continue;
+        }
+        out.push(l);
+    }
+    while out.last().is_some_and(|l| l.is_empty()) {
+        out.pop();
+    }
+    out.join("\n")
+}
+
+/// Lines of a message's text shown before « Afficher tout ».
+const TEXT_LINES: usize = 4;
 
 /// The kind of an inbox message, as a small tinted pill.
 fn kind_badge(ui: &mut egui::Ui, text: &str, accent: Color32) {
@@ -1929,6 +1993,30 @@ mod tests {
         assert!(!super::endless_on_main(true, false));
         assert!(!super::endless_on_main(false, true));
         assert!(!super::endless_main_warning().is_empty());
+    }
+
+    #[test]
+    fn inbox_messages_group_by_local_day() {
+        let h = 3_600_000u64;
+        let day = 24 * h;
+        // Noon UTC on some day, local time UTC+1.
+        let now = 20_000 * day + 12 * h;
+        let g = |at: u64| super::day_group(at, now, h as i64);
+        assert_eq!(g(now - h), g(now));
+        // 22:30 UTC the day before is 23:30 local: yesterday; 23:30 UTC is 00:30 local: today.
+        assert_eq!(g(now - 12 * h - 90 * 60_000), g(now - day));
+        assert_eq!(g(now - 12 * h + 30 * 60_000), g(now));
+        assert_ne!(g(now - day), g(now));
+        assert_eq!(g(now - 3 * day), g(now - 6 * day));
+        assert_ne!(g(now - 3 * day), g(now - 7 * day));
+        // A clock a little behind: still today.
+        assert_eq!(g(now + h), g(now));
+    }
+
+    #[test]
+    fn inbox_text_drops_markdown_marks() {
+        let s = "### Fait\n- **une** chose\n\n\n### Reste\n- rien\n\n";
+        assert_eq!(super::plain_text(s), "Fait\n- une chose\n\nReste\n- rien");
     }
 }
 
