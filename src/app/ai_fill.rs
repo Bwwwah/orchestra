@@ -121,7 +121,8 @@ impl NotesApp {
                         continue;
                     }
                     let q = question.clone();
-                    let slot = spawn(ctx, move || crate::sync::ask_question(&folder, &q, prefer));
+                    let code = self.code_forced(&page_id);
+                    let slot = spawn(ctx, move || crate::sync::ask_question(&folder, &q, code, prefer));
                     self.ai.answers.remove(&page_id);
                     self.ai.questions.insert(page_id, (question, slot));
                 }
@@ -182,7 +183,13 @@ impl NotesApp {
             return;
         }
         let f = crate::project::normalize_folder(&folder).display().to_string();
-        let slot = spawn(ctx, move || crate::sync::ask_fill(&f, prefer));
+        let code = self.code_forced(&page_id);
+        let slot = spawn(ctx, move || crate::sync::ask_fill(&f, code, prefer));
         self.ai.fills.insert(page_id, slot);
+    }
+
+    /// The code / non-code kind the person forced on this project, if any.
+    pub(super) fn code_forced(&self, page_id: &str) -> Option<bool> {
+        self.ws.page(page_id).and_then(|p| p.project.as_ref()).and_then(|pr| pr.code)
     }
 }

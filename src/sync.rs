@@ -388,8 +388,9 @@ pub fn parse_fill(answer: &str) -> Result<Fill, String> {
 }
 
 /// Ask an agent to fill in a project's cards (read-only, web search allowed).
-pub fn ask_fill(folder: &str, prefer: Option<Tool>) -> Result<(Fill, Tool), String> {
-    let (answer, tool) = ask(folder, fill_prompt(folder, crate::project::shows_git_card(folder)),"Read,Glob,Grep,Bash(git log:*),Bash(git status:*),Bash(ls:*),WebSearch,WebFetch", 30, prefer)?;
+/// `code`: the project kind forced by the person (None: detected).
+pub fn ask_fill(folder: &str, code: Option<bool>, prefer: Option<Tool>) -> Result<(Fill, Tool), String> {
+    let (answer, tool) = ask(folder, fill_prompt(folder, crate::project::code_kind(folder, code)), "Read,Glob,Grep,Bash(git log:*),Bash(git status:*),Bash(ls:*),WebSearch,WebFetch", 30, prefer)?;
     Ok((parse_fill(&answer)?, tool))
 }
 
@@ -614,20 +615,20 @@ fn question_prompt(folder: &str, question: &str, code: bool) -> String {
 }
 
 /// A quick question about a project, answered in a few lines by an agent (read-only).
-pub fn ask_question(folder: &str, question: &str, prefer: Option<Tool>) -> Result<(String, Tool), String> {
+pub fn ask_question(folder: &str, question: &str, code: Option<bool>, prefer: Option<Tool>) -> Result<(String, Tool), String> {
     if question.trim().is_empty() {
         return Err(crate::tr!("question vide", "empty question").into());
     }
     let dir = if !folder.trim().is_empty() && crate::project::normalize_folder(folder).is_dir() { crate::project::normalize_folder(folder).display().to_string() } else { dirs::home_dir().unwrap_or_default().display().to_string() };
-    let code = crate::project::shows_git_card(&dir);
+    let code = crate::project::code_kind(&dir, code);
     let (answer, tool) = ask(&dir, question_prompt(&dir, question, code),"Read,Glob,Grep,Bash(git log:*),Bash(ls:*)", 12, prefer)?;
     Ok((answer.trim().to_string(), tool))
 }
 
 /// Ask an agent for a short outside view of a project (read-only, web search allowed).
 /// `prefer`: the agent that worked on the project last, when it is installed.
-pub fn ask_review(folder: &str, prefer: Option<Tool>) -> Result<(String, Tool), String> {
-    ask(folder, review_prompt(folder, crate::project::shows_git_card(folder)),"Read,Glob,Grep,Bash(git log:*),Bash(ls:*),WebSearch,WebFetch,mcp__orchestra__get_project_state", 30, prefer)
+pub fn ask_review(folder: &str, code: Option<bool>, prefer: Option<Tool>) -> Result<(String, Tool), String> {
+    ask(folder, review_prompt(folder, crate::project::code_kind(folder, code)), "Read,Glob,Grep,Bash(git log:*),Bash(ls:*),WebSearch,WebFetch,mcp__orchestra__get_project_state", 30, prefer)
 }
 
 /// Where a folder's repository starts (the nearest folder holding `.git`), else itself.
@@ -812,7 +813,7 @@ mod tests {
         assert!(!p.contains("code »") && !p.contains("dans le code") && !p.contains("in the code"));
         assert!(p.contains("documents"));
         assert!(question_prompt("/tmp/x", "?", true).contains("code"));
-        assert!(ask_question("/tmp/x", "   ", None).is_err(), "an empty question never reaches an agent");
+        assert!(ask_question("/tmp/x", "   ", None, None).is_err(), "an empty question never reaches an agent");
     }
 
     #[test]

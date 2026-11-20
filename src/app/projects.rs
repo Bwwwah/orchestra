@@ -1066,6 +1066,28 @@ pub(super) fn project_panel(ui: &mut egui::Ui, cx: &mut Cx) -> Option<super::not
                 {
                     pr.read_only = ro;
                 }
+                // Code or not: detected from the folder, or forced here (the detection can be wrong).
+                ui.add_space(10.0);
+                let detected = detected_code(ui.ctx(), &pr.folder);
+                let is_code = pr.code.unwrap_or(detected);
+                let kind = if is_code { crate::tr!("Code", "Code") } else { crate::tr!("Sans code", "No code") };
+                let label = if pr.code.is_some() { format!("{kind} ▾") } else { crate::trf!("{kind} (auto) ▾", "{kind} (auto) ▾") };
+                let btn = ui
+                    .add_enabled(!pr.read_only, egui::Button::new(RichText::new(label).size(12.5).color(t.tertiary)).frame(false))
+                    .on_hover_text(crate::tr!(
+                        "Projet de code ou non : décide de la carte Versions (git) et de ce que l'IA regarde et répond. Détecté d'après le dossier ; choisissez ici si la détection se trompe.",
+                        "Code project or not: decides the Versions (git) card and what the AI looks at and answers. Detected from the folder; choose here if the detection is wrong."
+                    ));
+                egui::Popup::menu(&btn).show(|ui| {
+                    ui.set_min_width(220.0);
+                    let auto = crate::trf!("Automatique (détecté : {})", "Automatic (detected: {})", if detected { crate::tr!("code", "code") } else { crate::tr!("sans code", "no code") });
+                    for (choice, text) in [(None, auto.as_str()), (Some(true), crate::tr!("Projet de code", "Code project")), (Some(false), crate::tr!("Projet sans code", "Project without code"))] {
+                        if ui.selectable_label(pr.code == choice, text).clicked() {
+                            pr.code = choice;
+                            ui.close();
+                        }
+                    }
+                });
                 ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
             if editing_folder {
                 let r = ui.add(egui::TextEdit::singleline(&mut pr.folder).hint_text(crate::tr!("Dossier du projet, ex. ~/Code/mon-projet", "Project folder, e.g. ~/Code/my-project")).font(FontId::monospace(12.5)).desired_width(f32::INFINITY));
@@ -1095,7 +1117,7 @@ pub(super) fn project_panel(ui: &mut egui::Ui, cx: &mut Cx) -> Option<super::not
     // The AIs' questions, when there are some: first of the cards placed after the heads.
     let asked: &[CardKind] = if cx.questions.is_empty() { &[] } else { &[Questions] };
     // The git card (Versions) only for code projects.
-    let vers: &[CardKind] = if shows_git(ui.ctx(), &cx.pr.folder) { &[Versions] } else { &[] };
+    let vers: &[CardKind] = if shows_git(ui.ctx(), cx.pr) { &[Versions] } else { &[] };
     if w >= 1380.0 {
         let rest: Vec<CardKind> = asked.iter().chain(vers).copied().chain([Pages]).collect();
         let cols = balance(ui, cx.page_id, [Summary(420.0), Steps, Sessions], &rest);
@@ -1115,7 +1137,12 @@ pub(super) fn project_panel(ui: &mut egui::Ui, cx: &mut Cx) -> Option<super::not
 
 /// Whether the project page shows the git card, re-detected every few seconds per folder
 /// (a `git init` or new source files show it without reopening the page).
-fn shows_git(ctx: &egui::Context, folder: &str) -> bool {
+/// The person's forced choice (code / non-code) wins.
+fn shows_git(ctx: &egui::Context, pr: &Project) -> bool {
+    pr.code.unwrap_or_else(|| detected_code(ctx, &pr.folder))
+}
+
+fn detected_code(ctx: &egui::Context, folder: &str) -> bool {
     let key = egui::Id::unique(("shows-git", folder.trim().to_string()));
     let now_t = ctx.input(|i| i.time);
     if let Some((at, v)) = ctx.data(|d| d.get_temp::<(f64, bool)>(key))
@@ -2127,8 +2154,9 @@ impl NotesApp {
             && !self.reviews.contains_key(&r.page_id) {
                 let out: Arc<std::sync::Mutex<Option<_>>> = Arc::default();
                 let (o2, c2) = (out.clone(), ctx.clone());
+                let code = self.code_forced(&r.page_id);
                 std::thread::spawn(move || {
-                    let res = crate::sync::ask_review(&r.folder, r.prefer);
+                    let res = crate::sync::ask_review(&r.folder, code, r.prefer);
                     *o2.lock().unwrap() = Some(res);
                     c2.request_repaint();
                 });
@@ -2235,7 +2263,7 @@ fn quick_question(ui: &mut egui::Ui, cx: &mut Cx) {
     let text_key = egui::Id::unique(("quick-question", page_id));
     let mut text: String = ui.ctx().data(|d| d.get_temp(text_key)).unwrap_or_default();
     let asking = cx.ai.asking(page_id).map(String::from);
-    let hint = if shows_git(ui.ctx(), &folder) {
+    let hint = if shows_git(ui.ctx(), cx.pr) {
         crate::tr!("Question rapide à l'IA, ex. « telle fonctionnalité serait-elle intéressante ? »", "Quick question to the AI, e.g. « would this feature be worth it? »")
     } else {
         crate::tr!("Question rapide à l'IA, ex. « que me reste-t-il à rendre ? », « quel document manque ? »", "Quick question to the AI, e.g. « what do I still have to hand in? », « which document is missing? »")
@@ -2304,7 +2332,7 @@ fn review_card(ui: &mut egui::Ui, cx: &mut Cx) {
     let pr = &*cx.pr;
     let prefer = cx.live.first().map(|s| s.tool);
     let reviewing = cx.reviewing || cx.ai.filling(page_id);
-    let code = shows_git(ui.ctx(), &pr.folder);
+    let code = shows_git(ui.ctx(), pr);
     card(ui, t, 0.0, |ui| {
         let by = pr.review.as_ref().map(|r| format!("{} · {}", r.by, relative_time(r.at))).unwrap_or_default();
         card_title(ui, crate::tr!("REGARD EXTÉRIEUR", "OUTSIDE VIEW"), &by, t);

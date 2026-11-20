@@ -216,6 +216,10 @@ pub struct Project {
     /// "Regard extérieur": a short outside view asked to an AI (Markdown), by whom, when.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub review: Option<Review>,
+    /// Code project or not, forced by the person (None: detected from the folder, see
+    /// `shows_git_card`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub code: Option<bool>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, Default)]
@@ -517,6 +521,11 @@ pub fn shows_git_card(folder: &str) -> bool {
     }
     let dir = normalize_folder(folder);
     !dir.is_dir() || is_code_folder(&dir)
+}
+
+/// Whether a project is treated as code: what the person forced, else detected.
+pub fn code_kind(folder: &str, forced: Option<bool>) -> bool {
+    forced.unwrap_or_else(|| shows_git_card(folder))
 }
 
 /// Source file extensions counted when no marker is found.
@@ -854,6 +863,15 @@ mod tests {
         assert!(shows_git_card(""));
         assert!(shows_git_card("  "));
         assert!(shows_git_card(&s("absent")));
+        // Forced by the person: wins over the detection, both ways.
+        assert!(code_kind(&s("ecole"), Some(true)));
+        assert!(!code_kind(&s("rust"), Some(false)));
+        assert!(code_kind(&s("rust"), None) && !code_kind(&s("ecole"), None));
+        let mut p = Project::new("/tmp/x");
+        assert!(!serde_json::to_string(&p).unwrap().contains("\"code\""), "auto is not written");
+        p.code = Some(false);
+        let back: Project = serde_json::from_str(&serde_json::to_string(&p).unwrap()).unwrap();
+        assert_eq!(back.code, Some(false));
         let _ = std::fs::remove_dir_all(&base);
     }
 
