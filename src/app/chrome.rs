@@ -768,22 +768,72 @@ impl NotesApp {
         });
     }
 
-    /// Home: a greeting and the recently edited pages as cards.
+    /// Home: what Orchestra is, where things stand now (questions, sessions, AIs,
+    /// projects), the four steps to get going (ticked as they are done), then the recently
+    /// edited pages as cards.
     pub(super) fn home_view(&mut self, ui: &mut egui::Ui, actions: &mut Vec<Action>) {
         let t = tone(ui.visuals().dark_mode);
         let mut pages: Vec<&Page> = self.ws.pages.iter().filter(|p| !p.trashed).collect();
         pages.sort_by(|a, b| b.updated.cmp(&a.updated));
+        let now = HomeNow {
+            plugged: self.ais.plugged().len(),
+            projects: self.ws.projects().len(),
+            running: self.orch.runs.len(),
+            ran: !self.ws.runs.is_empty() || !self.orch.runs.is_empty(),
+            waiting: self.ws.inbox.iter().filter(|m| m.kind == "question" && m.answer.trim().is_empty()).count(),
+            checking: self.ais.states.lock().unwrap().is_none(),
+        };
+        let mut go: Option<HomeGo> = None;
         let avail = ui.available_width();
         let width = 708.0f32.min(avail - 40.0).max(300.0);
-        ui.add_space(70.0);
+        ui.add_space(56.0);
         ui.horizontal(|ui| {
             ui.add_space(((avail - width) / 2.0).max(20.0));
             ui.vertical(|ui| {
                 ui.set_width(width);
-                ui.vertical_centered(|ui| {
-                    ui.label(RichText::new(crate::tr!("Bonjour !", "Hello!")).font(bold(30.0)).color(t.text));
+                ui.label(RichText::new(crate::tr!("Bonjour !", "Hello!")).font(bold(30.0)).color(t.text));
+                ui.add_space(6.0);
+                ui.add(
+                    egui::Label::new(RichText::new(crate::tr!(
+                        "Orchestra fait avancer vos projets avec vos IA de code. Chaque projet a son dossier, son état des lieux et ses étapes ; Claude Code, Codex, Gemini CLI ou Mistral Vibe les lisent et les tiennent à jour par MCP, avec vous ou seules, dans les limites de votre abonnement. Leurs questions arrivent dans la boîte de réception ; vos notes vivent dans des pages, à côté.",
+                        "Orchestra moves your projects forward with your coding AIs. Each project has its folder, its state of play and its steps; Claude Code, Codex, Gemini CLI or Mistral Vibe read them and keep them up to date through MCP, with you or on their own, within your subscription's limits. Their questions arrive in the inbox; your notes live in pages, alongside."
+                    )).size(14.5).color(t.secondary))
+                    .wrap(),
+                );
+                ui.add_space(18.0);
+                // Where things stand, each chip opens its page.
+                ui.horizontal_wrapped(|ui| {
+                    ui.spacing_mut().item_spacing = egui::vec2(8.0, 8.0);
+                    for (text, color, target) in home_status(&now) {
+                        let c = match color {
+                            HomeTone::Alert => super::projects::ORANGE,
+                            HomeTone::Live => super::projects::GREEN,
+                            HomeTone::Calm => t.secondary,
+                        };
+                        if home_chip(ui, &text, c, &t).clicked() {
+                            go = Some(target);
+                        }
+                    }
                 });
-                ui.add_space(36.0);
+                // The four steps, while one is left to do.
+                let done = home_steps(&now);
+                if done.iter().any(|d| !d) {
+                    ui.add_space(26.0);
+                    ui.label(RichText::new(crate::tr!("Pour commencer", "To get going")).size(12.0).color(t.secondary));
+                    ui.add_space(8.0);
+                    let steps = [
+                        (crate::tr!("Brancher une IA", "Plug in an AI"), crate::tr!("Paramètres › IA : installez et branchez Claude Code, Codex, Gemini CLI ou Mistral Vibe.", "Settings › AI: install and plug in Claude Code, Codex, Gemini CLI or Mistral Vibe."), HomeGo::Ais),
+                        (crate::tr!("Créer un projet", "Create a project"), crate::tr!("Donnez son dossier de code ; l'IA remplit l'état des lieux et propose des étapes.", "Give its code folder; the AI fills in the state of play and proposes steps."), HomeGo::Projects),
+                        (crate::tr!("Lancer une IA en autonomie", "Start an AI on its own"), crate::tr!("Orchestration : elle avance étape par étape dans une copie à part, avec un budget.", "Orchestration: it goes step by step in a separate copy, within a budget."), HomeGo::Orchestra),
+                        (crate::tr!("Répondre à ses questions", "Answer its questions"), crate::tr!("Boîte de réception : votre réponse lui parvient au prochain état des lieux.", "Inbox: your answer reaches it at the next state of play."), HomeGo::Inbox),
+                    ];
+                    for (i, ((title, what, target), ok)) in steps.into_iter().zip(done).enumerate() {
+                        if home_step(ui, i + 1, title, what, ok, &t).clicked() {
+                            go = Some(target);
+                        }
+                    }
+                }
+                ui.add_space(30.0);
                 ui.horizontal(|ui| {
                     icons::paint(ui.painter(), egui::Rect::from_min_size(ui.cursor().min + egui::vec2(0.0, 2.0), egui::vec2(14.0, 14.0)), Icon::Page, t.secondary);
                     ui.add_space(20.0);
@@ -810,8 +860,16 @@ impl NotesApp {
                         }
                     }
                 });
+                ui.add_space(40.0);
             });
         });
+        match go {
+            Some(HomeGo::Ais) => self.open_settings(SettingsTab::Ai),
+            Some(HomeGo::Projects) => self.view = View::Projects,
+            Some(HomeGo::Orchestra) => self.view = View::Orchestra,
+            Some(HomeGo::Inbox) => self.view = View::Inbox,
+            None => {}
+        }
     }
 
     /// The round button at the bottom right that opens the AI (MCP) panel.
@@ -836,5 +894,126 @@ impl NotesApp {
                     self.open_settings(SettingsTab::Ai);
                 }
             });
+    }
+}
+
+/// Where things stand, for the home page.
+struct HomeNow {
+    /// AIs plugged into Orchestra.
+    plugged: usize,
+    projects: usize,
+    /// Autonomous sessions running now.
+    running: usize,
+    /// An autonomous session ran once (or runs).
+    ran: bool,
+    /// AI questions waiting for an answer.
+    waiting: usize,
+    /// The AIs are still being checked (startup).
+    checking: bool,
+}
+
+/// Where a click on the home page leads.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum HomeGo {
+    Ais,
+    Projects,
+    Orchestra,
+    Inbox,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum HomeTone {
+    /// Waits for the person.
+    Alert,
+    /// At work.
+    Live,
+    Calm,
+}
+
+/// The home page's status chips: questions waiting, sessions running, AIs plugged in,
+/// projects. What waits for the person comes first.
+fn home_status(n: &HomeNow) -> Vec<(String, HomeTone, HomeGo)> {
+    let mut out = vec![];
+    if n.waiting > 0 {
+        out.push((crate::trf!("{} question(s) à répondre", "{} question(s) to answer", n.waiting), HomeTone::Alert, HomeGo::Inbox));
+    }
+    if n.running > 0 {
+        out.push((crate::trf!("{} IA au travail", "{} AI(s) at work", n.running), HomeTone::Live, HomeGo::Orchestra));
+    }
+    if !n.checking {
+        if n.plugged == 0 {
+            out.push((crate::tr!("Aucune IA branchée", "No AI plugged in").to_string(), HomeTone::Alert, HomeGo::Ais));
+        } else {
+            out.push((crate::trf!("{} IA branchée(s)", "{} AI(s) plugged in", n.plugged), HomeTone::Calm, HomeGo::Ais));
+        }
+    }
+    out.push((crate::trf!("{} projet(s)", "{} project(s)", n.projects), HomeTone::Calm, HomeGo::Projects));
+    out
+}
+
+/// The four steps to get going, done or not: an AI plugged in, a project, an autonomous
+/// session, no question left unanswered (only once a session ran: before, nothing asked).
+fn home_steps(n: &HomeNow) -> [bool; 4] {
+    [n.plugged > 0, n.projects > 0, n.ran, n.ran && n.waiting == 0]
+}
+
+/// A status chip of the home page.
+fn home_chip(ui: &mut egui::Ui, text: &str, color: Color32, t: &Tone) -> egui::Response {
+    let g = ui.painter().layout_no_wrap(text.to_string(), FontId::proportional(13.0), color);
+    let (rect, resp) = ui.allocate_exact_size(g.size() + egui::vec2(24.0, 12.0), egui::Sense::click());
+    let fill = if resp.hovered() { t.selected } else { t.card };
+    ui.painter().rect_filled(rect, 14.0, fill);
+    ui.painter().rect_stroke(rect, 14.0, egui::Stroke::new(1.0, color.gamma_multiply(0.45)), egui::StrokeKind::Inside);
+    ui.painter().galley(rect.center() - g.size() / 2.0, g, color);
+    resp.on_hover_cursor(egui::CursorIcon::PointingHand)
+}
+
+/// One of the steps to get going: its number (a tick once done), title and what to do.
+fn home_step(ui: &mut egui::Ui, n: usize, title: &str, what: &str, done: bool, t: &Tone) -> egui::Response {
+    let bg = super::projects::hover_begin(ui);
+    let row = ui.horizontal_top(|ui| {
+        let (b, _) = ui.allocate_exact_size(egui::vec2(26.0, 26.0), egui::Sense::hover());
+        let col = if done { super::projects::GREEN } else { t.secondary };
+        ui.painter().circle_filled(b.center(), 12.0, col.gamma_multiply(0.15));
+        let mark = if done { "✓".to_string() } else { n.to_string() };
+        ui.painter().text(b.center(), egui::Align2::CENTER_CENTER, mark, semibold(13.0), col);
+        ui.vertical(|ui| {
+            let title_color = if done { t.tertiary } else { t.text };
+            ui.label(RichText::new(title).font(semibold(14.0)).color(title_color));
+            ui.add(egui::Label::new(RichText::new(what).size(13.0).color(t.tertiary)).wrap());
+        });
+    });
+    let rect = row.response.rect;
+    super::projects::hover_end(ui, bg, rect.expand2(egui::vec2(6.0, 3.0)), egui::Id::unique(("home-step", n)), t);
+    ui.add_space(6.0);
+    ui.interact(rect, egui::Id::unique(("home-step-click", n)), egui::Sense::click()).on_hover_cursor(egui::CursorIcon::PointingHand)
+}
+
+#[cfg(test)]
+mod home_tests {
+    use super::*;
+
+    fn now(plugged: usize, projects: usize, running: usize, ran: bool, waiting: usize) -> HomeNow {
+        HomeNow { plugged, projects, running, ran, waiting, checking: false }
+    }
+
+    /// A fresh install: nothing done, « no AI » flagged; then each step ticks as it is done.
+    #[test]
+    fn home_steps_tick_as_things_are_done() {
+        assert_eq!(home_steps(&now(0, 0, 0, false, 0)), [false; 4]);
+        assert_eq!(home_steps(&now(1, 2, 0, false, 0)), [true, true, false, false]);
+        assert_eq!(home_steps(&now(1, 2, 0, true, 1)), [true, true, true, false]);
+        assert_eq!(home_steps(&now(1, 2, 1, true, 0)), [true; 4]);
+    }
+
+    /// What waits for the person comes first; « no AI » only once the check is over.
+    #[test]
+    fn home_status_puts_what_waits_first() {
+        let s = home_status(&now(0, 3, 2, true, 1));
+        let go: Vec<HomeGo> = s.iter().map(|x| x.2).collect();
+        assert_eq!(go, [HomeGo::Inbox, HomeGo::Orchestra, HomeGo::Ais, HomeGo::Projects]);
+        assert_eq!(s[2].1, HomeTone::Alert);
+        let checking = HomeNow { checking: true, ..now(0, 0, 0, false, 0) };
+        assert_eq!(home_status(&checking).iter().map(|x| x.2).collect::<Vec<_>>(), [HomeGo::Projects]);
     }
 }

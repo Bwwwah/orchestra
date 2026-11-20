@@ -854,7 +854,7 @@ Cmd/Ctrl+P or K to search all pages.").into();
                 b
             },
             Block::new(BlockKind::Callout, crate::tr!("L'IA passe par MCP : le bouton rond en bas à droite explique comment brancher l'assistant de votre choix.", "AI goes through MCP: the round button at the bottom right explains how to plug in the assistant of your choice.")),
-            Block::new(BlockKind::Callout, crate::tr!("La collaboration passe par un branchement que vous choisissez : dossier partagé ou votre propre commande.", "Collaboration goes through a connection you choose: live, a shared folder or your own command.")),
+            Block::new(BlockKind::Callout, crate::tr!("La collaboration passe par un branchement que vous choisissez : en direct, dossier partagé ou votre propre commande.", "Collaboration goes through a connection you choose: live, a shared folder or your own command.")),
         ];
         let welcome_id = welcome.id.clone();
         ws.pages.push(welcome);
