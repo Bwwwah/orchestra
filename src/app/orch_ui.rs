@@ -170,6 +170,16 @@ struct Draft {
     end: crate::model::EndConditions,
 }
 
+/// A merge or a discard of a finished session's copy, running on its own thread.
+struct CopyJob {
+    id: String,
+    merge: bool,
+    title: String,
+    /// The project's repository.
+    root: String,
+    done: std::sync::mpsc::Receiver<Result<String, String>>,
+}
+
 #[derive(Default)]
 pub struct Orch {
     pub runs: Vec<LiveRun>,
@@ -193,6 +203,8 @@ pub struct Orch {
     daily_checked: Option<Instant>,
     /// A finished session's copy waiting for its second click: (run id, "merge" | "discard").
     confirm: Option<(String, &'static str)>,
+    /// Copies being merged or discarded in the background (git can take a while).
+    copy_jobs: Vec<CopyJob>,
     /// An endless session on main waiting for the person to confirm the warning: a project
     /// id, or SELECTION for « Lancer la sélection ».
     confirm_main: Option<String>,
@@ -393,6 +405,7 @@ impl NotesApp {
             auto::clean_copies_later(auto::stale_copies(&self.ws.runs));
         }
         self.usage_tick();
+        self.copy_jobs_tick();
         self.resume_tick(ctx);
         self.orch.awake.set(!self.orch.runs.is_empty());
         self.keep_running_on_close(ctx);
@@ -1693,7 +1706,7 @@ impl NotesApp {
         let mut clear_all = false;
         let mut answer: Option<(usize, String)> = None;
         let mut run_act: Option<(String, &'static str)> = None;
-        let confirm = self.orch.confirm.clone();
+        let confirm = self.copy_states();
         ui.add_space(50.0);
         ui.horizontal(|ui| {
             ui.add_space(((avail - width) / 2.0).max(20.0));
@@ -1870,7 +1883,7 @@ impl NotesApp {
                                 }
                             }
                             if let Some(r) = run {
-                                let asking = confirm.as_ref().filter(|(id, _)| *id == r.id).map(|(_, a)| *a);
+                                let asking = confirm.iter().find(|(id, _)| *id == r.id).map(|(_, a)| *a);
                                 if let Some(a) = run_actions(ui, r, asking, &t) {
                                     run_act = Some((r.id.clone(), a));
                                 }
@@ -1907,7 +1920,7 @@ impl NotesApp {
             self.save_answer(i, text);
         }
         if let Some((id, a)) = run_act {
-            self.run_action(&id, a);
+            self.run_action(&ui.ctx().clone(), &id, a);
         }
         if let Some(i) = remove {
             let m = self.ws.inbox.remove(i);
@@ -1934,7 +1947,7 @@ impl NotesApp {
         if list.is_empty() {
             return false;
         }
-        let confirm = self.orch.confirm.clone();
+        let confirm = self.copy_states();
         let mut act: Option<(String, &'static str)> = None;
         super::projects::card(ui, t, 0.0, |ui| {
             super::projects::card_title(ui, crate::tr!("COPIES À TRAITER", "COPIES TO DEAL WITH"), &list.len().to_string(), t);
@@ -1951,7 +1964,7 @@ impl NotesApp {
                         act = Some((p.clone(), "report"));
                     }
                 });
-                let asking = confirm.as_ref().filter(|(id, _)| *id == r.id).map(|(_, a)| *a);
+                let asking = confirm.iter().find(|(id, _)| *id == r.id).map(|(_, a)| *a);
                 if let Some(a) = run_actions(ui, r, asking, t) {
                     act = Some((r.id.clone(), a));
                 }
@@ -1960,14 +1973,52 @@ impl NotesApp {
         });
         match act {
             Some((page, "report")) => actions.push(Action::Open(page)),
-            Some((id, a)) => self.run_action(&id, a),
+            Some((id, a)) => self.run_action(&ui.ctx().clone(), &id, a),
             None => {}
         }
         true
     }
 
-    /// A click on a finished session's copy: ask first, then merge or discard it.
-    fn run_action(&mut self, id: &str, a: &'static str) {
+    /// What the links under a session's copy show: being dealt with, or the second click
+    /// awaited.
+    fn copy_states(&self) -> Vec<(String, &'static str)> {
+        let mut v: Vec<(String, &'static str)> = self.orch.copy_jobs.iter().map(|j| (j.id.clone(), if j.merge { "merging" } else { "discarding" })).collect();
+        v.extend(self.orch.confirm.clone());
+        v
+    }
+
+    /// The merges and discards finished in the background: their outcome recorded.
+    fn copy_jobs_tick(&mut self) {
+        let mut finished = vec![];
+        self.orch.copy_jobs.retain(|j| match j.done.try_recv() {
+            Ok(res) => {
+                finished.push((j.id.clone(), j.merge, j.title.clone(), res));
+                false
+            }
+            Err(std::sync::mpsc::TryRecvError::Empty) => true,
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                finished.push((j.id.clone(), j.merge, j.title.clone(), Err(crate::tr!("interrompu", "interrupted").into())));
+                false
+            }
+        });
+        for (id, merge, title, res) in finished {
+            match res {
+                Ok(m) => {
+                    if let Some(x) = self.ws.runs.iter_mut().find(|x| x.id == id) {
+                        x.closed = if merge { crate::tr!("fusionné", "merged").into() } else { crate::tr!("abandonné", "discarded").into() };
+                    }
+                    self.dirty_since.get_or_insert_with(Instant::now);
+                    self.detect_changes();
+                    self.info(format!("{title} : {m}"));
+                }
+                Err(e) => self.fail(format!("{title} : {e}")),
+            }
+        }
+    }
+
+    /// A click on a finished session's copy: ask first, then merge or discard it on its
+    /// own thread, the interface going on meanwhile.
+    fn run_action(&mut self, ctx: &egui::Context, id: &str, a: &'static str) {
         match a {
             "ask-merge" => self.orch.confirm = Some((id.to_string(), "merge")),
             "ask-discard" => self.orch.confirm = Some((id.to_string(), "discard")),
@@ -1977,22 +2028,24 @@ impl NotesApp {
                     let _ = crate::opener::open_path(std::path::Path::new(&r.worktree));
                 }
             }
-            _ => {
+            "merge" | "discard" => {
                 self.orch.confirm = None;
                 let Some(rec) = self.ws.runs.iter().find(|r| r.id == id).cloned() else { return };
-                let res = if a == "merge" { auto::merge(&rec) } else { auto::discard(&rec) };
-                match res {
-                    Ok(m) => {
-                        if let Some(x) = self.ws.runs.iter_mut().find(|x| x.id == id) {
-                            x.closed = if a == "merge" { crate::tr!("fusionné", "merged").into() } else { crate::tr!("abandonné", "discarded").into() };
-                        }
-                        self.dirty_since.get_or_insert_with(Instant::now);
-                        self.detect_changes();
-                        self.info(format!("{} : {m}", rec.title));
-                    }
-                    Err(e) => self.fail(format!("{} : {e}", rec.title)),
+                // One git operation at a time per repository: a second would find it locked.
+                if self.orch.copy_jobs.iter().any(|j| j.id == id || j.root == rec.root) {
+                    self.fail(crate::trf!("{} : une autre copie de ce projet est en cours de traitement, réessayez dans un instant.", "{}: another copy of this project is being dealt with, try again in a moment.", rec.title));
+                    return;
                 }
+                let merge = a == "merge";
+                let (tx, rx) = std::sync::mpsc::channel();
+                self.orch.copy_jobs.push(CopyJob { id: id.to_string(), merge, title: rec.title.clone(), root: rec.root.clone(), done: rx });
+                let ctx = ctx.clone();
+                std::thread::spawn(move || {
+                    let _ = tx.send(if merge { auto::merge(&rec) } else { auto::discard(&rec) });
+                    ctx.request_repaint();
+                });
             }
+            _ => {}
         }
     }
 }
@@ -2025,6 +2078,16 @@ fn run_actions(ui: &mut egui::Ui, r: &crate::model::RunRecord, asking: Option<&'
     if !r.closed.is_empty() {
         ui.add_space(4.0);
         ui.label(RichText::new(crate::trf!("Copie : {}", "Copy: {}", r.closed)).size(12.5).color(t.tertiary));
+        return None;
+    }
+    // Being dealt with in the background (the copy may already be half gone).
+    if let Some(a @ ("merging" | "discarding")) = asking {
+        let what = if a == "merging" { crate::tr!("Fusion en cours…", "Merging…") } else { crate::tr!("Suppression de la copie en cours…", "Deleting the copy…") };
+        ui.add_space(4.0);
+        ui.horizontal(|ui| {
+            ui.add(egui::Spinner::new().size(12.0));
+            ui.label(RichText::new(what).size(12.5).color(t.tertiary));
+        });
         return None;
     }
     if !std::path::Path::new(&r.worktree).is_dir() {
