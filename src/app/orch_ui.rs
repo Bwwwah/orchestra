@@ -922,6 +922,13 @@ impl NotesApp {
         for r in self.orch.runs.iter_mut() {
             r.term.stop();
         }
+        // A copy being merged or discarded: let git finish (cut short, it could leave the
+        // project's folder half merged), within a minute, and record how it went.
+        let until = Instant::now() + Duration::from_secs(60);
+        while !self.orch.copy_jobs.is_empty() && Instant::now() < until {
+            std::thread::sleep(Duration::from_millis(50));
+            self.copy_jobs_tick();
+        }
     }
 
     /// At launch: read the « Screen Recording » permission (no dialog). Granted: remember

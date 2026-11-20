@@ -98,9 +98,10 @@ impl NotesApp {
 
     fn restart_now(&mut self) {
         if let Some(p) = self.upd.ready.clone() {
-            self.save_now();
-            // `exit` below runs no destructor: the terminals and sessions are stopped first.
+            // `exit` below runs no destructor: the terminals and sessions are stopped first
+            // (a merge of a copy finishing meanwhile), then everything is saved.
             self.stop_children();
+            self.save_now();
             update::restart(&p);
             std::process::exit(0);
         }

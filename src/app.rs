@@ -1296,8 +1296,9 @@ impl eframe::App for NotesApp {
     }
 
     fn on_exit(&mut self) {
-        self.save_on_exit();
+        // Stopped first: a merge of a copy finishing meanwhile is recorded, then saved.
         self.stop_children();
+        self.save_on_exit();
     }
 }
 
