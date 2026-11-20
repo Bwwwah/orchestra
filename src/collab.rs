@@ -160,13 +160,6 @@ pub fn received_new(mut p: Page) -> Page {
 /// Merge another copy into ours. Returns how many pages changed here.
 pub fn merge(ours: &mut Workspace, theirs: &Workspace) -> usize {
     let mut changed = 0;
-    // Discussion messages: everybody's messages, never edited, so a plain union.
-    for (id, m) in &theirs.chat {
-        if !ours.chat.contains_key(id) {
-            ours.chat.insert(id.clone(), m.clone());
-            changed += 1;
-        }
-    }
     // Only deletions of shared pages (or of pages we don't have): never a private page.
     for (id, t) in &ours.accept_remote_deletions(theirs.deleted.clone()) {
         let e = ours.deleted.entry(id.clone()).or_insert(*t);
@@ -178,20 +171,31 @@ pub fn merge(ours: &mut Workspace, theirs: &Workspace) -> usize {
     let before = ours.pages.len();
     ours.pages.retain(|p| deleted.get(&p.id).map(|t| p.updated > *t).unwrap_or(true));
     changed += before - ours.pages.len();
-    for tp in &theirs.pages {
+    // Only pages of shared projects, as in live mode: never one of our private pages, nor a
+    // page slipped under one, nor a stray page of theirs.
+    for tp in ours.accept_remote(theirs.pages.clone()) {
         if deleted.get(&tp.id).map(|t| tp.updated <= *t).unwrap_or(false) {
             continue;
         }
         match ours.pages.iter_mut().find(|p| p.id == tp.id) {
             Some(op) => {
-                if merge_page(op, tp) {
+                if merge_page(op, &tp) {
                     changed += 1;
                 }
             }
             None => {
-                ours.pages.push(received_new(tp.clone()));
+                ours.pages.push(received_new(tp));
                 changed += 1;
             }
+        }
+    }
+    // Discussion messages: everybody's messages, never edited, so a plain union; only those
+    // of the projects shared here (now that theirs came in).
+    let shared = ours.shared_ids();
+    for (id, m) in &theirs.chat {
+        if shared.contains(&m.project) && !ours.chat.contains_key(id) {
+            ours.chat.insert(id.clone(), m.clone());
+            changed += 1;
         }
     }
     changed
@@ -451,5 +455,34 @@ mod tests {
         assert_eq!(a.pages.len(), 1);
         assert_eq!(a.pages[0].id, private.id);
         assert!(!a.deleted.contains_key(&private.id));
+    }
+
+    /// A copy read from the shared folder (or a command) brings only the shared projects:
+    /// not a stray page, not a private project, not an edit of one of our private pages,
+    /// not the discussion of a project that isn't shared.
+    #[test]
+    fn only_shared_projects_come_in_by_sync() {
+        let mut ours = Workspace::default();
+        let mine = ours.create_page("Notes perso", None);
+        ours.page_mut(&mine).unwrap().updated = 10;
+        let mut theirs = Workspace::default();
+        let shared = theirs.create_project("Partagé", "");
+        theirs.page_mut(&shared).unwrap().project.as_mut().unwrap().shared = true;
+        let doc = theirs.create_page("Doc", Some(shared.clone()));
+        let stray = theirs.create_page("Page glissée", None);
+        let private = theirs.create_project("Privé chez eux", "");
+        // Our private page, edited on their side.
+        let mut edit = ours.page(&mine).unwrap().clone();
+        edit.title = "piratée".into();
+        edit.updated = 99;
+        theirs.pages.push(edit);
+        for (id, pid) in [("ok", &shared), ("non", &private)] {
+            theirs.chat.insert(id.into(), crate::model::ChatMsg { id: id.into(), project: pid.clone(), author: "eux".into(), text: id.into(), at: 1 });
+        }
+        merge(&mut ours, &theirs);
+        assert!(ours.page(&shared).is_some() && ours.page(&doc).is_some());
+        assert!(ours.page(&stray).is_none() && ours.page(&private).is_none());
+        assert_eq!(ours.page(&mine).unwrap().title, "Notes perso");
+        assert!(ours.chat.contains_key("ok") && !ours.chat.contains_key("non"));
     }
 }
