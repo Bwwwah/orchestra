@@ -854,6 +854,11 @@ impl NotesApp {
                 if !self.orch.runs.is_empty() {
                     ui.add_space(14.0);
                 }
+                // The AIs' questions: those waiting (a paused session goes on once answered),
+                // then the answers of the last days.
+                if self.questions_card(ui, &t) {
+                    ui.add_space(14.0);
+                }
                 if let Some(msg) = self.launch_card(ui, &ctx, &t) {
                     self.notice(msg);
                 }
@@ -1280,6 +1285,78 @@ impl NotesApp {
                 self.orch.runs[i].stop = Some(crate::tr!("arrêtée à la main", "stopped by hand").into());
             }
         }
+    }
+
+    /// The AIs' questions (ask_human) on the Orchestration page: those still waiting, with
+    /// a box to answer them right here, then the recent answers. False when there is none.
+    fn questions_card(&mut self, ui: &mut egui::Ui, t: &Tone) -> bool {
+        let shown = orch_questions(&self.ws.inbox, crate::model::now_ms());
+        if shown.is_empty() {
+            return false;
+        }
+        let waiting = shown.iter().filter(|&&i| self.ws.inbox[i].answer.trim().is_empty()).count();
+        let accent = Color32::from_rgb(144, 101, 176);
+        let mut answer: Option<(usize, String)> = None;
+        let mut to_inbox = false;
+        super::projects::card(ui, t, 0.0, |ui| {
+            let count = if waiting > 0 { crate::trf!("{waiting} en attente", "{waiting} waiting") } else { shown.len().to_string() };
+            super::projects::card_title(ui, crate::tr!("QUESTIONS DES IA", "THE AIS' QUESTIONS"), &count, t);
+            for (k, &i) in shown.iter().enumerate() {
+                if k > 0 {
+                    super::projects::card_rule(ui, t);
+                }
+                let m = &self.ws.inbox[i];
+                let open = m.answer.trim().is_empty();
+                ui.horizontal(|ui| {
+                    if open {
+                        kind_badge(ui, crate::tr!("À répondre", "To answer"), super::projects::ORANGE);
+                    } else {
+                        kind_badge(ui, crate::tr!("Répondue", "Answered"), super::projects::GREEN);
+                    }
+                    if let Some(p) = (!m.project.is_empty()).then(|| self.ws.page(&m.project).map(|p| p.display_title())).flatten() {
+                        let (dot, _) = ui.allocate_exact_size(egui::vec2(8.0, 14.0), egui::Sense::hover());
+                        ui.painter().circle_filled(dot.center(), 3.5, project_color(&p));
+                        ui.label(RichText::new(p).size(12.0).color(t.secondary));
+                    }
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        ui.label(RichText::new(super::chrome::relative_time(m.at)).size(12.0).color(t.tertiary));
+                    });
+                });
+                // The question itself, a few lines at most: the inbox has it whole.
+                let q = plain_text(&m.text);
+                let q = if q.is_empty() { m.title.clone() } else { q };
+                let mut job = egui::text::LayoutJob::single_section(q, egui::TextFormat::simple(FontId::proportional(13.5), t.text));
+                job.wrap.max_width = ui.available_width();
+                job.wrap.max_rows = 3;
+                ui.label(ui.fonts_mut(|f| f.layout_job(job)));
+                ui.add_space(4.0);
+                if let Some(text) = answer_box(ui, m, accent, t) {
+                    answer = Some((i, text));
+                }
+            }
+            ui.add_space(4.0);
+            if super::projects::action_link(ui, crate::tr!("Tout voir dans la boîte de réception", "See everything in the inbox")).clicked() {
+                to_inbox = true;
+            }
+        });
+        if let Some((i, text)) = answer {
+            self.save_answer(i, text);
+        }
+        if to_inbox {
+            self.view = View::Inbox;
+        }
+        true
+    }
+
+    /// The person answers question `i` of the inbox (from the inbox or the Orchestration
+    /// page): kept with the question, read by the AI at the project's next state of play.
+    fn save_answer(&mut self, i: usize, text: String) {
+        let Some(m) = self.ws.inbox.get_mut(i) else { return };
+        m.answer = text;
+        m.answered_at = crate::model::now_ms();
+        m.read = true;
+        self.dirty_since.get_or_insert_with(Instant::now);
+        self.ack(crate::tr!("Réponse enregistrée : l'IA la verra au prochain état des lieux du projet.", "Answer saved: the AI will see it in the project's next state of play."));
     }
 
     /// The projects that can be started; returns a message to show.
@@ -1811,12 +1888,7 @@ impl NotesApp {
             self.dirty_since.get_or_insert_with(Instant::now);
         }
         if let Some((i, text)) = answer {
-            let m = &mut self.ws.inbox[i];
-            m.answer = text;
-            m.answered_at = crate::model::now_ms();
-            m.read = true;
-            self.dirty_since.get_or_insert_with(Instant::now);
-            self.ack(crate::tr!("Réponse enregistrée : l'IA la verra au prochain état des lieux du projet.", "Answer saved: the AI will see it in the project's next state of play."));
+            self.save_answer(i, text);
         }
         if let Some(i) = remove {
             let m = self.ws.inbox.remove(i);
@@ -2059,6 +2131,27 @@ fn share_row(ui: &mut egui::Ui, id: &str, pct: f32, limit: f32, window: Option<f
     });
 }
 
+/// Most questions shown on the Orchestration page.
+const ORCH_QUESTIONS: usize = 5;
+/// How long an answered question stays on the Orchestration page.
+const ORCH_ANSWERED_MS: u64 = 3 * 86_400_000;
+
+/// The inbox questions shown on the Orchestration page (indexes in `inbox`): first those
+/// waiting for an answer, whatever their age, then those answered in the last days; newest
+/// first in each group, `ORCH_QUESTIONS` at most.
+fn orch_questions(inbox: &[crate::model::InboxMsg], now: u64) -> Vec<usize> {
+    let newest = |a: &usize, b: &usize| inbox[*b].at.cmp(&inbox[*a].at);
+    let q = |i: &usize| inbox[*i].kind == "question";
+    let mut open: Vec<usize> = (0..inbox.len()).filter(q).filter(|&i| inbox[i].answer.trim().is_empty()).collect();
+    let mut answered: Vec<usize> = (0..inbox.len())
+        .filter(q)
+        .filter(|&i| !inbox[i].answer.trim().is_empty() && inbox[i].answered_at.max(inbox[i].at) + ORCH_ANSWERED_MS > now)
+        .collect();
+    open.sort_by(newest);
+    answered.sort_by(|a, b| inbox[*b].answered_at.cmp(&inbox[*a].answered_at));
+    open.into_iter().chain(answered).take(ORCH_QUESTIONS).collect()
+}
+
 /// The group of an inbox message, by its local day: today, yesterday, this week, older.
 /// `offset`: the local time's offset from UTC (ms).
 fn day_group(at: u64, now: u64, offset: i64) -> &'static str {
@@ -2249,6 +2342,28 @@ mod tests {
         assert!(!super::endless_on_main(true, false));
         assert!(!super::endless_on_main(false, true));
         assert!(!super::endless_main_warning().is_empty());
+    }
+
+    /// The Orchestration page shows the waiting questions first, then the recent answers;
+    /// never other messages nor old answers.
+    #[test]
+    fn orchestration_shows_waiting_questions_then_recent_answers() {
+        use crate::model::InboxMsg;
+        let day = 86_400_000;
+        let now = 100 * day;
+        let msg = |kind: &str, at: u64, answer: &str, answered_at: u64| InboxMsg { kind: kind.into(), at, answer: answer.into(), answered_at, ..Default::default() };
+        let inbox = vec![
+            msg("question", now - 30 * day, "", 0),               // 0: old, still waiting
+            msg("question", now - day, "oui", now - day),         // 1: answered yesterday
+            msg("fin", now, "", 0),                               // 2: not a question
+            msg("question", now - 10 * day, "non", now - 9 * day), // 3: answered long ago
+            msg("question", now - 2 * day, "", 0),                // 4: waiting, newer
+            msg("question", now - 5 * day, "plus tard", now - 60_000), // 5: answered a minute ago
+        ];
+        assert_eq!(super::orch_questions(&inbox, now), [4, 0, 5, 1]);
+        assert!(super::orch_questions(&[], now).is_empty());
+        let many: Vec<InboxMsg> = (0..9).map(|i| msg("question", now - i, "", 0)).collect();
+        assert_eq!(super::orch_questions(&many, now).len(), super::ORCH_QUESTIONS);
     }
 
     #[test]
