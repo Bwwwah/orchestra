@@ -1719,6 +1719,14 @@ impl NotesApp {
                                     ui.set_width(ui.available_width() - 30.0);
                                     ui.horizontal(|ui| {
                                         kind_badge(ui, kind, accent);
+                                        // A question says at once whether it still waits for the person.
+                                        if m.kind == "question" {
+                                            if to_answer {
+                                                kind_badge(ui, crate::tr!("À répondre", "To answer"), super::projects::ORANGE);
+                                            } else {
+                                                kind_badge(ui, crate::tr!("Répondue", "Answered"), super::projects::GREEN);
+                                            }
+                                        }
                                         if let Some(p) = &project {
                                             // The project's own colour, as on the Orchestration page.
                                             ui.add_space(2.0);
@@ -1770,7 +1778,7 @@ impl NotesApp {
                             }
                             if m.kind == "question" {
                                 ui.add_space(6.0);
-                                if let Some(text) = answer_box(ui, m, &t) {
+                                if let Some(text) = answer_box(ui, m, accent, &t) {
                                     answer = Some((i, text));
                                 }
                             }
@@ -2107,9 +2115,10 @@ fn filter_chip(ui: &mut egui::Ui, text: &str, count: usize, on: bool, t: &Tone) 
     resp.on_hover_cursor(egui::CursorIcon::PointingHand)
 }
 
-/// Under a question of the inbox: the answer given, or a box to type one.
+/// Under a question of the inbox: the answer given, in its own tinted box (when, and where
+/// it goes), or a box to type one.
 /// Returns the answer when the person sends it (button, or Cmd/Ctrl+Enter).
-fn answer_box(ui: &mut egui::Ui, m: &crate::model::InboxMsg, t: &Tone) -> Option<String> {
+fn answer_box(ui: &mut egui::Ui, m: &crate::model::InboxMsg, accent: Color32, t: &Tone) -> Option<String> {
     let draft_id = egui::Id::unique(("inbox-draft", &m.id));
     let edit_id = egui::Id::unique(("inbox-edit", &m.id));
     let editing = ui.data(|d| d.get_temp::<bool>(edit_id)).unwrap_or(false);
@@ -2117,17 +2126,35 @@ fn answer_box(ui: &mut egui::Ui, m: &crate::model::InboxMsg, t: &Tone) -> Option
     ui.horizontal_top(|ui| {
         ui.vertical(|ui| {
             ui.set_width(ui.available_width() - 30.0);
-            if !m.answer.is_empty() && !editing {
-                ui.horizontal_wrapped(|ui| {
-                    ui.label(RichText::new(crate::tr!("Votre réponse :", "Your answer:")).size(12.0).color(t.tertiary));
-                    ui.add(egui::Label::new(RichText::new(&m.answer).size(13.0).color(t.text)).wrap());
-                });
-                if super::projects::action_link(ui, crate::tr!("Modifier la réponse", "Edit the answer")).clicked() {
-                    ui.data_mut(|d| {
-                        d.insert_temp(draft_id, m.answer.clone());
-                        d.insert_temp(edit_id, true);
+            if !m.answer.trim().is_empty() && !editing {
+                let frame = egui::Frame::new()
+                    .fill(accent.gamma_multiply(0.07))
+                    .corner_radius(8.0)
+                    .inner_margin(egui::Margin { left: 14, right: 10, top: 8, bottom: 9 })
+                    .show(ui, |ui| {
+                        ui.set_width(ui.available_width());
+                        ui.horizontal(|ui| {
+                            ui.label(RichText::new(crate::tr!("VOTRE RÉPONSE", "YOUR ANSWER")).font(semibold(11.0)).color(accent));
+                            if m.answered_at > 0 {
+                                ui.label(RichText::new(super::chrome::relative_time(m.answered_at)).size(11.5).color(t.tertiary));
+                            }
+                            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                if super::projects::action_link(ui, crate::tr!("Modifier", "Edit")).clicked() {
+                                    ui.data_mut(|d| {
+                                        d.insert_temp(draft_id, m.answer.clone());
+                                        d.insert_temp(edit_id, true);
+                                    });
+                                }
+                            });
+                        });
+                        ui.add_space(2.0);
+                        ui.add(egui::Label::new(RichText::new(m.answer.trim()).size(13.5).color(t.text)).wrap());
                     });
-                }
+                // A bar on the left, like a quote: the person's words, not the AI's.
+                let r = frame.response.rect;
+                ui.painter().rect_filled(egui::Rect::from_min_max(r.left_top() + egui::vec2(0.0, 6.0), egui::pos2(r.left() + 2.5, r.bottom() - 6.0)), 1.5, accent.gamma_multiply(0.7));
+                ui.add_space(3.0);
+                ui.label(RichText::new(answer_note(m.project.is_empty())).size(11.5).color(t.tertiary));
                 return;
             }
             let mut draft = ui.data(|d| d.get_temp::<String>(draft_id)).unwrap_or_default();
@@ -2145,6 +2172,8 @@ fn answer_box(ui: &mut egui::Ui, m: &crate::model::InboxMsg, t: &Tone) -> Option
                 if editing && super::projects::action_link(ui, crate::tr!("Annuler", "Cancel")).clicked() {
                     ui.data_mut(|d| d.insert_temp(edit_id, false));
                 }
+                let hint = if cfg!(target_os = "macos") { crate::tr!("⌘ Entrée pour envoyer", "⌘ Enter to send") } else { crate::tr!("Ctrl+Entrée pour envoyer", "Ctrl+Enter to send") };
+                ui.label(RichText::new(hint).size(11.5).color(t.tertiary));
             });
             if send {
                 out = Some(crate::richtext::clean(draft.trim(), 4000));
@@ -2155,6 +2184,22 @@ fn answer_box(ui: &mut egui::Ui, m: &crate::model::InboxMsg, t: &Tone) -> Option
         });
     });
     out
+}
+
+/// Under an answer: where it goes. An answer reaches an AI through its project's state of
+/// play (get_project_state); a question asked outside any project has none to go through.
+fn answer_note(no_project: bool) -> &'static str {
+    if no_project {
+        crate::tr!(
+            "Question posée hors d'un projet : la réponse est gardée ici, aucune IA ne la reçoit.",
+            "Question asked outside a project: the answer is kept here, no AI receives it."
+        )
+    } else {
+        crate::tr!(
+            "Transmise à l'IA : elle la lit au prochain état des lieux du projet, au début de sa prochaine étape ou session.",
+            "Passed on to the AI: it reads it in the project's next state of play, at the start of its next step or session."
+        )
+    }
 }
 
 /// A ring gauge: `value` (0..1, None when unknown) and a tick at `limit`.
