@@ -114,11 +114,10 @@ impl NotesApp {
                     merged_any |= self.merge_remote(pages, deleted);
                 }
                 LiveMsg::Chat { msgs } => {
-                    for m in msgs {
-                        self.chat_sent.insert(m.id.clone());
-                        if self.ws.chat.insert(m.id.clone(), m).is_none() {
-                            merged_any = true;
-                        }
+                    // Not echoed back; only those of projects shared here come in.
+                    self.chat_sent.extend(msgs.iter().map(|m| m.id.clone()));
+                    if self.ws.accept_chat(msgs) > 0 {
+                        merged_any = true;
                     }
                 }
             }

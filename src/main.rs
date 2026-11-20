@@ -241,13 +241,7 @@ fn absorb(ws: &mut model::Workspace, msg: live::LiveMsg) -> bool {
             let other = model::Workspace { pages, deleted, ..Default::default() };
             collab::merge(ws, &other) > 0 || !other.deleted.is_empty()
         }
-        live::LiveMsg::Chat { msgs } => {
-            let mut new = false;
-            for m in msgs {
-                new |= ws.chat.insert(m.id.clone(), m).is_none();
-            }
-            new
-        }
+        live::LiveMsg::Chat { msgs } => ws.accept_chat(msgs) > 0,
         _ => false,
     }
 }

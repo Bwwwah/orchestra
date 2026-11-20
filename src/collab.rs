@@ -191,13 +191,7 @@ pub fn merge(ours: &mut Workspace, theirs: &Workspace) -> usize {
     }
     // Discussion messages: everybody's messages, never edited, so a plain union; only those
     // of the projects shared here (now that theirs came in).
-    let shared = ours.shared_ids();
-    for (id, m) in &theirs.chat {
-        if shared.contains(&m.project) && !ours.chat.contains_key(id) {
-            ours.chat.insert(id.clone(), m.clone());
-            changed += 1;
-        }
-    }
+    changed += ours.accept_chat(theirs.chat.values().cloned());
     changed
 }
 

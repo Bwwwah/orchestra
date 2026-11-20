@@ -136,6 +136,11 @@ impl Step {
 /// Longest title of a step received from another computer.
 pub const RECEIVED_STEP_MAX: usize = 300;
 
+/// Longest message of a team discussion received from another computer (characters).
+pub const RECEIVED_CHAT_MAX: usize = 4000;
+/// Longest name of its author.
+pub const RECEIVED_AUTHOR_MAX: usize = 60;
+
 /// Whether the merge of a shared project takes their copy of a step over ours: the most
 /// recent edit wins, except when both copies hold a live reservation by two different
 /// computers (two AIs took the step before seeing each other): then the earlier one wins on
@@ -676,6 +681,26 @@ impl Workspace {
         out
     }
 
+    /// Messages of the team discussions another person sent: only those of projects shared
+    /// here, new ones, cut to a reasonable size (`RECEIVED_CHAT_MAX` characters, the author
+    /// on one short line). Returns how many came in.
+    pub fn accept_chat(&mut self, msgs: impl IntoIterator<Item = crate::model::ChatMsg>) -> usize {
+        let shared = self.shared_ids();
+        let mut n = 0;
+        for mut m in msgs {
+            if m.id.is_empty() || !shared.contains(&m.project) || self.chat.contains_key(&m.id) {
+                continue;
+            }
+            if m.text.chars().count() > RECEIVED_CHAT_MAX {
+                m.text = m.text.chars().take(RECEIVED_CHAT_MAX).collect::<String>() + "…";
+            }
+            m.author = crate::richtext::one_line(&m.author, RECEIVED_AUTHOR_MAX);
+            self.chat.insert(m.id.clone(), m);
+            n += 1;
+        }
+        n
+    }
+
     /// Of the pages another person sent, those that may come in: only pages of shared
     /// projects, never one of ours that isn't shared, nor one placed under a private page.
     /// - a page we have: only if it is shared here, and it stays under a shared page;
@@ -1108,6 +1133,32 @@ mod tests {
         let ours = ws.page(&a).unwrap().project.as_ref().unwrap();
         assert_eq!(ours.folder, "/Users/moi/code/app");
         assert_eq!((ours.session_limit, ours.sessions.len()), (Some(95.0), 1));
+    }
+
+    /// Messages received: only for a project shared here, once, cut to size.
+    #[test]
+    fn only_shared_discussions_come_in() {
+        use crate::model::ChatMsg;
+        let mut ws = Workspace::default();
+        let shared = ws.create_project("Partagé", "");
+        ws.page_mut(&shared).unwrap().project.as_mut().unwrap().shared = true;
+        let private = ws.create_project("Privé", "");
+        let msg = |id: &str, project: &str, text: String| ChatMsg { id: id.into(), project: project.into(), author: "Camille\nseconde ligne".into(), text, at: 1 };
+        let n = ws.accept_chat(vec![
+            msg("a", &shared, "salut".into()),
+            msg("b", &private, "intrus".into()),
+            msg("c", "inconnu", "intrus".into()),
+            msg("", &shared, "sans id".into()),
+            msg("d", &shared, "x".repeat(RECEIVED_CHAT_MAX + 500)),
+        ]);
+        assert_eq!(n, 2);
+        assert!(ws.chat.contains_key("a") && ws.chat.contains_key("d"));
+        assert!(!ws.chat.contains_key("b") && !ws.chat.contains_key("c"));
+        assert_eq!(ws.chat["a"].author, "Camille");
+        assert_eq!(ws.chat["d"].text.chars().count(), RECEIVED_CHAT_MAX + 1);
+        // Already known: not taken again, not replaced.
+        assert_eq!(ws.accept_chat(vec![msg("a", &shared, "changé".into())]), 0);
+        assert_eq!(ws.chat["a"].text, "salut");
     }
 
     #[test]
