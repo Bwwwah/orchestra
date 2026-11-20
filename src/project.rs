@@ -226,6 +226,10 @@ pub struct Project {
     /// session, its copy is merged into main by itself (Orchestration page).
     #[serde(default)]
     pub commit_to_main: bool,
+    /// The budget per session chosen on the Orchestration page (% of the 5-hour window):
+    /// kept from one session to the next, and across restarts (None: the default).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_limit: Option<f32>,
     /// "Regard extérieur": a short outside view asked to an AI (Markdown), by whom, when.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub review: Option<Review>,
@@ -259,6 +263,7 @@ impl Project {
                 self.steps = o.steps.clone();
                 self.deleted_steps = o.deleted_steps.clone();
                 self.commit_to_main = o.commit_to_main;
+                self.session_limit = o.session_limit;
                 self.read_only = o.read_only;
                 self.sessions = o.sessions.clone();
                 self.sessions_cleared = o.sessions_cleared;
@@ -268,6 +273,7 @@ impl Project {
                 let tombs = std::mem::take(&mut self.deleted_steps);
                 self.folder.clear();
                 self.commit_to_main = false;
+                self.session_limit = None;
                 self.sessions.clear();
                 self.sessions_cleared = 0;
                 self.merge_steps(&theirs, &tombs);
@@ -846,6 +852,24 @@ pub fn project_to_markdown(page: &Page) -> String {
 mod tests {
     use super::*;
     use crate::model::Workspace;
+
+    /// The budget per session is saved with the project, comes back on loading, and stays
+    /// this computer's own when a shared copy comes in.
+    #[test]
+    fn the_session_budget_is_kept() {
+        let p = Project { session_limit: Some(95.0), ..Default::default() };
+        let back: Project = serde_json::from_str(&serde_json::to_string(&p).unwrap()).unwrap();
+        assert_eq!(back.session_limit, Some(95.0));
+        // An older file, without it: the default.
+        let old: Project = serde_json::from_str("{}").unwrap();
+        assert_eq!(old.session_limit, None);
+        let mut theirs = Project { session_limit: Some(10.0), ..Default::default() };
+        theirs.keep_local(Some(&p));
+        assert_eq!(theirs.session_limit, Some(95.0));
+        let mut new_here = Project { session_limit: Some(10.0), ..Default::default() };
+        new_here.keep_local(None);
+        assert_eq!(new_here.session_limit, None);
+    }
 
     #[test]
     fn code_folder_detection() {

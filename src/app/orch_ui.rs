@@ -1726,6 +1726,8 @@ impl NotesApp {
             .collect();
         let (dl, dc) = (self.ws.settings.orch.default_limit, self.ws.settings.orch.allow_commits);
         for (id, _, _) in &projects {
+            // The budget the person last chose for this project, kept in the project.
+            let dl = self.ws.page(id).and_then(|p| p.project.as_ref()).and_then(|x| x.session_limit).unwrap_or(dl);
             self.orch.drafts.entry(id.clone()).or_insert(Draft { mission: String::new(), limit: dl, commits: dc, pick: false, endless: false, end: crate::model::EndConditions { hours: Some(4.0), ..Default::default() } });
         }
         let running: Vec<String> = self.orch.runs.iter().map(|r| r.project.clone()).collect();
@@ -1748,6 +1750,7 @@ impl NotesApp {
         let to_main_before = to_main.clone();
         let lk = super::settings::look(ui.visuals().dark_mode);
         let mut confirm_main = self.orch.confirm_main.clone();
+        let mut budgets: Vec<(String, f32)> = vec![];
         let drafts = &mut self.orch.drafts;
         super::projects::card(ui, t, 0.0, |ui| {
             super::projects::card_title(ui, crate::tr!("LANCER UNE SESSION", "START A SESSION"), "Claude Code", t);
@@ -1788,7 +1791,7 @@ impl NotesApp {
                         });
                         if wide {
                             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                                launch_controls(ui, LaunchCx { id, d: &mut *d, busy, plugged, room, global, to_main: &mut to_main, start: &mut start, confirm_main: &mut confirm_main, lk: &lk, t });
+                                launch_controls(ui, LaunchCx { id, d: &mut *d, busy, plugged, room, global, to_main: &mut to_main, start: &mut start, confirm_main: &mut confirm_main, budgets: &mut budgets, lk: &lk, t });
                             });
                         }
                     });
@@ -1796,7 +1799,7 @@ impl NotesApp {
                     if !wide {
                         ui.horizontal_wrapped(|ui| {
                             ui.add_space(70.0);
-                            launch_controls(ui, LaunchCx { id, d: &mut *d, busy, plugged, room, global, to_main: &mut to_main, start: &mut start, confirm_main: &mut confirm_main, lk: &lk, t });
+                            launch_controls(ui, LaunchCx { id, d: &mut *d, busy, plugged, room, global, to_main: &mut to_main, start: &mut start, confirm_main: &mut confirm_main, budgets: &mut budgets, lk: &lk, t });
                         });
                     }
                     ui.horizontal(|ui| {
@@ -1898,6 +1901,13 @@ impl NotesApp {
                 }
             }
             self.dirty_since.get_or_insert_with(Instant::now);
+        }
+        // A budget chosen by the person stays for the next sessions, and after a restart.
+        for (id, limit) in budgets {
+            if let Some(p) = self.ws.page_mut(&id).and_then(|p| p.project.as_mut()) {
+                p.session_limit = Some(limit);
+                self.dirty_since.get_or_insert_with(Instant::now);
+            }
         }
         start.dedup();
         for id in start {
@@ -2951,6 +2961,8 @@ struct LaunchCx<'a> {
     to_main: &'a mut HashMap<String, bool>,
     start: &'a mut Vec<String>,
     confirm_main: &'a mut Option<String>,
+    /// Budgets the person has just changed, to keep in their projects.
+    budgets: &'a mut Vec<(String, f32)>,
     lk: &'a super::settings::Look,
     t: &'a Tone,
 }
@@ -2958,7 +2970,7 @@ struct LaunchCx<'a> {
 /// A project's controls: start, commits, « sur main », budget. In the order of a
 /// right-to-left layout (start at the far right); left to right, start comes first.
 fn launch_controls(ui: &mut egui::Ui, c: LaunchCx<'_>) {
-    let LaunchCx { id, d, busy, plugged, room, global, to_main, start, confirm_main, lk, t } = c;
+    let LaunchCx { id, d, busy, plugged, room, global, to_main, start, confirm_main, budgets, lk, t } = c;
     if busy {
         // A pill where the other rows have « Lancer », so the controls stay in line.
         let text = crate::tr!("En cours", "Running");
@@ -2990,15 +3002,13 @@ fn launch_controls(ui: &mut egui::Ui, c: LaunchCx<'_>) {
         ));
         ui.add_space(6.0);
     }
-    // A picked project keeps its share within the room left; the others only show it
-    // capped, so unpicking one doesn't shrink the rest for good.
-    if d.pick && !busy {
-        d.limit = d.limit.clamp(1.0, room.max(1.0));
-    }
+    // The budget chosen stays as it is: it is only shown capped to the room left (and
+    // capped again at the start), so a session running elsewhere never shrinks it for good.
     let mut shown = if busy { d.limit } else { d.limit.clamp(1.0, room.max(1.0)) };
     let dv = ui.add_enabled(!busy && room >= 1.0, egui::DragValue::new(&mut shown).range(1.0..=room.max(1.0)).speed(0.5).suffix(" %"));
     if dv.changed() {
         d.limit = shown;
+        budgets.push((id.clone(), shown));
     }
     dv.on_hover_text(crate::trf!(
         "Budget de la prochaine session de ce projet : elle s'arrête après avoir utilisé cette part de la fenêtre de 5 h de l'abonnement, comptée depuis son lancement. Chaque session a son propre budget : en relancer une repart de zéro.\n{room:.0} % au plus ici, le reste de la limite globale ({global:.0} %) étant pris par les autres.",
@@ -3249,7 +3259,7 @@ mod tests {
                 ui.scope(|ui| {
                     ui.horizontal_wrapped(|ui| {
                         ui.add_space(70.0);
-                        super::launch_controls(ui, super::LaunchCx { id: &id, d: &mut d, busy: false, plugged: true, room: 60.0, global: 60.0, to_main: &mut to_main, start: &mut start, confirm_main: &mut confirm, lk: &lk, t: &t });
+                        super::launch_controls(ui, super::LaunchCx { id: &id, d: &mut d, busy: false, plugged: true, room: 60.0, global: 60.0, to_main: &mut to_main, start: &mut start, confirm_main: &mut confirm, budgets: &mut vec![], lk: &lk, t: &t });
                     });
                     row = ui.min_rect().width();
                 });
