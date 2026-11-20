@@ -714,6 +714,10 @@ pub(super) struct Cx<'a> {
     pub launchers: Vec<(&'static str, Option<&'static str>, Color32)>,
     /// The AI filling the cards, proposing steps.
     pub ai: &'a mut super::ai_fill::AiJobs,
+    /// The AIs' questions about this project (waiting first, then answered), from the inbox.
+    pub questions: &'a [crate::model::InboxMsg],
+    /// An answer typed in the Questions card: (inbox message id, text), saved by the caller.
+    pub answered: &'a mut Option<(String, String)>,
 }
 
 #[derive(Clone, Copy)]
@@ -723,13 +727,14 @@ enum CardKind {
     Sessions,
     Pages,
     Versions,
+    Questions,
 }
 
 fn draw(ui: &mut egui::Ui, cx: &mut Cx, k: CardKind, extra: f32) -> f32 {
     // Cards come in one after the other when the page opens.
     let order = match k {
         CardKind::Summary(_) => 0.0,
-        CardKind::Steps => 1.0,
+        CardKind::Steps | CardKind::Questions => 1.0,
         CardKind::Sessions | CardKind::Pages => 2.0,
         CardKind::Versions => 3.0,
     };
@@ -766,6 +771,7 @@ fn draw_card(ui: &mut egui::Ui, cx: &mut Cx, k: CardKind, extra: f32) -> f32 {
         CardKind::Steps => steps_card(ui, cx, extra),
         CardKind::Sessions => sessions_card(ui, cx, extra),
         CardKind::Pages => pages_card(ui, cx, extra),
+        CardKind::Questions => questions_card(ui, cx, extra),
         CardKind::Versions => {
             let folder = cx.pr.folder.trim().to_string();
             let prefer = cx.live.first().map(|s| s.tool);
@@ -782,6 +788,7 @@ fn card_key(page_id: &str, k: CardKind) -> egui::Id {
         CardKind::Sessions => "sessions",
         CardKind::Pages => "pages",
         CardKind::Versions => "versions",
+        CardKind::Questions => "questions",
     };
     egui::Id::unique(("card-h", page_id, name))
 }
@@ -996,18 +1003,39 @@ pub(super) fn project_panel(ui: &mut egui::Ui, cx: &mut Cx) -> Option<super::not
     let w = ui.available_width();
     let gap = 16.0;
     use CardKind::*;
+    // The AIs' questions, when there are some: first of the cards placed after the heads.
+    let asked: &[CardKind] = if cx.questions.is_empty() { &[] } else { &[Questions] };
     if w >= 1380.0 {
-        let cols = balance(ui, cx.page_id, [Summary(420.0), Steps, Sessions], &[Versions, Pages]);
+        let rest: Vec<CardKind> = asked.iter().copied().chain([Versions, Pages]).collect();
+        let cols = balance(ui, cx.page_id, [Summary(420.0), Steps, Sessions], &rest);
         columns(ui, cx, &cols, gap);
     } else if w >= 860.0 {
-        let cols = balance(ui, cx.page_id, [Summary(380.0), Steps], &[Sessions, Versions, Pages]);
+        let rest: Vec<CardKind> = asked.iter().copied().chain([Sessions, Versions, Pages]).collect();
+        let cols = balance(ui, cx.page_id, [Summary(380.0), Steps], &rest);
         columns(ui, cx, &cols, gap);
     } else {
-        columns(ui, cx, &[vec![Summary(210.0), Steps, Sessions, Versions, Pages]], gap);
+        let one: Vec<CardKind> = [Summary(210.0), Steps].into_iter().chain(asked.iter().copied()).chain([Sessions, Versions, Pages]).collect();
+        columns(ui, cx, &[one], gap);
     }
     ui.add_space(gap);
     review_card(ui, cx);
     cx.msg.take()
+}
+
+/// The questions the AIs asked about this project (ask_human) and the person's answers:
+/// those waiting first, answerable right here, as on the Orchestration page.
+fn questions_card(ui: &mut egui::Ui, cx: &mut Cx, extra: f32) -> f32 {
+    let t = cx.t;
+    let msgs: Vec<&crate::model::InboxMsg> = cx.questions.iter().collect();
+    let mut sent = None;
+    let h = card(ui, t, extra, |ui| {
+        card_title(ui, crate::tr!("QUESTIONS DES IA", "THE AIS' QUESTIONS"), &super::orch_ui::questions_count(&msgs), t);
+        sent = super::orch_ui::question_list(ui, &msgs, |_| None, t);
+    });
+    if sent.is_some() {
+        *cx.answered = sent;
+    }
+    h
 }
 
 fn summary_card(ui: &mut egui::Ui, cx: &mut Cx, folded_h: f32, extra: f32) -> f32 {
