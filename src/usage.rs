@@ -485,6 +485,31 @@ mod tests {
         assert_eq!(p[0].pct, 23.0);
     }
 
+    /// The sessions' figures (their share, the global limit, the 5-hour tile) all come from
+    /// `five()`: Claude Code's `five_hour` window, from either source, never the week nor a
+    /// per-model limit, whatever the order they arrive in.
+    #[test]
+    fn the_sessions_count_on_the_five_hour_window() {
+        let rl = from_rate_limits(&json!({
+            "seven_day_opus": {"used_percentage": 12.0},
+            "seven_day": {"used_percentage": 41.0},
+            "five_hour": {"used_percentage": 75.0, "resets_at": 1738425600}
+        }));
+        let cache = from_cache(&json!({"utilization": {
+            "seven_day": {"utilization": 0.41},
+            "five_hour": {"utilization": 0.75, "resets_at": "2026-11-18T15:00:00Z"},
+            "limits": [{"display_name": "Opus", "utilization": 0.12}]
+        }}));
+        for windows in [rl, cache] {
+            let u = Usage { windows, at: 0 };
+            assert!((u.five().unwrap().pct - 75.0).abs() < 0.01);
+            assert!(u.five().unwrap().resets_at.is_some());
+            assert!((u.week().unwrap().pct - 41.0).abs() < 0.01);
+            // The 5-hour window comes first: the sidebar tile shows it on its first line.
+            assert_eq!(u.windows[0].label, "Session (5 h)");
+        }
+    }
+
     #[test]
     fn time_left_before_reset() {
         assert_eq!(until(1_000, 2_000), None);
