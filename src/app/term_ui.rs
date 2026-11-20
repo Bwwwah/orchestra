@@ -122,7 +122,7 @@ impl NotesApp {
                                 self.term_focus = true;
                             }
                             r.on_hover_text(&term.cwd);
-                            if ui.add(egui::Button::new(RichText::new("×").size(12.0).color(t.tertiary)).frame(false)).on_hover_text(crate::tr!("Fermer ce terminal", "Close this terminal")).clicked() {
+                            if super::icons::delete_cross(ui, 18.0, t.tertiary, t.text, t.selected, crate::tr!("Fermer ce terminal", "Close this terminal")).clicked() {
                                 close = Some(i);
                             }
                             ui.add_space(6.0);

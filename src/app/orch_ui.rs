@@ -1835,7 +1835,7 @@ impl NotesApp {
                                         }
                                     }
                                 });
-                                let x = ui.add(egui::Button::new(RichText::new("×").size(16.0).color(t.tertiary)).frame(false)).on_hover_text(crate::tr!("Supprimer", "Delete"));
+                                let x = super::icons::delete_cross(ui, 22.0, t.tertiary, t.text, t.selected, crate::tr!("Supprimer", "Delete"));
                                 if x.clicked() {
                                     remove = Some(i);
                                 }

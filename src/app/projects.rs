@@ -1228,10 +1228,13 @@ fn steps_card(ui: &mut egui::Ui, cx: &mut Cx, extra: f32) -> f32 {
                 } else {
                     line(ui, job, room)
                 };
-                let hovered = ui.rect_contains_pointer(ui.min_rect()) && !ro;
+                // The whole row up to its right edge, where the "×" sits: the cross must stay
+                // visible while the pointer is on it, not only over the text.
+                let row_rect = egui::Rect::from_min_max(ui.min_rect().min, egui::pos2(ui.max_rect().right(), ui.min_rect().bottom()));
+                let hovered = ui.rect_contains_pointer(row_rect) && !ro;
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Min), |ui| {
-                    let x = egui::Button::new(RichText::new("×").color(if hovered { t.secondary } else { t.card })).frame(false);
-                    if ui.add(x).on_hover_text(crate::tr!("Supprimer l'étape", "Delete the step")).clicked() {
+                    let rest = if hovered { t.secondary } else { Color32::TRANSPARENT };
+                    if icons::delete_cross(ui, 20.0, rest, t.text, t.selected, crate::tr!("Supprimer l'étape", "Delete the step")).clicked() {
                         remove = Some(s.id.clone());
                     }
                 });
@@ -1464,7 +1467,7 @@ fn ai_steps(ui: &mut egui::Ui, page_id: &str, pr: &mut Project, ai: &mut super::
                 ui.spacing_mut().item_spacing.x = 6.0;
                 let name = std::path::Path::new(p).file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_else(|| p.clone());
                 ui.label(RichText::new(crate::trf!("Image : {name}", "Image: {name}")).size(12.5).color(t.secondary)).on_hover_text(p.as_str());
-                if ui.add(egui::Button::new(RichText::new("×").size(13.0).color(t.tertiary)).frame(false)).on_hover_text(crate::tr!("Retirer l'image", "Remove the image")).clicked() {
+                if icons::delete_cross(ui, 18.0, t.tertiary, t.text, t.selected, crate::tr!("Retirer l'image", "Remove the image")).clicked() {
                     remove = Some(i);
                 }
             });
@@ -2206,7 +2209,7 @@ fn quick_question(ui: &mut egui::Ui, cx: &mut Cx) {
             ui.horizontal(|ui| {
                 ui.add(egui::Label::new(RichText::new(&a.question).size(12.5).color(t.secondary).italics()).wrap());
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Min), |ui| {
-                    if ui.add(egui::Button::new(RichText::new("×").color(t.tertiary)).frame(false)).on_hover_text(crate::tr!("Fermer la réponse", "Close the answer")).clicked() {
+                    if icons::delete_cross(ui, 20.0, t.tertiary, t.text, t.selected, crate::tr!("Fermer la réponse", "Close the answer")).clicked() {
                         close = true;
                     }
                 });

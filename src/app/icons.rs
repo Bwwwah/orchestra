@@ -263,3 +263,21 @@ pub fn button(ui: &mut egui::Ui, icon: Icon, size: f32, color: Color32, hover: C
     paint(ui.painter(), rect.shrink(size * 0.18), icon, color);
     if tip.is_empty() { resp } else { resp.on_hover_text(tip) }
 }
+
+/// The small "×" that deletes a step, a message, an image…: `rest` when the pointer is
+/// elsewhere (transparent to hide it until its row is hovered), and `hover_fg` on a `hover_bg`
+/// pad while the pointer is on it, so it never sinks into the background.
+pub fn delete_cross(ui: &mut egui::Ui, size: f32, rest: Color32, hover_fg: Color32, hover_bg: Color32, tip: &str) -> egui::Response {
+    let (rect, resp) = ui.allocate_exact_size(vec2(size, size), egui::Sense::click());
+    let color = if resp.hovered() {
+        ui.painter().rect_filled(rect, 5.0, hover_bg);
+        hover_fg
+    } else {
+        rest
+    };
+    if color.a() > 0 {
+        paint(ui.painter(), rect.shrink(size * 0.22), Icon::Close, color);
+    }
+    let resp = resp.on_hover_cursor(egui::CursorIcon::PointingHand);
+    if tip.is_empty() { resp } else { resp.on_hover_text(tip) }
+}
