@@ -20,6 +20,17 @@ pub enum AiReq {
     /// Propose steps: from the project (`text` None) or from a pasted text and its joined
     /// images (file paths).
     Tasks { page_id: String, folder: String, existing: Vec<String>, prefer: Option<Tool>, text: Option<String>, images: Vec<String> },
+    /// A quick question about the project, answered in its box.
+    Question { page_id: String, folder: String, question: String, prefer: Option<Tool> },
+}
+
+/// The last quick question of a project and its answer (or why there is none).
+#[derive(Clone)]
+pub struct QuickAnswer {
+    pub question: String,
+    pub answer: Result<String, String>,
+    /// Who answered ("Claude Code", "Codex").
+    pub by: String,
 }
 
 fn req_key() -> egui::Id {
@@ -39,9 +50,17 @@ pub struct AiJobs {
     tasks: HashMap<String, Slot<Result<Vec<String>, String>>>,
     /// Proposed steps per project, each ticked or not.
     pub proposals: HashMap<String, Vec<(String, bool)>>,
+    /// Quick questions being answered, per project (with the question).
+    questions: HashMap<String, (String, Slot<Result<(String, Tool), String>>)>,
+    /// The last answer per project, shown in the question box until closed.
+    pub answers: HashMap<String, QuickAnswer>,
 }
 
 impl AiJobs {
+    /// The question being answered for this project, if any.
+    pub fn asking(&self, page_id: &str) -> Option<&str> {
+        self.questions.get(page_id).map(|(q, _)| q.as_str())
+    }
     pub fn filling(&self, page_id: &str) -> bool {
         self.fills.contains_key(page_id)
     }
@@ -92,7 +111,24 @@ impl NotesApp {
                     });
                     self.ai.tasks.insert(page_id, slot);
                 }
+                AiReq::Question { page_id, folder, question, prefer } => {
+                    if self.ai.questions.contains_key(&page_id) || question.trim().is_empty() {
+                        continue;
+                    }
+                    let q = question.clone();
+                    let slot = spawn(ctx, move || crate::sync::ask_question(&folder, &q, prefer));
+                    self.ai.answers.remove(&page_id);
+                    self.ai.questions.insert(page_id, (question, slot));
+                }
             }
+        }
+        // Answered quick questions.
+        let done: Vec<String> = self.ai.questions.iter().filter(|(_, (_, s))| s.lock().unwrap().is_some()).map(|(k, _)| k.clone()).collect();
+        for id in done {
+            let (question, slot) = self.ai.questions.remove(&id).unwrap();
+            let res = slot.lock().unwrap().take().unwrap();
+            let by = res.as_ref().map(|(_, t)| t.label().to_string()).unwrap_or_default();
+            self.ai.answers.insert(id, QuickAnswer { question, answer: res.map(|(a, _)| a), by });
         }
         // Just-created projects: their page appears a frame later.
         let pending = std::mem::take(&mut self.ai.pending);
@@ -131,7 +167,7 @@ impl NotesApp {
                 Err(e) => self.fail(crate::trf!("Pas de tâches proposées : {e}", "No task proposed: {e}")),
             }
         }
-        if !self.ai.fills.is_empty() || !self.ai.tasks.is_empty() || !self.ai.pending.is_empty() {
+        if !self.ai.fills.is_empty() || !self.ai.tasks.is_empty() || !self.ai.pending.is_empty() || !self.ai.questions.is_empty() {
             ctx.request_repaint_after(std::time::Duration::from_millis(500));
         }
     }

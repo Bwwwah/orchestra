@@ -537,6 +537,34 @@ pub fn ask_with_images(folder: &str, prompt: String, claude_tools: &str, max_tur
     Ok((answer, agent.tool))
 }
 
+/// The longest quick question sent to an agent (characters).
+pub const QUESTION_MAX: usize = 1000;
+
+/// The prompt of a quick question about a project: a short, direct answer, read-only.
+fn question_prompt(folder: &str, question: &str) -> String {
+    let q: String = question.trim().chars().take(QUESTION_MAX).collect();
+    crate::trf!(
+        "Question rapide sur le projet du dossier « {folder} ». Ne modifie RIEN. Regarde le code ou l'historique \
+         seulement si c'est utile pour répondre juste. Réponds dans la langue de la question, directement, \
+         en 150 mots au plus, sans préambule : un avis franc, et si c'est une idée de fonctionnalité, \
+         dis si elle vaut le coup, ce qu'elle coûterait et où elle irait dans le code.\n\nQuestion :\n{q}",
+        "Quick question about the project in the folder « {folder} ». Change NOTHING. Look at the code or history \
+         only if it helps to answer right. Answer in the question's language, directly, in 150 words at most, \
+         no preamble: a frank opinion, and if it's a feature idea, say whether it's worth it, what it would cost \
+         and where it would go in the code.\n\nQuestion:\n{q}"
+    )
+}
+
+/// A quick question about a project, answered in a few lines by an agent (read-only).
+pub fn ask_question(folder: &str, question: &str, prefer: Option<Tool>) -> Result<(String, Tool), String> {
+    if question.trim().is_empty() {
+        return Err(crate::tr!("question vide", "empty question").into());
+    }
+    let dir = if !folder.trim().is_empty() && crate::project::normalize_folder(folder).is_dir() { crate::project::normalize_folder(folder).display().to_string() } else { dirs::home_dir().unwrap_or_default().display().to_string() };
+    let (answer, tool) = ask(&dir, question_prompt(&dir, question), "Read,Glob,Grep,Bash(git log:*),Bash(ls:*)", 12, prefer)?;
+    Ok((answer.trim().to_string(), tool))
+}
+
 /// Ask an agent for a short outside view of a project (read-only, web search allowed).
 /// `prefer`: the agent that worked on the project last, when it is installed.
 pub fn ask_review(folder: &str, prefer: Option<Tool>) -> Result<(String, Tool), String> {
@@ -693,6 +721,16 @@ mod tests {
         // A full question keeps the person's own default model.
         assert!(!ask_args(Tool::ClaudeCode, "p".into(), "Read", 3, &[], Weight::Full).contains(&"--model".to_string()));
         assert!(!ask_args(Tool::Codex, "p".into(), "Read", 3, &[], Weight::Full).contains(&"-c".to_string()));
+    }
+
+    #[test]
+    fn quick_questions_are_bounded_and_read_only() {
+        let long = "é".repeat(QUESTION_MAX + 500);
+        let p = question_prompt("/tmp/x", &long);
+        assert!(p.contains("/tmp/x"));
+        assert_eq!(p.matches('é').count() - question_prompt("/tmp/x", "").matches('é').count(), QUESTION_MAX, "the question is cut at QUESTION_MAX");
+        assert!(p.contains("RIEN") || p.contains("NOTHING"));
+        assert!(ask_question("/tmp/x", "   ", None).is_err(), "an empty question never reaches an agent");
     }
 
     #[test]

@@ -284,6 +284,12 @@ fn small(text: impl Into<String>, color: Color32) -> RichText {
     RichText::new(text).size(12.5).color(color)
 }
 
+/// A sub-heading inside the card ("DERNIERS COMMITS"): small caps, like the card titles.
+fn sub_heading(ui: &mut egui::Ui, text: &str, t: &Tone) {
+    ui.label(RichText::new(text.to_uppercase()).font(semibold(11.0)).color(t.tertiary));
+    ui.add_space(4.0);
+}
+
 /// The card. `prefer`: the agent that worked on the project last.
 pub(super) fn versions_card(ui: &mut egui::Ui, v: &mut Versions, page_id: &str, folder: &str, title: &str, prefer: Option<crate::sessions::Tool>, t: &Tone, extra: f32) -> f32 {
     let ctx = ui.ctx().clone();
@@ -599,8 +605,7 @@ pub(super) fn versions_card(ui: &mut egui::Ui, v: &mut Versions, page_id: &str, 
             let mut right = ui.new_child(egui::UiBuilder::new().max_rect(egui::Rect::from_min_size(egui::pos2(rx, top.y), egui::vec2(right_w, 10_000.0))).layout(egui::Layout::top_down(egui::Align::Min)));
             right.set_width(right_w);
             right.set_clip_rect(egui::Rect::from_min_size(egui::pos2(rx, top.y), egui::vec2(right_w, 10_000.0)).intersect(ui.clip_rect()));
-            right.label(small(crate::tr!("Derniers commits", "Latest commits"), t.tertiary));
-            right.add_space(4.0);
+            sub_heading(&mut right, crate::tr!("Derniers commits", "Latest commits"), t);
             commit_list(&mut right, &s, t);
             let h = h_left.max(right.min_rect().height());
             let sx = top.x + left_w + gap / 2.0;
@@ -609,9 +614,8 @@ pub(super) fn versions_card(ui: &mut egui::Ui, v: &mut Versions, page_id: &str, 
         } else {
             main(ui);
             if !s.commits.is_empty() {
-                ui.add_space(10.0);
-                ui.label(small(crate::tr!("Derniers commits", "Latest commits"), t.tertiary));
-                ui.add_space(4.0);
+                super::projects::card_rule(ui, t);
+                sub_heading(ui, crate::tr!("Derniers commits", "Latest commits"), t);
                 commit_list(ui, &s, t);
             }
         }

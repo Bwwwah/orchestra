@@ -568,6 +568,80 @@ pub struct RunRecord {
     /// Stopped by a quota: starts again by itself at this time (ms); 0 = no.
     #[serde(default, skip_serializing_if = "is_zero")]
     pub resume_at: u64,
+    /// Endless mode: the session doesn't stop at the turn limit nor when the steps run out,
+    /// only on one of these conditions (and always on the budgets and quotas).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub endless: Option<EndConditions>,
+}
+
+/// When an endless session stops. Each one is optional; the first reached stops it. The
+/// budget of the session, the global limit and the week's reserve always apply on top.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Default)]
+pub struct EndConditions {
+    /// After this many hours of work.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hours: Option<f32>,
+    /// Once this many steps are done during the session.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub steps: Option<u32>,
+    /// After this many turns.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub turns: Option<u32>,
+    /// As soon as the AI says there is nothing left to do ([[FINI]]).
+    #[serde(default)]
+    pub when_done: bool,
+}
+
+impl EndConditions {
+    /// Why an endless session stops now, if it does. `elapsed_ms`: since it started;
+    /// `done_streak`: how many turns in a row the AI said it had nothing left — twice
+    /// stops it anyway, so it never spends the budget going round in circles.
+    pub fn reached(&self, elapsed_ms: u64, steps_done: u32, turns: u32, done_streak: u32) -> Option<String> {
+        if let Some(h) = self.hours.filter(|h| *h > 0.0) {
+            if elapsed_ms as f64 >= h as f64 * 3_600_000.0 {
+                return Some(crate::trf!("durée atteinte ({h} h)", "time reached ({h} h)"));
+            }
+        }
+        if let Some(n) = self.steps.filter(|n| *n > 0) {
+            if steps_done >= n {
+                return Some(crate::trf!("{n} étape(s) terminée(s)", "{n} step(s) done"));
+            }
+        }
+        if let Some(n) = self.turns.filter(|n| *n > 0) {
+            if turns >= n {
+                return Some(crate::trf!("{n} tours atteints", "{n} turns reached"));
+            }
+        }
+        if done_streak >= 1 && self.when_done {
+            return Some(crate::tr!("mission terminée", "mission complete").into());
+        }
+        if done_streak >= 2 {
+            return Some(crate::tr!("plus rien à faire, deux tours de suite", "nothing left to do, two turns in a row").into());
+        }
+        None
+    }
+
+    /// The conditions in a few words, for the session's card and report.
+    pub fn describe(&self) -> String {
+        let mut parts: Vec<String> = vec![];
+        if let Some(h) = self.hours.filter(|h| *h > 0.0) {
+            parts.push(crate::trf!("{h} h", "{h} h"));
+        }
+        if let Some(n) = self.steps.filter(|n| *n > 0) {
+            parts.push(crate::trf!("{n} étape(s)", "{n} step(s)"));
+        }
+        if let Some(n) = self.turns.filter(|n| *n > 0) {
+            parts.push(crate::trf!("{n} tours", "{n} turns"));
+        }
+        if self.when_done {
+            parts.push(crate::tr!("plus d'étape", "no step left").into());
+        }
+        if parts.is_empty() {
+            crate::tr!("budget seulement", "budget only").into()
+        } else {
+            parts.join(crate::tr!(" ou ", " or "))
+        }
+    }
 }
 
 /// When a session stopped by a quota may start again: one minute after the window
@@ -970,6 +1044,26 @@ fn snippet(text: &str, q: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::original::*;
+
+    #[test]
+    fn endless_sessions_stop_on_their_conditions() {
+        let none = super::EndConditions::default();
+        // No condition: only the budgets stop it, or nothing left to do twice in a row.
+        assert!(none.reached(100 * 3_600_000, 50, 500, 0).is_none());
+        assert!(none.reached(0, 0, 1, 1).is_none(), "one [[FINI]] isn't enough without « when done »");
+        assert!(none.reached(0, 0, 2, 2).is_some());
+        let c = super::EndConditions { hours: Some(2.0), steps: Some(3), turns: Some(10), when_done: false };
+        assert!(c.reached(3_600_000, 2, 9, 0).is_none());
+        assert!(c.reached(2 * 3_600_000, 0, 0, 0).is_some(), "time");
+        assert!(c.reached(0, 3, 0, 0).is_some(), "steps");
+        assert!(c.reached(0, 0, 10, 0).is_some(), "turns");
+        let d = super::EndConditions { when_done: true, ..Default::default() };
+        assert!(d.reached(0, 0, 1, 1).is_some());
+        // Zero means « not set ».
+        let z = super::EndConditions { hours: Some(0.0), steps: Some(0), turns: Some(0), when_done: false };
+        assert!(z.reached(10 * 3_600_000, 10, 10, 0).is_none());
+        assert!(!c.describe().is_empty() && !none.describe().is_empty());
+    }
 
     #[test]
     fn top_level_pages_are_reordered() {
