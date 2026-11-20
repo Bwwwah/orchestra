@@ -1268,7 +1268,8 @@ fn steps_card(ui: &mut egui::Ui, cx: &mut Cx, extra: f32) -> f32 {
     let prefer = cx.live.first().map(|s| s.tool);
     // ---- Steps: open ones first, one line each; done ones folded.
     let (done, total) = pr.progress();
-    card(ui, t, extra, |ui| {
+    let (start, width) = (ui.cursor().min, ui.available_width());
+    let h = card(ui, t, extra, |ui| {
         card_title(ui, crate::tr!("ÉTAPES", "STEPS"), &format!("{done} / {total}"), t);
         let mut cycle = None;
         let mut remove = None;
@@ -1474,7 +1475,43 @@ fn steps_card(ui: &mut egui::Ui, cx: &mut Cx, extra: f32) -> f32 {
         // The AI's tools for the steps, set apart from the list by a thin line.
         card_rule(ui, t);
         ai_steps(ui, page_id, pr, ai, prefer, t);
-    })
+    });
+    // Arriving from « Ajouter des tâches »: the card glows green, then fades.
+    if let Some(glow) = steps_focus_age(ui.ctx(), page_id).map(steps_glow).filter(|g| *g > 0.0) {
+        let rect = egui::Rect::from_min_size(start, egui::vec2(width, h + extra.max(0.0)));
+        let p = ui.painter();
+        p.rect_filled(rect, 12.0, GREEN.gamma_multiply(0.07 * glow));
+        p.rect_stroke(rect, 12.0, egui::Stroke::new(2.0, GREEN.gamma_multiply(glow)), egui::StrokeKind::Inside);
+        p.rect_stroke(rect.expand(3.0), 15.0, egui::Stroke::new(3.0, GREEN.gamma_multiply(0.25 * glow)), egui::StrokeKind::Inside);
+        ui.ctx().request_repaint();
+    }
+    h
+}
+
+/// How strongly the Steps card glows `age` seconds after arriving from « Ajouter des
+/// tâches »: fully for 2.5 s, then fading out over 1.5 s.
+fn steps_glow(age: f64) -> f32 {
+    const HOLD: f64 = 2.5;
+    const FADE: f64 = 1.5;
+    if !(0.0..HOLD + FADE).contains(&age) {
+        return 0.0;
+    }
+    if age < HOLD { 1.0 } else { (1.0 - (age - HOLD) / FADE) as f32 }
+}
+
+#[cfg(test)]
+mod glow_tests {
+    /// The Steps card glows fully, then fades, then stops (never before, never after).
+    #[test]
+    fn steps_glow_holds_then_fades() {
+        assert_eq!(super::steps_glow(-0.1), 0.0);
+        assert_eq!(super::steps_glow(0.0), 1.0);
+        assert_eq!(super::steps_glow(2.4), 1.0);
+        let mid = super::steps_glow(3.25);
+        assert!(mid > 0.4 && mid < 0.6);
+        assert_eq!(super::steps_glow(4.0), 0.0);
+        assert_eq!(super::steps_glow(60.0), 0.0);
+    }
 }
 
 /// Height of a one-line field behind an icon (« + Ajouter une étape », « ? Question rapide »).
