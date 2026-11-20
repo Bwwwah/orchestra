@@ -1787,11 +1787,7 @@ impl NotesApp {
                     };
                     let project = (!m.project.is_empty()).then(|| self.ws.page(&m.project).map(|p| p.display_title())).flatten();
                     // The end of a session: its work, still in its own copy, to merge or discard.
-                    let run = (m.kind == "fin")
-                        .then_some(m.page.as_ref())
-                        .flatten()
-                        .and_then(|p| self.ws.runs.iter().find(|r| r.report.as_ref() == Some(p)))
-                        .filter(|r| !r.outcome.is_empty() && !self.orch.runs.iter().any(|l| l.id == r.id) && !self.orch.to_main.contains(&r.id));
+                    let run = run_of_message(m, &self.ws.runs, |id| self.orch.runs.iter().any(|l| l.id == id) || self.orch.to_main.iter().any(|x| x == id));
                     let bg = super::projects::hover_begin(ui);
                     let card = egui::Frame::new()
                         .fill(if m.read { Color32::TRANSPARENT } else { t.card })
@@ -1954,6 +1950,16 @@ impl NotesApp {
             }
         }
     }
+}
+
+/// The session an end-of-session message speaks of (by its report page), once it is over
+/// and not `busy` (running again, or about to be merged into main by itself).
+fn run_of_message<'a>(m: &crate::model::InboxMsg, runs: &'a [crate::model::RunRecord], busy: impl Fn(&str) -> bool) -> Option<&'a crate::model::RunRecord> {
+    if m.kind != "fin" {
+        return None;
+    }
+    let page = m.page.as_ref().filter(|p| !p.is_empty())?;
+    runs.iter().find(|r| r.report.as_ref() == Some(page)).filter(|r| !r.outcome.is_empty() && !busy(&r.id))
 }
 
 /// Under the end of a session: what became of its copy, or the links to deal with it
@@ -2671,6 +2677,26 @@ mod tests {
         assert!(super::orch_questions(&[], now, super::ORCH_ANSWERED_MS).is_empty());
         let many: Vec<InboxMsg> = (0..9).map(|i| msg("question", now - i, "", 0)).collect();
         assert_eq!(super::orch_questions(&many, now, super::ORCH_ANSWERED_MS).len(), super::ORCH_QUESTIONS);
+    }
+
+    /// An end-of-session message finds its session by the report page, and only once that
+    /// session is over and nothing else deals with it.
+    #[test]
+    fn an_end_message_finds_its_finished_session() {
+        use crate::model::{InboxMsg, RunRecord};
+        let run = |id: &str, report: &str, outcome: &str| RunRecord { id: id.into(), report: Some(report.into()), outcome: outcome.into(), ..Default::default() };
+        let runs = vec![run("a", "page-a", "terminée"), run("b", "page-b", ""), run("c", "page-c", "terminée")];
+        let msg = |kind: &str, page: Option<&str>| InboxMsg { kind: kind.into(), page: page.map(Into::into), ..Default::default() };
+        let idle = |_: &str| false;
+        assert_eq!(super::run_of_message(&msg("fin", Some("page-a")), &runs, idle).map(|r| r.id.as_str()), Some("a"));
+        // Still running, unknown page, no page, another kind of message.
+        assert!(super::run_of_message(&msg("fin", Some("page-b")), &runs, idle).is_none());
+        assert!(super::run_of_message(&msg("fin", Some("autre")), &runs, idle).is_none());
+        assert!(super::run_of_message(&msg("fin", None), &runs, idle).is_none());
+        assert!(super::run_of_message(&msg("fin", Some("")), &runs, idle).is_none());
+        assert!(super::run_of_message(&msg("rapport", Some("page-a")), &runs, idle).is_none());
+        // Started again, or waiting to be merged into main by itself.
+        assert!(super::run_of_message(&msg("fin", Some("page-c")), &runs, |id| id == "c").is_none());
     }
 
     #[test]
