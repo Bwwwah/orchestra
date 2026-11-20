@@ -239,6 +239,11 @@ fn slug(s: &str) -> String {
 
 /// A new worktree of the project's repository, on a branch of its own, from HEAD.
 pub fn make_copy(folder: &str, title: &str) -> Result<Copy, String> {
+    make_copy_in(&crate::store::data_dir().join("worktrees"), folder, title)
+}
+
+/// The same, with the copies kept in `copies` (the tests' own folder).
+fn make_copy_in(copies: &Path, folder: &str, title: &str) -> Result<Copy, String> {
     let dir = crate::project::normalize_folder(folder);
     let root = git(&dir, &["rev-parse", "--show-toplevel"]).map_err(|_| crate::tr!("le projet n'est pas un dépôt git : créez-le d'abord (encadré Versions)", "the project isn't a git repository: create it first (Versions card)").to_string())?.trim().to_string();
     let rd = PathBuf::from(&root);
@@ -246,8 +251,8 @@ pub fn make_copy(folder: &str, title: &str) -> Result<Copy, String> {
     let stamp = local_stamp(crate::model::now_ms());
     let name = format!("{}-{stamp}", if slug(title).is_empty() { "projet".to_string() } else { slug(title) });
     let branch = format!("orchestra/auto-{name}");
-    let wt = crate::store::data_dir().join("worktrees").join(&name);
-    std::fs::create_dir_all(wt.parent().unwrap()).map_err(|e| e.to_string())?;
+    let wt = copies.join(&name);
+    std::fs::create_dir_all(copies).map_err(|e| e.to_string())?;
     git(&rd, &["worktree", "add", "-b", &branch, &wt.display().to_string(), "HEAD"])?;
     Ok(Copy { root, worktree: wt.display().to_string(), branch, base })
 }
@@ -1041,7 +1046,9 @@ mod tests {
 
     #[test]
     fn copy_merge_discard() {
-        let repo = std::env::temp_dir().join(format!("orch-auto-repo-{}", std::process::id()));
+        // Everything in a folder of its own: never in Orchestra's real data folder.
+        let base = std::env::temp_dir().join(format!("orch-auto-{}", uuid::Uuid::new_v4().simple()));
+        let (repo, copies) = (base.join("repo"), base.join("worktrees"));
         std::fs::create_dir_all(&repo).unwrap();
         let ok = |d: &Path, a: &[&str]| git(d, a).is_ok();
         if !ok(&repo, &["init", "-b", "main"]) {
@@ -1051,7 +1058,8 @@ mod tests {
         let _ = git(&repo, &["config", "user.name", "T"]);
         std::fs::write(repo.join("a.txt"), "a").unwrap();
         assert!(ok(&repo, &["add", "-A"]) && ok(&repo, &["commit", "-m", "a"]));
-        let c = make_copy(&repo.display().to_string(), "Essai").unwrap();
+        let c = make_copy_in(&copies, &repo.display().to_string(), "Essai").unwrap();
+        assert!(Path::new(&c.worktree).starts_with(&copies));
         let wt = PathBuf::from(&c.worktree);
         std::fs::write(wt.join("b.txt"), "b").unwrap();
         let rec = crate::model::RunRecord { title: "Essai".into(), root: c.root.clone(), worktree: c.worktree.clone(), branch: c.branch.clone(), ..Default::default() };
@@ -1060,7 +1068,7 @@ mod tests {
         merge(&rec).unwrap();
         assert!(repo.join("b.txt").exists());
         assert!(!wt.exists());
-        let c2 = make_copy(&repo.display().to_string(), "Essai deux").unwrap();
+        let c2 = make_copy_in(&copies, &repo.display().to_string(), "Essai deux").unwrap();
         let rec2 = crate::model::RunRecord { root: c2.root.clone(), worktree: c2.worktree.clone(), branch: c2.branch.clone(), ..Default::default() };
         // Merging by itself only goes onto main.
         assert!(ok(&repo, &["switch", "-c", "ailleurs"]));
@@ -1069,7 +1077,7 @@ mod tests {
         assert!(ok(&repo, &["switch", "main"]));
         discard(&rec2).unwrap();
         assert!(!git(&repo, &["branch"]).unwrap().contains("orchestra/"));
-        let _ = std::fs::remove_dir_all(repo);
+        let _ = std::fs::remove_dir_all(base);
     }
 
     /// A merge that conflicts changes nothing in the project's folder (no half-done merge,
