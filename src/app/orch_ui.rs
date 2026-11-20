@@ -1002,8 +1002,8 @@ impl NotesApp {
                 0 => (
                     five.map(|f| format!("{f:.0} %")).unwrap_or_else(|| "—".into()),
                     match (five, five_left) {
-                        (Some(_), Some(l)) => crate::trf!("à zéro dans {} · limite {global:.0} %", "resets in {} · limit {global:.0} %", crate::usage::left_text(l)),
-                        (Some(_), None) => crate::trf!("limite des sessions : {global:.0} %", "sessions' limit: {global:.0} %"),
+                        (Some(_), Some(l)) => crate::trf!("repart dans {} · IA arrêtées à {global:.0} %", "resets in {} · AIs stop at {global:.0} %", crate::usage::left_text(l)),
+                        (Some(_), None) => crate::trf!("IA arrêtées à {global:.0} %", "AIs stop at {global:.0} %"),
                         _ => crate::tr!("inconnu pour l'instant", "unknown for now").into(),
                     },
                 ),
@@ -1027,8 +1027,8 @@ impl NotesApp {
                     }
                     // The details, on hover only.
                     let mut tip = vec![crate::trf!(
-                        "Part de la fenêtre de 5 h de l'abonnement utilisée. Les sessions s'arrêtent à la limite globale ({global:.0} %), réglable plus bas.",
-                        "Share of the subscription's 5-hour window used. Sessions stop at the global limit ({global:.0} %), set below."
+                        "Part de la fenêtre de 5 h de l'abonnement Claude déjà utilisée, par les IA d'Orchestra et par vous (Claude Code, claude.ai…) : le chiffre de Claude Code lui-même.\nLe trait orange de l'anneau est la limite globale ({global:.0} %) : aucune session autonome ne démarre ni ne continue au-delà. Réglable plus bas, dans « Réglages et limites ».",
+                        "Share of the Claude subscription's 5-hour window already used, by Orchestra's AIs and by you (Claude Code, claude.ai…): Claude Code's own figure.\nThe ring's orange tick is the global limit ({global:.0} %): no autonomous session starts or goes on past it. Set below, in « Settings and limits »."
                     )];
                     if let Some(d) = day {
                         tip.push(crate::trf!("Dernières 24 h : {d:.0} % (les fenêtres de 5 h de la journée, additionnées)", "Last 24 hours: {d:.0} % (the day's 5-hour windows, added up)"));
@@ -1108,7 +1108,7 @@ impl NotesApp {
             let col_w = if two { (w - 28.0) / 2.0 } else { w };
             let mut left = |ui: &mut egui::Ui| {
                 ui.set_width(col_w);
-                row(ui, crate::tr!("Limite globale", "Global limit"), crate::tr!("De la fenêtre de 5 h : aucune session ne va au-delà, tous projets confondus", "Of the 5-hour window: no session goes past it, all projects together"), &mut |ui| {
+                row(ui, crate::tr!("Limite globale", "Global limit"), crate::tr!("De la fenêtre de 5 h, votre propre usage compris : aucune session ne va au-delà, tous projets confondus. Chaque session a en plus son budget, compté depuis son lancement.", "Of the 5-hour window, your own use included: no session goes past it, all projects together. Each session also has its budget, counted from its start."), &mut |ui| {
                     ui.add(egui::DragValue::new(&mut o.global_limit).range(5.0..=100.0).speed(0.5).suffix(" %"));
                 });
                 row(ui, crate::tr!("Commits autorisés", "Commits allowed"), crate::tr!("Sur leur branche, envoyée sur GitHub par Orchestra", "On their branch, pushed to GitHub by Orchestra"), &mut |ui| {
@@ -1866,7 +1866,7 @@ fn window_bar(window: f32, pct: f32, limit: f32, global: f32) -> WindowBar {
 /// share of its budget only.
 fn share_row(ui: &mut egui::Ui, id: &str, pct: f32, limit: f32, window: Option<f32>, global: f32, t: &Tone) {
     let text = match window {
-        Some(w) => crate::trf!("fenêtre de 5 h : {w:.0} % · session : {pct:.1} / {limit:.0} %", "5-hour window: {w:.0} % · session: {pct:.1} / {limit:.0} %"),
+        Some(w) => crate::trf!("fenêtre de 5 h : {w:.0} % · cette session : {pct:.1} % (budget {limit:.0} %)", "5-hour window: {w:.0} % · this session: {pct:.1} % (budget {limit:.0} %)"),
         None => crate::trf!("{:.1} % utilisés sur un budget de {:.0} %", "{:.1} % used of a {:.0} % budget", pct, limit),
     };
     let font = FontId::proportional(12.5);
@@ -2311,8 +2311,8 @@ fn limits_summary(o: &crate::model::OrchSettings) -> String {
     let commits = if o.allow_commits { crate::tr!("commits autorisés", "commits allowed") } else { crate::tr!("sans commit", "no commits") };
     let resume = if o.auto_resume { crate::tr!("reprise automatique", "automatic restart") } else { crate::tr!("sans reprise", "no restart") };
     crate::trf!(
-        "Limite globale {:.0} % · {commits} · {resume} · bilan à {} h · {} tours au plus",
-        "Global limit {:.0} % · {commits} · {resume} · summary at {} h · {} turns at most",
+        "IA arrêtées à {:.0} % de la fenêtre de 5 h · {commits} · {resume} · bilan à {} h · {} tours au plus",
+        "AIs stop at {:.0} % of the 5-hour window · {commits} · {resume} · summary at {} h · {} turns at most",
         o.global_limit,
         o.report_hour,
         o.max_turns
