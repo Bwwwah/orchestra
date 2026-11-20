@@ -631,12 +631,11 @@ fn session_row(ui: &mut egui::Ui, page_id: &str, s: &SessionInfo, t: &Tone) -> O
             }
             ui.add_space(4.0);
             ui.horizontal(|ui| {
-                let cmd = s.resume_command();
+                let (Some(cmd), Some(resume)) = (s.resume_command(), s.resume_args()) else {
+                    ui.label(RichText::new(crate::tr!("Id de session invalide : reprise impossible", "Invalid session id: can't resume")).size(12.5).color(t.tertiary));
+                    return;
+                };
                 if ui.button(crate::tr!("Reprendre ici", "Resume here")).on_hover_text(crate::tr!("Rouvre la session dans le terminal intégré", "Reopens the session in the built-in terminal")).clicked() {
-                    let resume = match s.tool {
-                        crate::sessions::Tool::ClaudeCode => format!("claude --resume {}", s.id),
-                        crate::sessions::Tool::Codex => format!("codex resume {}", s.id),
-                    };
                     let title = format!("{} · {}", s.tool.label(), crate::richtext::one_line(&s.display_title(), 24));
                     super::term_ui::request(ui.ctx(), &title, &s.cwd, Some(resume));
                 }
