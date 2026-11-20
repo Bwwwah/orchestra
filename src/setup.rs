@@ -461,6 +461,31 @@ pub fn unplug(ai: Ai) -> Result<(), String> {
     Ok(())
 }
 
+/// Unplug Orchestra from every AI installed (before uninstalling it): otherwise each AI
+/// keeps trying to start `orchestra mcp`, which is gone.
+pub fn unplug_all() -> Vec<(String, Result<(), String>)> {
+    let path = shell_path();
+    Ai::ALL.into_iter().filter(|&ai| installed(ai, &path)).map(|ai| (ai.label().to_string(), unplug(ai))).collect()
+}
+
+/// Everything Orchestra set up outside its own folder, undone: Claude Code's status line
+/// (the person's own comes back) and the AIs' MCP entries. For `orchestra nettoyer`, run by
+/// the Windows uninstaller, and the « Avant de désinstaller » button. Returns what was done.
+pub fn clean_up_for_uninstall() -> Vec<String> {
+    let mut out = vec![];
+    match crate::usage::stop_tracking() {
+        Ok(()) => out.push(crate::tr!("Ligne d'état de Claude Code : remise comme avant.", "Claude Code's status line: put back as before.").to_string()),
+        Err(e) => out.push(crate::trf!("Ligne d'état de Claude Code : {e}", "Claude Code's status line: {e}")),
+    }
+    for (name, r) in unplug_all() {
+        out.push(match r {
+            Ok(()) => crate::trf!("{name} : débranché.", "{name}: unplugged."),
+            Err(e) => crate::trf!("{name} : {e}", "{name}: {e}"),
+        });
+    }
+    out
+}
+
 /// Plug every AI found, except those the person unplugged (`off`, by key).
 /// Slow-ish (runs the CLIs): call it off the UI thread.
 pub fn plug_all(exe: &Path, off: &[String]) -> Report {

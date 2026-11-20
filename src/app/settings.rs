@@ -498,6 +498,18 @@ impl NotesApp {
             }
         });
         row(ui, crate::tr!("Changer de dossier", "Change folder"), crate::tr!("Lancez l'application avec la variable ORCHESTRA_DIR pour utiliser un autre dossier.", "Launch the app with the ORCHESTRA_DIR variable to use another folder."), t, |_| {});
+        // On macOS the app goes to the Trash with no uninstaller: this undoes, first, what
+        // Orchestra set up outside its folder (Windows' uninstaller runs it by itself).
+        row(ui, crate::tr!("Avant de désinstaller", "Before uninstalling"), crate::tr!("Remet la ligne d'état de Claude Code comme avant et débranche Orchestra des IA, pour que rien ne tente de le relancer une fois supprimé. Vos pages restent dans le dossier des données.", "Puts Claude Code's status line back as before and unplugs Orchestra from the AIs, so that nothing tries to start it once removed. Your pages stay in the data folder."), t, |ui| {
+            if button(ui, crate::tr!("Tout débrancher", "Unplug everything"), t, l).clicked() {
+                // Runs the AIs' CLIs: off the UI thread, the result comes back as a message.
+                let (done, c) = (self.uninstall_report.clone(), ui.ctx().clone());
+                std::thread::spawn(move || {
+                    *done.lock().unwrap() = Some(crate::setup::clean_up_for_uninstall());
+                    c.request_repaint();
+                });
+            }
+        });
         self.update_settings(ui, t, l);
     }
 

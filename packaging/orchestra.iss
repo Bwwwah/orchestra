@@ -50,6 +50,11 @@ Name: "{autodesktop}\Orchestra"; Filename: "{app}\orchestra.exe"; Tasks: desktop
 [Run]
 Filename: "{app}\orchestra.exe"; Description: "{cm:LaunchProgram,Orchestra}"; Flags: nowait postinstall skipifsilent
 
+[UninstallRun]
+; Before the files go: Claude Code's status line put back, Orchestra unplugged from the AIs,
+; so nothing keeps trying to start the removed orchestra.exe.
+Filename: "{app}\orchestra.exe"; Parameters: "nettoyer"; Flags: runhidden waituntilterminated; RunOnceId: "OrchestraNettoyer"
+
 [Code]
 // Every orchestra.exe (the window, `orchestra mcp` started by the AIs, `orchestra
 // statusline`) and everything they started (PowerShell, claude, node…): /T ends the whole

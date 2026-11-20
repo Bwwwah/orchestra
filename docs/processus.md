@@ -37,3 +37,23 @@ ressemblait à une boucle sous Windows venait des consoles visibles de ces comma
   `taskkill /F /T /IM orchestra.exe` arrête toutes les copies d'Orchestra (fenêtre, `orchestra mcp`
   lancés par les IA, `orchestra statusline`) et leurs descendants, puis laisse 0,8 s à Windows pour
   libérer les fichiers ; `CloseApplications=force` en plus.
+
+## Après la désinstallation : rien ne relance Orchestra
+
+Orchestra ne s'inscrit nulle part pour démarrer seul (pas d'entrée de démarrage, de tâche
+planifiée, de LaunchAgent ni de service). Deux réglages, posés hors de son dossier, le faisaient
+pourtant relancer par d'autres après sa suppression :
+
+- la **ligne d'état de Claude Code** (`statusLine` dans `~/.claude/settings.json`), lancée à chaque
+  rafraîchissement ;
+- son **serveur MCP**, branché dans Claude Code, Codex, Gemini CLI, l'app Claude…, lancé à chaque
+  session d'IA.
+
+`orchestra nettoyer` défait les deux : la ligne d'état d'avant revient (ou aucune), mais seulement
+si c'est encore celle d'Orchestra ; l'entrée « orchestra » est retirée de chaque IA installée.
+- **Windows** : le désinstalleur le lance tout seul (`[UninstallRun]`), après avoir arrêté les
+  processus et avant de supprimer les fichiers.
+- **macOS** (l'app part à la Corbeille, sans désinstalleur) : Paramètres › Général › « Avant de
+  désinstaller » › « Tout débrancher », puis quitter et supprimer l'app.
+
+Les pages et réglages restent dans le dossier des données (à supprimer à la main si on le souhaite).

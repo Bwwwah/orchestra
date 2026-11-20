@@ -100,6 +100,8 @@ pub struct NotesApp {
     /// What the start-up MCP setup did (filled by a background thread).
     mcp_report: std::sync::Arc<std::sync::Mutex<Option<crate::setup::Report>>>,
     mcp_report_shown: bool,
+    /// What « Avant de désinstaller » did (filled by a background thread).
+    uninstall_report: std::sync::Arc<std::sync::Mutex<Option<Vec<String>>>>,
     ais: ai_ui::Ais,
     orch: orch_ui::Orch,
     upd: update_ui::Upd,
@@ -193,6 +195,7 @@ impl NotesApp {
             term_open: false,
             term_focus: false,
             mcp_report: Default::default(),
+            uninstall_report: Default::default(),
             mcp_report_shown: false,
             ais: Default::default(),
             orch: Default::default(),
@@ -1187,6 +1190,14 @@ impl eframe::App for NotesApp {
             }
         }
         self.shortcuts(&ctx, &mut actions);
+        let unplugged = self.uninstall_report.lock().unwrap().take();
+        if let Some(lines) = unplugged {
+            self.info(crate::trf!(
+                "{}\nVous pouvez maintenant quitter Orchestra et le supprimer.",
+                "{}\nYou can now quit Orchestra and remove it.",
+                lines.join("\n")
+            ));
+        }
         // Ctrl+` shows / hides the terminals, as in VS Code.
         if !self.terms.is_empty() && ctx.input_mut(|i| i.consume_key(egui::Modifiers::CTRL, egui::Key::Backtick)) {
             self.term_open = !self.term_open;
