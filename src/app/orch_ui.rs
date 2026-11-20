@@ -991,12 +991,12 @@ impl NotesApp {
                 if self.questions_card(ui, &t) {
                     ui.add_space(14.0);
                 }
+                // The settings and limits come first: they frame every launch below.
+                self.limits_card(ui, &t);
+                ui.add_space(14.0);
                 if let Some(msg) = self.launch_card(ui, &ctx, &t) {
                     self.notice(msg);
                 }
-                // The settings and limits come before the past sessions, which only grow.
-                ui.add_space(14.0);
-                self.limits_card(ui, &t);
                 ui.add_space(14.0);
                 self.history_card(ui, &t, actions);
                 ui.add_space(40.0);
