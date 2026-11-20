@@ -1241,6 +1241,9 @@ pub(super) fn focus_steps(ctx: &egui::Context, page_id: &str) {
     ctx.data_mut(|d| d.insert_temp(steps_focus_key(), (page_id.to_string(), now)));
 }
 
+/// How long the « tapez vos tâches ici » line stays after arriving from « Ajouter des tâches ».
+const STEPS_HINT_SECS: f64 = 90.0;
+
 /// Seconds since this page was opened from « Ajouter des tâches », if it was.
 fn steps_focus_age(ctx: &egui::Context, page_id: &str) -> Option<f64> {
     let (id, at): (String, f64) = ctx.data(|d| d.get_temp(steps_focus_key()))?;
@@ -1437,7 +1440,28 @@ fn steps_card(ui: &mut egui::Ui, cx: &mut Cx, extra: f32) -> f32 {
         }
         ui.add_space(2.0);
         let adding_key = ("adding-step", page_id);
+        // Arriving from « Ajouter des tâches »: the field is open, with a word on what to do.
+        let arrived = steps_focus_age(ui.ctx(), page_id).filter(|a| *a < STEPS_HINT_SECS);
+        if arrived.is_some_and(|a| a < 0.6) && !flag(ui, adding_key) {
+            toggle_flag(ui, adding_key);
+        }
         let adding = flag(ui, adding_key);
+        if arrived.is_some() {
+            ui.add_space(4.0);
+            ui.horizontal_wrapped(|ui| {
+                ui.spacing_mut().item_spacing.x = 4.0;
+                ui.label(RichText::new("✎").size(14.0).color(GREEN));
+                ui.label(
+                    RichText::new(crate::tr!(
+                        "Tapez vos tâches ici, une à la fois puis Entrée. L'IA en cours les prendra au tour suivant, sans s'arrêter.",
+                        "Type your tasks here, one at a time then Enter. The running AI takes them on its next turn, without stopping."
+                    ))
+                    .size(12.5)
+                    .color(GREEN),
+                );
+            });
+            ui.add_space(2.0);
+        }
         // A row exactly as tall as the « + »: the text typed (or the label) is centred on it.
         inline_row(ui, |ui| {
             let (r, plus) = ui.allocate_exact_size(egui::vec2(18.0, INLINE_H), egui::Sense::click());
@@ -1449,7 +1473,7 @@ fn steps_card(ui: &mut egui::Ui, cx: &mut Cx, extra: f32) -> f32 {
             if adding {
                 let edit = ui.add(
                     inline_edit(egui::TextEdit::singleline(new_step))
-                        .hint_text(crate::tr!("Nouvelle étape, puis Entrée", "New step, then Enter"))
+                        .hint_text(if arrived.is_some() { crate::tr!("Votre tâche, puis Entrée", "Your task, then Enter") } else { crate::tr!("Nouvelle étape, puis Entrée", "New step, then Enter") })
                         .desired_width(f32::INFINITY),
                 );
                 if !edit.has_focus() && !edit.lost_focus() && new_step.is_empty() && !ui.ctx().memory(|m| m.has_focus(edit.id)) {
