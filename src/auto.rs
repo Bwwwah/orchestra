@@ -61,11 +61,20 @@ impl Agent {
 /// copy needs nothing here: `acceptEdits` and Claude Code's own rules grant them for the
 /// working folder only. Listing `Read`, `Edit` or `Write` here would grant them on the whole
 /// disk, so they are not.
+///
+/// No interpreter or tool as a whole (`python`, `node`, `npm`, `make`, `cargo`, `go`): each
+/// runs any code it is given (`python -c`, `node -e`, `npm exec`, `cargo install`…). Only
+/// their build, check and test subcommands are allowed, so the AI can check its work; any
+/// other use of them asks, and Orchestra refuses.
 const ALLOWED: &[&str] = &[
     "Glob", "Grep", "TodoWrite", "mcp__orchestra",
     "Bash(ls:*)", "Bash(pwd)", "Bash(git status:*)", "Bash(git diff:*)", "Bash(git log:*)", "Bash(git show:*)",
-    "Bash(cargo:*)", "Bash(npm:*)", "Bash(pnpm:*)", "Bash(yarn:*)", "Bash(node:*)", "Bash(python:*)", "Bash(python3:*)",
-    "Bash(pytest:*)", "Bash(make:*)", "Bash(go:*)",
+    "Bash(cargo build:*)", "Bash(cargo check:*)", "Bash(cargo test:*)", "Bash(cargo clippy:*)", "Bash(cargo fmt:*)",
+    "Bash(npm test:*)", "Bash(npm run build:*)", "Bash(npm run test:*)", "Bash(npm run lint:*)", "Bash(npm run typecheck:*)",
+    "Bash(pnpm test:*)", "Bash(pnpm build:*)", "Bash(pnpm run build:*)", "Bash(pnpm run test:*)", "Bash(pnpm run lint:*)",
+    "Bash(yarn test:*)", "Bash(yarn build:*)", "Bash(yarn lint:*)",
+    "Bash(pytest:*)", "Bash(make test:*)", "Bash(make check:*)", "Bash(make build:*)",
+    "Bash(go build:*)", "Bash(go test:*)", "Bash(go vet:*)",
 ];
 
 /// Refused even if allowed elsewhere (a deny rule wins). The real restriction is the list
@@ -697,6 +706,13 @@ mod tests {
             assert!(denied.iter().any(|x| x == d), "{d}");
         }
         assert!(!allowed.iter().any(|a| a.contains("git commit")));
+        // No interpreter or tool as a whole: only its build and test subcommands.
+        for t in ["python", "python3", "node", "npm", "pnpm", "yarn", "make", "cargo", "go"] {
+            assert!(!allowed.iter().any(|a| *a == format!("Bash({t}:*)")), "{t}");
+        }
+        for t in ["Bash(cargo test:*)", "Bash(cargo build:*)", "Bash(npm test:*)", "Bash(pytest:*)"] {
+            assert!(allowed.iter().any(|a| a == t), "{t}");
+        }
         assert!(permissions(true, "").0.iter().any(|a| a == "Bash(git commit:*)"));
         // Extra rules that would lift the restriction are dropped; precise ones are kept.
         let (allowed, _) = permissions(false, "Bash, Bash(*), Bash(:*), Read, Edit(**), Read(~/.ssh/**), Bash(rm -rf:*), Bash(curl x:*), Bash(git push:*), Bash(just:*), Bash(docker compose:*), mcp__other");
