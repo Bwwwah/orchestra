@@ -1135,12 +1135,15 @@ fn steps_card(ui: &mut egui::Ui, cx: &mut Cx, extra: f32) -> f32 {
                     ui.vertical(|ui| {
                         ui.set_max_width(room);
                         let r = ui.add(egui::Label::new(job).wrap().sense(egui::Sense::click()));
-                        if !s.source.is_empty() || s.received {
+                        // Another computer's AI has reserved it (shared project).
+                        let held = s.held_elsewhere(&crate::store::computer_id(), crate::model::now_ms());
+                        if !s.source.is_empty() || s.received || held {
                             let by = if s.source.is_empty() { String::new() } else { crate::trf!("ajoutée par {} · {}", "added by {} · {}", s.source, relative_time(s.created)) };
                             // Written on another computer of the shared project.
                             let from = if s.received { crate::tr!("reçue d'un autre membre du projet", "received from another member of the project") } else { "" };
-                            let sep = if by.is_empty() || from.is_empty() { "" } else { " · " };
-                            ui.label(RichText::new(format!("{by}{sep}{from}")).size(12.0).color(t.tertiary));
+                            let hold = if held { crate::tr!("en cours par une IA d'un autre ordinateur", "in progress by an AI on another computer") } else { "" };
+                            let line = [by.as_str(), from, hold].into_iter().filter(|x| !x.is_empty()).collect::<Vec<_>>().join(" · ");
+                            ui.label(RichText::new(line).size(12.0).color(t.tertiary));
                         }
                         r
                     })

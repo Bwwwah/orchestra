@@ -376,6 +376,40 @@ mod tests {
         assert_eq!(bp.steps.iter().find(|s| s.id == a).unwrap().status, StepStatus::Done);
     }
 
+    /// Two AIs, one per computer, take the same step before seeing each other: both copies
+    /// end up giving it to the one that took it first, and the other is told to leave it.
+    #[test]
+    fn a_step_taken_on_two_computers_goes_to_the_first() {
+        use crate::project::{Project, StepStatus};
+        let mut base = Page::new("Projet", None);
+        let mut p = Project { shared: true, ..Project::new("/x") };
+        let a = p.add_step("A", "moi");
+        base.project = Some(p);
+        let (mut here, mut there) = (base.clone(), base.clone());
+        here.project.as_mut().unwrap().claim_step(&a, "ordi-ici").unwrap();
+        here.updated = crate::model::now_ms();
+        // There takes it later: a later edit, yet it must not win.
+        there.project.as_mut().unwrap().claim_step(&a, "ordi-la").unwrap();
+        there.updated = crate::model::now_ms();
+        let (h, t) = (here.clone(), there.clone());
+        merge_page(&mut here, &t);
+        merge_page(&mut there, &h);
+        for pg in [&here, &there] {
+            let s = &pg.project.as_ref().unwrap().steps[0];
+            assert_eq!((s.status, s.held_by.as_str()), (StepStatus::Doing, "ordi-ici"));
+        }
+        // There, the AI is refused the step; it isn't its next one any more.
+        let tp = there.project.as_mut().unwrap();
+        assert!(tp.claim_step(&a, "ordi-la").is_err());
+        assert!(tp.next_step_for("ordi-la", crate::model::now_ms()).is_none());
+        // Done here: the step comes back done everywhere, reservation cleared.
+        here.project.as_mut().unwrap().set_step_status(&a, StepStatus::Done);
+        merge_page(&mut there, &here);
+        let s = &there.project.as_ref().unwrap().steps[0];
+        assert_eq!(s.status, StepStatus::Done);
+        assert!(s.held_by.is_empty());
+    }
+
     #[test]
     fn added_blocks_are_kept_and_deleted_blocks_stay_deleted() {
         let base = page_with(&["un", "deux"]);
