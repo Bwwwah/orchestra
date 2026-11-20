@@ -12,7 +12,7 @@ use crate::sessions::Tool;
 use crate::sync::{Agent, detect, shell_path};
 use serde_json::{Value, json};
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 
 pub const NAME: &str = "orchestra";
 /// Names the server had before (the app was "Tableau IA"): removed when found.
@@ -36,7 +36,7 @@ impl Outcome {
 pub type Report = Vec<(String, Outcome)>;
 
 fn cli(bin: &Path, args: &[&str], path: &str) -> Result<String, String> {
-    let mut c = Command::new(bin);
+    let mut c = crate::proc::command(bin);
     c.args(args).env("PATH", path).stdin(Stdio::null());
     for k in crate::sync::API_KEY_VARS {
         c.env_remove(k);

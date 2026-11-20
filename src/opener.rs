@@ -23,7 +23,7 @@ pub fn open_url(url: &str) -> Result<(), String> {
     if !url_ok(url) {
         return Err(crate::trf!("adresse refusée : {url}", "address refused: {url}"));
     }
-    Command::new(opener()).arg(url).spawn().map(|_| ()).map_err(|e| e.to_string())
+    crate::proc::command(opener()).arg(url).spawn().map(|_| ()).map_err(|e| e.to_string())
 }
 
 fn url_ok(url: &str) -> bool {
@@ -37,7 +37,7 @@ pub fn open_path(path: &Path) -> Result<(), String> {
     if !path.is_absolute() || !path.exists() {
         return Err(crate::trf!("introuvable : {}", "not found: {}", path.display()));
     }
-    Command::new(opener()).arg(path).spawn().map(|_| ()).map_err(|e| e.to_string())
+    crate::proc::command(opener()).arg(path).spawn().map(|_| ()).map_err(|e| e.to_string())
 }
 
 /// The system's "choose a folder" dialog (Finder, Explorer, GTK/KDE), opened on `start` when
@@ -71,7 +71,7 @@ fn pick_folder_cmd(prompt: &str, start: &str) -> Option<Vec<u8>> {
         return POSIX path of (choose folder with prompt p default location (POSIX file s))\n\
         end if\n\
         end run";
-    run_out(Command::new("osascript").args(["-e", script, prompt, start]))
+    run_out(crate::proc::command("osascript").args(["-e", script, prompt, start]))
 }
 
 #[cfg(windows)]
@@ -81,12 +81,12 @@ fn pick_folder_cmd(prompt: &str, start: &str) -> Option<Vec<u8>> {
         $d.Description = $env:ORCHESTRA_PICK_PROMPT; \
         if ($env:ORCHESTRA_PICK_START) { $d.SelectedPath = $env:ORCHESTRA_PICK_START }; \
         if ($d.ShowDialog() -eq 'OK') { [Console]::OutputEncoding = [Text.Encoding]::UTF8; Write-Output $d.SelectedPath }";
-    run_out(Command::new("powershell").args(["-NoProfile", "-STA", "-Command", script]).env("ORCHESTRA_PICK_PROMPT", prompt).env("ORCHESTRA_PICK_START", start))
+    run_out(crate::proc::command("powershell").args(["-NoProfile", "-STA", "-Command", script]).env("ORCHESTRA_PICK_PROMPT", prompt).env("ORCHESTRA_PICK_START", start))
 }
 
 #[cfg(not(any(target_os = "macos", windows)))]
 fn pick_folder_cmd(prompt: &str, start: &str) -> Option<Vec<u8>> {
-    let mut zen = Command::new("zenity");
+    let mut zen = crate::proc::command("zenity");
     zen.args(["--file-selection", "--directory", "--title", prompt]);
     if !start.is_empty() {
         zen.arg(format!("--filename={start}/"));
@@ -96,7 +96,7 @@ fn pick_folder_cmd(prompt: &str, start: &str) -> Option<Vec<u8>> {
         return (o.status.success() && !o.stdout.is_empty()).then_some(o.stdout);
     }
     let home = dirs::home_dir().map(|h| h.display().to_string()).unwrap_or_else(|| "/".into());
-    run_out(Command::new("kdialog").args(["--getexistingdirectory", if start.is_empty() { &home } else { start }, "--title", prompt]))
+    run_out(crate::proc::command("kdialog").args(["--getexistingdirectory", if start.is_empty() { &home } else { start }, "--title", prompt]))
 }
 
 #[cfg(test)]

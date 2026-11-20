@@ -19,6 +19,7 @@ mod git;
 mod mcp;
 mod model;
 mod opener;
+mod proc;
 mod project;
 mod richtext;
 mod screen;

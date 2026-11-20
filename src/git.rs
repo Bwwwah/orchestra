@@ -9,7 +9,7 @@
 
 use crate::sessions::Tool;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Commit {
@@ -52,7 +52,7 @@ fn path() -> String {
 fn run_in(dir: &Path, bin: &str, args: &[&str]) -> Result<String, String> {
     let p = path();
     let exe = crate::sync::which(bin, &p).unwrap_or_else(|| PathBuf::from(bin));
-    let o = Command::new(exe)
+    let o = crate::proc::command(exe)
         .args(args)
         .current_dir(dir)
         .env("PATH", &p)
@@ -634,7 +634,7 @@ mod tests {
         std::fs::write(dir.join("a.txt"), "x").unwrap();
         let d = dir.display().to_string();
         assert!(state(&d).is_err());
-        let _ = Command::new("git").args(["config", "--global", "user.email"]).output();
+        let _ = crate::proc::command("git").args(["config", "--global", "user.email"]).output();
         if init(&d).is_err() {
             // No git identity on this machine: nothing more to check.
             let _ = std::fs::remove_dir_all(&dir);

@@ -4,7 +4,7 @@
 //! Orchestra…) needs the « Screen Recording » permission.
 
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 use std::time::{Duration, SystemTime};
 
 /// Pictures larger than this are given by path only, not inline.
@@ -123,7 +123,7 @@ pub fn open_settings() -> Result<(), String> {
     if !cfg!(target_os = "macos") {
         return Ok(());
     }
-    Command::new("open").arg("x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture").stdin(Stdio::null()).spawn().map(|_| ()).map_err(|e| e.to_string())
+    crate::proc::command("open").arg("x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture").stdin(Stdio::null()).spawn().map(|_| ()).map_err(|e| e.to_string())
 }
 
 /// The permission (now missing) was there for an earlier version: the entry left by the
@@ -190,7 +190,7 @@ fn no_picture() -> String {
 }
 
 fn run(cmd: &str, args: &[&str]) -> Result<String, String> {
-    let out = Command::new(cmd).args(args).stdin(Stdio::null()).output().map_err(|e| format!("{cmd}: {e}"))?;
+    let out = crate::proc::command(cmd).args(args).stdin(Stdio::null()).output().map_err(|e| format!("{cmd}: {e}"))?;
     if out.status.success() {
         Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
     } else {

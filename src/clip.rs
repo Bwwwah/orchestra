@@ -3,7 +3,7 @@
 //! system's own tools read the clipboard.
 
 use std::path::PathBuf;
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 
 /// Where pasted images are kept (the system's temporary folder).
 pub fn images_dir() -> PathBuf {
@@ -35,13 +35,13 @@ fn save_clipboard(out: &std::path::Path) -> bool {
         end try\n\
         close access f\n\
         end run";
-    Command::new("osascript").arg("-e").arg(script).arg(out).stdout(Stdio::null()).stderr(Stdio::null()).status().is_ok_and(|s| s.success())
+    crate::proc::command("osascript").arg("-e").arg(script).arg(out).stdout(Stdio::null()).stderr(Stdio::null()).status().is_ok_and(|s| s.success())
 }
 
 #[cfg(target_os = "windows")]
 fn save_clipboard(out: &std::path::Path) -> bool {
     let script = "Add-Type -AssemblyName System.Windows.Forms; $i = [System.Windows.Forms.Clipboard]::GetImage(); if ($i) { $i.Save($args[0], [System.Drawing.Imaging.ImageFormat]::Png) } else { exit 1 }";
-    Command::new("powershell").args(["-NoProfile", "-STA", "-Command", script]).arg(out).stdout(Stdio::null()).stderr(Stdio::null()).status().is_ok_and(|s| s.success())
+    crate::proc::command("powershell").args(["-NoProfile", "-STA", "-Command", script]).arg(out).stdout(Stdio::null()).stderr(Stdio::null()).status().is_ok_and(|s| s.success())
 }
 
 #[cfg(not(any(target_os = "macos", target_os = "windows")))]
@@ -50,7 +50,7 @@ fn save_clipboard(out: &std::path::Path) -> bool {
     let tries: [(&str, &[&str]); 2] = [("wl-paste", &["--type", "image/png"]), ("xclip", &["-selection", "clipboard", "-t", "image/png", "-o"])];
     for (cmd, args) in tries {
         let Ok(file) = std::fs::File::create(out) else { return false };
-        if Command::new(cmd).args(args).stdout(file).stderr(Stdio::null()).status().is_ok_and(|s| s.success()) {
+        if crate::proc::command(cmd).args(args).stdout(file).stderr(Stdio::null()).status().is_ok_and(|s| s.success()) {
             return true;
         }
     }

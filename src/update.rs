@@ -10,7 +10,7 @@
 
 use serde_json::Value;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
@@ -44,7 +44,7 @@ impl Release {
 fn run(bin: &str, args: &[&str], dir: Option<&Path>) -> Result<String, String> {
     let p = crate::sync::shell_path();
     let exe = crate::sync::which(bin, &p).ok_or_else(|| format!("« {bin} » introuvable"))?;
-    let mut c = Command::new(exe);
+    let mut c = crate::proc::command(exe);
     c.args(args).env("PATH", &p).env("GH_PROMPT_DISABLED", "1").stdin(Stdio::null());
     if let Some(d) = dir {
         c.current_dir(d);
@@ -278,9 +278,9 @@ fn find(dir: &Path, ok: impl Fn(&Path) -> bool + Copy) -> Option<PathBuf> {
 /// Start the new version (then the caller quits).
 pub fn restart(target: &Path) {
     if cfg!(target_os = "macos") {
-        let _ = Command::new("open").arg("-n").arg(target).spawn();
+        let _ = crate::proc::command("open").arg("-n").arg(target).spawn();
     } else {
-        let _ = Command::new(target).spawn();
+        let _ = crate::proc::command(target).spawn();
     }
 }
 
@@ -296,7 +296,7 @@ mod tests {
         std::fs::create_dir_all(base.join("pack/orchestra")).unwrap();
         std::fs::write(base.join("pack/orchestra/orchestra"), "#!/bin/sh\necho nouvelle\n").unwrap();
         let tar = base.join("Orchestra-v9.0.0-Linux.tar.gz");
-        assert!(Command::new("tar").args(["-czf", &tar.display().to_string(), "-C", &base.join("pack").display().to_string(), "orchestra"]).status().unwrap().success());
+        assert!(crate::proc::command("tar").args(["-czf", &tar.display().to_string(), "-C", &base.join("pack").display().to_string(), "orchestra"]).status().unwrap().success());
         let app = base.join("installed/orchestra");
         std::fs::create_dir_all(app.parent().unwrap()).unwrap();
         std::fs::write(&app, "ancienne").unwrap();
@@ -321,7 +321,7 @@ mod tests {
         assert_eq!(got, app);
         assert!(std::fs::read_to_string(&app).unwrap().contains("nouvelle"));
         assert!(!app.with_file_name("orchestra.ancienne").exists());
-        let out = Command::new(&app).output().unwrap();
+        let out = crate::proc::command(&app).output().unwrap();
         assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "nouvelle");
         let _ = std::fs::remove_dir_all(base);
     }

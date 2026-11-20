@@ -473,7 +473,7 @@ pub fn statusline_main() {
     if let Ok(prev) = std::fs::read_to_string(previous_file()) {
         if !prev.trim().is_empty() {
             let shell = if cfg!(windows) { ("cmd", "/C") } else { ("sh", "-c") };
-            if let Ok(mut child) = std::process::Command::new(shell.0)
+            if let Ok(mut child) = crate::proc::command(shell.0)
                 .args([shell.1, prev.trim()])
                 .stdin(std::process::Stdio::piped())
                 .stdout(std::process::Stdio::inherit())

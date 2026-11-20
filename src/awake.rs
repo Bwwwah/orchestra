@@ -6,7 +6,7 @@
 //! Linux) and is told to follow Orchestra's process, so the lock goes away with Orchestra
 //! even if it crashes.
 
-use std::process::{Child, Command, Stdio};
+use std::process::{Child, Stdio};
 
 #[derive(Default)]
 pub struct Awake {
@@ -69,7 +69,7 @@ pub fn command(pid: u32) -> Option<Vec<String>> {
 
 fn spawn() -> Option<Child> {
     let argv = command(std::process::id())?;
-    Command::new(&argv[0]).args(&argv[1..]).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).spawn().ok()
+    crate::proc::command(&argv[0]).args(&argv[1..]).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).spawn().ok()
 }
 
 #[cfg(test)]
