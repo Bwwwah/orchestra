@@ -25,6 +25,29 @@ enum Phase {
     Summary(Instant),
     /// /exit sent; closing.
     Closing(Instant),
+    /// Paused: the AI waits for the person's answer (see `LiveRun::waiting`).
+    Waiting,
+}
+
+/// What a paused session waits for.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub enum Wait {
+    /// Claude Code asks whether the folder is safe.
+    Trust,
+    /// Claude Code asks to allow a command or an edit (or a question it didn't explain).
+    Permission,
+    /// The AI asked the person a question (ask_human) and has nothing else to do.
+    Question,
+}
+
+impl Wait {
+    pub fn label(self) -> &'static str {
+        match self {
+            Wait::Trust => crate::tr!("En pause : Claude Code demande si le dossier est sûr. Répondez dans le terminal (« Regarder »), puis « Reprendre ».", "Paused: Claude Code asks whether the folder is safe. Answer in the terminal (« Watch »), then « Resume »."),
+            Wait::Permission => crate::tr!("En pause : Claude Code demande une autorisation. Répondez dans le terminal (« Regarder »), puis « Reprendre ».", "Paused: Claude Code asks for a permission. Answer in the terminal (« Watch »), then « Resume »."),
+            Wait::Question => crate::tr!("En pause : l'IA attend la réponse à sa question (boîte de réception), puis « Reprendre ».", "Paused: the AI waits for the answer to its question (inbox), then « Resume »."),
+        }
+    }
 }
 
 pub struct LiveRun {
@@ -68,6 +91,52 @@ pub struct LiveRun {
     pub endless: Option<crate::model::EndConditions>,
     /// Turns in a row the AI said it had nothing left ([[FINI]]).
     done_streak: u32,
+    /// Paused, waiting for the person (with `Phase::Waiting`).
+    pub waiting: Option<Wait>,
+}
+
+impl LiveRun {
+    /// Put the session on hold until the person answers.
+    fn pause(&mut self, why: Wait) {
+        self.waiting = Some(why);
+        self.phase = Phase::Waiting;
+        self.last_line = why.label().into();
+    }
+
+    /// Leave the pause (« Reprendre »). A question still on the screen is refused, as
+    /// without the pause.
+    pub fn resume(&mut self) {
+        let Some(why) = self.waiting.take() else { return };
+        let now = Instant::now();
+        let still = auto::read_screen(&self.term.text());
+        match why {
+            Wait::Trust if still == Screen::Trust => {
+                // Never accept for them; Claude Code closes and the session ends.
+                self.term.write(b"\x1b");
+                self.stop = Some(crate::tr!("le dossier n'a pas été accepté dans Claude Code", "the folder wasn't accepted in Claude Code").into());
+                self.phase = Phase::Starting(now);
+            }
+            Wait::Trust => self.phase = Phase::Starting(now),
+            Wait::Permission if still == Screen::Permission => {
+                self.term.write(b"\x1b");
+                self.denials += 1;
+                self.last_line = crate::tr!("Commande refusée (non autorisée en autonome)", "Command refused (not allowed when autonomous)").into();
+                self.phase = Phase::Denied(now);
+            }
+            Wait::Permission => {
+                self.phase = Phase::Working(now);
+                self.last_line = crate::trf!("Tour {} en cours…", "Turn {} running…", self.turns + 1);
+            }
+            Wait::Question => {
+                match &self.endless {
+                    Some(c) => self.term.paste(auto::endless_prompt(!c.when_done)),
+                    None => self.term.paste(auto::continue_prompt()),
+                }
+                self.phase = Phase::Typed(now);
+            }
+        }
+        self.screen_changed = now;
+    }
 }
 
 #[derive(Clone)]
@@ -254,6 +323,7 @@ impl NotesApp {
             measured: false,
             endless,
             done_streak: 0,
+            waiting: None,
         });
         Ok(())
     }
@@ -304,6 +374,8 @@ impl NotesApp {
         let now = Instant::now();
         let global = self.ws.settings.orch.global_limit;
         let week_limit = self.ws.settings.orch.week_limit;
+        let pause = self.ws.settings.orch.pause_for_answer;
+        let mut paused: Vec<(String, String, Wait)> = vec![];
         let mut finished: Vec<(usize, String, String)> = vec![];
         for (i, r) in self.orch.runs.iter_mut().enumerate() {
             // How the screen moves (idle = nothing drawn for a while).
@@ -330,6 +402,11 @@ impl NotesApp {
                                 // the copy is the same repository, in a new folder.
                                 r.term.write(b"\r");
                                 r.screen_changed = now;
+                            }
+                            Screen::Trust if pause => {
+                                // The person decides, in the terminal.
+                                r.pause(Wait::Trust);
+                                paused.push((r.project.clone(), r.title.clone(), Wait::Trust));
                             }
                             Screen::Trust => {
                                 // Never accept for them: it would turn on the repository's
@@ -375,6 +452,11 @@ impl NotesApp {
                         && !r.reader.turn_over
                         && r.reader.last_growth.is_none_or(|g| g.elapsed() > Duration::from_secs(180));
                     if (auto::read_screen(&screen) == Screen::Permission && idle > Duration::from_millis(800)) || frozen {
+                        if pause {
+                            r.pause(Wait::Permission);
+                            paused.push((r.project.clone(), r.title.clone(), Wait::Permission));
+                            continue;
+                        }
                         r.term.write(b"\x1b");
                         r.denials += 1;
                         r.last_line = crate::tr!("Commande refusée (non autorisée en autonome)", "Command refused (not allowed when autonomous)").into();
@@ -450,6 +532,16 @@ impl NotesApp {
                         } else {
                             None
                         };
+                        // A question to the person still unanswered: wait for it rather
+                        // than send the AI on.
+                        let asked = pause
+                            && reason.is_none()
+                            && self.ws.inbox.iter().any(|m| m.kind == "question" && m.project == r.project && m.answer.trim().is_empty() && m.at >= r.started_wall);
+                        if asked {
+                            r.pause(Wait::Question);
+                            paused.push((r.project.clone(), r.title.clone(), Wait::Question));
+                            continue;
+                        }
                         match reason {
                             Some(why) => {
                                 r.stop = Some(why.clone());
@@ -462,12 +554,18 @@ impl NotesApp {
                         r.phase = Phase::Typed(now);
                     }
                 }
+                // Paused: nothing moves until the person answers.
+                Phase::Waiting => {}
                 Phase::Closing(t) => {
                     if t.elapsed() > Duration::from_secs(3) || r.term.exited() {
                         finished.push((i, String::new(), String::new()));
                     }
                 }
             }
+        }
+        for (project, title, why) in paused {
+            self.ws.notify("info", &project, &crate::trf!("{title} attend votre réponse", "{title} waits for your answer"), why.label(), None);
+            self.dirty_since.get_or_insert_with(Instant::now);
         }
         // Finished sessions: report, inbox, then close the terminal.
         for (i, why, summary) in finished.into_iter().rev() {
@@ -989,6 +1087,9 @@ impl NotesApp {
                 row(ui, crate::tr!("Commits autorisés", "Commits allowed"), crate::tr!("Sur leur branche, envoyée sur GitHub par Orchestra", "On their branch, pushed to GitHub by Orchestra"), &mut |ui| {
                     super::settings::switch(ui, &mut o.allow_commits, &lk);
                 });
+                row(ui, crate::tr!("Pause quand l'IA attend", "Pause when the AI waits"), crate::tr!("Autorisation, dossier à approuver ou question posée : la session attend votre réponse au lieu de refuser ou de s'arrêter", "A permission, a folder to approve or a question asked: the session waits for your answer instead of refusing or stopping"), &mut |ui| {
+                    super::settings::switch(ui, &mut o.pause_for_answer, &lk);
+                });
                 row(ui, crate::tr!("Reprise automatique", "Automatic restart"), crate::tr!("Une session arrêtée par la limite globale ou la réserve de la semaine repart seule après la remise à zéro du quota", "A session stopped by the global limit or the week's reserve starts again by itself once the quota resets"), &mut |ui| {
                     super::settings::switch(ui, &mut o.auto_resume, &lk);
                 });
@@ -1060,9 +1161,11 @@ impl NotesApp {
                         Phase::Starting(_) => crate::tr!("démarre", "starting").to_string(),
                         Phase::Summary(_) => crate::tr!("compte rendu", "summary").to_string(),
                         Phase::Closing(_) => crate::tr!("se ferme", "closing").to_string(),
+                        Phase::Waiting => crate::tr!("en pause", "paused").to_string(),
                         _ => format!("tour {}", r.turns + 1),
                     };
-                    ui.label(RichText::new(state).size(12.5).color(t.tertiary));
+                    let state_color = if r.waiting.is_some() { super::projects::ORANGE } else { t.tertiary };
+                    ui.label(RichText::new(state).size(12.5).color(state_color));
                     if let Some(c) = &r.endless {
                         ui.label(RichText::new(crate::tr!("∞ sans fin", "∞ endless")).size(12.5).color(super::projects::BLUE))
                             .on_hover_text(crate::trf!("S'arrête après : {}, ou sur son budget", "Stops after: {}, or on its budget", c.describe()));
@@ -1073,6 +1176,13 @@ impl NotesApp {
                         }
                         if r.stop.is_none() && super::projects::action_link(ui, crate::tr!("Arrêter", "Stop")).on_hover_text(crate::tr!("Finit le tour en cours, écrit le compte rendu, puis s'arrête", "Finishes the current turn, writes the summary, then stops")).clicked() {
                             stop = Some((i, false));
+                        }
+                        if r.waiting.is_some()
+                            && super::projects::action_link(ui, crate::tr!("Reprendre", "Resume"))
+                                .on_hover_text(crate::tr!("L'IA repart ; une question restée à l'écran est refusée", "The AI goes on; a question still on the screen is refused"))
+                                .clicked()
+                        {
+                            r.resume();
                         }
                         let open = watching.as_deref() == Some(r.id.as_str());
                         if super::projects::action_link(ui, if open { crate::tr!("Masquer", "Hide") } else { crate::tr!("Regarder", "Watch") }).clicked() {

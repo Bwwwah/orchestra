@@ -740,6 +740,10 @@ pub struct OrchSettings {
     /// A session stopped by the 5-hour or weekly limit starts again by itself once that
     /// window resets.
     pub auto_resume: bool,
+    /// When the AI waits for an answer (a permission, « trust this folder », a question
+    /// asked with ask_human), the session pauses for the person instead of refusing or
+    /// stopping.
+    pub pause_for_answer: bool,
 }
 
 impl Default for OrchSettings {
@@ -756,6 +760,7 @@ impl Default for OrchSettings {
             last_daily: String::new(),
             reports_page: String::new(),
             auto_resume: true,
+            pause_for_answer: false,
         }
     }
 }
