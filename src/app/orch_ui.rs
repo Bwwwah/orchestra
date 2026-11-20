@@ -963,7 +963,7 @@ impl NotesApp {
         }
     }
 
-    pub(super) fn orchestra_view(&mut self, ui: &mut egui::Ui) {
+    pub(super) fn orchestra_view(&mut self, ui: &mut egui::Ui, actions: &mut Vec<Action>) {
         let t = tone(ui.visuals().dark_mode);
         let avail = ui.available_width();
         let width = 1000.0f32.min(avail - 40.0).max(320.0);
@@ -989,6 +989,10 @@ impl NotesApp {
                 // The AIs' questions: those waiting (a paused session goes on once answered),
                 // then the answers of the last days.
                 if self.questions_card(ui, &t) {
+                    ui.add_space(14.0);
+                }
+                // Work left in copies whose end message was deleted: nowhere else to deal with it.
+                if self.orphans_card(ui, &t, actions) {
                     ui.add_space(14.0);
                 }
                 // The settings and limits come first: they frame every launch below.
@@ -1921,6 +1925,47 @@ impl NotesApp {
         }
     }
 
+    /// The finished sessions whose work is still in their copy while their end message is
+    /// gone from the inbox (its links went with it): listed here, with the same links.
+    /// Shown only when there is one; returns whether it was.
+    fn orphans_card(&mut self, ui: &mut egui::Ui, t: &Tone, actions: &mut Vec<Action>) -> bool {
+        let busy = |id: &str| self.orch.runs.iter().any(|l| l.id == id) || self.orch.to_main.iter().any(|x| x == id);
+        let list = orphan_copies(&self.ws.runs, &self.ws.inbox, busy, |w| std::path::Path::new(w).is_dir());
+        if list.is_empty() {
+            return false;
+        }
+        let confirm = self.orch.confirm.clone();
+        let mut act: Option<(String, &'static str)> = None;
+        super::projects::card(ui, t, 0.0, |ui| {
+            super::projects::card_title(ui, crate::tr!("COPIES À TRAITER", "COPIES TO DEAL WITH"), &list.len().to_string(), t);
+            for &i in &list {
+                let r = &self.ws.runs[i];
+                ui.add_space(4.0);
+                ui.horizontal_wrapped(|ui| {
+                    ui.spacing_mut().item_spacing.x = 8.0;
+                    ui.label(RichText::new(&r.title).font(semibold(14.0)).color(t.text));
+                    ui.label(RichText::new(format!("{} · {}", auto::local_day(r.started), auto::hm(r.started))).size(12.5).color(t.tertiary));
+                    if let Some(p) = &r.report
+                        && super::projects::action_link(ui, crate::tr!("Rapport", "Report")).clicked()
+                    {
+                        act = Some((p.clone(), "report"));
+                    }
+                });
+                let asking = confirm.as_ref().filter(|(id, _)| *id == r.id).map(|(_, a)| *a);
+                if let Some(a) = run_actions(ui, r, asking, t) {
+                    act = Some((r.id.clone(), a));
+                }
+                ui.add_space(6.0);
+            }
+        });
+        match act {
+            Some((page, "report")) => actions.push(Action::Open(page)),
+            Some((id, a)) => self.run_action(&id, a),
+            None => {}
+        }
+        true
+    }
+
     /// A click on a finished session's copy: ask first, then merge or discard it.
     fn run_action(&mut self, id: &str, a: &'static str) {
         match a {
@@ -1960,6 +2005,18 @@ fn run_of_message<'a>(m: &crate::model::InboxMsg, runs: &'a [crate::model::RunRe
     }
     let page = m.page.as_ref().filter(|p| !p.is_empty())?;
     runs.iter().find(|r| r.report.as_ref() == Some(page)).filter(|r| !r.outcome.is_empty() && !busy(&r.id))
+}
+
+/// The finished sessions (indices in `runs`) whose work waits in a copy still on disk,
+/// not merged nor discarded, not `busy`, and whose end message is no longer in the inbox.
+fn orphan_copies(runs: &[crate::model::RunRecord], inbox: &[crate::model::InboxMsg], busy: impl Fn(&str) -> bool, copy_exists: impl Fn(&str) -> bool) -> Vec<usize> {
+    runs.iter()
+        .enumerate()
+        .filter(|(_, r)| !r.outcome.is_empty() && r.closed.is_empty() && !busy(&r.id))
+        .filter(|(_, r)| !inbox.iter().any(|m| run_of_message(m, std::slice::from_ref(*r), |_| false).is_some()))
+        .filter(|(_, r)| copy_exists(&r.worktree))
+        .map(|(i, _)| i)
+        .collect()
 }
 
 /// Under the end of a session: what became of its copy, or the links to deal with it
@@ -2697,6 +2754,33 @@ mod tests {
         assert!(super::run_of_message(&msg("rapport", Some("page-a")), &runs, idle).is_none());
         // Started again, or waiting to be merged into main by itself.
         assert!(super::run_of_message(&msg("fin", Some("page-c")), &runs, |id| id == "c").is_none());
+    }
+
+    /// Listed on the Orchestration page: only finished work still waiting in its copy whose
+    /// end message (and so its links) left the inbox.
+    #[test]
+    fn copies_left_without_their_end_message_are_listed() {
+        use crate::model::{InboxMsg, RunRecord};
+        let run = |id: &str, outcome: &str, closed: &str| RunRecord {
+            id: id.into(),
+            worktree: format!("/w/{id}"),
+            report: Some(format!("page-{id}")),
+            outcome: outcome.into(),
+            closed: closed.into(),
+            ..Default::default()
+        };
+        let runs = vec![
+            run("orpheline", "terminée", ""),
+            run("avec-message", "terminée", ""),
+            run("fusionnee", "terminée", "fusionné"),
+            run("en-cours", "", ""),
+            run("copie-partie", "terminée", ""),
+            run("vers-main", "terminée", ""),
+        ];
+        let inbox = vec![InboxMsg { kind: "fin".into(), page: Some("page-avec-message".into()), ..Default::default() }];
+        let exists = |w: &str| w != "/w/copie-partie";
+        assert_eq!(super::orphan_copies(&runs, &inbox, |id| id == "vers-main", exists), [0]);
+        assert_eq!(super::orphan_copies(&runs, &[], |_| false, exists), [0, 1, 5]);
     }
 
     #[test]
