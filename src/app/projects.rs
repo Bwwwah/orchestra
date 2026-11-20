@@ -991,6 +991,8 @@ pub(super) fn project_panel(ui: &mut egui::Ui, cx: &mut Cx) -> Option<super::not
     if cx_copy {
         cx.actions.push(Action::LocalCopy(cx.page_id.to_string()));
     }
+    quick_question(ui, cx);
+    ui.add_space(16.0);
     let w = ui.available_width();
     let gap = 16.0;
     use CardKind::*;
@@ -2054,6 +2056,76 @@ fn review_sections(ui: &mut egui::Ui, text: &str, t: &Tone) {
 
 /// Full-width card at the bottom of a project: an AI's short, honest outside view —
 /// opinion, similar projects that appeared, what to do next.
+/// "Question rapide": one line to ask the AI something about the project (« would this
+/// feature be worth it? »); the answer comes in the same box, a few lines, read-only.
+fn quick_question(ui: &mut egui::Ui, cx: &mut Cx) {
+    let (page_id, t) = (cx.page_id, cx.t);
+    let prefer = cx.live.first().map(|s| s.tool);
+    let folder = cx.pr.folder.trim().to_string();
+    let text_key = egui::Id::unique(("quick-question", page_id));
+    let mut text: String = ui.ctx().data(|d| d.get_temp(text_key)).unwrap_or_default();
+    let asking = cx.ai.asking(page_id).map(String::from);
+    let mut close = false;
+    card(ui, t, 0.0, |ui| {
+        ui.horizontal(|ui| {
+            let (r, _) = ui.allocate_exact_size(egui::vec2(18.0, 22.0), egui::Sense::hover());
+            ui.painter().text(r.center(), egui::Align2::CENTER_CENTER, "?", semibold(15.0), Color32::from_rgb(144, 101, 176));
+            let send_w = 90.0;
+            let edit = ui.add_enabled(
+                asking.is_none(),
+                egui::TextEdit::singleline(&mut text)
+                    .hint_text(crate::tr!("Question rapide à l'IA, ex. « telle fonctionnalité serait-elle intéressante ? »", "Quick question to the AI, e.g. « would this feature be worth it? »"))
+                    .frame(egui::Frame::NONE)
+                    .font(FontId::proportional(TEXT))
+                    .char_limit(crate::sync::QUESTION_MAX)
+                    .desired_width((ui.available_width() - send_w).max(80.0)),
+            );
+            let ready = asking.is_none() && !text.trim().is_empty();
+            let enter = edit.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter));
+            let sent = ui.add_enabled_ui(ready, |ui| action_link(ui, crate::tr!("Demander", "Ask"))).inner.clicked();
+            if ready && (sent || enter) {
+                super::ai_fill::request(ui.ctx(), super::ai_fill::AiReq::Question { page_id: page_id.to_string(), folder: folder.clone(), question: text.trim().to_string(), prefer });
+                text.clear();
+            }
+        });
+        if let Some(q) = &asking {
+            ui.add_space(6.0);
+            ui.label(RichText::new(q).size(12.5).color(t.secondary).italics());
+            ui.horizontal(|ui| {
+                ui.add(egui::Spinner::new().size(12.0));
+                ui.label(RichText::new(crate::tr!("L'IA réfléchit… (quelques dizaines de secondes)", "The AI is thinking… (a few dozen seconds)")).size(12.5).color(t.tertiary));
+            });
+        } else if let Some(a) = cx.ai.answers.get(page_id) {
+            card_rule(ui, t);
+            ui.horizontal(|ui| {
+                ui.add(egui::Label::new(RichText::new(&a.question).size(12.5).color(t.secondary).italics()).wrap());
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Min), |ui| {
+                    if ui.add(egui::Button::new(RichText::new("×").color(t.tertiary)).frame(false)).on_hover_text(crate::tr!("Fermer la réponse", "Close the answer")).clicked() {
+                        close = true;
+                    }
+                });
+            });
+            ui.add_space(4.0);
+            match &a.answer {
+                Ok(md) => {
+                    super::rich::markdown(ui, md, 13.5, t);
+                    if !a.by.is_empty() {
+                        ui.add_space(2.0);
+                        ui.label(RichText::new(crate::trf!("réponse de {}", "answer by {}", a.by)).size(11.5).color(t.tertiary));
+                    }
+                }
+                Err(e) => {
+                    ui.add(egui::Label::new(RichText::new(crate::trf!("Pas de réponse : {e}", "No answer: {e}")).size(12.5).color(ORANGE)).wrap());
+                }
+            }
+        }
+    });
+    if close {
+        cx.ai.answers.remove(page_id);
+    }
+    ui.ctx().data_mut(|d| d.insert_temp(text_key, text));
+}
+
 fn review_card(ui: &mut egui::Ui, cx: &mut Cx) {
     let (page_id, t) = (cx.page_id, cx.t);
     let pr = &*cx.pr;
