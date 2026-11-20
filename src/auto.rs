@@ -525,6 +525,27 @@ pub fn strip_markers(text: &str) -> String {
     text.replace("[[CONTINUER]]", "").replace("[[FINI]]", "").replace("[[BLOQUÉ]]", "").replace("[[BLOQUE]]", "").trim().to_string()
 }
 
+/// Whether the person already said, in Claude Code itself, that they trust `root` (the
+/// project's repository) or a folder above it. Claude Code asks again for the copy, a new
+/// folder: Orchestra answers yes only then, and never for a repository nobody approved
+/// (accepting turns on its hooks, MCP servers and settings).
+pub fn folder_trusted(root: &str) -> bool {
+    let Ok(text) = std::fs::read_to_string(crate::usage::claude_json()) else { return false };
+    trusted_in(&text, root)
+}
+
+fn trusted_in(claude_json: &str, root: &str) -> bool {
+    let Ok(v) = serde_json::from_str::<Value>(claude_json) else { return false };
+    let Some(projects) = v["projects"].as_object() else { return false };
+    let root = Path::new(root.trim_end_matches('/'));
+    if root.as_os_str().is_empty() {
+        return false;
+    }
+    root.ancestors()
+        .filter(|a| a.parent().is_some()) // Never the whole disk because "/" was trusted.
+        .any(|a| projects.get(&a.display().to_string()).is_some_and(|p| p["hasTrustDialogAccepted"].as_bool() == Some(true)))
+}
+
 /// What the screen of the hidden terminal shows that needs an answer.
 #[derive(Debug, PartialEq)]
 pub enum Screen {
@@ -745,6 +766,18 @@ mod tests {
         assert!(allowed.iter().any(|a| a == "Bash(python -m pytest:*)"));
         let cmd = Agent::ClaudeCode.command(false, "");
         assert!(cmd.contains("--disallowedTools") && cmd.contains("Bash(rm:*)"));
+    }
+
+    #[test]
+    fn trust_only_what_the_person_trusted() {
+        let j = r#"{"projects":{"/Users/a/Code/app":{"hasTrustDialogAccepted":true},"/Users/a/Code/other":{"hasTrustDialogAccepted":false},"/":{"hasTrustDialogAccepted":true},"/Users/b":{"hasTrustDialogAccepted":true}}}"#;
+        assert!(trusted_in(j, "/Users/a/Code/app"));
+        assert!(trusted_in(j, "/Users/a/Code/app/"));
+        assert!(trusted_in(j, "/Users/b/x/y"));
+        assert!(!trusted_in(j, "/Users/a/Code/other"));
+        assert!(!trusted_in(j, "/Users/a/Code/new"));
+        assert!(!trusted_in(j, ""));
+        assert!(!trusted_in("not json", "/Users/a/Code/app"));
     }
 
     #[test]

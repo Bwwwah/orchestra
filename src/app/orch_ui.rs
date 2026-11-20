@@ -40,6 +40,8 @@ pub struct LiveRun {
     since: std::time::SystemTime,
     base: String,
     worktree: String,
+    /// The project's repository (the copy's origin), for its trust in Claude Code.
+    root: String,
     pub limit: f32,
     pub pct: f32,
     tokens_counted: u64,
@@ -233,6 +235,7 @@ impl NotesApp {
             reader: auto::Reader::default(),
             since: std::time::SystemTime::now() - Duration::from_secs(2),
             base: copy.base,
+            root: copy.root,
             worktree: copy.worktree,
             limit,
             pct: 0.0,
@@ -322,10 +325,21 @@ impl NotesApp {
                         finished.push((i, crate::tr!("Claude Code n'a pas démarré", "Claude Code didn't start").into(), String::new()));
                     } else if t0.elapsed() > Duration::from_secs(3) && idle > Duration::from_millis(2500) {
                         match auto::read_screen(&screen) {
-                            Screen::Trust => {
-                                // The copy is a folder Orchestra made for this session.
+                            Screen::Trust if auto::folder_trusted(&r.root) => {
+                                // The person already trusts this repository in Claude Code;
+                                // the copy is the same repository, in a new folder.
                                 r.term.write(b"\r");
                                 r.screen_changed = now;
+                            }
+                            Screen::Trust => {
+                                // Never accept for them: it would turn on the repository's
+                                // hooks, MCP servers and settings.
+                                r.term.write(b"\x1b");
+                                finished.push((i, crate::trf!(
+                                    "Claude Code demande si le dossier est sûr ; ouvrez-le une fois dans « {} » et acceptez, puis relancez",
+                                    "Claude Code asks whether the folder is safe; open it once in « {} » and accept, then start again",
+                                    r.root
+                                ), String::new()));
                             }
                             _ => {
                                 if let Some(text) = r.next.take() {
