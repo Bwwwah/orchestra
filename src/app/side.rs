@@ -188,7 +188,7 @@ impl NotesApp {
         }
         // Which session: the chosen one if still there, else the most recent.
         let sel = self.ai_session.clone().filter(|id| live.iter().any(|s| &s.id == id)).unwrap_or_else(|| live[0].id.clone());
-        let s = live.iter().find(|s| s.id == sel).unwrap().clone();
+        let s = live.iter().find(|s| s.id == sel).unwrap_or(&live[0]).clone();
         egui::ComboBox::from_id_salt(("ai-session", pid))
             .width(ui.available_width() - 8.0)
             .selected_text(format!("{} · {}", s.tool.label(), crate::richtext::one_line(&s.display_title(), 40)))

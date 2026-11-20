@@ -1850,7 +1850,7 @@ impl NotesApp {
             }
         }
         for p in self.ws.projects() {
-            let pr = p.project.as_ref().unwrap();
+            let Some(pr) = p.project.as_ref() else { continue };
             if pr.folder.trim().is_empty() {
                 continue;
             }
@@ -2255,8 +2255,8 @@ impl NotesApp {
             }
         let done: Vec<String> = self.reviews.iter().filter(|(_, j)| j.result.lock_or_recover().is_some()).map(|(k, _)| k.clone()).collect();
         for id in done {
-            let job = self.reviews.remove(&id).unwrap();
-            let res = job.result.lock_or_recover().take().unwrap();
+            let Some(job) = self.reviews.remove(&id) else { continue };
+            let Some(res) = job.result.lock_or_recover().take() else { continue };
             match res {
                 Ok((text, tool)) => {
                     if let Some(pr) = self.ws.page_mut(&id).and_then(|p| p.project.as_mut()) {

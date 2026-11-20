@@ -647,7 +647,8 @@ impl NotesApp {
                 ui.spacing_mut().item_spacing.x = 4.0;
                 ui.add_space(8.0);
                 let more = icons::button(ui, Icon::More, 28.0, t.text, t.hover, "");
-                let page = self.ws.page_mut(cur).unwrap();
+                // Gone meanwhile (deleted from another window or by an AI): nothing to show.
+                let Some(page) = self.ws.page_mut(cur) else { return };
                 let words: usize = page.blocks.iter().map(|b| b.text.split_whitespace().count()).sum();
                 let mut reformatted = None;
                 egui::Popup::menu(&more).show(|ui| {
