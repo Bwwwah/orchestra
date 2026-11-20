@@ -186,6 +186,21 @@ fn default_prefs(commits: bool) -> crate::project::LaunchPrefs {
     crate::project::LaunchPrefs { commits, endless: false, end: crate::model::EndConditions { hours: Some(4.0), ..Default::default() } }
 }
 
+/// What is left of the global limit for one project of the launch card: the global limit
+/// less the sessions running and the other projects picked (`own`: this project's budget
+/// when it is picked itself, so it doesn't count against itself). Whole percents.
+fn room_for(global: f32, running_sum: f32, picked_sum: f32, own: Option<f32>) -> f32 {
+    let others = running_sum + picked_sum - own.unwrap_or(0.0);
+    (global - others).floor().max(0.0)
+}
+
+/// The budget a session gets when it starts: the one chosen, within what is left of the
+/// global limit once `taken` by the sessions running; None when less than 1 % is left.
+fn share_at_start(want: f32, global: f32, taken: f32) -> Option<f32> {
+    let left = (global - taken).floor();
+    (left >= 1.0).then(|| want.min(left).max(1.0))
+}
+
 /// What to do with a finished session's copy.
 #[derive(Clone, Copy, PartialEq)]
 enum CopyOp {
@@ -1781,8 +1796,7 @@ impl NotesApp {
                 let busy = running.contains(id);
                 let bg = super::projects::hover_begin(ui);
                 let open = open_steps.get(id).copied().unwrap_or(0);
-                let others = running_sum + if d.pick { picked_sum - d.limit } else { picked_sum };
-                let room = (global - others).floor().max(0.0);
+                let room = room_for(global, running_sum, picked_sum, d.pick.then_some(d.limit));
                 // Room for the project and its controls on one line (about 620 px).
                 let wide = ui.available_width() >= LAUNCH_ONE_LINE;
                 let row = ui.vertical(|ui| {
@@ -1944,7 +1958,15 @@ impl NotesApp {
             let d = self.orch.drafts.get(&id).cloned().unwrap();
             let title = self.ws.page(&id).map(|p| p.display_title()).unwrap_or_default();
             let taken: f32 = self.orch.runs.iter().map(|r| r.limit).sum();
-            let limit = d.limit.min((global - taken).floor()).max(1.0);
+            // The global limit already shared out (by the projects started just before, in
+            // a selection): this one doesn't start on a crumb of it.
+            let Some(limit) = share_at_start(d.limit, global, taken) else {
+                msg = Some(super::notices::Notice::Error(crate::trf!(
+                    "{title} : la limite globale ({global:.0} %) est déjà prise par les autres sessions.",
+                    "{title}: the global limit ({global:.0} %) is already taken by the other sessions."
+                )));
+                continue;
+            };
             let endless = if d.endless { Some(d.end.clone()) } else { None };
             match self.launch_run(ctx, &id, &d.mission, limit, d.commits, endless) {
                 Ok(()) => {
@@ -3065,6 +3087,38 @@ fn start_button(ui: &mut egui::Ui, enabled: bool, t: &Tone) -> egui::Response {
 /// The mark and colour of a finished session: done, stopped on a limit or a block, failed.
 #[cfg(test)]
 mod tests {
+    /// The global limit shared in the launch card: what each project may take.
+    #[test]
+    fn the_global_limit_is_shared() {
+        use super::{room_for, share_at_start};
+        // Nothing running nor picked: all of it.
+        assert_eq!(room_for(90.0, 0.0, 0.0, None), 90.0);
+        // A session running at 30 %: 60 left, whole percents only.
+        assert_eq!(room_for(90.0, 30.0, 0.0, None), 60.0);
+        assert_eq!(room_for(90.0, 30.5, 0.0, None), 59.0);
+        // Two projects picked, 20 and 25: one not picked sees 45 left; a picked one
+        // doesn't count against itself.
+        assert_eq!(room_for(90.0, 0.0, 45.0, None), 45.0);
+        assert_eq!(room_for(90.0, 0.0, 45.0, Some(20.0)), 65.0);
+        // Over-subscribed: never below zero.
+        assert_eq!(room_for(90.0, 60.0, 95.0, None), 0.0);
+
+        // At the start: the budget chosen when it fits…
+        assert_eq!(share_at_start(20.0, 90.0, 0.0), Some(20.0));
+        // …cut to what is left when it doesn't…
+        assert_eq!(share_at_start(95.0, 95.0, 20.0), Some(75.0));
+        // …at least 1 %…
+        assert_eq!(share_at_start(0.0, 90.0, 0.0), Some(1.0));
+        // …and no start at all when less than 1 % is left.
+        assert_eq!(share_at_start(20.0, 90.0, 89.5), None);
+        assert_eq!(share_at_start(20.0, 90.0, 90.0), None);
+        // A selection of two at 95 % with a global limit of 95 %: the first takes it all,
+        // the second doesn't start on a crumb.
+        let first = share_at_start(95.0, 95.0, 0.0).unwrap();
+        assert_eq!(first, 95.0);
+        assert_eq!(share_at_start(95.0, 95.0, first), None);
+    }
+
     #[test]
     fn only_endless_on_main_is_warned() {
         assert!(super::endless_on_main(true, true));
