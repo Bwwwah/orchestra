@@ -270,6 +270,29 @@ fn save(ws: &Workspace) -> Result<(), String> {
     store::save(ws).map_err(|e| format!("could not save: {e}"))
 }
 
+/// A project folder sent by an AI: the autonomous sessions work in a copy of it and read
+/// its documents, so it must be a real folder named in full, not a relative path (read
+/// from wherever the server runs), a missing one, the whole disk or the whole home
+/// folder. Kept as written (`~/Code/x` stays so); an empty folder clears it.
+fn check_folder(folder: &str) -> Result<String, String> {
+    let f = folder.trim();
+    if f.is_empty() {
+        return Ok(String::new());
+    }
+    if !(f.starts_with('/') || f == "~" || f.starts_with("~/")) {
+        return Err(format!("folder must be a full path (/… or ~/…), not « {f} »"));
+    }
+    let path = project::normalize_folder(f);
+    let home = dirs::home_dir().unwrap_or_default();
+    if path.parent().is_none() || path == home {
+        return Err(format!("folder « {f} » is too wide: give the project's own folder"));
+    }
+    if !path.is_dir() {
+        return Err(format!("no folder at « {f} »"));
+    }
+    Ok(f.to_string())
+}
+
 fn md_blocks(md: &str) -> Vec<Block> {
     let mut p = store::page_from_markdown(&format!("# _\n{md}"), "_");
     p.blocks.retain(|b| !(b.kind == BlockKind::Paragraph && b.text.is_empty()));
@@ -588,9 +611,12 @@ fn call_tool(name: &str, args: &Value) -> Result<String, ToolError> {
         }
         "create_project" => {
             let title = need(args, "title")?;
-            let folder = s(args, "folder").unwrap_or("");
+            let folder = match s(args, "folder") {
+                Some(f) if !f.trim().is_empty() => check_folder(f)?,
+                _ => String::new(),
+            };
             let src = s(args, "source").unwrap_or("ia");
-            let id = ws.create_project(title, folder);
+            let id = ws.create_project(title, &folder);
             let pr = ws.page_mut(&id).unwrap().project.as_mut().unwrap();
             if let Some(sum) = summary_arg(args) {
                 pr.set_summary(&sum, src);
@@ -615,7 +641,7 @@ fn call_tool(name: &str, args: &Value) -> Result<String, ToolError> {
                 pr.status = project::ProjectStatus::from_name(st).ok_or_else(|| format!("unknown status {st}"))?;
             }
             if let Some(f) = s(args, "folder") {
-                pr.folder = f.trim().to_string();
+                pr.folder = check_folder(f)?;
             }
             if let Some(sum) = summary_arg(args) {
                 pr.set_summary(&sum, &src);
@@ -799,6 +825,31 @@ mod tests {
         for i in 0..n {
             assert!(titles.contains(&format!("Étape parallèle {i}")), "étape {i} perdue : {titles:?}");
         }
+    }
+
+    /// An AI can't point a project at a relative, missing or too wide folder; a real one,
+    /// named in full, is kept as written, and nothing changes on a refusal.
+    #[test]
+    fn update_project_checks_the_folder() {
+        let _g = fresh_workspace();
+        let pid = project_with_steps(&[]);
+        let real = store::data_dir().join("projet-réel");
+        std::fs::create_dir_all(&real).unwrap();
+        let real = real.display().to_string();
+        call("update_project", json!({"project": pid, "folder": real})).unwrap();
+        let folder = || store::load().page(&pid).unwrap().project.clone().unwrap().folder;
+        assert_eq!(folder(), real);
+        for bad in ["src", "./x", "../../etc", "/", "~", "/nulle/part/ici", "~/ce-dossier-n-existe-pas-42"] {
+            let err = call("update_project", json!({"project": pid, "folder": bad, "title": "Renommé"})).unwrap_err();
+            assert!(err.contains("folder"), "{bad} : {err}");
+            assert_eq!(folder(), real, "{bad}");
+        }
+        assert_ne!(store::load().page(&pid).unwrap().title, "Renommé", "nothing saved on a refusal");
+        // An empty folder clears it; create_project checks it the same way.
+        call("update_project", json!({"project": pid, "folder": ""})).unwrap();
+        assert_eq!(folder(), "");
+        assert!(call("create_project", json!({"title": "Autre", "folder": "relatif/dossier"})).is_err());
+        assert!(call("create_project", json!({"title": "Sans dossier"})).is_ok());
     }
 
     #[test]
