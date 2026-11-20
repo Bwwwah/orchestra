@@ -34,6 +34,18 @@ mod store;
 mod update;
 mod usage;
 
+/// Lock a value shared with a background thread even when that thread panicked while
+/// holding it: the value is taken as it is, rather than bringing the whole app down.
+pub(crate) trait LockOrRecover<T> {
+    fn lock_or_recover(&self) -> std::sync::MutexGuard<'_, T>;
+}
+
+impl<T> LockOrRecover<T> for std::sync::Mutex<T> {
+    fn lock_or_recover(&self) -> std::sync::MutexGuard<'_, T> {
+        self.lock().unwrap_or_else(|e| e.into_inner())
+    }
+}
+
 const HELP: &str = "Orchestra — pages, blocs et bases de données, sur votre ordinateur.
 
 Utilisation :

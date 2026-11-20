@@ -11,6 +11,7 @@
 //! Only Claude Code for now; what depends on the agent is in `Agent` (command, session
 //! files), so Codex can be added there.
 
+use crate::LockOrRecover;
 use serde_json::Value;
 use std::collections::HashSet;
 use std::io::{Read, Seek, SeekFrom};
@@ -246,11 +247,11 @@ pub const DEV: &str = "dev";
 static BUSY: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
 
 pub fn set_busy(copies: Vec<String>) {
-    *BUSY.lock().unwrap() = copies;
+    *BUSY.lock_or_recover() = copies;
 }
 
 fn is_busy(copy: &Path) -> bool {
-    BUSY.lock().unwrap().iter().any(|b| Path::new(b) == copy)
+    BUSY.lock_or_recover().iter().any(|b| Path::new(b) == copy)
 }
 
 /// A new worktree of the project's repository. `on_dev`: on the shared branch `dev`

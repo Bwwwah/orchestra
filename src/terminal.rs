@@ -7,6 +7,7 @@ use portable_pty::{Child, CommandBuilder, MasterPty, PtySize, native_pty_system}
 use std::io::{Read, Write};
 use std::num::NonZeroU16;
 use std::sync::atomic::{AtomicBool, Ordering};
+use crate::LockOrRecover;
 use std::sync::{Arc, Mutex, OnceLock};
 
 /// The person's shell PATH, looked up once (see `sync::shell_path`).
@@ -113,7 +114,7 @@ impl Term {
                     match reader.read(&mut buf) {
                         Ok(0) | Err(_) => break,
                         Ok(n) => {
-                            p2.lock().unwrap().process(&buf[..n]);
+                            p2.lock_or_recover().process(&buf[..n]);
                             on_output();
                         }
                     }
@@ -149,14 +150,14 @@ impl Term {
     pub fn write(&mut self, bytes: &[u8]) {
         self.selection = None;
         // Typing brings the view back to the live screen.
-        self.parser.lock().unwrap().screen_mut().set_scrollback(0);
+        self.parser.lock_or_recover().screen_mut().set_scrollback(0);
         let _ = self.writer.write_all(bytes);
         let _ = self.writer.flush();
     }
 
     /// Paste text, wrapped in bracketed-paste markers when the program asked for them.
     pub fn paste(&mut self, text: &str) {
-        let bracketed = self.parser.lock().unwrap().screen().bracketed_paste();
+        let bracketed = self.parser.lock_or_recover().screen().bracketed_paste();
         let text = text.replace("\r\n", "\n").replace('\n', "\r");
         if bracketed {
             self.write(format!("\x1b[200~{text}\x1b[201~").as_bytes());
@@ -171,12 +172,12 @@ impl Term {
             return;
         }
         self.size = (rows, cols);
-        self.parser.lock().unwrap().set_size(nz(rows), nz(cols));
+        self.parser.lock_or_recover().set_size(nz(rows), nz(cols));
         let _ = self.master.resize(PtySize { rows, cols, pixel_width: 0, pixel_height: 0 });
     }
 
     pub fn with_screen<R>(&self, f: impl FnOnce(&vt100::Screen) -> R) -> R {
-        f(self.parser.lock().unwrap().screen())
+        f(self.parser.lock_or_recover().screen())
     }
 
     /// The mouse wheel over cell (row, col), `lines` > 0 going up. A program that tracks
@@ -196,7 +197,7 @@ impl Term {
     /// Move through the history: positive goes back in time.
     pub fn scroll(&mut self, rows: i32) {
         self.selection = None;
-        let mut p = self.parser.lock().unwrap();
+        let mut p = self.parser.lock_or_recover();
         let cur = p.screen().scrollback() as i32;
         p.screen_mut().set_scrollback((cur + rows).max(0) as usize);
     }

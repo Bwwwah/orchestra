@@ -19,6 +19,7 @@ use std::collections::{BTreeMap, HashMap};
 use std::net::{IpAddr, Shutdown, TcpListener, TcpStream, ToSocketAddrs};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{Receiver, Sender, channel};
+use crate::LockOrRecover;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -397,7 +398,7 @@ pub fn join(address: &str, name: &str, code: &str, wake: Wake) -> Live {
                         if sealer.send(&mut w, &bytes_of(&hello)).is_err() {
                             continue;
                         }
-                        *writer.lock().unwrap() = Some((w, sealer));
+                        *writer.lock_or_recover() = Some((w, sealer));
                         if let Ok(mut st) = status.lock() {
                             st.connected = true;
                             st.error = None;
@@ -425,7 +426,7 @@ pub fn join(address: &str, name: &str, code: &str, wake: Wake) -> Live {
                                 }
                             }
                         }
-                        *writer.lock().unwrap() = None;
+                        *writer.lock_or_recover() = None;
                         if let Ok(mut st) = status.lock() {
                             st.connected = false;
                             st.error = Some(reason.clone());
@@ -448,7 +449,7 @@ pub fn join(address: &str, name: &str, code: &str, wake: Wake) -> Live {
                     std::thread::sleep(Duration::from_millis(100));
                 }
             }
-            if let Some((s, _)) = writer.lock().unwrap().take() {
+            if let Some((s, _)) = writer.lock_or_recover().take() {
                 let _ = s.shutdown(Shutdown::Both);
             }
         });
@@ -456,7 +457,7 @@ pub fn join(address: &str, name: &str, code: &str, wake: Wake) -> Live {
     let out_writer = writer.clone();
     let out: Arc<dyn Fn(&LiveMsg) + Send + Sync> = Arc::new(move |msg: &LiveMsg| {
         let bytes = bytes_of(msg);
-        let mut w = out_writer.lock().unwrap();
+        let mut w = out_writer.lock_or_recover();
         if let Some((s, sealer)) = w.as_mut()
             && sealer.send(s, &bytes).is_err() {
                 *w = None;

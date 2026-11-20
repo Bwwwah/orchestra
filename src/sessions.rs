@@ -16,6 +16,7 @@ use std::collections::{HashMap, HashSet};
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
+use crate::LockOrRecover;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -638,7 +639,7 @@ impl Watcher {
                 let mut sc = Scanner::new(default_roots());
                 loop {
                     if sc.scan() {
-                        *out.lock().unwrap() = Arc::new(sc.sessions());
+                        *out.lock_or_recover() = Arc::new(sc.sessions());
                         on_change();
                     }
                     std::thread::sleep(Duration::from_secs(2));
@@ -649,7 +650,7 @@ impl Watcher {
     }
 
     pub fn sessions(&self) -> Arc<Vec<SessionInfo>> {
-        self.latest.lock().unwrap().clone()
+        self.latest.lock_or_recover().clone()
     }
 }
 

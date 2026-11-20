@@ -12,6 +12,7 @@ use crate::sessions::Tool;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::atomic::{AtomicBool, Ordering};
+use crate::LockOrRecover;
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
@@ -686,7 +687,7 @@ impl SyncRun {
         let r = run.clone();
         std::thread::spawn(move || {
             let note = |m: String| {
-                r.notes.lock().unwrap().push(m);
+                r.notes.lock_or_recover().push(m);
                 on_change();
             };
             let path = shell_path();
@@ -707,13 +708,13 @@ impl SyncRun {
                     Err(e) => note(crate::trf!("{} n'a pas pu être branché : {e}", "{} couldn't be plugged in: {e}", a.tool.label())),
                 }
             }
-            let n = r.jobs.lock().unwrap().len();
+            let n = r.jobs.lock_or_recover().len();
             for i in 0..n {
                 if r.cancel.load(Ordering::Relaxed) {
                     break;
                 }
                 let (folder, tool) = {
-                    let j = &r.jobs.lock().unwrap()[i];
+                    let j = &r.jobs.lock_or_recover()[i];
                     (j.folder.clone(), j.tool)
                 };
                 let agent = ready.iter().find(|a| a.tool == tool).or_else(|| ready.first()).cloned();
@@ -721,7 +722,7 @@ impl SyncRun {
                     None => Err(crate::tr!("aucune IA disponible", "no AI available").to_string()),
                     Some(a) => {
                         {
-                            let mut jobs = r.jobs.lock().unwrap();
+                            let mut jobs = r.jobs.lock_or_recover();
                             jobs[i].state = JobState::Running;
                             jobs[i].tool = a.tool;
                         }
@@ -729,14 +730,14 @@ impl SyncRun {
                         run_one(a, &folder, &path, &r.cancel)
                     }
                 };
-                r.jobs.lock().unwrap()[i].state = match result {
+                r.jobs.lock_or_recover()[i].state = match result {
                     Ok(m) => JobState::Done(m),
                     Err(e) => JobState::Failed(e),
                 };
                 on_change();
             }
             // Folders never reached (stopped): mark them.
-            for j in r.jobs.lock().unwrap().iter_mut() {
+            for j in r.jobs.lock_or_recover().iter_mut() {
                 if j.state == JobState::Waiting {
                     j.state = JobState::Failed(crate::tr!("non lancé", "not started").into());
                 }
@@ -748,7 +749,7 @@ impl SyncRun {
     }
 
     pub fn snapshot(&self) -> (Vec<Job>, Vec<String>, bool) {
-        (self.jobs.lock().unwrap().clone(), self.notes.lock().unwrap().clone(), self.finished.load(Ordering::Relaxed))
+        (self.jobs.lock_or_recover().clone(), self.notes.lock_or_recover().clone(), self.finished.load(Ordering::Relaxed))
     }
 }
 

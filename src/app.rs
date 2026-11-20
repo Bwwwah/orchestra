@@ -2106,17 +2106,7 @@ fn apply_kind(
     }
 }
 
-/// Lock the slot of a background task even when the thread that held it panicked: its
-/// value is taken as it is, rather than bringing the whole window down with it.
-pub(crate) trait LockOrRecover<T> {
-    fn lock_or_recover(&self) -> std::sync::MutexGuard<'_, T>;
-}
-
-impl<T> LockOrRecover<T> for std::sync::Mutex<T> {
-    fn lock_or_recover(&self) -> std::sync::MutexGuard<'_, T> {
-        self.lock().unwrap_or_else(|e| e.into_inner())
-    }
-}
+pub(crate) use crate::LockOrRecover;
 
 // -------------------------------------------------------------------- databases
 
