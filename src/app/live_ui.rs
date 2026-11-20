@@ -209,7 +209,7 @@ impl NotesApp {
                 }
                 None => {
                     self.live_sent.insert(incoming.id.clone(), incoming.updated);
-                    self.ws.pages.push(incoming);
+                    self.ws.pages.push(collab::received_new(incoming));
                     changed = true;
                 }
             }

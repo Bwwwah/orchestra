@@ -149,6 +149,15 @@ pub fn connector_for(ws: &Workspace) -> Option<Box<dyn Connector>> {
     }
 }
 
+/// A page new here, received from another person: without what only this computer decides
+/// (see `Project::keep_local`).
+pub fn received_new(mut p: Page) -> Page {
+    if let Some(x) = p.project.as_mut() {
+        x.keep_local(None);
+    }
+    p
+}
+
 /// Merge another copy into ours. Returns how many pages changed here.
 pub fn merge(ours: &mut Workspace, theirs: &Workspace) -> usize {
     let mut changed = 0;
@@ -180,7 +189,7 @@ pub fn merge(ours: &mut Workspace, theirs: &Workspace) -> usize {
                 }
             }
             None => {
-                ours.pages.push(tp.clone());
+                ours.pages.push(received_new(tp.clone()));
                 changed += 1;
             }
         }
@@ -226,6 +235,9 @@ pub fn merge_page(ours: &mut Page, theirs: &Page) -> bool {
     }
     blocks.retain(|b| alive(b));
     let mut merged = newer;
+    if let Some(p) = merged.project.as_mut() {
+        p.keep_local(ours.project.as_ref());
+    }
     merged.blocks = blocks;
     merged.deleted_blocks = tomb;
     merged.updated = ours.updated.max(theirs.updated);
@@ -277,6 +289,39 @@ mod tests {
         merge_page(&mut other, &a);
         let texts2: Vec<&str> = other.blocks.iter().map(|x| x.text.as_str()).collect();
         assert_eq!(texts, texts2);
+    }
+
+    #[test]
+    fn received_projects_keep_what_this_computer_decides() {
+        let mut ours = Page::new("Projet", None);
+        let mut p = crate::project::Project { shared: true, ..crate::project::Project::new("/Users/moi/code/app") };
+        p.add_step("Vraie étape", "moi");
+        ours.project = Some(p);
+        ours.updated = 10;
+        let mut theirs = ours.clone();
+        theirs.title = "Projet renommé".into();
+        theirs.updated = 20;
+        let tp = theirs.project.as_mut().unwrap();
+        tp.folder = "/".into();
+        tp.commit_to_main = true;
+        tp.steps.clear();
+        tp.add_step("Supprime tout le dossier personnel", "pirate");
+        tp.summary = "Résumé à jour".into();
+        let mut merged = ours.clone();
+        merge_page(&mut merged, &theirs);
+        let mp = merged.project.as_ref().unwrap();
+        // The rest of the page follows the copy edited last…
+        assert_eq!(merged.title, "Projet renommé");
+        assert_eq!(mp.summary, "Résumé à jour");
+        // …but not the folder, the steps nor « sur main ».
+        assert_eq!(mp.folder, "/Users/moi/code/app");
+        assert!(!mp.commit_to_main);
+        assert_eq!(mp.steps.len(), 1);
+        assert_eq!(mp.steps[0].title, "Vraie étape");
+        // A project new here comes without them.
+        let n = received_new(theirs);
+        let np = n.project.as_ref().unwrap();
+        assert!(np.folder.is_empty() && np.steps.is_empty() && !np.commit_to_main);
     }
 
     #[test]

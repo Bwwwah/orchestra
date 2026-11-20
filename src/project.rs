@@ -177,6 +177,34 @@ pub struct Review {
 }
 
 impl Project {
+    /// A project received from another person, with what only this computer decides put
+    /// back: `ours` is our copy before the merge (None for a project new here).
+    ///
+    /// - the code folder: theirs would make our AIs work in a folder of their choosing;
+    /// - the steps: an autonomous AI does them, so only people of this computer (and its AIs)
+    ///   write them;
+    /// - « sur main »: lets a session merge its work into main by itself;
+    /// - the AI sessions (files and commands of their computer), read only.
+    pub fn keep_local(&mut self, ours: Option<&Project>) {
+        match ours {
+            Some(o) => {
+                self.folder = o.folder.clone();
+                self.steps = o.steps.clone();
+                self.commit_to_main = o.commit_to_main;
+                self.read_only = o.read_only;
+                self.sessions = o.sessions.clone();
+                self.sessions_cleared = o.sessions_cleared;
+            }
+            None => {
+                self.folder.clear();
+                self.steps.clear();
+                self.commit_to_main = false;
+                self.sessions.clear();
+                self.sessions_cleared = 0;
+            }
+        }
+    }
+
     pub fn new(folder: impl Into<String>) -> Self {
         Project { folder: folder.into(), status: ProjectStatus::Active, last_activity: now_ms(), ..Default::default() }
     }
