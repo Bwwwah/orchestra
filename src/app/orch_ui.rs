@@ -678,20 +678,14 @@ impl NotesApp {
             return;
         }
         self.orch.last_reading = Some((u.at, five.pct, five.resets_at));
-        let rise = match prev {
-            Some((_, p, r)) if r.is_some() && five.resets_at.is_some() && r.unwrap().abs_diff(five.resets_at.unwrap()) < 120_000 => (five.pct - p).max(0.0),
-            Some((_, p, None)) if five.resets_at.is_none() => (five.pct - p).max(0.0),
-            Some(_) => five.pct,
-            None => 0.0,
-        };
+        let rise = window_rise(prev.map(|(_, p, r)| (p, r)), five.pct, five.resets_at);
         let deltas: Vec<u64> = self.orch.runs.iter().map(|r| r.reader.tokens.saturating_sub(r.tokens_counted)).collect();
-        let total: u64 = deltas.iter().sum();
-        let n = self.orch.runs.len().max(1) as f32;
-        for (r, d) in self.orch.runs.iter_mut().zip(deltas) {
+        let shares = split_rise(rise, &deltas);
+        for (r, s) in self.orch.runs.iter_mut().zip(shares) {
             if u.at >= r.started_wall {
                 r.measured = true;
             }
-            r.pct += if total > 0 { rise * d as f32 / total as f32 } else { rise / n };
+            r.pct += s;
             r.tokens_counted = r.reader.tokens;
         }
     }
@@ -1823,6 +1817,28 @@ impl NotesApp {
 }
 
 
+/// How much the 5-hour window rose since the last reading (`prev`: its figure and reset
+/// time then). A new window (another reset time) counts from zero; the first reading
+/// counts for nothing: what was used before it isn't anyone's.
+fn window_rise(prev: Option<(f32, Option<u64>)>, pct: f32, resets_at: Option<u64>) -> f32 {
+    match (prev, resets_at) {
+        (Some((p, Some(r))), Some(now)) if r.abs_diff(now) < 120_000 => (pct - p).max(0.0),
+        (Some((p, None)), None) => (pct - p).max(0.0),
+        (Some(_), _) => pct,
+        (None, _) => 0.0,
+    }
+}
+
+/// A rise of the 5-hour window shared between the running sessions, by the tokens each
+/// used since the last reading (evenly when none is known). What each session shows
+/// (`LiveRun::pct`) is the sum of its shares since it started: the window's own figure
+/// at its start is never in it.
+fn split_rise(rise: f32, tokens: &[u64]) -> Vec<f32> {
+    let total: u64 = tokens.iter().sum();
+    let n = tokens.len().max(1) as f32;
+    tokens.iter().map(|&d| if total > 0 { rise * d as f32 / total as f32 } else { rise / n }).collect()
+}
+
 /// In a running session's card: the use of its share of the 5-hour window, as a bar and
 /// its figures.
 /// Never wider than its card: the bar takes what the text leaves (the text was once given
@@ -2170,6 +2186,28 @@ mod tests {
             });
             assert!(row <= width + 0.5, "à {width} px : commandes sur {row} px");
         }
+    }
+
+    /// The case reported: the 5-hour window already at 75 % when a session starts with a
+    /// budget of 90 %; it then rises to 80 %. The session's card reads « 5 % utilisés sur
+    /// un budget de 90 % »: its own use since it started, not the window's 80 %.
+    #[test]
+    fn a_session_shows_its_own_use_not_the_window() {
+        let reset = Some(1_000_000u64);
+        // First reading after the start: the 75 % already there are nobody's.
+        let mut pct = 0.0;
+        let mut prev: Option<(f32, Option<u64>)> = None;
+        for (window, tokens) in [(75.0, 0u64), (78.0, 3_000), (80.0, 2_000)] {
+            pct += super::split_rise(super::window_rise(prev, window, reset), &[tokens])[0];
+            prev = Some((window, reset));
+        }
+        assert!((pct - 5.0).abs() < 0.01, "{pct}");
+        // Two sessions: the rise shared by their tokens.
+        let s = super::split_rise(4.0, &[3_000, 1_000]);
+        assert!((s[0] - 3.0).abs() < 0.01 && (s[1] - 1.0).abs() < 0.01);
+        // A new window: counted from zero; an unknown reset time on both sides: the difference.
+        assert_eq!(super::window_rise(Some((75.0, reset)), 2.0, Some(1_000_000 + 5 * 3_600_000)), 2.0);
+        assert_eq!(super::window_rise(Some((10.0, None)), 12.0, None), 2.0);
     }
 
     #[test]
