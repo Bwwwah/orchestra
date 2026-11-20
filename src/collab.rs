@@ -238,6 +238,10 @@ pub fn merge_page(ours: &mut Page, theirs: &Page) -> bool {
     let mut merged = newer;
     if let Some(p) = merged.project.as_mut() {
         p.keep_local(ours.project.as_ref());
+        // The steps are shared: theirs merged into ours, step by step.
+        if let Some(tp) = theirs.project.as_ref() {
+            p.merge_steps(&tp.steps, &tp.deleted_steps);
+        }
     }
     merged.blocks = blocks;
     merged.deleted_blocks = tomb;
@@ -305,8 +309,8 @@ mod tests {
         let tp = theirs.project.as_mut().unwrap();
         tp.folder = "/".into();
         tp.commit_to_main = true;
-        tp.steps.clear();
-        tp.add_step("Supprime tout le dossier personnel", "pirate");
+        let long = format!("Étape reçue\nsur deux lignes {}", "x".repeat(1000));
+        tp.add_step(&long, "autre");
         tp.summary = "Résumé à jour".into();
         let mut merged = ours.clone();
         merge_page(&mut merged, &theirs);
@@ -314,15 +318,62 @@ mod tests {
         // The rest of the page follows the copy edited last…
         assert_eq!(merged.title, "Projet renommé");
         assert_eq!(mp.summary, "Résumé à jour");
-        // …but not the folder, the steps nor « sur main ».
+        // …but not the folder nor « sur main ».
         assert_eq!(mp.folder, "/Users/moi/code/app");
         assert!(!mp.commit_to_main);
-        assert_eq!(mp.steps.len(), 1);
-        assert_eq!(mp.steps[0].title, "Vraie étape");
-        // A project new here comes without them.
+        // The steps are shared: ours stays as ours, theirs comes in, on one line, cut short,
+        // and marked as received.
+        assert_eq!(mp.steps.len(), 2);
+        assert_eq!((mp.steps[0].title.as_str(), mp.steps[0].received), ("Vraie étape", false));
+        assert!(mp.steps[1].received && !mp.steps[1].title.contains('\n'));
+        assert!(mp.steps[1].title.chars().count() <= crate::project::RECEIVED_STEP_MAX);
+        // A project new here: its steps come in, all marked as received; never its folder.
         let n = received_new(theirs);
         let np = n.project.as_ref().unwrap();
-        assert!(np.folder.is_empty() && np.steps.is_empty() && !np.commit_to_main);
+        assert!(np.folder.is_empty() && !np.commit_to_main);
+        assert_eq!(np.steps.len(), 2);
+        assert!(np.steps.iter().all(|s| s.received));
+    }
+
+    /// Steps edited, added and deleted on two computers: each keeps its latest edit, new
+    /// ones come in, deleted ones stay deleted, and « received » is never taken from the
+    /// other copy.
+    #[test]
+    fn steps_are_shared_step_by_step() {
+        use crate::project::{Project, StepStatus};
+        let mut base = Page::new("Projet", None);
+        let mut p = Project { shared: true, ..Project::new("/x") };
+        let a = p.add_step("A", "moi");
+        let b = p.add_step("B", "moi");
+        let c = p.add_step("C", "moi");
+        base.project = Some(p);
+        base.updated = 10;
+        let (mut here, mut there) = (base.clone(), base.clone());
+        // Here: A done, C deleted. There: B renamed, D added, and it claims D isn't received.
+        let hp = here.project.as_mut().unwrap();
+        hp.set_step_status(&a, StepStatus::Done);
+        hp.remove_step(&c);
+        here.updated = 20;
+        let tp = there.project.as_mut().unwrap();
+        let s = tp.steps.iter_mut().find(|s| s.id == b).unwrap();
+        s.title = "B renommée".into();
+        s.updated = crate::model::now_ms() + 5;
+        let d = tp.add_step("D", "autre");
+        there.updated = 30;
+        let mut merged = here.clone();
+        assert!(merge_page(&mut merged, &there));
+        let mp = merged.project.as_ref().unwrap();
+        let got: Vec<(&str, bool)> = mp.steps.iter().map(|s| (s.title.as_str(), s.received)).collect();
+        assert_eq!(got, [("A", false), ("B renommée", false), ("D", true)]);
+        assert_eq!(mp.steps[0].status, StepStatus::Done);
+        assert!(mp.deleted_steps.contains_key(&c));
+        // And the other way round: C deleted there too, D stays theirs (not received there).
+        let mut back = there.clone();
+        merge_page(&mut back, &merged);
+        let bp = back.project.as_ref().unwrap();
+        assert!(!bp.steps.iter().any(|s| s.id == c));
+        assert!(!bp.steps.iter().find(|s| s.id == d).unwrap().received);
+        assert_eq!(bp.steps.iter().find(|s| s.id == a).unwrap().status, StepStatus::Done);
     }
 
     #[test]

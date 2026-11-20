@@ -1135,8 +1135,12 @@ fn steps_card(ui: &mut egui::Ui, cx: &mut Cx, extra: f32) -> f32 {
                     ui.vertical(|ui| {
                         ui.set_max_width(room);
                         let r = ui.add(egui::Label::new(job).wrap().sense(egui::Sense::click()));
-                        if !s.source.is_empty() {
-                            ui.label(RichText::new(crate::trf!("ajoutée par {} · {}", "added by {} · {}", s.source, relative_time(s.created))).size(12.0).color(t.tertiary));
+                        if !s.source.is_empty() || s.received {
+                            let by = if s.source.is_empty() { String::new() } else { crate::trf!("ajoutée par {} · {}", "added by {} · {}", s.source, relative_time(s.created)) };
+                            // Written on another computer of the shared project.
+                            let from = if s.received { crate::tr!("reçue d'un autre membre du projet", "received from another member of the project") } else { "" };
+                            let sep = if by.is_empty() || from.is_empty() { "" } else { " · " };
+                            ui.label(RichText::new(format!("{by}{sep}{from}")).size(12.0).color(t.tertiary));
                         }
                         r
                     })
@@ -1227,8 +1231,7 @@ fn steps_card(ui: &mut egui::Ui, cx: &mut Cx, extra: f32) -> f32 {
             pr.set_step_status(&id, next);
         }
         if let Some(id) = remove {
-            pr.steps.retain(|s| s.id != id);
-            pr.touch();
+            pr.remove_step(&id);
         }
         // "+ Ajouter une étape": a quiet line aligned with the steps; click to type.
         if ro {
