@@ -500,6 +500,61 @@ pub fn normalize_folder(folder: &str) -> PathBuf {
     out
 }
 
+/// Files whose presence at the root of a folder marks a code project.
+const CODE_MARKERS: &[&str] = &[
+    ".git", "Cargo.toml", "package.json", "pyproject.toml", "setup.py", "requirements.txt", "go.mod", "pom.xml",
+    "build.gradle", "build.gradle.kts", "Gemfile", "composer.json", "Makefile", "CMakeLists.txt", "Package.swift",
+    "pubspec.yaml", "mix.exs", "deno.json", "tsconfig.json", "Dockerfile",
+];
+
+/// Source file extensions counted when no marker is found.
+const CODE_EXTS: &[&str] = &[
+    "rs", "py", "js", "jsx", "ts", "tsx", "go", "java", "kt", "swift", "c", "h", "cpp", "hpp", "cc", "cs", "rb", "php",
+    "dart", "ex", "exs", "scala", "lua", "sh", "vue", "svelte", "m", "mm", "zig",
+];
+
+/// Whether `dir` looks like a code project: a known marker at its root (`.git`, `Cargo.toml`,
+/// `package.json`…), or at least 3 source files in it or one level down (hidden folders and
+/// dependency folders skipped). A missing folder is not code. Reads at most a few hundred entries.
+pub fn is_code_folder(dir: &Path) -> bool {
+    if !dir.is_dir() {
+        return false;
+    }
+    if CODE_MARKERS.iter().any(|m| dir.join(m).exists()) {
+        return true;
+    }
+    let is_src = |p: &Path| p.extension().and_then(|e| e.to_str()).is_some_and(|e| CODE_EXTS.contains(&e.to_ascii_lowercase().as_str()));
+    let mut found = 0;
+    let mut seen = 0;
+    let mut subdirs = vec![];
+    for e in std::fs::read_dir(dir).into_iter().flatten().flatten() {
+        seen += 1;
+        if seen > 400 {
+            break;
+        }
+        let p = e.path();
+        let name = e.file_name().to_string_lossy().to_string();
+        if p.is_dir() {
+            if !name.starts_with('.') && !matches!(name.as_str(), "node_modules" | "target" | "vendor" | "venv" | "__pycache__") {
+                subdirs.push(p);
+            }
+        } else if is_src(&p) {
+            found += 1;
+        }
+    }
+    for sub in subdirs.into_iter().take(40) {
+        if found >= 3 {
+            break;
+        }
+        for e in std::fs::read_dir(&sub).into_iter().flatten().flatten().take(200) {
+            if e.path().is_file() && is_src(&e.path()) {
+                found += 1;
+            }
+        }
+    }
+    found >= 3
+}
+
 impl Workspace {
     /// Pages that are projects (not in the trash), most recent activity first.
     pub fn projects(&self) -> Vec<&Page> {
@@ -750,6 +805,38 @@ pub fn project_to_markdown(page: &Page) -> String {
 mod tests {
     use super::*;
     use crate::model::Workspace;
+
+    #[test]
+    fn code_folder_detection() {
+        let base = std::env::temp_dir().join(format!("orch-codecheck-{}", uuid::Uuid::new_v4().simple()));
+        let w = |p: &str| {
+            let f = base.join(p);
+            std::fs::create_dir_all(f.parent().unwrap()).unwrap();
+            std::fs::write(f, "x").unwrap();
+        };
+        // Missing folder: not code.
+        assert!(!is_code_folder(&base.join("absent")));
+        // School / admin documents: not code.
+        w("ecole/memoire.docx");
+        w("ecole/notes.md");
+        w("ecole/sources/article.pdf");
+        w("ecole/sources/script.py");
+        assert!(!is_code_folder(&base.join("ecole")));
+        // A marker at the root: code.
+        w("rust/Cargo.toml");
+        assert!(is_code_folder(&base.join("rust")));
+        // No marker, but source files one level down: code.
+        w("site/src/a.ts");
+        w("site/src/b.ts");
+        w("site/index.js");
+        assert!(is_code_folder(&base.join("site")));
+        // Sources hidden in a dependency folder don't count.
+        w("deps/node_modules/a.js");
+        w("deps/node_modules/b.js");
+        w("deps/node_modules/c.js");
+        assert!(!is_code_folder(&base.join("deps")));
+        let _ = std::fs::remove_dir_all(&base);
+    }
 
     #[test]
     fn steps_progress_and_next() {

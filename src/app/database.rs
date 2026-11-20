@@ -247,9 +247,9 @@ fn table_view(ui: &mut egui::Ui, page_id: &str, db: &mut Database, actions: &mut
         for &ri in &rows {
             let row_id = db.rows[ri].id.clone();
             let row = ui.horizontal(|ui| {
-                for ci in 0..db.columns.len() {
+                for (ci, &w) in widths.iter().enumerate().take(db.columns.len()) {
                     let col = db.columns[ci].clone();
-                    let (rect, _) = ui.allocate_exact_size(egui::vec2(widths[ci], row_h), egui::Sense::hover());
+                    let (rect, _) = ui.allocate_exact_size(egui::vec2(w, row_h), egui::Sense::hover());
                     let hovered = ui.rect_contains_pointer(rect);
                     let value = db.rows[ri].cells.entry(col.id.clone()).or_default();
                     let inner = rect.shrink2(egui::vec2(8.0, 6.0));
