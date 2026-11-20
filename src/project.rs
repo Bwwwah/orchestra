@@ -507,6 +507,18 @@ const CODE_MARKERS: &[&str] = &[
     "pubspec.yaml", "mix.exs", "deno.json", "tsconfig.json", "Dockerfile",
 ];
 
+/// Whether a project with this folder gets the git (Versions) card: code projects, and
+/// projects without a usable folder yet (the card then asks for one). A folder of documents,
+/// school work or paperwork doesn't.
+pub fn shows_git_card(folder: &str) -> bool {
+    let folder = folder.trim();
+    if folder.is_empty() {
+        return true;
+    }
+    let dir = normalize_folder(folder);
+    !dir.is_dir() || is_code_folder(&dir)
+}
+
 /// Source file extensions counted when no marker is found.
 const CODE_EXTS: &[&str] = &[
     "rs", "py", "js", "jsx", "ts", "tsx", "go", "java", "kt", "swift", "c", "h", "cpp", "hpp", "cc", "cs", "rb", "php",
@@ -835,6 +847,13 @@ mod tests {
         w("deps/node_modules/b.js");
         w("deps/node_modules/c.js");
         assert!(!is_code_folder(&base.join("deps")));
+        // The git card: code projects and projects without a usable folder, not documents.
+        let s = |p: &str| base.join(p).display().to_string();
+        assert!(shows_git_card(&s("rust")));
+        assert!(!shows_git_card(&s("ecole")));
+        assert!(shows_git_card(""));
+        assert!(shows_git_card("  "));
+        assert!(shows_git_card(&s("absent")));
         let _ = std::fs::remove_dir_all(&base);
     }
 

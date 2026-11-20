@@ -1094,21 +1094,38 @@ pub(super) fn project_panel(ui: &mut egui::Ui, cx: &mut Cx) -> Option<super::not
     use CardKind::*;
     // The AIs' questions, when there are some: first of the cards placed after the heads.
     let asked: &[CardKind] = if cx.questions.is_empty() { &[] } else { &[Questions] };
+    // The git card (Versions) only for code projects.
+    let vers: &[CardKind] = if shows_git(ui.ctx(), &cx.pr.folder) { &[Versions] } else { &[] };
     if w >= 1380.0 {
-        let rest: Vec<CardKind> = asked.iter().copied().chain([Versions, Pages]).collect();
+        let rest: Vec<CardKind> = asked.iter().chain(vers).copied().chain([Pages]).collect();
         let cols = balance(ui, cx.page_id, [Summary(420.0), Steps, Sessions], &rest);
         columns(ui, cx, &cols, gap);
     } else if w >= 860.0 {
-        let rest: Vec<CardKind> = asked.iter().copied().chain([Sessions, Versions, Pages]).collect();
+        let rest: Vec<CardKind> = asked.iter().copied().chain([Sessions]).chain(vers.iter().copied()).chain([Pages]).collect();
         let cols = balance(ui, cx.page_id, [Summary(380.0), Steps], &rest);
         columns(ui, cx, &cols, gap);
     } else {
-        let one: Vec<CardKind> = [Summary(210.0), Steps].into_iter().chain(asked.iter().copied()).chain([Sessions, Versions, Pages]).collect();
+        let one: Vec<CardKind> = [Summary(210.0), Steps].into_iter().chain(asked.iter().copied()).chain([Sessions]).chain(vers.iter().copied()).chain([Pages]).collect();
         columns(ui, cx, &[one], gap);
     }
     ui.add_space(gap);
     review_card(ui, cx);
     cx.msg.take()
+}
+
+/// Whether the project page shows the git card, re-detected every few seconds per folder
+/// (a `git init` or new source files show it without reopening the page).
+fn shows_git(ctx: &egui::Context, folder: &str) -> bool {
+    let key = egui::Id::unique(("shows-git", folder.trim().to_string()));
+    let now_t = ctx.input(|i| i.time);
+    if let Some((at, v)) = ctx.data(|d| d.get_temp::<(f64, bool)>(key)) {
+        if now_t - at < 5.0 {
+            return v;
+        }
+    }
+    let v = crate::project::shows_git_card(folder);
+    ctx.data_mut(|d| d.insert_temp(key, (now_t, v)));
+    v
 }
 
 /// The questions the AIs asked about this project (ask_human) and the person's answers:
