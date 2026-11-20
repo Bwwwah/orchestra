@@ -278,7 +278,8 @@ impl NotesApp {
         }
         // The session checks interfaces with take_screenshot, which macOS only allows once
         // Orchestra has the « Screen Recording » permission: ask for it now (once per launch).
-        crate::screen::ensure_permission();
+        let mut granted_version = self.ws.settings.screen_granted_version.clone();
+        crate::screen::ensure_permission(&mut granted_version);
         let steps_at_start: Vec<(String, bool)> = pr.steps.iter().map(|s| (s.id.clone(), s.status == crate::project::StepStatus::Done)).collect();
         let copy = auto::make_copy(&folder, &title)?;
         let agent = Agent::ClaudeCode;
@@ -309,6 +310,7 @@ impl NotesApp {
             x.resume_at = 0;
         }
         self.ws.runs.push(rec);
+        self.ws.settings.screen_granted_version = granted_version;
         self.dirty_since.get_or_insert_with(Instant::now);
         self.orch.runs.push(LiveRun {
             id,

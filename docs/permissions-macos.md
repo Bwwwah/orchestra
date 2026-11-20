@@ -50,6 +50,16 @@ lancée depuis Terminal continue de fonctionner.
 | **Certificat personnel** créé dans Trousseaux d'accès (auto-signé), toujours le même | Oui, sur tous les Mac | Gratuit | Gatekeeper avertit toujours au premier lancement, comme aujourd'hui. Le certificat et sa clé privée doivent être conservés et réutilisés à chaque version. |
 | Rester en ad hoc + `tccutil reset ScreenCapture app.orchestra.desktop` après chaque mise à jour, puis redemander | Non : il faut recocher à chaque fois | Gratuit | Solution de secours seulement : elle évite l'entrée « fantôme » cochée mais inopérante. |
 
+## Ce qui est en place : l'entrée obsolète est réinitialisée
+
+Orchestra retient la dernière version qui avait la permission (`screen_granted_version` dans les
+réglages). Au lancement d'une session autonome, si la permission manque alors qu'une version
+**précédente** l'avait, l'entrée laissée par la mise à jour est obsolète : Orchestra lance
+`tccutil reset ScreenCapture app.orchestra.desktop` (seulement l'entrée d'Orchestra, pas celles des
+autres apps), puis redemande la permission. macOS affiche alors sa fenêtre normale au lieu d'une case
+cochée qui ne marche pas. Rien n'est réinitialisé à la première installation, ni si la permission a été
+retirée à la main pour la version en cours, ni hors d'`Orchestra.app` (`cargo run`).
+
 ## Ce qui est en place : même identifiant, même identité de signature
 
 `packaging/sign-macos.sh` (appelé par `build-macos.sh`) :

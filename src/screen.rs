@@ -42,27 +42,59 @@ unsafe extern "C" {
     fn CGRequestScreenCaptureAccess() -> bool;
 }
 
+/// The app's bundle identifier (packaging/Info.plist): macOS files its permissions under it.
+pub const BUNDLE_ID: &str = "app.orchestra.desktop";
+
 /// Whether this app may record the screen. On macOS, the AIs that Orchestra starts (the
 /// autonomous sessions, in its own hidden terminal) take their screenshots under its name:
 /// without the « Screen Recording » permission, `take_screenshot` gets no picture. When
 /// missing, the system is asked once per launch: it shows its dialog and lists Orchestra in
 /// System Settings › Privacy & Security, where the person switches it on.
-pub fn ensure_permission() -> bool {
+///
+/// `granted_version` is the last version that had the permission (kept in the settings).
+/// When an earlier version had it and this one hasn't, the update left a stale entry: still
+/// ticked in System Settings but made for the old build's signature (ad hoc: tied to its
+/// exact binary, see docs/permissions-macos.md), so it blocks this one without a new
+/// dialog. That entry, and only Orchestra's, is reset with `tccutil` before asking again.
+pub fn ensure_permission(granted_version: &mut String) -> bool {
     #[cfg(target_os = "macos")]
     {
         use std::sync::atomic::{AtomicBool, Ordering};
         static ASKED: AtomicBool = AtomicBool::new(false);
+        let current = crate::update::VERSION;
         // SAFETY: plain CoreGraphics calls with no arguments (macOS 10.15 and later).
         if unsafe { CGPreflightScreenCaptureAccess() } {
+            *granted_version = current.to_string();
             return true;
         }
-        if !ASKED.swap(true, Ordering::SeqCst) {
-            return unsafe { CGRequestScreenCaptureAccess() };
+        if ASKED.swap(true, Ordering::SeqCst) {
+            return false;
         }
-        false
+        if stale_after_update(granted_version, current) && in_app_bundle() {
+            // Only this app's entry: `tccutil reset ScreenCapture <bundle id>`.
+            let _ = run("tccutil", &["reset", "ScreenCapture", BUNDLE_ID]);
+            granted_version.clear();
+        }
+        unsafe { CGRequestScreenCaptureAccess() }
     }
     #[cfg(not(target_os = "macos"))]
-    true
+    {
+        let _ = granted_version;
+        true
+    }
+}
+
+/// The permission (now missing) was there for an earlier version: the entry left by the
+/// update is stale.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+fn stale_after_update(granted_version: &str, current: &str) -> bool {
+    !granted_version.is_empty() && granted_version != current
+}
+
+/// Running as Orchestra.app (not `cargo run`): only then is the system's entry ours.
+#[cfg(target_os = "macos")]
+fn in_app_bundle() -> bool {
+    std::env::current_exe().map(|p| p.to_string_lossy().contains(".app/Contents/MacOS/")).unwrap_or(false)
 }
 
 pub fn shots_dir() -> PathBuf {
@@ -250,6 +282,16 @@ pub fn base64(data: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The case reported: the permission given to 0.6.4, lost after the update to 0.6.5.
+    #[test]
+    fn a_stale_entry_is_one_left_by_an_earlier_version() {
+        assert!(stale_after_update("0.6.4", "0.6.5"));
+        // Never granted (first install), or granted to this very version (the person
+        // switched it off): nothing to reset, the system asks as usual.
+        assert!(!stale_after_update("", "0.6.5"));
+        assert!(!stale_after_update("0.6.5", "0.6.5"));
+    }
 
     #[test]
     fn base64_matches_the_standard() {
