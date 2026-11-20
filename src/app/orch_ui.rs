@@ -1422,7 +1422,7 @@ impl NotesApp {
                                 let (txt, col) = if busy { (crate::tr!("au travail", "at work").to_string(), super::projects::GREEN) } else if open == 0 { (crate::tr!("aucune étape ouverte", "no open step").to_string(), t.tertiary) } else { (crate::trf!("{open} étape(s) ouverte(s)", "{open} open step(s)"), t.secondary) };
                                 ui.label(RichText::new(txt).size(12.0).color(col));
                             });
-                            let mut job = egui::text::LayoutJob::single_section(folder.clone(), egui::TextFormat::simple(FontId::monospace(11.0), t.tertiary));
+                            let mut job = egui::text::LayoutJob::single_section(super::projects::tilde(folder), egui::TextFormat::simple(FontId::monospace(11.0), t.tertiary));
                             job.wrap = egui::text::TextWrapping::truncate_at_width(if wide { (ui.available_width() - 250.0).max(80.0) } else { ui.available_width().max(40.0) });
                             super::projects::cut_label(ui, job);
                         });
@@ -2801,8 +2801,13 @@ struct LaunchCx<'a> {
 fn launch_controls(ui: &mut egui::Ui, c: LaunchCx<'_>) {
     let LaunchCx { id, d, busy, plugged, room, global, to_main, start, confirm_main, lk, t } = c;
     if busy {
-        let (r, _) = ui.allocate_exact_size(egui::vec2(16.0, 16.0), egui::Sense::hover());
-        super::projects::pulse_dot(ui, r.center(), super::projects::GREEN);
+        // A pill where the other rows have « Lancer », so the controls stay in line.
+        let text = crate::tr!("En cours", "Running");
+        let g = ui.painter().layout_no_wrap(text.to_string(), semibold(13.0), super::projects::GREEN);
+        let (rect, _) = ui.allocate_exact_size(g.size() + egui::vec2(36.0, 12.0), egui::Sense::hover());
+        ui.painter().rect_filled(rect, 7.0, super::projects::GREEN.gamma_multiply(0.14));
+        super::projects::pulse_dot(ui, egui::pos2(rect.left() + 14.0, rect.center().y), super::projects::GREEN);
+        ui.painter().galley(egui::pos2(rect.left() + 24.0, rect.center().y - g.size().y / 2.0), g, super::projects::GREEN);
     } else if !plugged {
         start_button(ui, false, t).on_disabled_hover_text(crate::tr!("Branchez d'abord Claude Code", "Plug in Claude Code first"));
     } else if room < 1.0 {

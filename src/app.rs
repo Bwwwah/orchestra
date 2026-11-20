@@ -1000,39 +1000,97 @@ impl NotesApp {
 
     // ---------------------------------------------------------------- other views
 
+    /// The trash, laid out like the other pages: a centred column, one row per page with its
+    /// parent and last edit, and nothing deleted for good on a single click.
     fn trash_view(&mut self, ui: &mut egui::Ui, actions: &mut Vec<Action>) {
-        ui.add_space(20.0);
-        ui.heading(crate::tr!("🗑 Corbeille", "🗑 Trash"));
-        ui.label(crate::tr!("Les pages restent ici jusqu'à ce que vous les supprimiez définitivement.", "Pages stay here until you delete them for good."));
-        ui.add_space(10.0);
-        let roots: Vec<(String, String)> = self
+        let t = tone(ui.visuals().dark_mode);
+        let mut roots: Vec<(String, String, String, u64)> = self
             .ws
             .pages
             .iter()
             .filter(|p| p.trashed && p.parent.as_deref().and_then(|pp| self.ws.page(pp)).map(|pp| !pp.trashed).unwrap_or(true))
-            .map(|p| (p.id.clone(), title_with_icon(p)))
+            .map(|p| {
+                let parent = p.parent.as_deref().and_then(|pp| self.ws.page(pp)).map(|pp| pp.display_title()).unwrap_or_default();
+                (p.id.clone(), title_with_icon(p), parent, p.updated)
+            })
             .collect();
-        if roots.is_empty() {
-            ui.label(RichText::new(crate::tr!("La corbeille est vide.", "The trash is empty.")).weak());
-            return;
-        }
-        for (id, t) in &roots {
-            ui.horizontal(|ui| {
-                ui.label(t);
-                if ui.button(crate::tr!("Restaurer", "Restore")).clicked() {
-                    actions.push(Action::Restore(id.clone()));
+        roots.sort_by(|a, b| b.3.cmp(&a.3));
+        // The row (or "*" for the whole trash) waiting for its second click.
+        let confirm_id = egui::Id::unique("trash-confirm");
+        let mut confirm: Option<String> = ui.ctx().data(|d| d.get_temp(confirm_id));
+        let avail = ui.available_width();
+        let width = 708.0f32.min(avail - 40.0).max(300.0);
+        ui.add_space(50.0);
+        ui.horizontal(|ui| {
+            ui.add_space(((avail - width) / 2.0).max(20.0));
+            ui.vertical(|ui| {
+                ui.set_width(width);
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new(crate::tr!("Corbeille", "Trash")).font(bold(30.0)).color(t.text));
+                    if !roots.is_empty() {
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            let all = confirm.as_deref() == Some("*");
+                            let text = if all { crate::trf!("Confirmer : supprimer {} page(s) pour de bon", "Confirm: delete {} page(s) for good", roots.len()) } else { crate::tr!("Vider la corbeille", "Empty the trash").to_string() };
+                            let color = if all { projects::ORANGE } else { t.text };
+                            if ui.button(RichText::new(text).size(14.0).color(color)).clicked() {
+                                if all {
+                                    actions.extend(roots.iter().map(|r| Action::DeleteForever(r.0.clone())));
+                                    confirm = None;
+                                } else {
+                                    confirm = Some("*".into());
+                                }
+                            }
+                        });
+                    }
+                });
+                ui.label(RichText::new(crate::tr!("Les pages restent ici jusqu'à ce que vous les supprimiez définitivement.", "Pages stay here until you delete them for good.")).color(t.secondary));
+                ui.add_space(20.0);
+                if roots.is_empty() {
+                    ui.label(RichText::new(crate::tr!("La corbeille est vide.", "The trash is empty.")).color(t.tertiary).italics());
+                    return;
                 }
-                if ui.button(crate::tr!("Supprimer définitivement", "Delete for good")).clicked() {
-                    actions.push(Action::DeleteForever(id.clone()));
+                for (id, title, parent, updated) in &roots {
+                    let bg = projects::hover_begin(ui);
+                    let row = ui.horizontal(|ui| {
+                        ui.set_min_height(30.0);
+                        ui.vertical(|ui| {
+                            ui.spacing_mut().item_spacing.y = 1.0;
+                            ui.label(RichText::new(title).size(14.5).color(t.text));
+                            let when = chrome::relative_time(*updated);
+                            let info = if parent.is_empty() { when } else { crate::trf!("dans {parent} · {when}", "in {parent} · {when}") };
+                            ui.label(RichText::new(info).size(12.0).color(t.tertiary));
+                        });
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            if confirm.as_deref() == Some(id.as_str()) {
+                                if projects::quiet_link(ui, crate::tr!("Annuler", "Cancel"), &t).clicked() {
+                                    confirm = None;
+                                }
+                                if ui.button(RichText::new(crate::tr!("Confirmer la suppression", "Confirm the deletion")).size(13.0).color(projects::ORANGE)).clicked() {
+                                    actions.push(Action::DeleteForever(id.clone()));
+                                    confirm = None;
+                                }
+                            } else {
+                                if projects::quiet_link(ui, crate::tr!("Supprimer définitivement", "Delete for good"), &t).clicked() {
+                                    confirm = Some(id.clone());
+                                }
+                                if projects::action_link(ui, crate::tr!("Restaurer", "Restore")).clicked() {
+                                    actions.push(Action::Restore(id.clone()));
+                                }
+                            }
+                        });
+                    });
+                    projects::hover_end(ui, bg, row.response.rect, egui::Id::unique(("trash-row", id)), &t);
+                    ui.add_space(6.0);
                 }
             });
-        }
-        ui.add_space(10.0);
-        if ui.button(crate::tr!("Vider la corbeille", "Empty the trash")).clicked() {
-            for (id, _) in roots {
-                actions.push(Action::DeleteForever(id));
+        });
+        ui.ctx().data_mut(|d| {
+            if let Some(c) = confirm {
+                d.insert_temp(confirm_id, c);
+            } else {
+                d.remove::<String>(confirm_id);
             }
-        }
+        });
     }
 
 }

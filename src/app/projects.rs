@@ -501,6 +501,34 @@ pub(super) fn hover_begin(ui: &egui::Ui) -> egui::layers::ShapeIdx {
     ui.painter().add(egui::Shape::Noop)
 }
 
+/// A folder as shown on screen: the home directory abbreviated to « ~ », the same way
+/// everywhere (`/Users/name/Code/x` and `~/Code/x` read alike).
+pub(super) fn tilde(path: &str) -> String {
+    let home = std::env::var("HOME").or_else(|_| std::env::var("USERPROFILE")).unwrap_or_default();
+    tilde_in(path.trim(), &home)
+}
+
+fn tilde_in(path: &str, home: &str) -> String {
+    let home = home.trim_end_matches(['/', '\\']);
+    if home.is_empty() {
+        return path.to_string();
+    }
+    match path.strip_prefix(home) {
+        Some("") => "~".to_string(),
+        Some(rest) if rest.starts_with(['/', '\\']) => format!("~{rest}"),
+        _ => path.to_string(),
+    }
+}
+
+#[test]
+fn tilde_abbreviates_the_home_folder() {
+    assert_eq!(tilde_in("/Users/ana/Code/x", "/Users/ana"), "~/Code/x");
+    assert_eq!(tilde_in("/Users/ana", "/Users/ana/"), "~");
+    assert_eq!(tilde_in("/Users/anabel/x", "/Users/ana"), "/Users/anabel/x");
+    assert_eq!(tilde_in("~/Code/x", "/Users/ana"), "~/Code/x");
+    assert_eq!(tilde_in("/opt/x", ""), "/opt/x");
+}
+
 pub(super) fn hover_end(ui: &egui::Ui, idx: egui::layers::ShapeIdx, rect: egui::Rect, id: egui::Id, t: &Tone) -> f32 {
     let r = rect.expand2(egui::vec2(6.0, 2.0));
     let a = ui.ctx().animate_bool_with_time(id, ui.rect_contains_pointer(r), 0.14);
@@ -1033,7 +1061,7 @@ pub(super) fn project_panel(ui: &mut egui::Ui, cx: &mut Cx) -> Option<super::not
                     toggle_flag(ui, ("edit-folder", page_id));
                 }
             } else {
-                let r = ui.add(egui::Label::new(RichText::new(&pr.folder).font(FontId::monospace(12.5)).color(t.tertiary)).sense(egui::Sense::click()));
+                let r = ui.add(egui::Label::new(RichText::new(tilde(&pr.folder)).font(FontId::monospace(12.5)).color(t.tertiary)).sense(egui::Sense::click()));
                 if r.on_hover_text(if pr.read_only { crate::tr!("Lecture seule", "Read-only") } else { crate::tr!("Cliquer pour modifier le dossier", "Click to change the folder") }).clicked() && !pr.read_only {
                     toggle_flag(ui, ("edit-folder", page_id));
                 }
@@ -1740,7 +1768,7 @@ impl NotesApp {
                             }
                             chip(ui, c.tool.label(), t.secondary, egui::Sense::hover());
                             let room = ui.available_width() - 90.0;
-                            let job = egui::text::LayoutJob::single_section(c.folder.clone(), egui::TextFormat::simple(FontId::monospace(11.5), t.tertiary));
+                            let job = egui::text::LayoutJob::single_section(tilde(&c.folder), egui::TextFormat::simple(FontId::monospace(11.5), t.tertiary));
                             line(ui, job, room);
                             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                                 if c.last > 0 {

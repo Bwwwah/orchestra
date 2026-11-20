@@ -200,11 +200,11 @@ impl NotesApp {
                 self.view = View::Home;
             }
             let ai = self.settings_tab == Some(SettingsTab::Ai);
-            if icons::button(ui, Icon::Sparkle, 30.0, if ai { t.text } else { t.secondary }, t.hover, crate::tr!("IA (MCP)", "AI (MCP)")).clicked() {
+            if icons::button(ui, Icon::Sparkle, 30.0, if ai { t.text } else { t.secondary }, t.hover, crate::tr!("Brancher et régler les IA (MCP)", "Plug in and set up the AIs (MCP)")).clicked() {
                 self.open_settings(SettingsTab::Ai);
             }
             let co = self.settings_tab == Some(SettingsTab::Collab);
-            if icons::button(ui, Icon::People, 30.0, if co { t.text } else { t.secondary }, t.hover, crate::tr!("Collaboration", "Collaboration")).clicked() {
+            if icons::button(ui, Icon::People, 30.0, if co { t.text } else { t.secondary }, t.hover, crate::tr!("Collaboration : partager des projets en équipe", "Collaboration: share projects with a team")).clicked() {
                 self.open_settings(SettingsTab::Collab);
             }
         });
