@@ -124,6 +124,8 @@ fn main() {
         Some("import") => match args.get(1) {
             Some(file) => match std::fs::read_to_string(file) {
                 Ok(md) => {
+                    // From the read to the write: an AI's write through MCP isn't overwritten.
+                    let _lock = store::lock_workspace();
                     let mut ws = store::load();
                     let stem = std::path::Path::new(file).file_stem().and_then(|s| s.to_str()).unwrap_or("Import").to_string();
                     let page = store::page_from_markdown(&md, &stem);
@@ -153,6 +155,9 @@ fn main() {
             run_server(port, &code)
         }
         Some("sync") => {
+            // Held through the pull and the push too: the others wait for the sync to end
+            // rather than have their writes dropped by its save.
+            let _lock = store::lock_workspace();
             let mut ws = store::load();
             match collab::sync(&mut ws) {
                 Ok(report) => match store::save(&ws) {
