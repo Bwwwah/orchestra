@@ -101,6 +101,9 @@ pub struct Orch {
     resume_checked: Option<Instant>,
     daily_checked: Option<Instant>,
     confirm: Option<(String, &'static str)>,
+    /// An endless session on main waiting for the person to confirm the warning: a project
+    /// id, or SELECTION for « Lancer la sélection ».
+    confirm_main: Option<String>,
     started: bool,
     /// Finished sessions to merge into main by themselves, once their terminal is closed.
     to_main: Vec<String>,
@@ -108,6 +111,22 @@ pub struct Orch {
     awake: crate::awake::Awake,
     /// When closing the window last only hid it because sessions were running.
     close_held: Option<Instant>,
+}
+
+/// `Orch::confirm_main` for the « Lancer la sélection » button.
+const SELECTION: &str = "*selection*";
+
+/// An endless session whose work goes into main by itself: hours of unreviewed commits
+/// land on the main branch. Worth a warning before it starts.
+fn endless_on_main(endless: bool, to_main: bool) -> bool {
+    endless && to_main
+}
+
+fn endless_main_warning() -> &'static str {
+    crate::tr!(
+        "Attention : mode sans fin avec « sur main » coché. Le travail de chaque session, y compris les étapes que l'IA s'invente, sera fusionné tout seul dans main sans relecture, potentiellement pendant des heures.",
+        "Careful: endless mode with « on main » ticked. Each session's work, including the steps the AI makes up, will be merged into main by itself without review, possibly for hours."
+    )
 }
 
 fn default_mission() -> &'static str {
@@ -1131,6 +1150,7 @@ impl NotesApp {
             .collect();
         let to_main_before = to_main.clone();
         let lk = super::settings::look(ui.visuals().dark_mode);
+        let mut confirm_main = self.orch.confirm_main.clone();
         let drafts = &mut self.orch.drafts;
         super::projects::card(ui, t, 0.0, |ui| {
             super::projects::card_title(ui, crate::tr!("LANCER UNE SESSION", "START A SESSION"), "Claude Code", t);
@@ -1176,7 +1196,12 @@ impl NotesApp {
                             } else if room < 1.0 {
                                 start_button(ui, false, t).on_disabled_hover_text(crate::trf!("La limite globale ({global:.0} %) est déjà répartie entre les autres projets", "The global limit ({global:.0} %) is already shared among the other projects"));
                             } else if start_button(ui, true, t).clicked() {
-                                start.push(id.clone());
+                                // Endless on main: the warning first, the start once confirmed.
+                                if endless_on_main(d.endless, to_main.get(id).copied().unwrap_or(false)) {
+                                    confirm_main = Some(id.clone());
+                                } else {
+                                    start.push(id.clone());
+                                }
                             }
                             ui.add_space(4.0);
                             super::settings::switch(ui, &mut d.commits, &lk).on_hover_text(crate::tr!("L'IA peut faire des commits sur sa branche (Orchestra l'envoie sur GitHub après chaque tour)", "The AI may commit on its branch (Orchestra pushes it to GitHub after each turn)"));
@@ -1224,6 +1249,37 @@ impl NotesApp {
                                 end_conditions(ui, &mut d.end, t);
                             }
                         });
+                        let risky = endless_on_main(d.endless, to_main.get(id).copied().unwrap_or(false));
+                        if !risky && confirm_main.as_deref() == Some(id.as_str()) {
+                            confirm_main = None;
+                        }
+                        if risky {
+                            ui.horizontal(|ui| {
+                                ui.add_space(70.0);
+                                egui::Frame::new()
+                                    .fill(super::projects::ORANGE.gamma_multiply(0.08))
+                                    .stroke(egui::Stroke::new(1.0, super::projects::ORANGE.gamma_multiply(0.45)))
+                                    .corner_radius(8.0)
+                                    .inner_margin(egui::Margin::symmetric(10, 8))
+                                    .show(ui, |ui| {
+                                        ui.set_width(ui.available_width());
+                                        ui.add(egui::Label::new(RichText::new(format!("⚠ {}", endless_main_warning())).size(12.5).color(super::projects::ORANGE)).wrap());
+                                        if confirm_main.as_deref() == Some(id.as_str()) {
+                                            ui.add_space(4.0);
+                                            ui.horizontal_wrapped(|ui| {
+                                                if ui.add(egui::Button::new(RichText::new(crate::tr!("Lancer quand même", "Start anyway")).size(13.0).color(super::projects::ORANGE))).clicked() {
+                                                    start.push(id.clone());
+                                                    confirm_main = None;
+                                                }
+                                                if super::projects::quiet_link(ui, crate::tr!("Annuler", "Cancel"), t).clicked() {
+                                                    confirm_main = None;
+                                                }
+                                                ui.label(RichText::new(crate::tr!("ou décochez « sur main » : le travail restera sur sa branche, à fusionner vous-même.", "or untick « on main »: the work stays on its branch, for you to merge.")).size(12.0).color(t.tertiary));
+                                            });
+                                        }
+                                    });
+                            });
+                        }
                     }
                 });
                 super::projects::hover_end(ui, bg, row.response.rect, egui::Id::unique(("orch-row", id)), t);
@@ -1231,15 +1287,41 @@ impl NotesApp {
             }
             if !picked.is_empty() {
                 ui.add_space(4.0);
+                // Picked projects set to endless on main: confirmed once for the whole selection.
+                let risky: Vec<&str> = projects
+                    .iter()
+                    .filter(|(id, _, _)| picked.contains(id) && drafts.get(id).is_some_and(|d| endless_on_main(d.endless, to_main.get(id).copied().unwrap_or(false))))
+                    .map(|(_, title, _)| title.as_str())
+                    .collect();
+                if risky.is_empty() && confirm_main.as_deref() == Some(SELECTION) {
+                    confirm_main = None;
+                }
+                if confirm_main.as_deref() == Some(SELECTION) {
+                    ui.label(RichText::new(crate::trf!("⚠ {} ({})", "⚠ {} ({})", endless_main_warning(), risky.join(", "))).size(12.5).color(super::projects::ORANGE));
+                    ui.horizontal_wrapped(|ui| {
+                        if ui.add(egui::Button::new(RichText::new(crate::tr!("Lancer quand même", "Start anyway")).size(13.0).color(super::projects::ORANGE))).clicked() {
+                            start.extend(picked.iter().cloned());
+                            confirm_main = None;
+                        }
+                        if super::projects::quiet_link(ui, crate::tr!("Annuler", "Cancel"), t).clicked() {
+                            confirm_main = None;
+                        }
+                    });
+                }
                 ui.horizontal_wrapped(|ui| {
                     if ui.add_enabled(plugged, egui::Button::new(RichText::new(crate::trf!("Lancer la sélection ({})", "Start the selection ({})", picked.len())).size(13.5))).clicked() {
-                        start.extend(picked.iter().cloned());
+                        if risky.is_empty() {
+                            start.extend(picked.iter().cloned());
+                        } else {
+                            confirm_main = Some(SELECTION.to_string());
+                        }
                     }
                     let note = crate::trf!("{} projet(s) en parallèle · {picked_sum:.0} % au total pour une limite globale de {global:.0} %", "{} project(s) in parallel · {picked_sum:.0} % in total for a global limit of {global:.0} %", picked.len());
                     ui.label(RichText::new(note).size(12.5).color(if picked_sum > global { super::projects::ORANGE } else { t.tertiary }));
                 });
             }
         });
+        self.orch.confirm_main = confirm_main;
         if to_main != to_main_before {
             for (id, on) in &to_main {
                 if let Some(p) = self.ws.page_mut(id).and_then(|p| p.project.as_mut()) {
@@ -1692,6 +1774,17 @@ fn project_color(title: &str) -> Color32 {
 }
 
 /// The mark and colour of a finished session: done, stopped on a limit or a block, failed.
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn only_endless_on_main_is_warned() {
+        assert!(super::endless_on_main(true, true));
+        assert!(!super::endless_on_main(true, false));
+        assert!(!super::endless_on_main(false, true));
+        assert!(!super::endless_main_warning().is_empty());
+    }
+}
+
 /// The end conditions of an endless session, each one ticked or not; the first reached stops it.
 fn end_conditions(ui: &mut egui::Ui, c: &mut crate::model::EndConditions, t: &Tone) {
     let small = |s: &str| RichText::new(s).size(12.0).color(t.secondary);
