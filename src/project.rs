@@ -106,7 +106,15 @@ pub struct Step {
     pub created: u64,
     #[serde(default)]
     pub updated: u64,
+    /// Received from another member of a shared project. Decided here only, never taken
+    /// from the other copy (see `Project::merge_steps`): the AIs are told such a step comes
+    /// from elsewhere, to weigh it as a request rather than an order from this computer.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub received: bool,
 }
+
+/// Longest title of a step received from another computer.
+pub const RECEIVED_STEP_MAX: usize = 300;
 
 /// A conversation or coding session that worked on the project.
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -144,6 +152,10 @@ pub struct Project {
     pub summary_by: String,
     #[serde(default)]
     pub steps: Vec<Step>,
+    /// Steps deleted, and when: a shared project's copies agree on them (a step deleted on
+    /// one computer doesn't come back from another).
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub deleted_steps: std::collections::BTreeMap<String, u64>,
     #[serde(default)]
     pub sessions: Vec<SessionRef>,
     /// "Effacer l'historique": sessions whose last activity is before this are no longer
@@ -181,28 +193,85 @@ impl Project {
     /// back: `ours` is our copy before the merge (None for a project new here).
     ///
     /// - the code folder: theirs would make our AIs work in a folder of their choosing;
-    /// - the steps: an autonomous AI does them, so only people of this computer (and its AIs)
-    ///   write them;
     /// - « sur main »: lets a session merge its work into main by itself;
     /// - the AI sessions (files and commands of their computer), read only.
+    ///
+    /// The steps are shared, but merged rather than taken (`merge_steps`): ours stay, theirs
+    /// come in marked as received. A project new here takes its steps that way too.
     pub fn keep_local(&mut self, ours: Option<&Project>) {
         match ours {
             Some(o) => {
                 self.folder = o.folder.clone();
                 self.steps = o.steps.clone();
+                self.deleted_steps = o.deleted_steps.clone();
                 self.commit_to_main = o.commit_to_main;
                 self.read_only = o.read_only;
                 self.sessions = o.sessions.clone();
                 self.sessions_cleared = o.sessions_cleared;
             }
             None => {
+                let theirs = std::mem::take(&mut self.steps);
+                let tombs = std::mem::take(&mut self.deleted_steps);
                 self.folder.clear();
-                self.steps.clear();
                 self.commit_to_main = false;
                 self.sessions.clear();
                 self.sessions_cleared = 0;
+                self.merge_steps(&theirs, &tombs);
             }
         }
+    }
+
+    /// Bring another copy's steps into ours, by step id: each step keeps its most recent
+    /// edit, steps new on their side come in, steps deleted on either side stay deleted.
+    /// What comes in is cleaned (one line, `RECEIVED_STEP_MAX` characters at most) and
+    /// marked `received`; a step already here keeps its own mark. Returns true when ours
+    /// changed.
+    pub fn merge_steps(&mut self, theirs: &[Step], their_deleted: &std::collections::BTreeMap<String, u64>) -> bool {
+        let mut changed = false;
+        for (id, t) in their_deleted {
+            let e = self.deleted_steps.entry(id.clone()).or_insert(*t);
+            if *t > *e {
+                *e = *t;
+            }
+        }
+        let clean = |s: &Step| crate::richtext::step_title(&s.title, RECEIVED_STEP_MAX);
+        for ts in theirs {
+            if ts.id.trim().is_empty() || clean(ts).is_empty() {
+                continue;
+            }
+            match self.steps.iter_mut().find(|s| s.id == ts.id) {
+                Some(s) if ts.updated > s.updated => {
+                    s.title = clean(ts);
+                    s.status = ts.status;
+                    s.updated = ts.updated;
+                    changed = true;
+                }
+                Some(_) => {}
+                None => {
+                    let mut s = ts.clone();
+                    s.title = clean(ts);
+                    s.received = true;
+                    self.steps.push(s);
+                    changed = true;
+                }
+            }
+        }
+        let tombs = &self.deleted_steps;
+        let before = self.steps.len();
+        self.steps.retain(|s| tombs.get(&s.id).is_none_or(|t| s.updated > *t));
+        changed | (before != self.steps.len())
+    }
+
+    /// Delete one step, remembered so that a shared copy doesn't bring it back.
+    pub fn remove_step(&mut self, id: &str) -> bool {
+        let before = self.steps.len();
+        self.steps.retain(|s| s.id != id);
+        if self.steps.len() == before {
+            return false;
+        }
+        self.deleted_steps.insert(id.to_string(), now_ms());
+        self.touch();
+        true
     }
 
     pub fn new(folder: impl Into<String>) -> Self {
@@ -215,7 +284,7 @@ impl Project {
 
     pub fn add_step(&mut self, title: &str, source: &str) -> String {
         let t = now_ms();
-        let s = Step { id: new_id(), title: crate::richtext::step_title(title, STEP_MAX), status: StepStatus::Todo, source: source.to_string(), created: t, updated: t };
+        let s = Step { id: new_id(), title: crate::richtext::step_title(title, STEP_MAX), status: StepStatus::Todo, source: source.to_string(), created: t, updated: t, received: false };
         let id = s.id.clone();
         self.steps.push(s);
         self.touch();
@@ -280,6 +349,10 @@ impl Project {
 
     pub fn remove_done_steps(&mut self) -> usize {
         let before = self.steps.len();
+        let t = now_ms();
+        for s in self.steps.iter().filter(|s| s.status == StepStatus::Done) {
+            self.deleted_steps.insert(s.id.clone(), t);
+        }
         self.steps.retain(|s| s.status != StepStatus::Done);
         let n = before - self.steps.len();
         if n > 0 {
@@ -568,7 +641,9 @@ pub fn project_to_markdown(page: &Page) -> String {
             StepStatus::Todo => " ",
         };
         let src = if s.source.is_empty() { String::new() } else { format!(" — {}", s.source) };
-        out.push_str(&format!("- [{mark}] {} (step_id: {}){src}\n", s.title, s.id));
+        // Written on another computer of the shared project: the AI weighs it as a request.
+        let from = if s.received { crate::tr!(" — reçue d'un autre membre du projet partagé", " — received from another member of the shared project") } else { "" };
+        out.push_str(&format!("- [{mark}] {} (step_id: {}){src}{from}\n", s.title, s.id));
     }
     out.push_str(crate::tr!("\n## Sessions IA\n\n", "\n## AI sessions\n\n"));
     if pr.sessions.is_empty() {

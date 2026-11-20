@@ -106,6 +106,8 @@ const DENIED: &[&str] = &[
     "Bash(git push:*)", "Bash(git reset:*)", "Bash(git checkout:*)", "Bash(git switch:*)", "Bash(git restore:*)", "Bash(git rebase:*)",
     "Bash(git clean:*)", "Bash(git branch:*)", "Bash(git worktree:*)", "Bash(git remote:*)", "Bash(git config:*)", "Bash(git filter-branch:*)",
     "Bash(git stash:*)", "Bash(git tag:*)", "Bash(git update-ref:*)",
+    // A setting given on the command line runs code (`git -c alias.x='!sh …' x`, `core.sshCommand`…).
+    "Bash(git -c:*)", "Bash(git --config-env:*)", "Bash(git --exec-path:*)",
     // Code given on the command line or read from the terminal: a way round every rule above.
     "Bash(python -c:*)", "Bash(python3 -c:*)", "Bash(python - :*)", "Bash(python3 - :*)", "Bash(python <<:*)", "Bash(python3 <<:*)",
     "Bash(node -e:*)", "Bash(node --eval:*)", "Bash(node -p:*)", "Bash(node --print:*)", "Bash(node - :*)", "Bash(node <<:*)",
@@ -136,18 +138,39 @@ fn extra_rule_ok(rule: &str) -> bool {
     let tool = &rule[..open];
     let pattern = rule[open + 1..rule.len() - 1].trim();
     let bare = pattern.trim_end_matches(":*").trim_end_matches('*').trim();
-    if bare.is_empty() || bare.contains("**") || pattern.starts_with('/') || pattern.starts_with('~') {
+    if bare.is_empty() || bare.contains('*') || pattern.starts_with('/') || pattern.starts_with('~') {
+        // Nothing left, or a wildcard inside (`* push`, `git * x`) that matches anything.
         return false;
     }
+    // Shell operators: one rule would let a second command through (`ls && rm`, `$(…)`).
+    if bare.chars().any(|c| matches!(c, ';' | '&' | '|' | '`' | '$' | '<' | '>' | '(' | ')' | '\n' | '\r')) {
+        return false;
+    }
+    let first = bare.split_whitespace().next().unwrap_or("");
     match tool {
         // An interpreter as a whole runs any code: only a precise use of it (`python -m pytest`).
         "Bash" if INTERPRETERS.contains(&bare) => false,
-        "Bash" => !DENIED.iter().any(|d| {
-            let d = d.strip_prefix("Bash(").and_then(|d| d.strip_suffix(":*)")).unwrap_or("");
-            !d.is_empty() && (bare == d || bare.starts_with(&format!("{d} ")))
+        // A refused tool, under any form (`rm -i`, `sudo -n`…), never comes back as an extra.
+        "Bash" if denied_commands().any(|d| !d.contains(' ') && d == first) => false,
+        "Bash" => !denied_commands().any(|d| {
+            // The refused command itself or a longer form of it (`git push origin`), or a
+            // shorter rule that covers it (`git` covers `git push`, and `git -c alias…` runs
+            // anything).
+            bare == d || bare.starts_with(&format!("{d} ")) || d.starts_with(&format!("{bare} "))
         }),
         _ => false,
     }
+}
+
+/// The refused shell commands, without `Bash(` and `:*)`: `rm`, `git push`…
+fn denied_commands() -> impl Iterator<Item = &'static str> {
+    DENIED.iter().filter_map(|d| d.strip_prefix("Bash(").and_then(|d| d.strip_suffix(":*)"))).map(str::trim).filter(|d| !d.is_empty())
+}
+
+/// The extra rules of the settings that are dropped (they would lift the restriction), to
+/// show the person.
+pub fn rejected_extra(extra: &str) -> Vec<String> {
+    extra.split(',').map(str::trim).filter(|x| !x.is_empty() && !extra_rule_ok(x)).map(String::from).collect()
 }
 
 /// The allowed and refused rules of an autonomous session. `extra`: rules the person adds
@@ -307,6 +330,58 @@ pub fn discard(r: &crate::model::RunRecord) -> Result<String, String> {
     git(&rd, &["branch", "-D", &r.branch])?;
     delete_remote_later(r.root.clone(), r.branch.clone());
     Ok(crate::tr!("Copie et branche supprimées.", "Copy and branch deleted.").into())
+}
+
+// ------------------------------------------------------------------ leftover copies
+
+/// The copies left in `data_dir/worktrees` that no session needs any more: neither a
+/// running one nor a finished one still waiting to be merged or discarded (its copy holds
+/// that work). A copy is a session's when its path, or at least its folder name, is the
+/// one the session recorded (the data folder may have moved since).
+pub fn stale_copies(runs: &[crate::model::RunRecord]) -> Vec<PathBuf> {
+    let dir = crate::store::data_dir().join("worktrees");
+    let found: Vec<PathBuf> = std::fs::read_dir(&dir).into_iter().flatten().flatten().map(|e| e.path()).filter(|p| p.is_dir()).collect();
+    stale_among(found, runs)
+}
+
+fn stale_among(found: Vec<PathBuf>, runs: &[crate::model::RunRecord]) -> Vec<PathBuf> {
+    let needed = |p: &Path| {
+        runs.iter().filter(|r| r.closed.is_empty()).any(|r| {
+            let w = Path::new(&r.worktree);
+            w == p || (w.file_name().is_some() && w.file_name() == p.file_name())
+        })
+    };
+    found.into_iter().filter(|p| !needed(p)).collect()
+}
+
+/// Remove one leftover copy the way git does it, never by hand: `git worktree remove`
+/// without force refuses a copy with changes not committed (or files not tracked), and
+/// its branch stays in the repository, commits and all. A folder that isn't a git copy is
+/// left alone. Then `git worktree prune` forgets copies whose folder is already gone.
+pub fn remove_copy(copy: &Path) -> Result<(), String> {
+    if !copy.join(".git").is_file() {
+        return Err(crate::trf!("{} n'est pas une copie git : laissée", "{} isn't a git copy: left alone", copy.display()));
+    }
+    let common = git(copy, &["rev-parse", "--path-format=absolute", "--git-common-dir"])?.trim().to_string();
+    let root = Path::new(&common).parent().ok_or("no repository")?.to_path_buf();
+    git(&root, &["worktree", "remove", &copy.display().to_string()])?;
+    let _ = git(&root, &["worktree", "prune"]);
+    Ok(())
+}
+
+/// At start: remove the leftover copies in the background (git is slow on big projects);
+/// those that can't go (changes not committed, repository gone…) stay, with a line in the log.
+pub fn clean_copies_later(copies: Vec<PathBuf>) {
+    if copies.is_empty() {
+        return;
+    }
+    std::thread::spawn(move || {
+        for c in copies {
+            if let Err(e) = remove_copy(&c) {
+                eprintln!("orchestra: copy {} kept: {e}", c.display());
+            }
+        }
+    });
 }
 
 /// Commits of the session, and the files changed but not committed.
@@ -781,6 +856,22 @@ mod tests {
         let (allowed, _) = permissions(false, "Bash(python:*), Bash(python3:*), Bash(node:*), Bash(npm:*), Bash(python -c:*), Bash(node -e x:*), Bash(perl -e:*), Bash(python -m pytest:*)");
         assert!(!allowed.iter().any(|a| ["Bash(python:*)", "Bash(python3:*)", "Bash(node:*)", "Bash(npm:*)", "Bash(python -c:*)", "Bash(node -e x:*)", "Bash(perl -e:*)"].contains(&a.as_str())));
         assert!(allowed.iter().any(|a| a == "Bash(python -m pytest:*)"));
+        // A whole command that covers a refused one, wildcards inside, shell operators, a
+        // refused tool under another form, git settings given on the command line.
+        let wide = [
+            "Bash(git:*)", "Bash(git *)", "Bash(* push:*)", "Bash(git * push)", "Bash(ls && rm x:*)", "Bash(ls; curl x:*)",
+            "Bash(echo $(id):*)", "Bash(cat x | sh:*)", "Bash(ls `id`:*)", "Bash(rm -i:*)", "Bash(sudo -n:*)", "Bash(curl:*)",
+            "Bash(git -c alias.x=y x:*)", "Bash(git -c:*)",
+        ];
+        let (allowed, denied) = permissions(false, &wide.join(", "));
+        for bad in wide {
+            assert!(!allowed.iter().any(|a| a == bad), "{bad}");
+        }
+        assert!(denied.iter().any(|d| d == "Bash(git -c:*)"));
+        assert_eq!(rejected_extra(&wide.join(", ")).len(), wide.len());
+        // Precise rules stay, and are not reported.
+        let fine = "Bash(git log --oneline:*), Bash(just test:*), Bash(docker compose up:*), Bash(npm run e2e:*), mcp__other";
+        assert!(rejected_extra(fine).is_empty(), "{:?}", rejected_extra(fine));
         let cmd = Agent::ClaudeCode.command(false, "");
         assert!(cmd.contains("--disallowedTools") && cmd.contains("Bash(rm:*)"));
         // Neither the repository's hooks and settings nor its .mcp.json: only Orchestra's server.
@@ -833,6 +924,54 @@ mod tests {
         discard(&rec2).unwrap();
         assert!(!git(&repo, &["branch"]).unwrap().contains("orchestra/"));
         let _ = std::fs::remove_dir_all(repo);
+    }
+
+    /// Only copies no session needs are candidates: a running session's and a finished one
+    /// not yet merged or discarded stay, even when the data folder moved.
+    #[test]
+    fn stale_copies_are_the_ones_no_session_needs() {
+        let w = |n: &str| PathBuf::from(format!("/data/orchestra/worktrees/{n}"));
+        let run = |n: &str, closed: &str| crate::model::RunRecord { worktree: format!("/old/place/worktrees/{n}"), closed: closed.into(), ..Default::default() };
+        let runs = vec![run("en-cours", ""), run("a-fusionner", ""), run("fusionnee", "fusionné"), run("abandonnee", "abandonné")];
+        let found = vec![w("en-cours"), w("a-fusionner"), w("fusionnee"), w("abandonnee"), w("oubliee")];
+        assert_eq!(stale_among(found, &runs), vec![w("fusionnee"), w("abandonnee"), w("oubliee")]);
+    }
+
+    /// Removed through git only: a clean copy goes (its branch stays), a copy with work
+    /// not committed and a folder that isn't a git copy are both left as they are.
+    #[test]
+    fn leftover_copies_go_only_when_nothing_is_lost() {
+        let base = std::env::temp_dir().join(format!("orch-copies-{}", uuid::Uuid::new_v4().simple()));
+        let repo = base.join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        let ok = |d: &Path, a: &[&str]| git(d, a).is_ok();
+        if !ok(&repo, &["init", "-b", "main"]) {
+            return;
+        }
+        let _ = git(&repo, &["config", "user.email", "t@t"]);
+        let _ = git(&repo, &["config", "user.name", "T"]);
+        std::fs::write(repo.join("a.txt"), "a").unwrap();
+        assert!(ok(&repo, &["add", "-A"]) && ok(&repo, &["commit", "-m", "a"]));
+        let add = |name: &str| {
+            let wt = base.join("worktrees").join(name);
+            assert!(ok(&repo, &["worktree", "add", "-b", &format!("orchestra/auto-{name}"), &wt.display().to_string(), "HEAD"]));
+            wt
+        };
+        let clean = add("propre");
+        let dirty = add("modifiee");
+        std::fs::write(dirty.join("travail.txt"), "pas encore enregistré").unwrap();
+        let other = base.join("worktrees").join("autre-chose");
+        std::fs::create_dir_all(&other).unwrap();
+        std::fs::write(other.join("note.txt"), "x").unwrap();
+
+        remove_copy(&clean).unwrap();
+        assert!(!clean.exists());
+        assert!(git(&repo, &["branch"]).unwrap().contains("orchestra/auto-propre"), "the branch stays");
+        assert!(remove_copy(&dirty).is_err());
+        assert!(dirty.join("travail.txt").exists(), "uncommitted work kept");
+        assert!(remove_copy(&other).is_err());
+        assert!(other.join("note.txt").exists());
+        let _ = std::fs::remove_dir_all(&base);
     }
 
     #[test]

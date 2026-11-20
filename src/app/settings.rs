@@ -492,8 +492,7 @@ impl NotesApp {
             }
             if button(ui, crate::tr!("Ouvrir le dossier", "Open the folder"), t, l).clicked() {
                 let _ = std::fs::create_dir_all(&dir);
-                let opener = if cfg!(target_os = "macos") { "open" } else if cfg!(windows) { "explorer" } else { "xdg-open" };
-                if let Err(e) = std::process::Command::new(opener).arg(&dir).spawn() {
+                if let Err(e) = crate::opener::open_path(&dir) {
                     self.fail(crate::trf!("Impossible d'ouvrir le dossier : {e}", "Couldn't open the folder: {e}"));
                 }
             }
@@ -643,13 +642,13 @@ impl NotesApp {
                         }
                     }
                 } else if let Some(cmd) = ai.install() {
-                    if button(ui, crate::tr!("Installer", "Install"), t, l).on_hover_text(crate::trf!("Lance « {cmd} » dans le terminal intégré (Node.js requis)", "Runs « {cmd} » in the built-in terminal (Node.js needed)")).clicked() {
+                    let needs = if cmd.starts_with("uv ") { crate::tr!("uv requis, l'outil Python d'Astral", "uv needed, Astral's Python tool") } else { crate::tr!("Node.js requis", "Node.js needed") };
+                    if button(ui, crate::tr!("Installer", "Install"), t, l).on_hover_text(crate::trf!("Lance « {cmd} » dans le terminal intégré ({needs})", "Runs « {cmd} » in the built-in terminal ({needs})")).clicked() {
                         term = Some((crate::trf!("Installation · {}", "Installing · {}", ai.label()), cmd.to_string(), None));
                     }
                 } else if let Some(url) = ai.download_page() {
                     if button(ui, crate::tr!("Télécharger", "Download"), t, l).clicked() {
-                        let opener = if cfg!(target_os = "macos") { "open" } else if cfg!(windows) { "explorer" } else { "xdg-open" };
-                        let _ = std::process::Command::new(opener).arg(url).spawn();
+                        let _ = crate::opener::open_url(url);
                     }
                 }
             });

@@ -1135,8 +1135,12 @@ fn steps_card(ui: &mut egui::Ui, cx: &mut Cx, extra: f32) -> f32 {
                     ui.vertical(|ui| {
                         ui.set_max_width(room);
                         let r = ui.add(egui::Label::new(job).wrap().sense(egui::Sense::click()));
-                        if !s.source.is_empty() {
-                            ui.label(RichText::new(crate::trf!("ajoutée par {} · {}", "added by {} · {}", s.source, relative_time(s.created))).size(12.0).color(t.tertiary));
+                        if !s.source.is_empty() || s.received {
+                            let by = if s.source.is_empty() { String::new() } else { crate::trf!("ajoutée par {} · {}", "added by {} · {}", s.source, relative_time(s.created)) };
+                            // Written on another computer of the shared project.
+                            let from = if s.received { crate::tr!("reçue d'un autre membre du projet", "received from another member of the project") } else { "" };
+                            let sep = if by.is_empty() || from.is_empty() { "" } else { " · " };
+                            ui.label(RichText::new(format!("{by}{sep}{from}")).size(12.0).color(t.tertiary));
                         }
                         r
                     })
@@ -1227,8 +1231,7 @@ fn steps_card(ui: &mut egui::Ui, cx: &mut Cx, extra: f32) -> f32 {
             pr.set_step_status(&id, next);
         }
         if let Some(id) = remove {
-            pr.steps.retain(|s| s.id != id);
-            pr.touch();
+            pr.remove_step(&id);
         }
         // "+ Ajouter une étape": a quiet line aligned with the steps; click to type.
         if ro {
@@ -1237,8 +1240,9 @@ fn steps_card(ui: &mut egui::Ui, cx: &mut Cx, extra: f32) -> f32 {
         ui.add_space(2.0);
         let adding_key = ("adding-step", page_id);
         let adding = flag(ui, adding_key);
-        ui.horizontal(|ui| {
-            let (r, plus) = ui.allocate_exact_size(egui::vec2(18.0, 22.0), egui::Sense::click());
+        // A row exactly as tall as the « + »: the text typed (or the label) is centred on it.
+        inline_row(ui, |ui| {
+            let (r, plus) = ui.allocate_exact_size(egui::vec2(18.0, INLINE_H), egui::Sense::click());
             let hover_row = ui.rect_contains_pointer(egui::Rect::from_min_size(r.min, egui::vec2(ui.available_width() + 18.0, 22.0)));
             let col = if adding || hover_row { t.secondary } else { t.tertiary };
             let c = r.center();
@@ -1246,10 +1250,8 @@ fn steps_card(ui: &mut egui::Ui, cx: &mut Cx, extra: f32) -> f32 {
             ui.painter().line_segment([c - egui::vec2(0.0, 5.0), c + egui::vec2(0.0, 5.0)], egui::Stroke::new(1.5, col));
             if adding {
                 let edit = ui.add(
-                    egui::TextEdit::singleline(new_step)
-                        .frame(egui::Frame::NONE)
+                    inline_edit(egui::TextEdit::singleline(new_step))
                         .hint_text(crate::tr!("Nouvelle étape, puis Entrée", "New step, then Enter"))
-                        .font(FontId::proportional(TEXT))
                         .desired_width(f32::INFINITY),
                 );
                 if !edit.has_focus() && !edit.lost_focus() && new_step.is_empty() && !ui.ctx().memory(|m| m.has_focus(edit.id)) {
@@ -1276,6 +1278,28 @@ fn steps_card(ui: &mut egui::Ui, cx: &mut Cx, extra: f32) -> f32 {
         card_rule(ui, t);
         ai_steps(ui, page_id, pr, ai, prefer, t);
     })
+}
+
+/// Height of a one-line field behind an icon (« + Ajouter une étape », « ? Question rapide »).
+const INLINE_H: f32 = 22.0;
+
+/// A row of exactly `INLINE_H`, its items centred on it. `ui.horizontal` centres each item
+/// on the row as it stands when the item is added, so a field after a taller icon sat high.
+fn inline_row<R>(ui: &mut egui::Ui, add: impl FnOnce(&mut egui::Ui) -> R) -> R {
+    ui.allocate_ui_with_layout(egui::vec2(ui.available_width(), INLINE_H), egui::Layout::left_to_right(egui::Align::Center), |ui| {
+        ui.set_min_height(INLINE_H);
+        add(ui)
+    })
+    .inner
+}
+
+/// A frameless one-line field, as tall as its row, its text centred vertically.
+fn inline_edit(edit: egui::TextEdit<'_>) -> egui::TextEdit<'_> {
+    edit.frame(egui::Frame::NONE)
+        .font(FontId::proportional(TEXT))
+        .margin(egui::Margin::symmetric(4, 0))
+        .min_size(egui::vec2(0.0, INLINE_H))
+        .align(egui::Align2::LEFT_CENTER)
 }
 
 /// Under the steps: ask the AI for steps (from the project or from a pasted text), and
@@ -1372,7 +1396,11 @@ fn ai_steps(ui: &mut egui::Ui, page_id: &str, pr: &mut Project, ai: &mut super::
             ui.label(RichText::new(e.as_str()).size(12.5).color(t.tertiary));
         }
         let mut close = false;
+        // The actions, set apart from the field and from one another.
+        ui.add_space(8.0);
         ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = 12.0;
+            ui.spacing_mut().button_padding = egui::vec2(12.0, 5.0);
             let ready = !text.trim().is_empty() || !images.is_empty();
             if ui.add_enabled(ready, egui::Button::new(RichText::new(crate::tr!("Transformer en étapes", "Turn into steps")).size(13.0))).clicked() {
                 super::ai_fill::request(ui.ctx(), super::ai_fill::AiReq::Tasks { page_id: page_id.to_string(), folder: folder.clone(), existing: existing.clone(), prefer, text: Some(text.clone()), images: images.clone() });
@@ -1394,6 +1422,7 @@ fn ai_steps(ui: &mut egui::Ui, page_id: &str, pr: &mut Project, ai: &mut super::
                 close = true;
             }
         });
+        ui.add_space(4.0);
         if close {
             text.clear();
             images.clear();
@@ -1779,8 +1808,7 @@ pub(super) fn source_banner(ui: &mut egui::Ui, page_id: &str, src: &crate::docs:
                 actions.push(Action::RevertDoc(page_id.to_string()));
             }
             if !src.missing && link(ui, crate::tr!("Ouvrir le fichier", "Open the file")) {
-                let opener = if cfg!(target_os = "macos") { "open" } else if cfg!(windows) { "explorer" } else { "xdg-open" };
-                let _ = std::process::Command::new(opener).arg(&src.path).spawn();
+                let _ = crate::opener::open_path(std::path::Path::new(&src.path));
             }
         });
     });
@@ -2067,16 +2095,14 @@ fn quick_question(ui: &mut egui::Ui, cx: &mut Cx) {
     let asking = cx.ai.asking(page_id).map(String::from);
     let mut close = false;
     card(ui, t, 0.0, |ui| {
-        ui.horizontal(|ui| {
-            let (r, _) = ui.allocate_exact_size(egui::vec2(18.0, 22.0), egui::Sense::hover());
+        inline_row(ui, |ui| {
+            let (r, _) = ui.allocate_exact_size(egui::vec2(18.0, INLINE_H), egui::Sense::hover());
             ui.painter().text(r.center(), egui::Align2::CENTER_CENTER, "?", semibold(15.0), Color32::from_rgb(144, 101, 176));
             let send_w = 90.0;
             let edit = ui.add_enabled(
                 asking.is_none(),
-                egui::TextEdit::singleline(&mut text)
+                inline_edit(egui::TextEdit::singleline(&mut text))
                     .hint_text(crate::tr!("Question rapide à l'IA, ex. « telle fonctionnalité serait-elle intéressante ? »", "Quick question to the AI, e.g. « would this feature be worth it? »"))
-                    .frame(egui::Frame::NONE)
-                    .font(FontId::proportional(TEXT))
                     .char_limit(crate::sync::QUESTION_MAX)
                     .desired_width((ui.available_width() - send_w).max(80.0)),
             );

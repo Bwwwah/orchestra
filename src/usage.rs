@@ -325,6 +325,9 @@ pub fn day_total(h: &[Sample], now: u64) -> Option<f32> {
     Some(total)
 }
 
+/// Without reset times, a drop of the weekly figure bigger than this (points) is a new week.
+const WEEK_DROP: f32 = 5.0;
+
 /// How much of the week went in the last 24 hours (percentage points of the week), and
 /// over how long the readings go back (24 h at most). None without any weekly reading.
 pub fn day_week_used(h: &[Sample], now: u64) -> Option<(f32, u64)> {
@@ -333,16 +336,27 @@ pub fn day_week_used(h: &[Sample], now: u64) -> Option<(f32, u64)> {
     // Starting point: the last reading before the 24 hours, or else the first one.
     let start = readings.iter().rposition(|s| s.at <= from).unwrap_or(0);
     let first = readings.get(start)?;
-    let (mut prev, mut reset) = (first.week?, first.week_reset);
+    // `high`: the highest figure of the week being read. Only what goes past it counts: the
+    // two sources (status line, ~/.claude.json) take turns and one may be a little late,
+    // so the figure dips and climbs back; counting each climb counted the same use twice.
+    let (mut high, mut reset) = (first.week?, first.week_reset);
     let mut used = 0.0;
     for s in &readings[start + 1..] {
         let p = s.week?;
         let same = match (reset, s.week_reset) {
             (Some(a), Some(b)) => a.abs_diff(b) < SAME_RESET,
-            _ => p + 0.5 >= prev,
+            // A reset time missing on one side: a new week drops the figure to a few
+            // points; a dip of a point or two is a late reading of the same week.
+            _ => p + WEEK_DROP >= high,
         };
-        used += if same { (p - prev).max(0.0) } else { p };
-        prev = p;
+        if same {
+            used += (p - high).max(0.0);
+            high = high.max(p);
+        } else {
+            // A new week: its figure so far is all new use.
+            used += p;
+            high = p;
+        }
         reset = s.week_reset.or(if same { reset } else { None });
     }
     Some((used, now - first.at.max(from)))
@@ -352,6 +366,23 @@ pub fn day_week_used(h: &[Sample], now: u64) -> Option<(f32, u64)> {
 /// against a seventh of the week (100 % = on pace to use exactly the whole week).
 pub fn daily_pct(week_used: f32) -> f32 {
     week_used * 7.0
+}
+
+/// One day's share of the week (in points of the week): a seventh.
+pub const DAY_SHARE: f32 = 100.0 / 7.0;
+
+/// The line under the week's bar: the points of the week used over the last 24 hours (or
+/// since the first reading, `span`), next to a day's share. Before, it read « 105 % de la
+/// part du jour », a percentage of a percentage hard to read; the figures themselves are
+/// shown now. The flag: faster than a day's share, at which pace the week runs out early
+/// (over a shorter span, compared with that span's share of a day).
+pub fn day_pace_line(used: f32, span: u64) -> (String, bool) {
+    let full = span >= 23 * HOUR;
+    let share = if full { DAY_SHARE } else { DAY_SHARE * span as f32 / DAY as f32 };
+    let fast = used > share + 0.05;
+    let when = if full { crate::tr!("Ces 24 h", "These 24 h").to_string() } else { crate::trf!("Depuis {}", "Last {}", left_text(span)) };
+    let pace = if fast { crate::tr!(" · plus vite que la part d'un jour", " · faster than a day's share") } else { "" };
+    (crate::trf!("{when} : {used:.1} % de la semaine utilisés (part d'un jour : {DAY_SHARE:.1} %){pace}", "{when}: {used:.1} % of the week used (a day's share: {DAY_SHARE:.1} %){pace}"), fast)
 }
 
 /// The reserve is near: one more turn, as big as the biggest so far (at least half a
@@ -485,6 +516,31 @@ mod tests {
         assert_eq!(p[0].pct, 23.0);
     }
 
+    /// The sessions' figures (their share, the global limit, the 5-hour tile) all come from
+    /// `five()`: Claude Code's `five_hour` window, from either source, never the week nor a
+    /// per-model limit, whatever the order they arrive in.
+    #[test]
+    fn the_sessions_count_on_the_five_hour_window() {
+        let rl = from_rate_limits(&json!({
+            "seven_day_opus": {"used_percentage": 12.0},
+            "seven_day": {"used_percentage": 41.0},
+            "five_hour": {"used_percentage": 75.0, "resets_at": 1738425600}
+        }));
+        let cache = from_cache(&json!({"utilization": {
+            "seven_day": {"utilization": 0.41},
+            "five_hour": {"utilization": 0.75, "resets_at": "2026-11-18T15:00:00Z"},
+            "limits": [{"display_name": "Opus", "utilization": 0.12}]
+        }}));
+        for windows in [rl, cache] {
+            let u = Usage { windows, at: 0 };
+            assert!((u.five().unwrap().pct - 75.0).abs() < 0.01);
+            assert!(u.five().unwrap().resets_at.is_some());
+            assert!((u.week().unwrap().pct - 41.0).abs() < 0.01);
+            // The 5-hour window comes first: the sidebar tile shows it on its first line.
+            assert_eq!(u.windows[0].label, "Session (5 h)");
+        }
+    }
+
     #[test]
     fn time_left_before_reset() {
         assert_eq!(until(1_000, 2_000), None);
@@ -543,6 +599,34 @@ mod tests {
         assert!((used - 8.0).abs() < 0.01);
         assert_eq!(span, 10 * HOUR);
         assert_eq!(day_week_used(&[], now), None);
+        // Two sources taking turns (the status line, live, and ~/.claude.json, a little
+        // late): the figure goes 40, 39.5, 40.2, 39.8, 41. Only the week's real rise, 1
+        // point, counts; the dips and the climbs back over them don't.
+        let noisy = [w(20, 40.0, 100), w(21, 39.5, 100), w(22, 40.2, 100), w(23, 39.8, 100), w(24, 41.0, 100)];
+        let (used, _) = day_week_used(&noisy, now).unwrap();
+        assert!((used - 1.0).abs() < 0.01, "{used}");
+        // The late source without a reset time: a dip of a point or two is still the same
+        // week, not a new one whose whole figure would count.
+        let bare = |at_h: u64, pct: f32| Sample { at: at_h * HOUR, week: Some(pct), ..Default::default() };
+        let (used, _) = day_week_used(&[w(20, 40.0, 100), bare(21, 38.5, ), w(22, 41.0, 100)], now).unwrap();
+        assert!((used - 1.0).abs() < 0.01, "{used}");
+        // Without any reset time, a real new week (a big drop) still counts from zero.
+        let (used, _) = day_week_used(&[bare(30, 90.0), bare(31, 95.0), bare(35, 3.0)], now).unwrap();
+        assert!((used - 8.0).abs() < 0.01, "{used}");
+    }
+
+    /// The figures themselves, not « 105 % de la part du jour »: 15 points of the week in
+    /// 24 h is a little faster than a day's share (14.3); over 3 h, 2 points is fast too.
+    #[test]
+    fn day_pace_reads_in_points_of_the_week() {
+        let (line, fast) = day_pace_line(15.0, 24 * HOUR);
+        assert!(line.contains("15.0") && line.contains("14.3") && !line.contains("105"), "{line}");
+        assert!(fast);
+        assert!(!day_pace_line(10.0, 24 * HOUR).1);
+        assert!(!day_pace_line(14.28, 24 * HOUR).1, "a day's share exactly is not too fast");
+        // Over 3 hours, a day's share is about 1.8 points.
+        assert!(day_pace_line(2.0, 3 * HOUR).1);
+        assert!(!day_pace_line(1.0, 3 * HOUR).1);
     }
 
     #[test]

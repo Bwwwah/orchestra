@@ -121,6 +121,94 @@ pub fn plug_json(file: &Path, exe: &Path) -> Outcome {
     }
 }
 
+// ------------------------------------------------------------------ Mistral Vibe (TOML)
+
+/// Mistral Vibe's settings: `$VIBE_HOME/config.toml`, by default `~/.vibe/config.toml`. Its
+/// MCP servers are `[[mcp_servers]]` tables (name, transport, command, args).
+fn vibe_config() -> PathBuf {
+    let home = std::env::var_os("VIBE_HOME").map(PathBuf::from).unwrap_or_else(|| dirs::home_dir().unwrap_or_default().join(".vibe"));
+    home.join("config.toml")
+}
+
+/// The file cut into its tables: each piece starts at a `[…]` header (the first one may
+/// have none: the top-level keys).
+fn toml_tables(text: &str) -> Vec<String> {
+    let mut out: Vec<String> = vec![String::new()];
+    for line in text.split_inclusive('\n') {
+        if line.trim_start().starts_with('[') && !out.last().is_some_and(|t| t.is_empty()) {
+            out.push(String::new());
+        }
+        out.last_mut().unwrap().push_str(line);
+    }
+    out
+}
+
+/// One of our `[[mcp_servers]]` tables (under our name or an old one).
+fn toml_is_ours(table: &str) -> bool {
+    let mut lines = table.lines();
+    if lines.next().map(|h| h.split('#').next().unwrap_or("").trim().replace(' ', "")) != Some("[[mcp_servers]]".into()) {
+        return false;
+    }
+    lines.any(|l| {
+        let l = l.split('#').next().unwrap_or("").replace(' ', "");
+        std::iter::once(NAME).chain(OLD_NAMES).any(|n| l == format!("name=\"{n}\"") || l == format!("name='{n}'"))
+    })
+}
+
+fn toml_string(s: &str) -> String {
+    format!("\"{}\"", s.replace('\\', "\\\\").replace('"', "\\\""))
+}
+
+fn toml_entry(exe: &Path) -> String {
+    format!("[[mcp_servers]]\nname = \"{NAME}\"\ntransport = \"stdio\"\ncommand = {}\nargs = [\"mcp\"]\n", toml_string(&exe.display().to_string()))
+}
+
+/// Mistral Vibe: put our `[[mcp_servers]]` table in its TOML settings, or fix the path if
+/// it moved. Everything else in the file stays as written (comments included); a `.bak`
+/// copy is kept the first time.
+pub fn plug_toml(file: &Path, exe: &Path) -> Outcome {
+    let text = std::fs::read_to_string(file).unwrap_or_default();
+    let tables = toml_tables(&text);
+    let ours: Vec<&String> = tables.iter().filter(|t| toml_is_ours(t)).collect();
+    let entry = toml_entry(exe);
+    if ours.len() == 1 && ours[0].trim_end() == entry.trim_end() {
+        return Outcome::AlreadyThere;
+    }
+    let mut kept: String = tables.iter().filter(|t| !toml_is_ours(t)).map(String::as_str).collect();
+    if !kept.is_empty() && !kept.ends_with("\n\n") {
+        kept.push_str(if kept.ends_with('\n') { "\n" } else { "\n\n" });
+    }
+    kept.push_str(&entry);
+    if !text.is_empty() {
+        let bak = file.with_extension("toml.bak");
+        if !bak.exists() {
+            let _ = std::fs::write(&bak, &text);
+        }
+    }
+    if let Some(dir) = file.parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
+    match std::fs::write(file, kept) {
+        Ok(()) if !ours.is_empty() => Outcome::Updated,
+        Ok(()) => Outcome::Added,
+        Err(e) => Outcome::Failed(e.to_string()),
+    }
+}
+
+fn toml_has(file: &Path) -> bool {
+    std::fs::read_to_string(file).is_ok_and(|t| toml_tables(&t).iter().any(|x| toml_is_ours(x)))
+}
+
+fn unplug_toml(file: &Path) -> Result<(), String> {
+    let Ok(text) = std::fs::read_to_string(file) else { return Ok(()) };
+    let tables = toml_tables(&text);
+    if !tables.iter().any(|t| toml_is_ours(t)) {
+        return Ok(());
+    }
+    let kept: String = tables.iter().filter(|t| !toml_is_ours(t)).map(String::as_str).collect();
+    std::fs::write(file, kept.trim_end().to_string() + "\n").map_err(|e| e.to_string())
+}
+
 fn gemini_settings() -> PathBuf {
     dirs::home_dir().unwrap_or_default().join(".gemini").join("settings.json")
 }
@@ -143,10 +231,12 @@ pub enum Ai {
     Gemini,
     ClaudeDesktop,
     Cursor,
+    /// Mistral Vibe, Mistral's coding agent in the terminal (`vibe`).
+    Vibe,
 }
 
 impl Ai {
-    pub const ALL: [Ai; 5] = [Ai::ClaudeCode, Ai::Codex, Ai::Gemini, Ai::ClaudeDesktop, Ai::Cursor];
+    pub const ALL: [Ai; 6] = [Ai::ClaudeCode, Ai::Codex, Ai::Gemini, Ai::Vibe, Ai::ClaudeDesktop, Ai::Cursor];
 
     /// Stable name, kept in the settings.
     pub fn key(self) -> &'static str {
@@ -156,6 +246,7 @@ impl Ai {
             Ai::Gemini => "gemini",
             Ai::ClaudeDesktop => "claude-desktop",
             Ai::Cursor => "cursor",
+            Ai::Vibe => "vibe",
         }
     }
     pub fn label(self) -> &'static str {
@@ -165,6 +256,7 @@ impl Ai {
             Ai::Gemini => "Gemini CLI",
             Ai::ClaudeDesktop => crate::tr!("Claude (app de bureau)", "Claude (desktop app)"),
             Ai::Cursor => "Cursor",
+            Ai::Vibe => "Mistral Vibe",
         }
     }
     pub fn what(self) -> &'static str {
@@ -174,6 +266,7 @@ impl Ai {
             Ai::Gemini => crate::tr!("Agent de code de Google, sur votre compte Google", "Google's coding agent, on your Google account"),
             Ai::ClaudeDesktop => crate::tr!("L'app Claude : ses conversations lisent et écrivent vos projets", "The Claude app: its conversations read and write your projects"),
             Ai::Cursor => crate::tr!("L'éditeur Cursor : son agent lit et écrit vos projets", "The Cursor editor: its agent reads and writes your projects"),
+            Ai::Vibe => crate::tr!("Agent de code de Mistral, sur votre compte Mistral", "Mistral's coding agent, on your Mistral account"),
         }
     }
     /// Command to start it in a terminal, for the agents that run in one.
@@ -182,6 +275,7 @@ impl Ai {
             Ai::ClaudeCode => Some("claude"),
             Ai::Codex => Some("codex"),
             Ai::Gemini => Some("gemini"),
+            Ai::Vibe => Some("vibe"),
             _ => None,
         }
     }
@@ -191,6 +285,8 @@ impl Ai {
             Ai::ClaudeCode => Some(("claude", "/login")),
             Ai::Codex => Some(("codex login", "")),
             Ai::Gemini => Some(("gemini", "")),
+            // Its first start asks for the Mistral key.
+            Ai::Vibe => Some(("vibe", "")),
             _ => None,
         }
     }
@@ -200,6 +296,8 @@ impl Ai {
             Ai::ClaudeCode => Some("npm install -g @anthropic-ai/claude-code"),
             Ai::Codex => Some("npm install -g @openai/codex"),
             Ai::Gemini => Some("npm install -g @google/gemini-cli"),
+            // Mistral's Python package, through uv.
+            Ai::Vibe => Some("uv tool install mistral-vibe"),
             _ => None,
         }
     }
@@ -216,6 +314,14 @@ impl Ai {
             Ai::Codex => (110, 150, 230),
             Ai::Gemini => (66, 133, 244),
             Ai::Cursor => (150, 150, 150),
+            Ai::Vibe => (250, 82, 15),
+        }
+    }
+    /// For the AIs set up in a TOML file (Mistral Vibe).
+    fn toml_file(self) -> Option<PathBuf> {
+        match self {
+            Ai::Vibe => Some(vibe_config()),
+            _ => None,
         }
     }
     fn agent(self, path: &str) -> Option<Agent> {
@@ -251,6 +357,7 @@ fn installed(ai: Ai, path: &str) -> bool {
         Ai::Gemini => crate::sync::which("gemini", path).is_some(),
         Ai::ClaudeDesktop => claude_desktop_config().is_some(),
         Ai::Cursor => cursor_settings().parent().is_some_and(Path::is_dir),
+        Ai::Vibe => crate::sync::which("vibe", path).is_some(),
     }
 }
 
@@ -264,6 +371,9 @@ fn plugged(ai: Ai, path: &str) -> bool {
             Tool::ClaudeCode => cli(&a.bin, &["mcp", "get", NAME], path).is_ok(),
             Tool::Codex => cli(&a.bin, &["mcp", "list"], path).is_ok_and(|o| o.contains(NAME)),
         };
+    }
+    if let Some(f) = ai.toml_file() {
+        return toml_has(&f);
     }
     ai.json_file().is_some_and(|f| json_has(&f))
 }
@@ -286,6 +396,9 @@ pub fn plug(ai: Ai, exe: &Path) -> Outcome {
     if let Some(a) = ai.agent(&path) {
         return plug_cli(&a, exe, &path);
     }
+    if let Some(f) = ai.toml_file() {
+        return if installed(ai, &path) { plug_toml(&f, exe) } else { Outcome::Failed(crate::trf!("{} n'est pas installé", "{} isn't installed", ai.label())) };
+    }
     match ai.json_file() {
         Some(f) if installed(ai, &path) => plug_json(&f, exe),
         _ => Outcome::Failed(crate::trf!("{} n'est pas installé", "{} isn't installed", ai.label())),
@@ -301,6 +414,9 @@ pub fn unplug(ai: Ai) -> Result<(), String> {
             Tool::Codex => vec!["mcp", "remove", NAME],
         };
         return cli(&a.bin, &rm, &path).map(|_| ());
+    }
+    if let Some(f) = ai.toml_file() {
+        return unplug_toml(&f);
     }
     let Some(f) = ai.json_file() else { return Ok(()) };
     let Ok(text) = std::fs::read_to_string(&f) else { return Ok(()) };
@@ -320,9 +436,10 @@ pub fn plug_all(exe: &Path, off: &[String]) -> Report {
         if off.iter().any(|k| k == ai.key()) || !installed(ai, &path) {
             continue;
         }
-        let o = match ai.agent(&path) {
-            Some(a) => plug_cli(&a, exe, &path),
-            None => match ai.json_file() {
+        let o = match (ai.agent(&path), ai.toml_file()) {
+            (Some(a), _) => plug_cli(&a, exe, &path),
+            (None, Some(f)) => plug_toml(&f, exe),
+            (None, None) => match ai.json_file() {
                 Some(f) => plug_json(&f, exe),
                 None => continue,
             },
@@ -372,6 +489,40 @@ mod tests {
         std::fs::write(&f, "{ broken").unwrap();
         assert!(matches!(plug_json(&f, exe), Outcome::Failed(_)));
         assert_eq!(std::fs::read_to_string(&f).unwrap(), "{ broken");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// Mistral Vibe's TOML: our table added, put right when the program moved, removed on
+    /// unplugging; the person's own settings, comments and other servers never touched.
+    #[test]
+    fn vibe_toml_keeps_everything_else() {
+        let dir = std::env::temp_dir().join(format!("orch-vibe-{}", uuid::Uuid::new_v4().simple()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let f = dir.join("config.toml");
+        let mine = "# mes réglages\nactive_model = \"devstral\"\n\n[[mcp_servers]]\nname = \"fetch\"\ntransport = \"stdio\"\ncommand = \"uvx\"\nargs = [\"mcp-server-fetch\"]\n\n[tools.bash]\npermission = \"ask\"\n";
+        std::fs::write(&f, mine).unwrap();
+        let exe = Path::new("/Applications/Orchestra.app/Contents/MacOS/orchestra");
+        assert_eq!(plug_toml(&f, exe), Outcome::Added);
+        let text = std::fs::read_to_string(&f).unwrap();
+        assert!(text.starts_with(mine), "the file as it was, then our table:\n{text}");
+        assert!(text.contains("name = \"orchestra\"") && text.contains("command = \"/Applications/Orchestra.app/Contents/MacOS/orchestra\"") && text.contains("args = [\"mcp\"]"));
+        assert!(toml_has(&f));
+        assert!(dir.join("config.toml.bak").exists());
+        assert_eq!(plug_toml(&f, exe), Outcome::AlreadyThere);
+        // Moved: one table, the new path.
+        assert_eq!(plug_toml(&f, Path::new("/moved/orchestra")), Outcome::Updated);
+        let text = std::fs::read_to_string(&f).unwrap();
+        assert_eq!(text.matches("name = \"orchestra\"").count(), 1);
+        assert!(text.contains("/moved/orchestra") && !text.contains("/Applications/Orchestra.app"));
+        assert!(text.contains("name = \"fetch\"") && text.contains("[tools.bash]") && text.contains("# mes réglages"));
+        // Unplugged: back to the person's settings only.
+        unplug_toml(&f).unwrap();
+        assert!(!toml_has(&f));
+        assert_eq!(std::fs::read_to_string(&f).unwrap().trim_end(), mine.trim_end());
+        // No file yet: one is made. A path with quotes stays valid TOML.
+        let new = dir.join("neuf").join("config.toml");
+        assert_eq!(plug_toml(&new, Path::new("/a \"b\"/orchestra")), Outcome::Added);
+        assert!(std::fs::read_to_string(&new).unwrap().contains(r#"command = "/a \"b\"/orchestra""#));
         let _ = std::fs::remove_dir_all(dir);
     }
 

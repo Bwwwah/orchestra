@@ -25,6 +25,29 @@ enum Phase {
     Summary(Instant),
     /// /exit sent; closing.
     Closing(Instant),
+    /// Paused: the AI waits for the person's answer (see `LiveRun::waiting`).
+    Waiting,
+}
+
+/// What a paused session waits for.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub enum Wait {
+    /// Claude Code asks whether the folder is safe.
+    Trust,
+    /// Claude Code asks to allow a command or an edit (or a question it didn't explain).
+    Permission,
+    /// The AI asked the person a question (ask_human) and has nothing else to do.
+    Question,
+}
+
+impl Wait {
+    pub fn label(self) -> &'static str {
+        match self {
+            Wait::Trust => crate::tr!("En pause : Claude Code demande si le dossier est sûr. Répondez dans le terminal (« Regarder ») : la session repart ensuite.", "Paused: Claude Code asks whether the folder is safe. Answer in the terminal (« Watch »): the session goes on afterwards."),
+            Wait::Permission => crate::tr!("En pause : Claude Code demande une autorisation. Répondez dans le terminal (« Regarder ») : la session repart ensuite.", "Paused: Claude Code asks for a permission. Answer in the terminal (« Watch »): the session goes on afterwards."),
+            Wait::Question => crate::tr!("En pause : l'IA attend la réponse à sa question (boîte de réception) ; elle repart dès qu'elle l'a.", "Paused: the AI waits for the answer to its question (inbox); it goes on as soon as it has it."),
+        }
+    }
 }
 
 pub struct LiveRun {
@@ -51,6 +74,7 @@ pub struct LiveRun {
     stop: Option<String>,
     summarizing: bool,
     pub last_line: String,
+    /// The project's steps when the session started: (step id, done).
     steps_at_start: Vec<(String, bool)>,
     screen_hash: u64,
     screen_changed: Instant,
@@ -68,6 +92,71 @@ pub struct LiveRun {
     pub endless: Option<crate::model::EndConditions>,
     /// Turns in a row the AI said it had nothing left ([[FINI]]).
     done_streak: u32,
+    /// Paused, waiting for the person (with `Phase::Waiting`).
+    pub waiting: Option<Wait>,
+    /// The screen when the pause began: the answer given in the terminal changes it.
+    paused_screen: u64,
+}
+
+impl LiveRun {
+    /// Put the session on hold until the person answers.
+    fn pause(&mut self, why: Wait) {
+        self.waiting = Some(why);
+        self.phase = Phase::Waiting;
+        self.paused_screen = self.screen_hash;
+        self.last_line = why.label().into();
+    }
+
+    /// The person answered what the session waits for: in the terminal (the question is
+    /// gone from a screen that moved since the pause), or in the inbox (`question_left`:
+    /// one of its questions still has no answer).
+    fn answered(&self, screen: &str, idle: Duration, question_left: bool) -> bool {
+        let moved = self.screen_hash != self.paused_screen && idle > Duration::from_millis(1500);
+        match self.waiting {
+            Some(Wait::Trust) => moved && auto::read_screen(screen) != Screen::Trust,
+            Some(Wait::Permission) => moved && auto::read_screen(screen) != Screen::Permission,
+            Some(Wait::Question) => !question_left,
+            None => false,
+        }
+    }
+
+    /// Leave the pause (« Reprendre »). A question still on the screen is refused, as
+    /// without the pause.
+    pub fn resume(&mut self) {
+        let Some(why) = self.waiting.take() else { return };
+        let now = Instant::now();
+        let still = auto::read_screen(&self.term.text());
+        match why {
+            Wait::Trust if still == Screen::Trust => {
+                // Never accept for them; Claude Code closes and the session ends.
+                self.term.write(b"\x1b");
+                self.stop = Some(crate::tr!("le dossier n'a pas été accepté dans Claude Code", "the folder wasn't accepted in Claude Code").into());
+                self.phase = Phase::Starting(now);
+            }
+            Wait::Trust => {
+                self.phase = Phase::Starting(now);
+                self.last_line = crate::tr!("Démarrage de Claude Code…", "Starting Claude Code…").into();
+            }
+            Wait::Permission if still == Screen::Permission => {
+                self.term.write(b"\x1b");
+                self.denials += 1;
+                self.last_line = crate::tr!("Commande refusée (non autorisée en autonome)", "Command refused (not allowed when autonomous)").into();
+                self.phase = Phase::Denied(now);
+            }
+            Wait::Permission => {
+                self.phase = Phase::Working(now);
+                self.last_line = crate::trf!("Tour {} en cours…", "Turn {} running…", self.turns + 1);
+            }
+            Wait::Question => {
+                match &self.endless {
+                    Some(c) => self.term.paste(auto::endless_prompt(!c.when_done)),
+                    None => self.term.paste(auto::continue_prompt()),
+                }
+                self.phase = Phase::Typed(now);
+            }
+        }
+        self.screen_changed = now;
+    }
 }
 
 #[derive(Clone)]
@@ -190,7 +279,7 @@ impl NotesApp {
         // The session checks interfaces with take_screenshot, which macOS only allows once
         // Orchestra has the « Screen Recording » permission: ask for it now (once per launch).
         crate::screen::ensure_permission();
-        let steps_at_start: Vec<(String, bool)> = pr.steps.iter().map(|s| (s.title.clone(), s.status == crate::project::StepStatus::Done)).collect();
+        let steps_at_start: Vec<(String, bool)> = pr.steps.iter().map(|s| (s.id.clone(), s.status == crate::project::StepStatus::Done)).collect();
         let copy = auto::make_copy(&folder, &title)?;
         let agent = Agent::ClaudeCode;
         let o = &self.ws.settings.orch;
@@ -254,6 +343,8 @@ impl NotesApp {
             measured: false,
             endless,
             done_streak: 0,
+            waiting: None,
+            paused_screen: 0,
         });
         Ok(())
     }
@@ -287,6 +378,9 @@ impl NotesApp {
                 r.outcome = crate::tr!("interrompue (Orchestra fermé)", "interrupted (Orchestra closed)").into();
                 r.ended = r.ended.max(r.started);
             }
+            // Copies no session needs any more (merged, discarded, or forgotten): removed
+            // if they hold nothing uncommitted, their branches kept.
+            auto::clean_copies_later(auto::stale_copies(&self.ws.runs));
         }
         self.usage_tick();
         self.resume_tick(ctx);
@@ -304,6 +398,8 @@ impl NotesApp {
         let now = Instant::now();
         let global = self.ws.settings.orch.global_limit;
         let week_limit = self.ws.settings.orch.week_limit;
+        let pause = self.ws.settings.orch.pause_for_answer;
+        let mut paused: Vec<(String, String, Wait)> = vec![];
         let mut finished: Vec<(usize, String, String)> = vec![];
         for (i, r) in self.orch.runs.iter_mut().enumerate() {
             // How the screen moves (idle = nothing drawn for a while).
@@ -330,6 +426,11 @@ impl NotesApp {
                                 // the copy is the same repository, in a new folder.
                                 r.term.write(b"\r");
                                 r.screen_changed = now;
+                            }
+                            Screen::Trust if pause => {
+                                // The person decides, in the terminal.
+                                r.pause(Wait::Trust);
+                                paused.push((r.project.clone(), r.title.clone(), Wait::Trust));
                             }
                             Screen::Trust => {
                                 // Never accept for them: it would turn on the repository's
@@ -375,6 +476,11 @@ impl NotesApp {
                         && !r.reader.turn_over
                         && r.reader.last_growth.is_none_or(|g| g.elapsed() > Duration::from_secs(180));
                     if (auto::read_screen(&screen) == Screen::Permission && idle > Duration::from_millis(800)) || frozen {
+                        if pause {
+                            r.pause(Wait::Permission);
+                            paused.push((r.project.clone(), r.title.clone(), Wait::Permission));
+                            continue;
+                        }
                         r.term.write(b"\x1b");
                         r.denials += 1;
                         r.last_line = crate::tr!("Commande refusée (non autorisée en autonome)", "Command refused (not allowed when autonomous)").into();
@@ -413,43 +519,48 @@ impl NotesApp {
                         r.done_streak = if sig == Signal::Done { r.done_streak + 1 } else { 0 };
                         // Endless mode: its own end conditions replace [[FINI]] and the turn limit.
                         let endless_end = r.endless.as_ref().and_then(|c| {
-                            let before = &r.steps_at_start;
                             let steps = self.ws.page(&r.project).and_then(|p| p.project.as_ref()).map(|pr| pr.steps.clone()).unwrap_or_default();
-                            let done = |s: &crate::project::Step| s.status == crate::project::StepStatus::Done;
-                            let steps_done = steps.iter().filter(|s| done(s) && !before.iter().any(|(b, d)| *b == s.title && *d)).count() as u32;
+                            let p = steps_since(&r.steps_at_start, &steps);
+                            let steps_done = p.done.len() as u32;
                             // Steps the AI added itself and hasn't done yet.
-                            let added_open = steps.iter().filter(|s| !done(s) && !before.iter().any(|(b, _)| *b == s.title)).count();
+                            let added_open = p.added_open;
                             if auto::too_many_self_steps(added_open) {
                                 return Some(crate::trf!("l'IA a ajouté {added_open} étapes sans les faire", "the AI added {added_open} steps without doing them"));
                             }
                             c.reached(crate::model::now_ms().saturating_sub(r.started_wall), steps_done, r.turns, r.done_streak)
                         });
-                        let reason = if let Some(s) = r.stop.clone() {
-                            Some(s)
-                        } else if too_long {
-                            Some(crate::tr!("un tour a duré trop longtemps", "a turn took too long").into())
-                        } else if let Some(why) = endless_end {
-                            Some(why)
-                        } else if sig == Signal::Done && r.endless.is_none() {
-                            Some(crate::tr!("mission terminée", "mission complete").into())
-                        } else if sig == Signal::Blocked {
-                            Some(crate::tr!("l'IA est bloquée", "the AI is blocked").into())
-                        } else if r.pct >= r.limit {
-                            Some(crate::trf!("limite du projet atteinte ({:.0} %)", "project limit reached ({:.0} %)", r.limit))
-                        } else if five.is_some_and(|f| f >= global) {
-                            r.quota_reset = self.orch.five_reset;
-                            Some(crate::trf!("limite globale atteinte ({global:.0} %)", "global limit reached ({global:.0} %)"))
-                        } else if self.orch.week.is_some_and(|w| crate::usage::near_reserve(w, week_limit, r.week_turn)) {
-                            // Paused before the next turn bites into the reserve; starts again once the week resets.
-                            r.quota_reset = self.orch.week_reset;
-                            Some(crate::trf!("pause : la réserve minimum de la semaine ({:.0} %) approche", "paused: the week's minimum reserve ({:.0} %) is near", 100.0 - week_limit))
-                        } else if !r.measured && r.turns >= 2 {
-                            Some(crate::tr!("utilisation de l'abonnement impossible à mesurer", "subscription use can't be measured").into())
-                        } else if r.endless.is_none() && r.turns >= r.max_turns {
-                            Some(crate::trf!("{} tours atteints", "{} turns reached", r.max_turns))
-                        } else {
-                            None
-                        };
+                        let stop = stop_reason(&TurnEnd {
+                            asked: r.stop.clone(),
+                            too_long,
+                            endless_end,
+                            signal: sig,
+                            endless: r.endless.is_some(),
+                            pct: r.pct,
+                            limit: r.limit,
+                            five,
+                            global,
+                            week: self.orch.week,
+                            week_limit,
+                            week_turn: r.week_turn,
+                            measured: r.measured,
+                            turns: r.turns,
+                            max_turns: r.max_turns,
+                        });
+                        // Stopped by a quota: when it resets, to start again then.
+                        match stop.as_ref().map(Stop::quota) {
+                            Some(Quota::FiveHours) => r.quota_reset = self.orch.five_reset,
+                            Some(Quota::Week) => r.quota_reset = self.orch.week_reset,
+                            _ => {}
+                        }
+                        let reason = stop.map(|s| s.text());
+                        // A question to the person still unanswered: wait for it rather
+                        // than send the AI on.
+                        let asked = pause && reason.is_none() && crate::model::question_pending(&self.ws.inbox, &r.project, r.started_wall);
+                        if asked {
+                            r.pause(Wait::Question);
+                            paused.push((r.project.clone(), r.title.clone(), Wait::Question));
+                            continue;
+                        }
                         match reason {
                             Some(why) => {
                                 r.stop = Some(why.clone());
@@ -462,12 +573,23 @@ impl NotesApp {
                         r.phase = Phase::Typed(now);
                     }
                 }
+                // Paused: nothing moves until the person answers, then the AI goes on.
+                Phase::Waiting => {
+                    let left = crate::model::question_pending(&self.ws.inbox, &r.project, r.started_wall);
+                    if r.answered(&screen, idle, left) {
+                        r.resume();
+                    }
+                }
                 Phase::Closing(t) => {
                     if t.elapsed() > Duration::from_secs(3) || r.term.exited() {
                         finished.push((i, String::new(), String::new()));
                     }
                 }
             }
+        }
+        for (project, title, why) in paused {
+            self.ws.notify("info", &project, &crate::trf!("{title} attend votre réponse", "{title} waits for your answer"), why.label(), None);
+            self.dirty_since.get_or_insert_with(Instant::now);
         }
         // Finished sessions: report, inbox, then close the terminal.
         for (i, why, summary) in finished.into_iter().rev() {
@@ -557,20 +679,14 @@ impl NotesApp {
             return;
         }
         self.orch.last_reading = Some((u.at, five.pct, five.resets_at));
-        let rise = match prev {
-            Some((_, p, r)) if r.is_some() && five.resets_at.is_some() && r.unwrap().abs_diff(five.resets_at.unwrap()) < 120_000 => (five.pct - p).max(0.0),
-            Some((_, p, None)) if five.resets_at.is_none() => (five.pct - p).max(0.0),
-            Some(_) => five.pct,
-            None => 0.0,
-        };
+        let rise = window_rise(prev.map(|(_, p, r)| (p, r)), five.pct, five.resets_at);
         let deltas: Vec<u64> = self.orch.runs.iter().map(|r| r.reader.tokens.saturating_sub(r.tokens_counted)).collect();
-        let total: u64 = deltas.iter().sum();
-        let n = self.orch.runs.len().max(1) as f32;
-        for (r, d) in self.orch.runs.iter_mut().zip(deltas) {
+        let shares = split_rise(rise, &deltas);
+        for (r, s) in self.orch.runs.iter_mut().zip(shares) {
             if u.at >= r.started_wall {
                 r.measured = true;
             }
-            r.pct += if total > 0 { rise * d as f32 / total as f32 } else { rise / n };
+            r.pct += s;
             r.tokens_counted = r.reader.tokens;
         }
     }
@@ -609,13 +725,7 @@ impl NotesApp {
         let now = crate::model::now_ms();
         let resume_at = r.quota_reset.filter(|&reset| self.ws.settings.orch.auto_resume && reset > now).map(crate::model::resume_time).unwrap_or(0);
         let before = r.steps_at_start.clone();
-        let done_now: Vec<String> = self
-            .ws
-            .page(&project)
-            .and_then(|p| p.project.as_ref())
-            .map(|pr| pr.steps.iter().filter(|s| s.status == crate::project::StepStatus::Done).map(|s| s.title.clone()).collect())
-            .unwrap_or_default();
-        let newly: Vec<String> = done_now.into_iter().filter(|t| !before.iter().any(|(b, d)| b == t && *d)).collect();
+        let newly: Vec<String> = self.ws.page(&project).and_then(|p| p.project.as_ref()).map(|pr| steps_since(&before, &pr.steps).done).unwrap_or_default();
         let Some(rec) = self.ws.runs.iter_mut().find(|x| x.id == id) else { return };
         rec.ended = crate::model::now_ms();
         rec.outcome = why.clone();
@@ -789,6 +899,22 @@ impl NotesApp {
                 });
                 ui.add_space(8.0);
             }
+            let o = &mut self.ws.settings.orch;
+            // The reserve, set right here (laid out right to left: its label ends up first).
+            let reserve_ctl = |ui: &mut egui::Ui, o: &mut crate::model::OrchSettings| {
+                let mut reserve = o.reserve();
+                let r = ui.add(egui::DragValue::new(&mut reserve).range(0.0..=95.0).speed(0.5).suffix(" %")).on_hover_text(crate::tr!(
+                    "Part de la semaine gardée pour vous : les IA s'arrêtent avant de l'entamer",
+                    "Share of the week kept for you: the AIs stop before touching it"
+                ));
+                if r.changed() {
+                    o.set_reserve(reserve);
+                    o.reserve_asked = true;
+                }
+                ui.label(RichText::new(crate::tr!("Réserve minimum", "Minimum reserve")).size(13.0).color(t.secondary));
+            };
+            // Narrow: the reserve on a line of its own rather than over the figure.
+            let wide = ui.available_width() >= WEEK_ONE_LINE;
             ui.horizontal(|ui| {
                 ui.label(RichText::new(crate::tr!("CETTE SEMAINE", "THIS WEEK")).font(semibold(11.5)).color(t.tertiary));
                 let used = match week {
@@ -796,19 +922,13 @@ impl NotesApp {
                     None => crate::tr!("utilisation inconnue pour l'instant", "usage unknown for now").into(),
                 };
                 ui.label(RichText::new(used).font(semibold(14.0)).color(t.text));
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    let mut reserve = self.ws.settings.orch.reserve();
-                    let r = ui.add(egui::DragValue::new(&mut reserve).range(0.0..=95.0).speed(0.5).suffix(" %")).on_hover_text(crate::tr!(
-                        "Part de la semaine gardée pour vous : les IA s'arrêtent avant de l'entamer",
-                        "Share of the week kept for you: the AIs stop before touching it"
-                    ));
-                    if r.changed() {
-                        self.ws.settings.orch.set_reserve(reserve);
-                        self.ws.settings.orch.reserve_asked = true;
-                    }
-                    ui.label(RichText::new(crate::tr!("Réserve minimum", "Minimum reserve")).size(13.0).color(t.secondary));
-                });
+                if wide {
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| reserve_ctl(ui, o));
+                }
             });
+            if !wide {
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| reserve_ctl(ui, o));
+            }
             ui.add_space(4.0);
             let limit = self.ws.settings.orch.week_limit;
             let w = ui.available_width();
@@ -825,13 +945,13 @@ impl NotesApp {
             ui.painter().vline(lx, egui::Rangef::new(bar.top() - 3.0, bar.bottom() + 3.0), egui::Stroke::new(2.0, super::projects::ORANGE));
             // The day's pace: what went from the week in 24 hours against a seventh of it.
             if let Some((used, span)) = self.orch.day_week {
-                let d = crate::usage::daily_pct(used);
-                let over = if span >= 23 * 3_600_000 { crate::tr!("sur 24 h", "over 24 h").to_string() } else { crate::trf!("depuis {}", "for the last {}", crate::usage::left_text(span)) };
-                let color = if d > 100.0 { super::projects::ORANGE } else { t.secondary };
+                let (line, fast) = crate::usage::day_pace_line(used, span);
+                let color = if fast { super::projects::ORANGE } else { t.secondary };
                 ui.add_space(4.0);
-                ui.label(RichText::new(crate::trf!("Aujourd'hui : {d:.0} % de la part du jour ({over})", "Today: {d:.0} % of the day's share ({over})")).size(12.5).color(color)).on_hover_text(crate::trf!(
-                    "{used:.1} % de la semaine utilisés, pour une part du jour d'un septième de la semaine (≈ 14,3 %). Au-delà de 100 %, le rythme épuiserait la semaine avant sa fin.",
-                    "{used:.1} % of the week used, against a day's share of one seventh of the week (≈ 14.3 %). Past 100 %, this pace would use up the week before it ends."
+                ui.add(egui::Label::new(RichText::new(line).size(12.5).color(color)).wrap()).on_hover_text(crate::trf!(
+                    "Ce qui est parti de l'abonnement de la semaine sur les dernières 24 h, par vous et par les IA. La part d'un jour est un septième de la semaine : à ce rythme, la semaine dure pile jusqu'à sa remise à zéro. Plus vite (en orange), elle s'épuiserait avant ; c'est {:.0} % de la part d'un jour.",
+                    "What went from the week's subscription over the last 24 hours, by you and by the AIs. A day's share is a seventh of the week: at that pace, the week lasts exactly until it resets. Faster (in orange), it would run out before; that is {:.0} % of a day's share.",
+                    crate::usage::daily_pct(used)
                 ));
             }
         });
@@ -877,8 +997,8 @@ impl NotesApp {
                 0 => (
                     five.map(|f| format!("{f:.0} %")).unwrap_or_else(|| "—".into()),
                     match (five, five_left) {
-                        (Some(_), Some(l)) => crate::trf!("à zéro dans {} · limite {global:.0} %", "resets in {} · limit {global:.0} %", crate::usage::left_text(l)),
-                        (Some(_), None) => crate::trf!("limite des sessions : {global:.0} %", "sessions' limit: {global:.0} %"),
+                        (Some(_), Some(l)) => crate::trf!("repart dans {} · IA arrêtées à {global:.0} %", "resets in {} · AIs stop at {global:.0} %", crate::usage::left_text(l)),
+                        (Some(_), None) => crate::trf!("IA arrêtées à {global:.0} %", "AIs stop at {global:.0} %"),
                         _ => crate::tr!("inconnu pour l'instant", "unknown for now").into(),
                     },
                 ),
@@ -902,8 +1022,8 @@ impl NotesApp {
                     }
                     // The details, on hover only.
                     let mut tip = vec![crate::trf!(
-                        "Part de la fenêtre de 5 h de l'abonnement utilisée. Les sessions s'arrêtent à la limite globale ({global:.0} %), réglable plus bas.",
-                        "Share of the subscription's 5-hour window used. Sessions stop at the global limit ({global:.0} %), set below."
+                        "Part de la fenêtre de 5 h de l'abonnement Claude déjà utilisée, par les IA d'Orchestra et par vous (Claude Code, claude.ai…) : le chiffre de Claude Code lui-même.\nLe trait orange de l'anneau est la limite globale ({global:.0} %) : aucune session autonome ne démarre ni ne continue au-delà. Réglable plus bas, dans « Réglages et limites ».",
+                        "Share of the Claude subscription's 5-hour window already used, by Orchestra's AIs and by you (Claude Code, claude.ai…): Claude Code's own figure.\nThe ring's orange tick is the global limit ({global:.0} %): no autonomous session starts or goes on past it. Set below, in « Settings and limits »."
                     )];
                     if let Some(d) = day {
                         tip.push(crate::trf!("Dernières 24 h : {d:.0} % (les fenêtres de 5 h de la journée, additionnées)", "Last 24 hours: {d:.0} % (the day's 5-hour windows, added up)"));
@@ -983,11 +1103,14 @@ impl NotesApp {
             let col_w = if two { (w - 28.0) / 2.0 } else { w };
             let mut left = |ui: &mut egui::Ui| {
                 ui.set_width(col_w);
-                row(ui, crate::tr!("Limite globale", "Global limit"), crate::tr!("De la fenêtre de 5 h : aucune session ne va au-delà, tous projets confondus", "Of the 5-hour window: no session goes past it, all projects together"), &mut |ui| {
+                row(ui, crate::tr!("Limite globale", "Global limit"), crate::tr!("De la fenêtre de 5 h, votre propre usage compris : aucune session ne va au-delà, tous projets confondus. Chaque session a en plus son budget, compté depuis son lancement.", "Of the 5-hour window, your own use included: no session goes past it, all projects together. Each session also has its budget, counted from its start."), &mut |ui| {
                     ui.add(egui::DragValue::new(&mut o.global_limit).range(5.0..=100.0).speed(0.5).suffix(" %"));
                 });
                 row(ui, crate::tr!("Commits autorisés", "Commits allowed"), crate::tr!("Sur leur branche, envoyée sur GitHub par Orchestra", "On their branch, pushed to GitHub by Orchestra"), &mut |ui| {
                     super::settings::switch(ui, &mut o.allow_commits, &lk);
+                });
+                row(ui, crate::tr!("Pause quand l'IA attend", "Pause when the AI waits"), crate::tr!("Autorisation, dossier à approuver ou question posée : la session attend votre réponse au lieu de refuser ou de s'arrêter", "A permission, a folder to approve or a question asked: the session waits for your answer instead of refusing or stopping"), &mut |ui| {
+                    super::settings::switch(ui, &mut o.pause_for_answer, &lk);
                 });
                 row(ui, crate::tr!("Reprise automatique", "Automatic restart"), crate::tr!("Une session arrêtée par la limite globale ou la réserve de la semaine repart seule après la remise à zéro du quota", "A session stopped by the global limit or the week's reserve starts again by itself once the quota resets"), &mut |ui| {
                     super::settings::switch(ui, &mut o.auto_resume, &lk);
@@ -1022,6 +1145,22 @@ impl NotesApp {
                         .color(t.tertiary),
                 );
                 ui.add(egui::TextEdit::singleline(&mut o.extra_tools).hint_text(crate::tr!("En plus, ex. Bash(just:*), Bash(docker compose:*)", "More, e.g. Bash(just:*), Bash(docker compose:*)")).desired_width(f32::INFINITY).font(FontId::monospace(12.5)));
+                // The rules dropped, said rather than silently ignored.
+                let rejected = auto::rejected_extra(&o.extra_tools);
+                if !rejected.is_empty() {
+                    ui.add(
+                        egui::Label::new(
+                            RichText::new(crate::trf!(
+                                "Ignorées, trop larges ou contraires aux commandes toujours refusées : {}. Donnez une commande précise, ex. Bash(git log:*) plutôt que Bash(git:*).",
+                                "Ignored, too wide or against the commands always refused: {}. Give a precise command, e.g. Bash(git log:*) rather than Bash(git:*).",
+                                rejected.join(", ")
+                            ))
+                            .size(12.0)
+                            .color(super::projects::ORANGE),
+                        )
+                        .wrap(),
+                    );
+                }
             });
         });
         ui.ctx().data_mut(|d| d.insert_temp(open_key, open));
@@ -1040,6 +1179,7 @@ impl NotesApp {
         let mut watch: Option<Option<String>> = None;
         let n = self.orch.runs.len();
         let awake = self.orch.awake.held();
+        let (five, global) = (self.orch.five, self.ws.settings.orch.global_limit);
         super::projects::card(ui, t, 0.0, |ui| {
             super::projects::card_title(ui, crate::tr!("EN COURS", "RUNNING"), &n.to_string(), t);
             if awake {
@@ -1050,8 +1190,30 @@ impl NotesApp {
                 ui.add_space(6.0);
             }
             for (i, r) in self.orch.runs.iter_mut().enumerate() {
+                // The session's links; in a right-to-left layout « Forcer l'arrêt » ends up last.
+                let mut links = |ui: &mut egui::Ui, r: &mut LiveRun| {
+                    if super::projects::action_link(ui, crate::tr!("Forcer l'arrêt", "Force stop")).on_hover_text(crate::tr!("Ferme Claude Code tout de suite, sans compte rendu", "Closes Claude Code right away, without a summary")).clicked() {
+                        stop = Some((i, true));
+                    }
+                    if r.stop.is_none() && super::projects::action_link(ui, crate::tr!("Arrêter", "Stop")).on_hover_text(crate::tr!("Finit le tour en cours, écrit le compte rendu, puis s'arrête", "Finishes the current turn, writes the summary, then stops")).clicked() {
+                        stop = Some((i, false));
+                    }
+                    if r.waiting.is_some()
+                        && super::projects::action_link(ui, crate::tr!("Reprendre", "Resume"))
+                            .on_hover_text(crate::tr!("L'IA repart ; une question restée à l'écran est refusée", "The AI goes on; a question still on the screen is refused"))
+                            .clicked()
+                    {
+                        r.resume();
+                    }
+                    let open = watching.as_deref() == Some(r.id.as_str());
+                    if super::projects::action_link(ui, if open { crate::tr!("Masquer", "Hide") } else { crate::tr!("Regarder", "Watch") }).clicked() {
+                        watch = Some(if open { None } else { Some(r.id.clone()) });
+                    }
+                };
                 egui::Frame::new().fill(super::projects::GREEN.gamma_multiply(0.06)).stroke(egui::Stroke::new(1.0, super::projects::GREEN.gamma_multiply(0.3))).corner_radius(10.0).inner_margin(egui::Margin::same(12)).show(ui, |ui| {
                 ui.set_width(ui.available_width());
+                // Room for the title, its state and the links on one line.
+                let wide = ui.available_width() >= RUN_ONE_LINE;
                 ui.horizontal(|ui| {
                     let (dot, _) = ui.allocate_exact_size(egui::vec2(12.0, 18.0), egui::Sense::hover());
                     super::projects::pulse_dot(ui, dot.center(), super::projects::GREEN);
@@ -1060,39 +1222,27 @@ impl NotesApp {
                         Phase::Starting(_) => crate::tr!("démarre", "starting").to_string(),
                         Phase::Summary(_) => crate::tr!("compte rendu", "summary").to_string(),
                         Phase::Closing(_) => crate::tr!("se ferme", "closing").to_string(),
+                        Phase::Waiting => crate::tr!("en pause", "paused").to_string(),
                         _ => format!("tour {}", r.turns + 1),
                     };
-                    ui.label(RichText::new(state).size(12.5).color(t.tertiary));
+                    let state_color = if r.waiting.is_some() { super::projects::ORANGE } else { t.tertiary };
+                    ui.label(RichText::new(state).size(12.5).color(state_color));
                     if let Some(c) = &r.endless {
                         ui.label(RichText::new(crate::tr!("∞ sans fin", "∞ endless")).size(12.5).color(super::projects::BLUE))
                             .on_hover_text(crate::trf!("S'arrête après : {}, ou sur son budget", "Stops after: {}, or on its budget", c.describe()));
                     }
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        if super::projects::action_link(ui, crate::tr!("Forcer l'arrêt", "Force stop")).on_hover_text(crate::tr!("Ferme Claude Code tout de suite, sans compte rendu", "Closes Claude Code right away, without a summary")).clicked() {
-                            stop = Some((i, true));
-                        }
-                        if r.stop.is_none() && super::projects::action_link(ui, crate::tr!("Arrêter", "Stop")).on_hover_text(crate::tr!("Finit le tour en cours, écrit le compte rendu, puis s'arrête", "Finishes the current turn, writes the summary, then stops")).clicked() {
-                            stop = Some((i, false));
-                        }
-                        let open = watching.as_deref() == Some(r.id.as_str());
-                        if super::projects::action_link(ui, if open { crate::tr!("Masquer", "Hide") } else { crate::tr!("Regarder", "Watch") }).clicked() {
-                            watch = Some(if open { None } else { Some(r.id.clone()) });
-                        }
+                    if wide {
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| links(ui, r));
+                    }
+                });
+                // Narrow: the links on a line of their own rather than over the title.
+                if !wide {
+                    ui.horizontal_wrapped(|ui| {
+                        ui.add_space(20.0);
+                        links(ui, r);
                     });
-                });
-                // Use of the project's share.
-                ui.horizontal(|ui| {
-                    ui.add_space(20.0);
-                    let w = (ui.available_width() - 150.0).max(80.0);
-                    let (bar, _) = ui.allocate_exact_size(egui::vec2(w, 8.0), egui::Sense::hover());
-                    ui.painter().rect_filled(bar, 4.0, t.fill);
-                    let frac = super::projects::smooth(ui, ("run-pct", &r.id), (r.pct / r.limit.max(0.1)).clamp(0.0, 1.0));
-                    ui.painter().rect_filled(egui::Rect::from_min_size(bar.min, egui::vec2(bar.width() * frac, 8.0)), 4.0, if frac > 0.85 { super::projects::ORANGE } else { super::projects::GREEN });
-                    ui.label(RichText::new(crate::trf!("{:.1} % utilisés sur un budget de {:.0} %", "{:.1} % used of a {:.0} % budget", r.pct, r.limit)).size(12.5).color(t.secondary)).on_hover_text(crate::tr!(
-                        "Part de la fenêtre de 5 h utilisée par cette session depuis son lancement, et son budget : elle s'arrête en l'atteignant. Les sessions précédentes du projet ne comptent pas.",
-                        "Share of the 5-hour window this session used since it started, and its budget: it stops on reaching it. The project's earlier sessions don't count."
-                    ));
-                });
+                }
+                share_row(ui, &r.id, r.pct, r.limit, five, global, t);
                 ui.horizontal(|ui| {
                     ui.add_space(20.0);
                     let mut job = egui::text::LayoutJob::single_section(r.last_line.clone(), egui::TextFormat::simple(FontId::proportional(12.5), t.tertiary));
@@ -1102,7 +1252,8 @@ impl NotesApp {
                 if let Some(why) = &r.stop {
                     ui.horizontal(|ui| {
                         ui.add_space(20.0);
-                        ui.label(RichText::new(crate::trf!("S'arrête : {why}", "Stopping: {why}")).size(12.5).color(super::projects::ORANGE));
+                        // Wrapped: a long reason must not widen the cards below.
+                        ui.add(egui::Label::new(RichText::new(crate::trf!("S'arrête : {why}", "Stopping: {why}")).size(12.5).color(super::projects::ORANGE)).wrap());
                     });
                 }
                 if watching.as_deref() == Some(r.id.as_str()) {
@@ -1181,6 +1332,8 @@ impl NotesApp {
                 let open = open_steps.get(id).copied().unwrap_or(0);
                 let others = running_sum + if d.pick { picked_sum - d.limit } else { picked_sum };
                 let room = (global - others).floor().max(0.0);
+                // Room for the project and its controls on one line (about 620 px).
+                let wide = ui.available_width() >= LAUNCH_ONE_LINE;
                 let row = ui.vertical(|ui| {
                     ui.horizontal(|ui| {
                         ui.add_enabled(!busy, egui::Checkbox::without_text(&mut d.pick)).on_hover_text(crate::tr!("Sélectionner pour lancer plusieurs projets ensemble", "Select to start several projects together"));
@@ -1198,53 +1351,22 @@ impl NotesApp {
                                 ui.label(RichText::new(txt).size(12.0).color(col));
                             });
                             let mut job = egui::text::LayoutJob::single_section(folder.clone(), egui::TextFormat::simple(FontId::monospace(11.0), t.tertiary));
-                            job.wrap = egui::text::TextWrapping::truncate_at_width((ui.available_width() - 250.0).max(80.0));
+                            job.wrap = egui::text::TextWrapping::truncate_at_width(if wide { (ui.available_width() - 250.0).max(80.0) } else { ui.available_width().max(40.0) });
                             super::projects::cut_label(ui, job);
                         });
-                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            if busy {
-                                let (r, _) = ui.allocate_exact_size(egui::vec2(16.0, 16.0), egui::Sense::hover());
-                                super::projects::pulse_dot(ui, r.center(), super::projects::GREEN);
-                            } else if !plugged {
-                                start_button(ui, false, t).on_disabled_hover_text(crate::tr!("Branchez d'abord Claude Code", "Plug in Claude Code first"));
-                            } else if room < 1.0 {
-                                start_button(ui, false, t).on_disabled_hover_text(crate::trf!("La limite globale ({global:.0} %) est déjà répartie entre les autres projets", "The global limit ({global:.0} %) is already shared among the other projects"));
-                            } else if start_button(ui, true, t).clicked() {
-                                // Endless on main: the warning first, the start once confirmed.
-                                if endless_on_main(d.endless, to_main.get(id).copied().unwrap_or(false)) {
-                                    confirm_main = Some(id.clone());
-                                } else {
-                                    start.push(id.clone());
-                                }
-                            }
-                            ui.add_space(4.0);
-                            super::settings::switch(ui, &mut d.commits, &lk).on_hover_text(crate::tr!("L'IA peut faire des commits sur sa branche (Orchestra l'envoie sur GitHub après chaque tour)", "The AI may commit on its branch (Orchestra pushes it to GitHub after each turn)"));
-                            ui.label(RichText::new("commits").size(12.0).color(t.tertiary));
-                            ui.add_space(6.0);
-                            if let Some(m) = to_main.get_mut(id) {
-                                ui.checkbox(m, RichText::new(crate::tr!("sur main", "on main")).size(12.0).color(t.tertiary)).on_hover_text(crate::tr!(
-                                    "À la fin de chaque session, son travail est fusionné tout seul dans main (seulement si le dossier du projet est sur main ou master)",
-                                    "At the end of each session, its work is merged into main by itself (only when the project's folder is on main or master)"
-                                ));
-                                ui.add_space(6.0);
-                            }
-                            // A picked project keeps its share within the room left; the others
-                            // only show it capped, so unpicking one doesn't shrink the rest for good.
-                            if d.pick && !busy {
-                                d.limit = d.limit.clamp(1.0, room.max(1.0));
-                            }
-                            let mut shown = if busy { d.limit } else { d.limit.clamp(1.0, room.max(1.0)) };
-                            let dv = ui.add_enabled(!busy && room >= 1.0, egui::DragValue::new(&mut shown).range(1.0..=room.max(1.0)).speed(0.5).suffix(" %"));
-                            if dv.changed() {
-                                d.limit = shown;
-                            }
-                            dv.on_hover_text(crate::trf!(
-                                "Budget de la prochaine session de ce projet : elle s'arrête après avoir utilisé cette part de la fenêtre de 5 h de l'abonnement, comptée depuis son lancement. Chaque session a son propre budget : en relancer une repart de zéro.\n{room:.0} % au plus ici, le reste de la limite globale ({global:.0} %) étant pris par les autres.",
-                                "Budget of this project's next session: it stops after using this share of the subscription's 5-hour window, counted from its start. Each session has its own budget: starting another one begins again from zero.\n{room:.0} % at most here, the rest of the global limit ({global:.0} %) being taken by the others."
-                            ));
-                            ui.label(RichText::new(crate::tr!("budget par session", "budget per session")).size(12.0).color(t.tertiary));
-                        });
+                        if wide {
+                            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                launch_controls(ui, LaunchCx { id, d: &mut *d, busy, plugged, room, global, to_main: &mut to_main, start: &mut start, confirm_main: &mut confirm_main, lk: &lk, t });
+                            });
+                        }
                     });
+                    // Narrow: the controls under the project, left to right, instead of over it.
+                    if !wide {
+                        ui.horizontal_wrapped(|ui| {
+                            ui.add_space(70.0);
+                            launch_controls(ui, LaunchCx { id, d: &mut *d, busy, plugged, room, global, to_main: &mut to_main, start: &mut start, confirm_main: &mut confirm_main, lk: &lk, t });
+                        });
+                    }
                     ui.horizontal(|ui| {
                         ui.add_space(70.0);
                         ui.add(egui::TextEdit::singleline(&mut d.mission).hint_text(default_mission()).desired_width(f32::INFINITY).font(FontId::proportional(13.0)).margin(egui::Margin::symmetric(8, 5)));
@@ -1413,8 +1535,7 @@ impl NotesApp {
                             return;
                         }
                         if super::projects::action_link(ui, crate::tr!("Ouvrir la copie", "Open the copy")).clicked() {
-                            let opener = if cfg!(target_os = "macos") { "open" } else if cfg!(windows) { "explorer" } else { "xdg-open" };
-                            let _ = std::process::Command::new(opener).arg(&r.worktree).spawn();
+                            let _ = crate::opener::open_path(std::path::Path::new(&r.worktree));
                         }
                         let asking = confirm.as_ref().filter(|(id, _)| *id == r.id).map(|(_, a)| *a);
                         match asking {
@@ -1561,8 +1682,21 @@ impl NotesApp {
                     };
                     ui.label(RichText::new(empty).color(t.tertiary).italics());
                 }
+                let (now, offset) = (crate::model::now_ms(), auto::local_offset_ms());
+                let mut group = "";
                 for i in shown {
                     let m = &self.ws.inbox[i];
+                    // A heading per day, newest first.
+                    let g = day_group(m.at, now, offset);
+                    if g != group {
+                        if !group.is_empty() {
+                            ui.add_space(10.0);
+                        }
+                        group = g;
+                        ui.label(RichText::new(g.to_uppercase()).font(semibold(11.5)).color(t.tertiary));
+                        ui.add_space(6.0);
+                    }
+                    let to_answer = m.kind == "question" && m.answer.trim().is_empty();
                     let (accent, kind) = match m.kind.as_str() {
                         "question" => (Color32::from_rgb(144, 101, 176), crate::tr!("Question", "Question")),
                         "fin" => (super::projects::GREEN, crate::tr!("Session", "Session")),
@@ -1574,7 +1708,8 @@ impl NotesApp {
                     let bg = super::projects::hover_begin(ui);
                     let card = egui::Frame::new()
                         .fill(if m.read { Color32::TRANSPARENT } else { t.card })
-                        .stroke(egui::Stroke::new(1.0, t.border))
+                        // A question still waiting for its answer stands out.
+                        .stroke(egui::Stroke::new(1.0, if to_answer { accent.gamma_multiply(0.55) } else { t.border }))
                         .corner_radius(10.0)
                         .inner_margin(egui::Margin { left: 16, right: 10, top: 10, bottom: 10 })
                         .show(ui, |ui| {
@@ -1585,7 +1720,11 @@ impl NotesApp {
                                     ui.horizontal(|ui| {
                                         kind_badge(ui, kind, accent);
                                         if let Some(p) = &project {
-                                            ui.label(RichText::new(p).size(12.0).color(t.tertiary));
+                                            // The project's own colour, as on the Orchestration page.
+                                            ui.add_space(2.0);
+                                            let (dot, _) = ui.allocate_exact_size(egui::vec2(8.0, 14.0), egui::Sense::hover());
+                                            ui.painter().circle_filled(dot.center(), 3.5, project_color(p));
+                                            ui.label(RichText::new(p).size(12.0).color(t.secondary));
                                         }
                                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                                             ui.label(RichText::new(super::chrome::relative_time(m.at)).size(12.0).color(t.tertiary));
@@ -1597,9 +1736,23 @@ impl NotesApp {
                                     });
                                     ui.add_space(3.0);
                                     ui.add(egui::Label::new(RichText::new(&m.title).font(if m.read { FontId::proportional(14.5) } else { semibold(14.5) }).color(t.text)).wrap());
-                                    if !m.text.is_empty() {
+                                    let body = plain_text(&m.text);
+                                    if !body.is_empty() {
                                         ui.add_space(2.0);
-                                        ui.add(egui::Label::new(RichText::new(&m.text).size(13.0).color(t.secondary)).wrap());
+                                        // Long texts (session summaries) folded to a few lines.
+                                        let more_id = egui::Id::unique(("inbox-more", &m.id));
+                                        let all = ui.data(|d| d.get_temp::<bool>(more_id)).unwrap_or(false);
+                                        let mut job = egui::text::LayoutJob::single_section(body, egui::TextFormat::simple(FontId::proportional(13.0), t.secondary));
+                                        job.wrap.max_width = ui.available_width();
+                                        if !all {
+                                            job.wrap.max_rows = TEXT_LINES;
+                                        }
+                                        let galley = ui.fonts_mut(|f| f.layout_job(job));
+                                        let cut = galley.elided;
+                                        ui.label(galley);
+                                        if (cut || all) && super::projects::action_link(ui, if all { crate::tr!("Réduire", "Show less") } else { crate::tr!("Afficher tout", "Show all") }).clicked() {
+                                            ui.data_mut(|d| d.insert_temp(more_id, !all));
+                                        }
                                     }
                                 });
                                 let x = ui.add(egui::Button::new(RichText::new("×").size(16.0).color(t.tertiary)).frame(false)).on_hover_text(crate::tr!("Supprimer", "Delete"));
@@ -1674,6 +1827,261 @@ impl NotesApp {
     }
 }
 
+
+/// A session's work on the steps since it started.
+#[derive(Debug, PartialEq)]
+struct StepsSince {
+    /// Titles of the steps done since the start (as they read now).
+    done: Vec<String>,
+    /// Steps added since the start and not done yet.
+    added_open: usize,
+}
+
+/// Compared by step id, not by title: a step renamed during the session stays the same
+/// step (it used to count as new, and as done twice), and two steps with one title stay
+/// two. `before`: (step id, done) at the start.
+fn steps_since(before: &[(String, bool)], steps: &[crate::project::Step]) -> StepsSince {
+    let done = |s: &crate::project::Step| s.status == crate::project::StepStatus::Done;
+    let at_start = |s: &crate::project::Step| before.iter().find(|(id, _)| *id == s.id).map(|(_, d)| *d);
+    StepsSince {
+        done: steps.iter().filter(|s| done(s) && at_start(s) != Some(true)).map(|s| s.title.clone()).collect(),
+        added_open: steps.iter().filter(|s| !done(s) && at_start(s).is_none()).count(),
+    }
+}
+
+/// What a session's turn ended on, to choose whether it stops.
+struct TurnEnd {
+    /// A stop already asked (by the person, or a limit seen during the turn).
+    asked: Option<String>,
+    too_long: bool,
+    /// Endless mode: the end condition reached, if any.
+    endless_end: Option<String>,
+    signal: Signal,
+    endless: bool,
+    /// The session's use of the 5-hour window, and its budget.
+    pct: f32,
+    limit: f32,
+    /// The 5-hour window, and the global limit.
+    five: Option<f32>,
+    global: f32,
+    /// The week, the share of it the AIs may use, and the most one turn took from it.
+    week: Option<f32>,
+    week_limit: f32,
+    week_turn: f32,
+    measured: bool,
+    turns: u32,
+    max_turns: u32,
+}
+
+/// Why a session stops after a turn.
+#[derive(Debug, Clone, PartialEq)]
+enum Stop {
+    Asked(String),
+    TooLong,
+    EndlessEnd(String),
+    MissionDone,
+    Blocked,
+    Budget(f32),
+    GlobalLimit(f32),
+    /// The week's reserve (in %) is near.
+    WeekReserve(f32),
+    Unmeasured,
+    Turns(u32),
+}
+
+/// The quota a stop waits for, to start again once it resets.
+#[derive(Debug, PartialEq)]
+enum Quota {
+    None,
+    FiveHours,
+    Week,
+}
+
+impl Stop {
+    fn quota(&self) -> Quota {
+        match self {
+            Stop::GlobalLimit(_) => Quota::FiveHours,
+            Stop::WeekReserve(_) => Quota::Week,
+            _ => Quota::None,
+        }
+    }
+
+    fn text(&self) -> String {
+        match self {
+            Stop::Asked(s) | Stop::EndlessEnd(s) => s.clone(),
+            Stop::TooLong => crate::tr!("un tour a duré trop longtemps", "a turn took too long").into(),
+            Stop::MissionDone => crate::tr!("mission terminée", "mission complete").into(),
+            Stop::Blocked => crate::tr!("l'IA est bloquée", "the AI is blocked").into(),
+            Stop::Budget(l) => crate::trf!("limite du projet atteinte ({l:.0} %)", "project limit reached ({l:.0} %)"),
+            Stop::GlobalLimit(g) => crate::trf!("limite globale atteinte ({g:.0} %)", "global limit reached ({g:.0} %)"),
+            Stop::WeekReserve(r) => crate::trf!("pause : la réserve minimum de la semaine ({r:.0} %) approche", "paused: the week's minimum reserve ({r:.0} %) is near"),
+            Stop::Unmeasured => crate::tr!("utilisation de l'abonnement impossible à mesurer", "subscription use can't be measured").into(),
+            Stop::Turns(n) => crate::trf!("{n} tours atteints", "{n} turns reached"),
+        }
+    }
+}
+
+/// Whether a session stops after a turn, and why: the first reason in this order. None:
+/// it goes on.
+fn stop_reason(t: &TurnEnd) -> Option<Stop> {
+    Some(if let Some(s) = &t.asked {
+        Stop::Asked(s.clone())
+    } else if t.too_long {
+        Stop::TooLong
+    } else if let Some(why) = &t.endless_end {
+        Stop::EndlessEnd(why.clone())
+    } else if t.signal == Signal::Done && !t.endless {
+        // Endless mode has its own end conditions instead of [[FINI]].
+        Stop::MissionDone
+    } else if t.signal == Signal::Blocked {
+        Stop::Blocked
+    } else if t.pct >= t.limit {
+        Stop::Budget(t.limit)
+    } else if t.five.is_some_and(|f| f >= t.global) {
+        Stop::GlobalLimit(t.global)
+    } else if t.week.is_some_and(|w| crate::usage::near_reserve(w, t.week_limit, t.week_turn)) {
+        // Paused before the next turn bites into the reserve; starts again once the week resets.
+        Stop::WeekReserve(100.0 - t.week_limit)
+    } else if !t.measured && t.turns >= 2 {
+        Stop::Unmeasured
+    } else if !t.endless && t.turns >= t.max_turns {
+        Stop::Turns(t.max_turns)
+    } else {
+        return None;
+    })
+}
+
+/// How much the 5-hour window rose since the last reading (`prev`: its figure and reset
+/// time then). A new window (another reset time) counts from zero; the first reading
+/// counts for nothing: what was used before it isn't anyone's.
+fn window_rise(prev: Option<(f32, Option<u64>)>, pct: f32, resets_at: Option<u64>) -> f32 {
+    match (prev, resets_at) {
+        (Some((p, Some(r))), Some(now)) if r.abs_diff(now) < 120_000 => (pct - p).max(0.0),
+        (Some((p, None)), None) => (pct - p).max(0.0),
+        (Some(_), _) => pct,
+        (None, _) => 0.0,
+    }
+}
+
+/// A rise of the 5-hour window shared between the running sessions, by the tokens each
+/// used since the last reading (evenly when none is known). What each session shows
+/// (`LiveRun::pct`) is the sum of its shares since it started: the window's own figure
+/// at its start is never in it.
+fn split_rise(rise: f32, tokens: &[u64]) -> Vec<f32> {
+    let total: u64 = tokens.iter().sum();
+    let n = tokens.len().max(1) as f32;
+    tokens.iter().map(|&d| if total > 0 { rise * d as f32 / total as f32 } else { rise / n }).collect()
+}
+
+/// In a running session's card: the use of its share of the 5-hour window, as a bar and
+/// its figures.
+/// A running session on the 5-hour window (all in %, 0..100): what was used before it or by
+/// others (`0..before`), its own use (`before..window`), and where it will stop (`stop`):
+/// on its budget, or on the global limit if that comes first.
+#[derive(Debug, PartialEq)]
+struct WindowBar {
+    before: f32,
+    window: f32,
+    stop: f32,
+}
+
+fn window_bar(window: f32, pct: f32, limit: f32, global: f32) -> WindowBar {
+    let window = window.clamp(0.0, 100.0);
+    let before = (window - pct.max(0.0)).max(0.0);
+    WindowBar { before, window, stop: (before + limit).min(global).clamp(0.0, 100.0) }
+}
+
+/// Never wider than its card: the bar takes what the text leaves (the text was once given
+/// a fixed 150 px it didn't fit in, and the overflow widened every card below; see the
+/// tests). Too narrow for both side by side, the text goes under the bar.
+/// With the 5-hour window's figure (`window`), the bar is that window: the use before the
+/// session, the session's own, and a tick where it stops. Without it, the session's
+/// share of its budget only.
+fn share_row(ui: &mut egui::Ui, id: &str, pct: f32, limit: f32, window: Option<f32>, global: f32, t: &Tone) {
+    let text = match window {
+        Some(w) => crate::trf!("fenêtre de 5 h : {w:.0} % · cette session : {pct:.1} % (budget {limit:.0} %)", "5-hour window: {w:.0} % · this session: {pct:.1} % (budget {limit:.0} %)"),
+        None => crate::trf!("{:.1} % utilisés sur un budget de {:.0} %", "{:.1} % used of a {:.0} % budget", pct, limit),
+    };
+    let font = FontId::proportional(12.5);
+    let text_w = ui.fonts_mut(|f| f.layout_no_wrap(text.clone(), font.clone(), t.secondary)).size().x;
+    let indent = 20.0;
+    let gap = ui.spacing().item_spacing.x;
+    let room = ui.available_width() - indent;
+    let side_by_side = room - gap - text_w >= 60.0;
+    let bar_w = if side_by_side { room - gap - text_w } else { room.max(0.0) };
+    let draw_bar = |ui: &mut egui::Ui| {
+        let (bar, _) = ui.allocate_exact_size(egui::vec2(bar_w, 8.0), egui::Sense::hover());
+        let p = ui.painter();
+        p.rect_filled(bar, 4.0, t.fill);
+        let x = |v: f32| bar.left() + bar.width() * (v / 100.0).clamp(0.0, 1.0);
+        match window {
+            Some(w) => {
+                let b = window_bar(w, pct, limit, global);
+                let end = super::projects::smooth(ui, ("run-window", id), b.window);
+                let near = b.window >= b.stop - (b.stop - b.before) * 0.15;
+                let p = ui.painter();
+                // Before the session (or by others): muted; the session's own: its colour.
+                p.rect_filled(egui::Rect::from_min_max(bar.min, egui::pos2(x(b.before), bar.bottom())), 4.0, t.tertiary.gamma_multiply(0.45));
+                p.rect_filled(egui::Rect::from_min_max(egui::pos2(x(b.before), bar.top()), egui::pos2(x(end.max(b.before)), bar.bottom())), 0.0, if near { super::projects::ORANGE } else { super::projects::GREEN });
+                p.vline(x(b.stop), egui::Rangef::new(bar.top() - 3.0, bar.bottom() + 3.0), egui::Stroke::new(2.0, super::projects::ORANGE));
+            }
+            None => {
+                let frac = super::projects::smooth(ui, ("run-pct", id), (pct / limit.max(0.1)).clamp(0.0, 1.0));
+                ui.painter().rect_filled(egui::Rect::from_min_size(bar.min, egui::vec2(bar.width() * frac, 8.0)), 4.0, if frac > 0.85 { super::projects::ORANGE } else { super::projects::GREEN });
+            }
+        }
+    };
+    let label = |ui: &mut egui::Ui| {
+        ui.add(egui::Label::new(RichText::new(text.as_str()).font(font.clone()).color(t.secondary)).wrap()).on_hover_text(crate::tr!(
+            "La barre est la fenêtre de 5 h de l'abonnement : en gris ce qui était utilisé avant cette session (ou par d'autres), en vert ce qu'elle a utilisé depuis son lancement. Le trait orange : où elle s'arrête, sur son budget ou sur la limite globale si elle vient avant. Les sessions précédentes du projet ne comptent pas dans son budget.",
+            "The bar is the subscription's 5-hour window: in grey what was used before this session (or by others), in green what it used since it started. The orange tick: where it stops, on its budget or on the global limit if that comes first. The project's earlier sessions don't count in its budget."
+        ));
+    };
+    ui.horizontal(|ui| {
+        ui.add_space(indent);
+        if side_by_side {
+            draw_bar(ui);
+            label(ui);
+        } else {
+            ui.vertical(|ui| {
+                draw_bar(ui);
+                label(ui);
+            });
+        }
+    });
+}
+
+/// The group of an inbox message, by its local day: today, yesterday, this week, older.
+/// `offset`: the local time's offset from UTC (ms).
+fn day_group(at: u64, now: u64, offset: i64) -> &'static str {
+    let day = |ms: u64| (ms as i64 + offset).div_euclid(86_400_000);
+    match day(now) - day(at) {
+        i64::MIN..=0 => crate::tr!("Aujourd'hui", "Today"),
+        1 => crate::tr!("Hier", "Yesterday"),
+        2..=6 => crate::tr!("Cette semaine", "This week"),
+        _ => crate::tr!("Plus ancien", "Older"),
+    }
+}
+
+/// An inbox message's text for reading: Markdown headings and bold marks dropped (session
+/// summaries are written in Markdown), blank lines squeezed.
+fn plain_text(text: &str) -> String {
+    let mut out: Vec<String> = vec![];
+    for line in text.lines() {
+        let l = line.trim_end().trim_start_matches('#').trim_start().replace("**", "");
+        if l.is_empty() && out.last().is_none_or(|p| p.is_empty()) {
+            continue;
+        }
+        out.push(l);
+    }
+    while out.last().is_some_and(|l| l.is_empty()) {
+        out.pop();
+    }
+    out.join("\n")
+}
+
+/// Lines of a message's text shown before « Afficher tout ».
+const TEXT_LINES: usize = 4;
 
 /// The kind of an inbox message, as a small tinted pill.
 fn kind_badge(ui: &mut egui::Ui, text: &str, accent: Color32) {
@@ -1797,6 +2205,286 @@ mod tests {
         assert!(!super::endless_on_main(false, true));
         assert!(!super::endless_main_warning().is_empty());
     }
+
+    #[test]
+    fn inbox_messages_group_by_local_day() {
+        let h = 3_600_000u64;
+        let day = 24 * h;
+        // Noon UTC on some day, local time UTC+1.
+        let now = 20_000 * day + 12 * h;
+        let g = |at: u64| super::day_group(at, now, h as i64);
+        assert_eq!(g(now - h), g(now));
+        // 22:30 UTC the day before is 23:30 local: yesterday; 23:30 UTC is 00:30 local: today.
+        assert_eq!(g(now - 12 * h - 90 * 60_000), g(now - day));
+        assert_eq!(g(now - 12 * h + 30 * 60_000), g(now));
+        assert_ne!(g(now - day), g(now));
+        assert_eq!(g(now - 3 * day), g(now - 6 * day));
+        assert_ne!(g(now - 3 * day), g(now - 7 * day));
+        // A clock a little behind: still today.
+        assert_eq!(g(now + h), g(now));
+    }
+
+    use eframe::egui;
+
+    /// Runs `add` in a column of `width` px, as `orchestra_view` sets it (`ui.set_width`),
+    /// without a window. Two passes: egui settles sizes on the second.
+    fn column(width: f32, mut add: impl FnMut(&mut egui::Ui)) {
+        let ctx = egui::Context::default();
+        for _ in 0..2 {
+            ctx.begin_pass(egui::RawInput { screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1400.0, 900.0))), ..Default::default() });
+            egui::Area::new(egui::Id::unique("column")).fixed_pos(egui::Pos2::ZERO).show(&ctx, |ui| {
+                ui.vertical(|ui| {
+                    ui.set_width(width);
+                    add(ui);
+                });
+            });
+            // No screen to send the textures to: drop them on purpose.
+            ctx.end_pass().textures_delta.clear();
+        }
+    }
+
+    /// A card as `projects::card` lays it out (full width, inner margin); its width.
+    fn card(ui: &mut egui::Ui, add: impl FnOnce(&mut egui::Ui)) -> f32 {
+        egui::Frame::new()
+            .inner_margin(egui::Margin::symmetric(18, 16))
+            .show(ui, |ui| {
+                ui.set_width(ui.available_width());
+                add(ui);
+            })
+            .response
+            .rect
+            .width()
+    }
+
+    /// The running session's card: its inner frame and the row of its budget.
+    fn running(ui: &mut egui::Ui) {
+        let t = super::tone(false);
+        egui::Frame::new().inner_margin(egui::Margin::same(12)).show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            super::share_row(ui, "run", 0.0, 20.0, Some(75.0), 90.0, &t);
+        });
+    }
+
+    /// A card drawn before a session starts, the running session's card, then a card
+    /// after it; the widths of the three.
+    fn card_widths(width: f32) -> [f32; 3] {
+        let mut out = [0.0; 3];
+        column(width, |ui| {
+            out[0] = card(ui, |ui| {
+                ui.label("Cette semaine");
+            });
+            out[1] = card(ui, running);
+            out[2] = card(ui, |ui| {
+                ui.label("Réglages et limites");
+            });
+        });
+        out
+    }
+
+    /// The mechanism behind the gap: in an egui column, something wider than the column
+    /// widens it for everything that follows, never for what came before. The column has
+    /// no grid nor fixed widths of its own (the cards fill `ui.available_width()`).
+    #[test]
+    fn a_row_wider_than_the_column_widens_what_follows() {
+        let (mut before, mut after) = (0.0, 0.0);
+        column(400.0, |ui| {
+            before = card(ui, |ui| {
+                ui.label("avant");
+            });
+            ui.allocate_exact_size(egui::vec2(460.0, 10.0), egui::Sense::hover());
+            after = card(ui, |ui| {
+                ui.label("après");
+            });
+        });
+        assert_eq!(before, 400.0);
+        assert_eq!(after, 460.0);
+    }
+
+    /// The cause was the budget row of a running session: its bar took all the width but
+    /// 150 px, kept for « 0.0 % utilisés sur un budget de 20 % », which needs more, so the
+    /// row came out wider than its card. Now it fills its card exactly, side by side when
+    /// there is room, the text under the bar when not, with large figures too.
+    #[test]
+    fn the_budget_row_fits_its_card() {
+        for width in [140.0, 240.0, 300.0, 480.0, 1000.0] {
+            for (pct, limit, window) in [(0.0, 20.0, None), (123.4, 100.0, None), (5.0, 90.0, Some(80.0)), (12.3, 100.0, Some(100.0))] {
+                let mut row = 0.0;
+                column(width, |ui| {
+                    ui.scope(|ui| {
+                        let t = super::tone(false);
+                        super::share_row(ui, "run", pct, limit, window, 90.0, &t);
+                        row = ui.min_rect().width();
+                    });
+                });
+                assert!(row <= width + 0.5, "à {width} px ({pct} / {limit}) : rangée de {row} px");
+            }
+        }
+    }
+
+    /// The gap once seen when a session started: the cards from the running one down came
+    /// out 57.5 px wider than the ones above.
+    #[test]
+    fn cards_keep_one_width_once_a_session_runs() {
+        let mut uneven = vec![];
+        for width in [320.0, 480.0, 620.0, 1000.0] {
+            let [above, running, below] = card_widths(width);
+            if (running - above).abs() >= 0.5 || (below - above).abs() >= 0.5 {
+                uneven.push(format!("à {width} px : au-dessus {above}, en cours {running}, en dessous {below}"));
+            }
+        }
+        assert!(uneven.is_empty(), "{}", uneven.join(" ; "));
+    }
+
+    /// The smallest window (640 px, sidebar open) leaves the page a column of about 330 px,
+    /// 296 inside a card: a project's launch controls, under it there, stay within it.
+    #[test]
+    fn launch_controls_fit_a_narrow_column() {
+        for width in [296.0, 400.0] {
+            let mut row = 0.0;
+            column(width, |ui| {
+                let t = super::tone(false);
+                let lk = super::super::settings::look(false);
+                let id = "p".to_string();
+                let mut d = super::Draft { mission: String::new(), limit: 20.0, commits: true, pick: false, endless: false, end: Default::default() };
+                let mut to_main: super::HashMap<String, bool> = [(id.clone(), false)].into_iter().collect();
+                let (mut start, mut confirm) = (vec![], None);
+                ui.scope(|ui| {
+                    ui.horizontal_wrapped(|ui| {
+                        ui.add_space(70.0);
+                        super::launch_controls(ui, super::LaunchCx { id: &id, d: &mut d, busy: false, plugged: true, room: 60.0, global: 60.0, to_main: &mut to_main, start: &mut start, confirm_main: &mut confirm, lk: &lk, t: &t });
+                    });
+                    row = ui.min_rect().width();
+                });
+            });
+            assert!(row <= width + 0.5, "à {width} px : commandes sur {row} px");
+        }
+    }
+
+    /// The case reported: the 5-hour window already at 75 % when a session starts with a
+    /// budget of 90 %; it then rises to 80 %. The session's card reads « 5 % utilisés sur
+    /// un budget de 90 % »: its own use since it started, not the window's 80 %.
+    #[test]
+    fn a_session_shows_its_own_use_not_the_window() {
+        let reset = Some(1_000_000u64);
+        // First reading after the start: the 75 % already there are nobody's.
+        let mut pct = 0.0;
+        let mut prev: Option<(f32, Option<u64>)> = None;
+        for (window, tokens) in [(75.0, 0u64), (78.0, 3_000), (80.0, 2_000)] {
+            pct += super::split_rise(super::window_rise(prev, window, reset), &[tokens])[0];
+            prev = Some((window, reset));
+        }
+        assert!((pct - 5.0).abs() < 0.01, "{pct}");
+        // Two sessions: the rise shared by their tokens.
+        let s = super::split_rise(4.0, &[3_000, 1_000]);
+        assert!((s[0] - 3.0).abs() < 0.01 && (s[1] - 1.0).abs() < 0.01);
+        // A new window: counted from zero; an unknown reset time on both sides: the difference.
+        assert_eq!(super::window_rise(Some((75.0, reset)), 2.0, Some(1_000_000 + 5 * 3_600_000)), 2.0);
+        assert_eq!(super::window_rise(Some((10.0, None)), 12.0, None), 2.0);
+    }
+
+    /// The bar of a running session is the 5-hour window itself. The case reported: 75 %
+    /// used before it, 5 % since, a budget of 90 % and a global limit of 90 %: the window
+    /// reads 80 %, and it stops at the global limit (90 %), well before its budget.
+    #[test]
+    fn a_session_bar_is_the_five_hour_window() {
+        use super::{window_bar, WindowBar};
+        assert_eq!(window_bar(80.0, 5.0, 90.0, 90.0), WindowBar { before: 75.0, window: 80.0, stop: 90.0 });
+        // A small budget stops it first.
+        assert_eq!(window_bar(80.0, 5.0, 10.0, 90.0), WindowBar { before: 75.0, window: 80.0, stop: 85.0 });
+        // Its share can't start below zero, nor anything go past 100.
+        assert_eq!(window_bar(3.0, 5.0, 20.0, 100.0), WindowBar { before: 0.0, window: 3.0, stop: 20.0 });
+        assert_eq!(window_bar(120.0, 5.0, 50.0, 200.0).stop, 100.0);
+    }
+
+    /// A turn that ends with nothing to stop on: under every limit, measured, few turns.
+    fn calm() -> super::TurnEnd {
+        super::TurnEnd {
+            asked: None,
+            too_long: false,
+            endless_end: None,
+            signal: super::Signal::Continue,
+            endless: false,
+            pct: 2.0,
+            limit: 20.0,
+            five: Some(30.0),
+            global: 60.0,
+            week: Some(40.0),
+            week_limit: 95.0,
+            week_turn: 1.0,
+            measured: true,
+            turns: 3,
+            max_turns: 30,
+        }
+    }
+
+    #[test]
+    fn a_session_goes_on_or_stops_for_the_first_reason() {
+        use super::{stop_reason, Quota, Signal, Stop, TurnEnd};
+        assert_eq!(stop_reason(&calm()), None);
+        let with = |f: &dyn Fn(&mut TurnEnd)| {
+            let mut t = calm();
+            f(&mut t);
+            stop_reason(&t)
+        };
+        assert_eq!(with(&|t| t.asked = Some("arrêtée à la main".into())), Some(Stop::Asked("arrêtée à la main".into())));
+        assert_eq!(with(&|t| t.too_long = true), Some(Stop::TooLong));
+        assert_eq!(with(&|t| t.signal = Signal::Done), Some(Stop::MissionDone));
+        assert_eq!(with(&|t| t.signal = Signal::Blocked), Some(Stop::Blocked));
+        assert_eq!(with(&|t| t.pct = 20.0), Some(Stop::Budget(20.0)));
+        assert_eq!(with(&|t| t.five = Some(60.0)), Some(Stop::GlobalLimit(60.0)));
+        assert_eq!(with(&|t| t.week = Some(94.5)), Some(Stop::WeekReserve(5.0)));
+        assert_eq!(with(&|t| t.measured = false), Some(Stop::Unmeasured));
+        assert_eq!(with(&|t| t.turns = 30), Some(Stop::Turns(30)));
+        // Unmeasured only from the second turn; unknown figures stop nothing.
+        assert_eq!(with(&|t| { t.measured = false; t.turns = 1 }), None);
+        assert_eq!(with(&|t| { t.five = None; t.week = None }), None);
+        // Endless: neither [[FINI]] nor the turn limit, its own end conditions instead.
+        assert_eq!(with(&|t| { t.endless = true; t.signal = Signal::Done; t.turns = 500 }), None);
+        assert_eq!(with(&|t| { t.endless = true; t.endless_end = Some("4 h écoulées".into()) }), Some(Stop::EndlessEnd("4 h écoulées".into())));
+        // The order: a stop asked comes before all, the budget before the global limit…
+        assert_eq!(with(&|t| { t.asked = Some("x".into()); t.too_long = true; t.pct = 99.0 }), Some(Stop::Asked("x".into())));
+        assert_eq!(with(&|t| { t.pct = 20.0; t.five = Some(90.0) }), Some(Stop::Budget(20.0)));
+        assert_eq!(with(&|t| { t.five = Some(90.0); t.week = Some(99.0) }), Some(Stop::GlobalLimit(60.0)));
+        // Only the quotas start again by themselves, each when its own window resets.
+        assert_eq!(Stop::GlobalLimit(60.0).quota(), Quota::FiveHours);
+        assert_eq!(Stop::WeekReserve(5.0).quota(), Quota::Week);
+        assert_eq!(Stop::Budget(20.0).quota(), Quota::None);
+        assert_eq!(Stop::MissionDone.quota(), Quota::None);
+        assert!(Stop::GlobalLimit(60.0).text().contains("60"));
+    }
+
+    /// Steps counted by id: renamed, twins and new ones each count once, and right.
+    #[test]
+    fn steps_since_the_start_go_by_id() {
+        use crate::project::{Project, StepStatus};
+        let mut p = Project::default();
+        let a = p.add_step("Écrire les tests", "moi");
+        let b = p.add_step("Doublon", "moi");
+        let c = p.add_step("Doublon", "moi");
+        let d = p.add_step("Déjà faite", "moi");
+        p.set_step_status(&d, StepStatus::Done);
+        let before: Vec<(String, bool)> = p.steps.iter().map(|s| (s.id.clone(), s.status == StepStatus::Done)).collect();
+        assert_eq!(super::steps_since(&before, &p.steps), super::StepsSince { done: vec![], added_open: 0 });
+        // During the session: A renamed then done, one of the twins done, a new step added
+        // and another added then done.
+        p.steps.iter_mut().find(|s| s.id == a).unwrap().title = "Écrire les tests (unitaires)".into();
+        p.set_step_status(&a, StepStatus::Done);
+        p.set_step_status(&c, StepStatus::Done);
+        p.add_step("Nouvelle étape", "claude-code");
+        let e = p.add_step("Nouvelle et faite", "claude-code");
+        p.set_step_status(&e, StepStatus::Done);
+        let s = super::steps_since(&before, &p.steps);
+        assert_eq!(s.done, vec!["Écrire les tests (unitaires)".to_string(), "Doublon".into(), "Nouvelle et faite".into()]);
+        // Only the new open step: the renamed one is not new, the twin still open is not new.
+        assert_eq!(s.added_open, 1);
+        assert!(p.steps.iter().any(|x| x.id == b && x.status == StepStatus::Todo));
+    }
+
+    #[test]
+    fn inbox_text_drops_markdown_marks() {
+        let s = "### Fait\n- **une** chose\n\n\n### Reste\n- rien\n\n";
+        assert_eq!(super::plain_text(s), "Fait\n- une chose\n\nReste\n- rien");
+    }
 }
 
 /// The end conditions of an endless session, each one ticked or not; the first reached stops it.
@@ -1840,8 +2528,8 @@ fn limits_summary(o: &crate::model::OrchSettings) -> String {
     let commits = if o.allow_commits { crate::tr!("commits autorisés", "commits allowed") } else { crate::tr!("sans commit", "no commits") };
     let resume = if o.auto_resume { crate::tr!("reprise automatique", "automatic restart") } else { crate::tr!("sans reprise", "no restart") };
     crate::trf!(
-        "Limite globale {:.0} % · {commits} · {resume} · bilan à {} h · {} tours au plus",
-        "Global limit {:.0} % · {commits} · {resume} · summary at {} h · {} turns at most",
+        "IA arrêtées à {:.0} % de la fenêtre de 5 h · {commits} · {resume} · bilan à {} h · {} tours au plus",
+        "AIs stop at {:.0} % of the 5-hour window · {commits} · {resume} · summary at {} h · {} turns at most",
         o.global_limit,
         o.report_hour,
         o.max_turns
@@ -1865,6 +2553,78 @@ fn outcome_mark(outcome: &str, closed: &str, t: &Tone) -> (&'static str, Color32
 }
 
 /// "Lancer": a filled button.
+/// Below this width, the week's reserve goes under the week's figure.
+const WEEK_ONE_LINE: f32 = 520.0;
+
+/// Below this width, a running session's links go under its title.
+const RUN_ONE_LINE: f32 = 460.0;
+
+/// Below this width, a project's controls in « Lancer une session » go under it.
+const LAUNCH_ONE_LINE: f32 = 620.0;
+
+/// What a project's launch controls work on.
+struct LaunchCx<'a> {
+    id: &'a String,
+    d: &'a mut Draft,
+    busy: bool,
+    plugged: bool,
+    /// What is left of the global limit for this project.
+    room: f32,
+    global: f32,
+    to_main: &'a mut HashMap<String, bool>,
+    start: &'a mut Vec<String>,
+    confirm_main: &'a mut Option<String>,
+    lk: &'a super::settings::Look,
+    t: &'a Tone,
+}
+
+/// A project's controls: start, commits, « sur main », budget. In the order of a
+/// right-to-left layout (start at the far right); left to right, start comes first.
+fn launch_controls(ui: &mut egui::Ui, c: LaunchCx<'_>) {
+    let LaunchCx { id, d, busy, plugged, room, global, to_main, start, confirm_main, lk, t } = c;
+    if busy {
+        let (r, _) = ui.allocate_exact_size(egui::vec2(16.0, 16.0), egui::Sense::hover());
+        super::projects::pulse_dot(ui, r.center(), super::projects::GREEN);
+    } else if !plugged {
+        start_button(ui, false, t).on_disabled_hover_text(crate::tr!("Branchez d'abord Claude Code", "Plug in Claude Code first"));
+    } else if room < 1.0 {
+        start_button(ui, false, t).on_disabled_hover_text(crate::trf!("La limite globale ({global:.0} %) est déjà répartie entre les autres projets", "The global limit ({global:.0} %) is already shared among the other projects"));
+    } else if start_button(ui, true, t).clicked() {
+        // Endless on main: the warning first, the start once confirmed.
+        if endless_on_main(d.endless, to_main.get(id).copied().unwrap_or(false)) {
+            *confirm_main = Some(id.clone());
+        } else {
+            start.push(id.clone());
+        }
+    }
+    ui.add_space(4.0);
+    super::settings::switch(ui, &mut d.commits, lk).on_hover_text(crate::tr!("L'IA peut faire des commits sur sa branche (Orchestra l'envoie sur GitHub après chaque tour)", "The AI may commit on its branch (Orchestra pushes it to GitHub after each turn)"));
+    ui.label(RichText::new("commits").size(12.0).color(t.tertiary));
+    ui.add_space(6.0);
+    if let Some(m) = to_main.get_mut(id) {
+        ui.checkbox(m, RichText::new(crate::tr!("sur main", "on main")).size(12.0).color(t.tertiary)).on_hover_text(crate::tr!(
+            "À la fin de chaque session, son travail est fusionné tout seul dans main (seulement si le dossier du projet est sur main ou master)",
+            "At the end of each session, its work is merged into main by itself (only when the project's folder is on main or master)"
+        ));
+        ui.add_space(6.0);
+    }
+    // A picked project keeps its share within the room left; the others only show it
+    // capped, so unpicking one doesn't shrink the rest for good.
+    if d.pick && !busy {
+        d.limit = d.limit.clamp(1.0, room.max(1.0));
+    }
+    let mut shown = if busy { d.limit } else { d.limit.clamp(1.0, room.max(1.0)) };
+    let dv = ui.add_enabled(!busy && room >= 1.0, egui::DragValue::new(&mut shown).range(1.0..=room.max(1.0)).speed(0.5).suffix(" %"));
+    if dv.changed() {
+        d.limit = shown;
+    }
+    dv.on_hover_text(crate::trf!(
+        "Budget de la prochaine session de ce projet : elle s'arrête après avoir utilisé cette part de la fenêtre de 5 h de l'abonnement, comptée depuis son lancement. Chaque session a son propre budget : en relancer une repart de zéro.\n{room:.0} % au plus ici, le reste de la limite globale ({global:.0} %) étant pris par les autres.",
+        "Budget of this project's next session: it stops after using this share of the subscription's 5-hour window, counted from its start. Each session has its own budget: starting another one begins again from zero.\n{room:.0} % at most here, the rest of the global limit ({global:.0} %) being taken by the others."
+    ));
+    ui.label(RichText::new(crate::tr!("budget par session", "budget per session")).size(12.0).color(t.tertiary));
+}
+
 fn start_button(ui: &mut egui::Ui, enabled: bool, t: &Tone) -> egui::Response {
     let text = crate::tr!("Lancer", "Start");
     let g = ui.painter().layout_no_wrap(text.to_string(), semibold(13.0), Color32::WHITE);
