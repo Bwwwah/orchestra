@@ -774,6 +774,13 @@ pub fn project_to_markdown(page: &Page) -> String {
     if !pr.folder.is_empty() {
         out.push_str(&crate::trf!("- dossier : {}\n", "- folder: {}\n", pr.folder));
     }
+    // Code or not, so that the AIs adapt (forced by the person, or detected).
+    if pr.code.is_some() || !pr.folder.trim().is_empty() {
+        let code = code_kind(&pr.folder, pr.code);
+        let kind = if code { crate::tr!("projet de code", "code project") } else { crate::tr!("projet sans code (documents, cours, démarches…)", "project without code (documents, school, paperwork…)") };
+        let how = if pr.code.is_some() { crate::tr!("choisi par la personne", "chosen by the person") } else { crate::tr!("détecté", "detected") };
+        out.push_str(&crate::trf!("- type : {kind} ({how})\n", "- kind: {kind} ({how})\n"));
+    }
     let (done, total) = pr.progress();
     out.push_str(&crate::trf!("- étapes : {done}/{total} terminées\n", "- steps: {done}/{total} done\n"));
     let (me, now) = (crate::store::computer_id(), now_ms());
@@ -872,6 +879,17 @@ mod tests {
         p.code = Some(false);
         let back: Project = serde_json::from_str(&serde_json::to_string(&p).unwrap()).unwrap();
         assert_eq!(back.code, Some(false));
+        // The AIs read the kind in the state of play.
+        let mut page = Page::new("École", None);
+        page.project = Some(Project::new(&s("ecole")));
+        let md = project_to_markdown(&page);
+        assert!(md.contains("sans code") || md.contains("without code"));
+        assert!(md.contains("détecté") || md.contains("detected"));
+        page.project.as_mut().unwrap().code = Some(true);
+        let md = project_to_markdown(&page);
+        assert!((md.contains("projet de code") || md.contains("code project")) && (md.contains("choisi") || md.contains("chosen")));
+        page.project = Some(Project::new(""));
+        assert!(!project_to_markdown(&page).contains("type :") && !project_to_markdown(&page).contains("kind:"), "no folder, nothing forced: no kind");
         let _ = std::fs::remove_dir_all(&base);
     }
 
