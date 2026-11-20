@@ -334,6 +334,30 @@ pub fn discard(r: &crate::model::RunRecord) -> Result<String, String> {
     Ok(crate::tr!("Copie et branche supprimées.", "Copy and branch deleted.").into())
 }
 
+// ------------------------------------------------------------------ history
+
+/// How many autonomous sessions the workspace remembers, at least those still useful.
+pub const KEEP_RUNS: usize = 200;
+
+/// Forget the oldest sessions past `keep`, but only those nothing needs any more: finished,
+/// not waiting to start again, and merged or discarded or whose copy is gone (a copy still
+/// there holds work not merged). Returns how many went. Runs are kept in start order.
+pub fn trim_runs(runs: &mut Vec<crate::model::RunRecord>, keep: usize, copy_exists: impl Fn(&str) -> bool) -> usize {
+    let excess = runs.len().saturating_sub(keep);
+    let mut dropped = 0;
+    runs.retain(|r| {
+        if dropped >= excess {
+            return true;
+        }
+        let done = !r.outcome.is_empty() && r.resume_at == 0 && (!r.closed.is_empty() || !copy_exists(&r.worktree));
+        if done {
+            dropped += 1;
+        }
+        !done
+    });
+    dropped
+}
+
 // ------------------------------------------------------------------ leftover copies
 
 /// The copies left in `data_dir/worktrees` that no session needs any more: neither a
@@ -1059,6 +1083,34 @@ mod tests {
         let runs = vec![run("en-cours", ""), run("a-fusionner", ""), run("fusionnee", "fusionné"), run("abandonnee", "abandonné")];
         let found = vec![w("en-cours"), w("a-fusionner"), w("fusionnee"), w("abandonnee"), w("oubliee")];
         assert_eq!(stale_among(found, &runs), vec![w("fusionnee"), w("abandonnee"), w("oubliee")]);
+    }
+
+    /// Only the oldest sessions past the limit go, and never one still needed: running,
+    /// waiting to start again, or with a copy still holding work not merged.
+    #[test]
+    fn history_forgets_only_old_sessions_nothing_needs() {
+        let run = |id: &str, outcome: &str, closed: &str, resume_at: u64| crate::model::RunRecord {
+            id: id.into(),
+            worktree: format!("/w/{id}"),
+            outcome: outcome.into(),
+            closed: closed.into(),
+            resume_at,
+            ..Default::default()
+        };
+        let mut runs = vec![
+            run("en-cours", "", "", 0),
+            run("reprendra", "quota", "", 99),
+            run("copie-la", "terminée", "", 0),
+            run("fusionnee", "terminée", "fusionné", 0),
+            run("copie-partie", "terminée", "", 0),
+            run("ancienne", "terminée", "abandonné", 0),
+            run("recente", "terminée", "fusionné", 0),
+        ];
+        let exists = |w: &str| w == "/w/copie-la";
+        assert_eq!(trim_runs(&mut runs, 10, exists), 0);
+        assert_eq!(trim_runs(&mut runs, 4, exists), 3);
+        let ids: Vec<&str> = runs.iter().map(|r| r.id.as_str()).collect();
+        assert_eq!(ids, ["en-cours", "reprendra", "copie-la", "recente"]);
     }
 
     /// Removed through git only: a clean copy goes (its branch stays), a copy with work

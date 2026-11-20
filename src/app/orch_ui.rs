@@ -384,6 +384,10 @@ impl NotesApp {
                 r.outcome = crate::tr!("interrompue (Orchestra fermé)", "interrupted (Orchestra closed)").into();
                 r.ended = r.ended.max(r.started);
             }
+            // The history only grows: the oldest sessions nothing needs any more go.
+            if auto::trim_runs(&mut self.ws.runs, auto::KEEP_RUNS, |w| std::path::Path::new(w).exists()) > 0 {
+                self.dirty_since.get_or_insert_with(Instant::now);
+            }
             // Copies no session needs any more (merged, discarded, or forgotten): removed
             // if they hold nothing uncommitted, their branches kept.
             auto::clean_copies_later(auto::stale_copies(&self.ws.runs));
