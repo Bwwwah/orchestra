@@ -33,27 +33,11 @@ impl Agent {
     pub fn command(self, allow_commits: bool, extra: &str) -> String {
         match self {
             Agent::ClaudeCode => {
-                let mut allowed: Vec<String> = [
-                    "Read", "Edit", "Write", "MultiEdit", "Glob", "Grep", "TodoWrite", "mcp__orchestra",
-                    "Bash(ls:*)", "Bash(cat:*)", "Bash(pwd)", "Bash(git status:*)", "Bash(git diff:*)", "Bash(git log:*)", "Bash(git show:*)",
-                    "Bash(cargo:*)", "Bash(npm:*)", "Bash(pnpm:*)", "Bash(yarn:*)", "Bash(node:*)", "Bash(python:*)", "Bash(python3:*)",
-                    "Bash(pytest:*)", "Bash(make:*)", "Bash(go:*)",
-                ]
-                .iter()
-                .map(|s| s.to_string())
-                .collect();
-                if allow_commits {
-                    allowed.push("Bash(git add:*)".into());
-                    allowed.push("Bash(git commit:*)".into());
-                }
-                for x in extra.split(',').map(str::trim).filter(|x| !x.is_empty()) {
-                    allowed.push(x.to_string());
-                }
-                let denied = "Bash(git push:*),Bash(git reset:*),Bash(git checkout:*),Bash(git switch:*),Bash(rm -rf:*),Bash(sudo:*),Bash(curl:*),Bash(wget:*)";
+                let (allowed, denied) = permissions(allow_commits, extra);
                 format!(
                     "claude --permission-mode acceptEdits --allowedTools {} --disallowedTools {}",
                     crate::sessions::shell_quote(&allowed.join(",")),
-                    crate::sessions::shell_quote(denied)
+                    crate::sessions::shell_quote(&denied.join(","))
                 )
             }
         }
@@ -69,6 +53,79 @@ impl Agent {
             }
         }
     }
+}
+
+// ------------------------------------------------------------------ what the AI may do
+
+/// Commands always allowed without asking. Reading, editing and creating files inside the
+/// copy needs nothing here: `acceptEdits` and Claude Code's own rules grant them for the
+/// working folder only. Listing `Read`, `Edit` or `Write` here would grant them on the whole
+/// disk, so they are not.
+const ALLOWED: &[&str] = &[
+    "Glob", "Grep", "TodoWrite", "mcp__orchestra",
+    "Bash(ls:*)", "Bash(pwd)", "Bash(git status:*)", "Bash(git diff:*)", "Bash(git log:*)", "Bash(git show:*)",
+    "Bash(cargo:*)", "Bash(npm:*)", "Bash(pnpm:*)", "Bash(yarn:*)", "Bash(node:*)", "Bash(python:*)", "Bash(python3:*)",
+    "Bash(pytest:*)", "Bash(make:*)", "Bash(go:*)",
+];
+
+/// Refused even if allowed elsewhere (a deny rule wins). The real restriction is the list
+/// above: Orchestra refuses every other command the AI asks for (Esc on the permission
+/// screen). These rules are a second net: whole command names rather than exact forms that
+/// a variant (`rm -fr`, `rm -r -f`) would get round, the shells and wrappers that run
+/// another command, the network, and the secrets in the home folder.
+const DENIED: &[&str] = &[
+    "Bash(rm:*)", "Bash(sudo:*)", "Bash(su:*)", "Bash(doas:*)",
+    "Bash(curl:*)", "Bash(wget:*)", "Bash(ssh:*)", "Bash(scp:*)", "Bash(sftp:*)", "Bash(rsync:*)", "Bash(nc:*)", "Bash(ncat:*)", "Bash(telnet:*)", "Bash(ftp:*)",
+    "Bash(sh:*)", "Bash(bash:*)", "Bash(zsh:*)", "Bash(fish:*)", "Bash(dash:*)", "Bash(env:*)", "Bash(eval:*)", "Bash(exec:*)", "Bash(xargs:*)",
+    "Bash(nohup:*)", "Bash(osascript:*)", "Bash(open:*)", "Bash(security:*)", "Bash(launchctl:*)", "Bash(crontab:*)",
+    "Bash(chmod:*)", "Bash(chown:*)", "Bash(dd:*)", "Bash(mkfs:*)", "Bash(diskutil:*)",
+    "Bash(git push:*)", "Bash(git reset:*)", "Bash(git checkout:*)", "Bash(git switch:*)", "Bash(git restore:*)", "Bash(git rebase:*)",
+    "Bash(git clean:*)", "Bash(git branch:*)", "Bash(git worktree:*)", "Bash(git remote:*)", "Bash(git config:*)", "Bash(git filter-branch:*)",
+    "Bash(git stash:*)", "Bash(git tag:*)", "Bash(git update-ref:*)",
+    "WebFetch", "WebSearch",
+    "Read(~/.ssh/**)", "Read(~/.aws/**)", "Read(~/.gnupg/**)", "Read(~/.config/gh/**)", "Read(~/.netrc)", "Read(~/.git-credentials)", "Read(~/Library/Keychains/**)",
+    "Edit(~/.ssh/**)", "Edit(~/.zshrc)", "Edit(~/.bashrc)", "Edit(~/.profile)", "Edit(~/.gitconfig)", "Edit(~/.claude/**)",
+];
+
+/// One extra rule from the settings, if it stays a restriction: a tool without a pattern
+/// (`Bash`, `Read`, `Edit`…) or a pattern matching every command would open everything.
+fn extra_rule_ok(rule: &str) -> bool {
+    let Some(open) = rule.find('(') else {
+        // A whole tool: only MCP tools, which do one thing each.
+        return rule.starts_with("mcp__");
+    };
+    if !rule.ends_with(')') {
+        return false;
+    }
+    let tool = &rule[..open];
+    let pattern = rule[open + 1..rule.len() - 1].trim();
+    let bare = pattern.trim_end_matches(":*").trim_end_matches('*').trim();
+    if bare.is_empty() || bare.contains("**") || pattern.starts_with('/') || pattern.starts_with('~') {
+        return false;
+    }
+    match tool {
+        "Bash" => !DENIED.iter().any(|d| {
+            let d = d.strip_prefix("Bash(").and_then(|d| d.strip_suffix(":*)")).unwrap_or("");
+            !d.is_empty() && (bare == d || bare.starts_with(&format!("{d} ")))
+        }),
+        _ => false,
+    }
+}
+
+/// The allowed and refused rules of an autonomous session. `extra`: rules the person adds
+/// in the settings (comma separated); those that would lift the restriction are dropped.
+pub fn permissions(allow_commits: bool, extra: &str) -> (Vec<String>, Vec<String>) {
+    let mut allowed: Vec<String> = ALLOWED.iter().map(|s| s.to_string()).collect();
+    if allow_commits {
+        allowed.push("Bash(git add:*)".into());
+        allowed.push("Bash(git commit:*)".into());
+    }
+    for x in extra.split(',').map(str::trim).filter(|x| !x.is_empty()) {
+        if extra_rule_ok(x) && !allowed.iter().any(|a| a == x) {
+            allowed.push(x.to_string());
+        }
+    }
+    (allowed, DENIED.iter().map(|s| s.to_string()).collect())
 }
 
 // ------------------------------------------------------------------ the copy of the repository
@@ -626,6 +683,31 @@ mod tests {
         assert!(Agent::ClaudeCode.command(false, "").contains("--permission-mode acceptEdits"));
         assert!(!Agent::ClaudeCode.command(false, "").contains("git commit"));
         assert!(Agent::ClaudeCode.command(true, "Bash(just:*)").contains("Bash(just:*)"));
+    }
+
+    #[test]
+    fn autonomous_permissions_are_a_real_restriction() {
+        let (allowed, denied) = permissions(false, "");
+        // No whole-disk file tools, no reading any file through the shell.
+        for t in ["Read", "Edit", "Write", "MultiEdit", "Bash", "Bash(cat:*)"] {
+            assert!(!allowed.iter().any(|a| a == t), "{t}");
+        }
+        // Whole command names, not one spelling: `rm -fr` and `rm -r -f` are caught too.
+        for d in ["Bash(rm:*)", "Bash(curl:*)", "Bash(bash:*)", "Bash(sh:*)", "Bash(git push:*)", "WebFetch", "Read(~/.ssh/**)"] {
+            assert!(denied.iter().any(|x| x == d), "{d}");
+        }
+        assert!(!allowed.iter().any(|a| a.contains("git commit")));
+        assert!(permissions(true, "").0.iter().any(|a| a == "Bash(git commit:*)"));
+        // Extra rules that would lift the restriction are dropped; precise ones are kept.
+        let (allowed, _) = permissions(false, "Bash, Bash(*), Bash(:*), Read, Edit(**), Read(~/.ssh/**), Bash(rm -rf:*), Bash(curl x:*), Bash(git push:*), Bash(just:*), Bash(docker compose:*), mcp__other");
+        for bad in ["Bash", "Bash(*)", "Bash(:*)", "Read", "Edit(**)", "Read(~/.ssh/**)", "Bash(rm -rf:*)", "Bash(curl x:*)", "Bash(git push:*)"] {
+            assert!(!allowed.iter().any(|a| a == bad), "{bad}");
+        }
+        for ok in ["Bash(just:*)", "Bash(docker compose:*)", "mcp__other"] {
+            assert!(allowed.iter().any(|a| a == ok), "{ok}");
+        }
+        let cmd = Agent::ClaudeCode.command(false, "");
+        assert!(cmd.contains("--disallowedTools") && cmd.contains("Bash(rm:*)"));
     }
 
     #[test]
