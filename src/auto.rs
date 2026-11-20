@@ -106,6 +106,8 @@ const DENIED: &[&str] = &[
     "Bash(git push:*)", "Bash(git reset:*)", "Bash(git checkout:*)", "Bash(git switch:*)", "Bash(git restore:*)", "Bash(git rebase:*)",
     "Bash(git clean:*)", "Bash(git branch:*)", "Bash(git worktree:*)", "Bash(git remote:*)", "Bash(git config:*)", "Bash(git filter-branch:*)",
     "Bash(git stash:*)", "Bash(git tag:*)", "Bash(git update-ref:*)",
+    // A setting given on the command line runs code (`git -c alias.x='!sh …' x`, `core.sshCommand`…).
+    "Bash(git -c:*)", "Bash(git --config-env:*)", "Bash(git --exec-path:*)",
     // Code given on the command line or read from the terminal: a way round every rule above.
     "Bash(python -c:*)", "Bash(python3 -c:*)", "Bash(python - :*)", "Bash(python3 - :*)", "Bash(python <<:*)", "Bash(python3 <<:*)",
     "Bash(node -e:*)", "Bash(node --eval:*)", "Bash(node -p:*)", "Bash(node --print:*)", "Bash(node - :*)", "Bash(node <<:*)",
@@ -136,18 +138,39 @@ fn extra_rule_ok(rule: &str) -> bool {
     let tool = &rule[..open];
     let pattern = rule[open + 1..rule.len() - 1].trim();
     let bare = pattern.trim_end_matches(":*").trim_end_matches('*').trim();
-    if bare.is_empty() || bare.contains("**") || pattern.starts_with('/') || pattern.starts_with('~') {
+    if bare.is_empty() || bare.contains('*') || pattern.starts_with('/') || pattern.starts_with('~') {
+        // Nothing left, or a wildcard inside (`* push`, `git * x`) that matches anything.
         return false;
     }
+    // Shell operators: one rule would let a second command through (`ls && rm`, `$(…)`).
+    if bare.chars().any(|c| matches!(c, ';' | '&' | '|' | '`' | '$' | '<' | '>' | '(' | ')' | '\n' | '\r')) {
+        return false;
+    }
+    let first = bare.split_whitespace().next().unwrap_or("");
     match tool {
         // An interpreter as a whole runs any code: only a precise use of it (`python -m pytest`).
         "Bash" if INTERPRETERS.contains(&bare) => false,
-        "Bash" => !DENIED.iter().any(|d| {
-            let d = d.strip_prefix("Bash(").and_then(|d| d.strip_suffix(":*)")).unwrap_or("");
-            !d.is_empty() && (bare == d || bare.starts_with(&format!("{d} ")))
+        // A refused tool, under any form (`rm -i`, `sudo -n`…), never comes back as an extra.
+        "Bash" if denied_commands().any(|d| !d.contains(' ') && d == first) => false,
+        "Bash" => !denied_commands().any(|d| {
+            // The refused command itself or a longer form of it (`git push origin`), or a
+            // shorter rule that covers it (`git` covers `git push`, and `git -c alias…` runs
+            // anything).
+            bare == d || bare.starts_with(&format!("{d} ")) || d.starts_with(&format!("{bare} "))
         }),
         _ => false,
     }
+}
+
+/// The refused shell commands, without `Bash(` and `:*)`: `rm`, `git push`…
+fn denied_commands() -> impl Iterator<Item = &'static str> {
+    DENIED.iter().filter_map(|d| d.strip_prefix("Bash(").and_then(|d| d.strip_suffix(":*)"))).map(str::trim).filter(|d| !d.is_empty())
+}
+
+/// The extra rules of the settings that are dropped (they would lift the restriction), to
+/// show the person.
+pub fn rejected_extra(extra: &str) -> Vec<String> {
+    extra.split(',').map(str::trim).filter(|x| !x.is_empty() && !extra_rule_ok(x)).map(String::from).collect()
 }
 
 /// The allowed and refused rules of an autonomous session. `extra`: rules the person adds
@@ -781,6 +804,22 @@ mod tests {
         let (allowed, _) = permissions(false, "Bash(python:*), Bash(python3:*), Bash(node:*), Bash(npm:*), Bash(python -c:*), Bash(node -e x:*), Bash(perl -e:*), Bash(python -m pytest:*)");
         assert!(!allowed.iter().any(|a| ["Bash(python:*)", "Bash(python3:*)", "Bash(node:*)", "Bash(npm:*)", "Bash(python -c:*)", "Bash(node -e x:*)", "Bash(perl -e:*)"].contains(&a.as_str())));
         assert!(allowed.iter().any(|a| a == "Bash(python -m pytest:*)"));
+        // A whole command that covers a refused one, wildcards inside, shell operators, a
+        // refused tool under another form, git settings given on the command line.
+        let wide = [
+            "Bash(git:*)", "Bash(git *)", "Bash(* push:*)", "Bash(git * push)", "Bash(ls && rm x:*)", "Bash(ls; curl x:*)",
+            "Bash(echo $(id):*)", "Bash(cat x | sh:*)", "Bash(ls `id`:*)", "Bash(rm -i:*)", "Bash(sudo -n:*)", "Bash(curl:*)",
+            "Bash(git -c alias.x=y x:*)", "Bash(git -c:*)",
+        ];
+        let (allowed, denied) = permissions(false, &wide.join(", "));
+        for bad in wide {
+            assert!(!allowed.iter().any(|a| a == bad), "{bad}");
+        }
+        assert!(denied.iter().any(|d| d == "Bash(git -c:*)"));
+        assert_eq!(rejected_extra(&wide.join(", ")).len(), wide.len());
+        // Precise rules stay, and are not reported.
+        let fine = "Bash(git log --oneline:*), Bash(just test:*), Bash(docker compose up:*), Bash(npm run e2e:*), mcp__other";
+        assert!(rejected_extra(fine).is_empty(), "{:?}", rejected_extra(fine));
         let cmd = Agent::ClaudeCode.command(false, "");
         assert!(cmd.contains("--disallowedTools") && cmd.contains("Bash(rm:*)"));
         // Neither the repository's hooks and settings nor its .mcp.json: only Orchestra's server.

@@ -1150,6 +1150,22 @@ impl NotesApp {
                         .color(t.tertiary),
                 );
                 ui.add(egui::TextEdit::singleline(&mut o.extra_tools).hint_text(crate::tr!("En plus, ex. Bash(just:*), Bash(docker compose:*)", "More, e.g. Bash(just:*), Bash(docker compose:*)")).desired_width(f32::INFINITY).font(FontId::monospace(12.5)));
+                // The rules dropped, said rather than silently ignored.
+                let rejected = auto::rejected_extra(&o.extra_tools);
+                if !rejected.is_empty() {
+                    ui.add(
+                        egui::Label::new(
+                            RichText::new(crate::trf!(
+                                "Ignorées, trop larges ou contraires aux commandes toujours refusées : {}. Donnez une commande précise, ex. Bash(git log:*) plutôt que Bash(git:*).",
+                                "Ignored, too wide or against the commands always refused: {}. Give a precise command, e.g. Bash(git log:*) rather than Bash(git:*).",
+                                rejected.join(", ")
+                            ))
+                            .size(12.0)
+                            .color(super::projects::ORANGE),
+                        )
+                        .wrap(),
+                    );
+                }
             });
         });
         ui.ctx().data_mut(|d| d.insert_temp(open_key, open));
@@ -2099,7 +2115,7 @@ mod tests {
         let ctx = egui::Context::default();
         for _ in 0..2 {
             ctx.begin_pass(egui::RawInput { screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1400.0, 900.0))), ..Default::default() });
-            egui::Area::new(egui::Id::new("column")).fixed_pos(egui::Pos2::ZERO).show(&ctx, |ui| {
+            egui::Area::new(egui::Id::unique("column")).fixed_pos(egui::Pos2::ZERO).show(&ctx, |ui| {
                 ui.vertical(|ui| {
                     ui.set_width(width);
                     add(ui);
