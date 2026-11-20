@@ -348,13 +348,60 @@ pub fn continue_prompt() -> &'static str {
     )
 }
 
+/// The most steps an endless session may add at once, when it has run out of them.
+pub const SELF_STEPS_MAX: u32 = 3;
+
+/// An endless session that piles up steps without doing them stops: `added_open` is the
+/// number of steps it added that are still open.
+pub fn too_many_self_steps(added_open: usize) -> bool {
+    added_open > 2 * SELF_STEPS_MAX as usize
+}
+
+/// Added to the mission of an endless session. `self_tasks`: when the open steps run out,
+/// the AI finds the next ones itself (add_steps) instead of stopping; off when the person
+/// asked the session to stop once no open step is left.
+pub fn endless_rule(project_id: &str, self_tasks: bool) -> String {
+    let n = SELF_STEPS_MAX;
+    if self_tasks {
+        crate::trf!(
+            "\n\nMODE SANS FIN. Orchestra décide quand la session s'arrête (durée, budget…), pas toi. \
+             Quand il ne reste plus d'étape ouverte, ne réponds pas [[FINI]] : lis le code et l'historique, \
+             trouve les prochaines améliorations utiles au projet, et ajoute-en au plus {n} avec add_steps \
+             (project = « {project_id} »), précises et vérifiables seule, au format « Domaine : action (fichier ou module) » \
+             (Fonctionnalité, Technique ou Sécurité), sans répéter une étape existante, terminée ou non. Puis prends la première. \
+             N'ajoute pas d'étapes tant qu'il en reste d'ouvertes. Rien qui demande une décision humaine, un accès, \
+             une dépendance nouvelle, ni la doc. [[FINI]] seulement si le projet n'a vraiment plus rien d'utile à faire.",
+            "\n\nENDLESS MODE. Orchestra decides when the session stops (time, budget…), not you. \
+             When no open step is left, don't answer [[FINI]]: read the code and the history, \
+             find the next improvements useful to the project, and add at most {n} of them with add_steps \
+             (project = « {project_id} »), precise and checkable alone, as « Area: action (file or module) » \
+             (Feature, Technical or Security), without repeating an existing step, done or not. Then take the first one. \
+             Don't add steps while open ones are left. Nothing needing a human decision, an access, \
+             a new dependency, nor docs. [[FINI]] only if the project really has nothing useful left to do."
+        )
+    } else {
+        crate::tr!(
+            "\n\nMODE SANS FIN. Orchestra décide quand la session s'arrête. N'ajoute pas d'étapes : quand il n'en reste plus d'ouverte, réponds [[FINI]].",
+            "\n\nENDLESS MODE. Orchestra decides when the session stops. Don't add steps: when no open step is left, answer [[FINI]]."
+        )
+        .to_string()
+    }
+}
+
 /// The next turn of an endless session: Orchestra decides when it stops (its end
 /// conditions), not the turn limit.
-pub fn endless_prompt() -> &'static str {
-    crate::tr!(
-        "Mode sans fin : continue la mission avec les mêmes règles, l'étape ouverte suivante, une seule (relis get_project_state pour les réponses à tes questions). Orchestra décide quand la session s'arrête. Termine par [[CONTINUER]], [[FINI]] s'il ne reste vraiment rien à faire, ou [[BLOQUÉ]].",
-        "Endless mode: go on with the mission under the same rules, the next open step, only one (read get_project_state again for the answers to your questions). Orchestra decides when the session stops. End with [[CONTINUER]], [[FINI]] if there is really nothing left to do, or [[BLOQUÉ]]."
-    )
+pub fn endless_prompt(self_tasks: bool) -> &'static str {
+    if self_tasks {
+        crate::tr!(
+            "Mode sans fin : continue avec les mêmes règles, une seule étape (relis get_project_state pour les réponses à tes questions). S'il ne reste plus d'étape ouverte, ajoute les prochaines avec add_steps (3 au plus), puis prends la première. Termine par [[CONTINUER]], [[FINI]] seulement s'il n'y a vraiment plus rien d'utile à faire, ou [[BLOQUÉ]].",
+            "Endless mode: go on under the same rules, only one step (read get_project_state again for the answers to your questions). If no open step is left, add the next ones with add_steps (3 at most), then take the first. End with [[CONTINUER]], [[FINI]] only if there is really nothing useful left to do, or [[BLOQUÉ]]."
+        )
+    } else {
+        crate::tr!(
+            "Mode sans fin : continue la mission avec les mêmes règles, l'étape ouverte suivante, une seule (relis get_project_state pour les réponses à tes questions). Termine par [[CONTINUER]], [[FINI]] s'il ne reste plus d'étape ouverte, ou [[BLOQUÉ]].",
+            "Endless mode: go on with the mission under the same rules, the next open step, only one (read get_project_state again for the answers to your questions). End with [[CONTINUER]], [[FINI]] if no open step is left, or [[BLOQUÉ]]."
+        )
+    }
 }
 
 pub fn denied_prompt() -> &'static str {
@@ -549,6 +596,21 @@ pub fn daily_report(day: &str, runs: &[&crate::model::RunRecord]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn endless_sessions_find_their_own_steps() {
+        let on = endless_rule("p1", true);
+        assert!(on.contains("add_steps") && on.contains("p1") && on.contains(&SELF_STEPS_MAX.to_string()));
+        assert!(endless_prompt(true).contains("add_steps"));
+        // Asked to stop once the steps are done: it adds none.
+        assert!(!endless_prompt(false).contains("add_steps"));
+        assert!(endless_rule("p1", false).contains("[[FINI]]"));
+        for p in [endless_prompt(true), endless_prompt(false)] {
+            assert!(p.contains("[[CONTINUER]]") && p.contains("[[FINI]]") && p.contains("[[BLOQUÉ]]"));
+        }
+        assert!(!too_many_self_steps(2 * SELF_STEPS_MAX as usize));
+        assert!(too_many_self_steps(2 * SELF_STEPS_MAX as usize + 1));
+    }
 
     #[test]
     fn signals_and_screen() {

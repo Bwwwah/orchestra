@@ -207,7 +207,7 @@ impl NotesApp {
             agent,
             term,
             phase: Phase::Starting(Instant::now()),
-            next: Some(auto::mission_prompt(&self.ws.page(project).map(|p| p.display_title()).unwrap_or_default(), project, &copy.branch, &mission, commits)),
+            next: Some(auto::mission_prompt(&self.ws.page(project).map(|p| p.display_title()).unwrap_or_default(), project, &copy.branch, &mission, commits) + &endless.as_ref().map(|c| auto::endless_rule(project, !c.when_done)).unwrap_or_default()),
             quota_reset: None,
             week_at_turn: None,
             week_turn: 0.0,
@@ -381,12 +381,14 @@ impl NotesApp {
                         // Endless mode: its own end conditions replace [[FINI]] and the turn limit.
                         let endless_end = r.endless.as_ref().and_then(|c| {
                             let before = &r.steps_at_start;
-                            let steps_done = self
-                                .ws
-                                .page(&r.project)
-                                .and_then(|p| p.project.as_ref())
-                                .map(|pr| pr.steps.iter().filter(|s| s.status == crate::project::StepStatus::Done && !before.iter().any(|(b, d)| *b == s.title && *d)).count())
-                                .unwrap_or(0) as u32;
+                            let steps = self.ws.page(&r.project).and_then(|p| p.project.as_ref()).map(|pr| pr.steps.clone()).unwrap_or_default();
+                            let done = |s: &crate::project::Step| s.status == crate::project::StepStatus::Done;
+                            let steps_done = steps.iter().filter(|s| done(s) && !before.iter().any(|(b, d)| *b == s.title && *d)).count() as u32;
+                            // Steps the AI added itself and hasn't done yet.
+                            let added_open = steps.iter().filter(|s| !done(s) && !before.iter().any(|(b, _)| *b == s.title)).count();
+                            if auto::too_many_self_steps(added_open) {
+                                return Some(crate::trf!("l'IA a ajouté {added_open} étapes sans les faire", "the AI added {added_open} steps without doing them"));
+                            }
                             c.reached(crate::model::now_ms().saturating_sub(r.started_wall), steps_done, r.turns, r.done_streak)
                         });
                         let reason = if let Some(s) = r.stop.clone() {
@@ -421,7 +423,7 @@ impl NotesApp {
                                 r.summarizing = true;
                                 r.term.paste(&auto::summary_prompt(&r.project, &why));
                             }
-                            None if r.endless.is_some() => r.term.paste(auto::endless_prompt()),
+                            None if r.endless.is_some() => r.term.paste(auto::endless_prompt(r.endless.as_ref().is_some_and(|c| !c.when_done))),
                             None => r.term.paste(auto::continue_prompt()),
                         }
                         r.phase = Phase::Typed(now);
@@ -1213,8 +1215,8 @@ impl NotesApp {
                             ui.add_space(70.0);
                             ui.spacing_mut().item_spacing.x = 6.0;
                             super::settings::switch(ui, &mut d.endless, &lk).on_hover_text(crate::tr!(
-                                "La session ne s'arrête ni au nombre de tours des réglages ni à la première fin de mission : seulement sur les conditions choisies ici, ou sur son budget, la limite globale et la réserve de la semaine.",
-                                "The session stops neither at the settings' number of turns nor at the first end of mission: only on the conditions chosen here, or on its budget, the global limit and the week's reserve."
+                                "La session ne s'arrête ni au nombre de tours des réglages ni à la fin des étapes : quand il n'y en a plus, l'IA trouve elle-même les suivantes (3 à la fois au plus) et continue. Elle s'arrête seulement sur les conditions choisies ici, ou sur son budget, la limite globale et la réserve de la semaine.",
+                                "The session stops neither at the settings' number of turns nor when the steps run out: then the AI finds the next ones itself (3 at a time at most) and goes on. It only stops on the conditions chosen here, or on its budget, the global limit and the week's reserve."
                             ));
                             ui.label(RichText::new(crate::tr!("sans fin", "endless")).size(12.0).color(if d.endless { t.text } else { t.tertiary }));
                             if d.endless {
@@ -1714,7 +1716,10 @@ fn end_conditions(ui: &mut egui::Ui, c: &mut crate::model::EndConditions, t: &To
     if let Some(n) = c.turns.as_mut() {
         ui.add(egui::DragValue::new(n).range(1..=1000));
     }
-    ui.checkbox(&mut c.when_done, small(crate::tr!("plus d'étape ouverte", "no open step left")));
+    ui.checkbox(&mut c.when_done, small(crate::tr!("plus d'étape ouverte", "no open step left"))).on_hover_text(crate::tr!(
+        "Coché : la session s'arrête une fois les étapes faites. Décoché : l'IA crée elle-même les étapes suivantes et continue.",
+        "Ticked: the session stops once the steps are done. Unticked: the AI creates the next steps itself and goes on."
+    ));
     if c.hours.is_none() && c.steps.is_none() && c.turns.is_none() && !c.when_done {
         ui.label(RichText::new(crate::tr!("(budget seulement)", "(budget only)")).size(12.0).color(super::projects::ORANGE)).on_hover_text(crate::tr!(
             "Sans condition, la session tourne jusqu'à son budget, la limite globale ou la réserve de la semaine (ou deux tours de suite sans rien à faire).",
