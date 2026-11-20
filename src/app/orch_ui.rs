@@ -1846,8 +1846,8 @@ impl NotesApp {
                             ui.add_space(70.0);
                             ui.spacing_mut().item_spacing.x = 6.0;
                             super::settings::switch(ui, &mut d.endless, &lk).on_hover_text(crate::tr!(
-                                "La session ne s'arrête ni au nombre de tours des réglages ni à la fin des étapes : quand il n'y en a plus, l'IA trouve elle-même les suivantes (3 à la fois au plus) et continue. Elle s'arrête seulement sur les conditions choisies ici, ou sur son budget, la limite globale et la réserve de la semaine.",
-                                "The session stops neither at the settings' number of turns nor when the steps run out: then the AI finds the next ones itself (3 at a time at most) and goes on. It only stops on the conditions chosen here, or on its budget, the global limit and the week's reserve."
+                                "La session ne s'arrête ni au nombre de tours des réglages ni à la fin des étapes : quand il n'y en a plus, l'IA trouve elle-même les suivantes (3 à la fois au plus) et continue. Elle s'arrête seulement sur les conditions choisies ici, ou sur son budget, la limite globale et la réserve de la semaine.\nCe choix et ses conditions sont gardés pour les prochaines sessions de ce projet.",
+                                "The session stops neither at the settings' number of turns nor when the steps run out: then the AI finds the next ones itself (3 at a time at most) and goes on. It only stops on the conditions chosen here, or on its budget, the global limit and the week's reserve.\nThis choice and its conditions are kept for this project's next sessions."
                             ));
                             ui.label(RichText::new(crate::tr!("sans fin", "endless")).size(12.0).color(if d.endless { t.text } else { t.tertiary }));
                             if d.endless {
@@ -3049,7 +3049,7 @@ fn launch_controls(ui: &mut egui::Ui, c: LaunchCx<'_>) {
         }
     }
     ui.add_space(4.0);
-    super::settings::switch(ui, &mut d.commits, lk).on_hover_text(crate::tr!("L'IA peut faire des commits sur sa branche (Orchestra l'envoie sur GitHub après chaque tour)", "The AI may commit on its branch (Orchestra pushes it to GitHub after each turn)"));
+    super::settings::switch(ui, &mut d.commits, lk).on_hover_text(crate::tr!("L'IA peut faire des commits sur sa branche (Orchestra l'envoie sur GitHub après chaque tour).\nGardé pour les prochaines sessions de ce projet.", "The AI may commit on its branch (Orchestra pushes it to GitHub after each turn).\nKept for this project's next sessions."));
     ui.label(RichText::new("commits").size(12.0).color(t.tertiary));
     ui.add_space(6.0);
     if let Some(m) = to_main.get_mut(id) {
@@ -3068,8 +3068,8 @@ fn launch_controls(ui: &mut egui::Ui, c: LaunchCx<'_>) {
         budgets.push((id.clone(), shown));
     }
     dv.on_hover_text(crate::trf!(
-        "Budget de la prochaine session de ce projet : elle s'arrête après avoir utilisé cette part de la fenêtre de 5 h de l'abonnement, comptée depuis son lancement. Chaque session a son propre budget : en relancer une repart de zéro.\n{room:.0} % au plus ici, le reste de la limite globale ({global:.0} %) étant pris par les autres.",
-        "Budget of this project's next session: it stops after using this share of the subscription's 5-hour window, counted from its start. Each session has its own budget: starting another one begins again from zero.\n{room:.0} % at most here, the rest of the global limit ({global:.0} %) being taken by the others."
+        "Budget de la prochaine session de ce projet : elle s'arrête après avoir utilisé cette part de la fenêtre de 5 h de l'abonnement, comptée depuis son lancement. Chaque session a son propre budget : en relancer une repart de zéro. Le budget choisi est gardé pour les prochaines sessions de ce projet, même après un redémarrage.\n{room:.0} % au plus ici, le reste de la limite globale ({global:.0} %) étant pris par les autres.",
+        "Budget of this project's next session: it stops after using this share of the subscription's 5-hour window, counted from its start. Each session has its own budget: starting another one begins again from zero. The budget chosen is kept for this project's next sessions, even after a restart.\n{room:.0} % at most here, the rest of the global limit ({global:.0} %) being taken by the others."
     ));
     ui.label(RichText::new(crate::tr!("budget par session", "budget per session")).size(12.0).color(t.tertiary));
 }
