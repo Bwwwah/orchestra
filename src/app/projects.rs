@@ -1118,10 +1118,10 @@ pub(super) fn project_panel(ui: &mut egui::Ui, cx: &mut Cx) -> Option<super::not
 fn shows_git(ctx: &egui::Context, folder: &str) -> bool {
     let key = egui::Id::unique(("shows-git", folder.trim().to_string()));
     let now_t = ctx.input(|i| i.time);
-    if let Some((at, v)) = ctx.data(|d| d.get_temp::<(f64, bool)>(key)) {
-        if now_t - at < 5.0 {
-            return v;
-        }
+    if let Some((at, v)) = ctx.data(|d| d.get_temp::<(f64, bool)>(key))
+        && now_t - at < 5.0
+    {
+        return v;
     }
     let v = crate::project::shows_git_card(folder);
     ctx.data_mut(|d| d.insert_temp(key, (now_t, v)));
