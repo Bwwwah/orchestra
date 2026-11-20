@@ -410,6 +410,9 @@ pub struct Reader {
     /// When the file last grew.
     pub last_growth: Option<std::time::Instant>,
     pub records: usize,
+    /// Claude Code answered with its own "usage limit reached" message: no more turn will
+    /// go through before the quota resets. Its text, to read the reset time from.
+    pub limit_hit: Option<String>,
 }
 
 impl Reader {
@@ -458,10 +461,16 @@ impl Reader {
                         self.tokens += ["input_tokens", "output_tokens", "cache_creation_input_tokens"].iter().map(|k| u[k].as_u64().unwrap_or(0)).sum::<u64>();
                     }
                     let text: String = m["content"].as_array().map(|a| a.iter().filter(|c| c["type"] == "text").filter_map(|c| c["text"].as_str()).collect::<Vec<_>>().join("\n")).unwrap_or_default();
+                    // Claude Code writes its errors as answers of its own (not the model's).
+                    let error = v["isApiErrorMessage"].as_bool() == Some(true) || m["model"].as_str() == Some("<synthetic>");
+                    let limit = error && is_limit_message(&text);
+                    if limit {
+                        self.limit_hit = Some(text.clone());
+                    }
                     if !text.trim().is_empty() {
                         self.last_text = text;
                     }
-                    self.turn_over = m["stop_reason"].as_str() == Some("end_turn");
+                    self.turn_over = m["stop_reason"].as_str() == Some("end_turn") || limit;
                 }
                 Some("user") => {
                     // A tool result or a new message: the turn goes on.
@@ -667,6 +676,93 @@ pub fn read_screen(text: &str) -> Screen {
     }
 }
 
+// ------------------------------------------------------------------ the subscription's own limit
+
+/// Whether a message of Claude Code says the subscription's limit is reached ("Claude AI
+/// usage limit reached|…", "5-hour limit reached ∙ resets 3pm", "You've hit your limit ·
+/// resets 3pm (Europe/Paris)", "Weekly limit reached ∙ resets Nov 24, 3pm"…).
+pub fn is_limit_message(text: &str) -> bool {
+    let t = text.to_lowercase();
+    t.contains("limit reached") || t.contains("hit your limit") || t.contains("reached your usage limit") || t.contains("usage limit")
+}
+
+/// When the limit of such a message resets (ms), read from the message: the time stamp of
+/// the old form (`…|1763650800`), or "resets 3pm" / "resets 3:30pm" / "resets 15:00" /
+/// "resets Nov 24, 3pm" in local time. None: no time in it.
+pub fn limit_reset(text: &str, now: u64) -> Option<u64> {
+    if let Some((_, tail)) = text.rsplit_once('|') {
+        let digits: String = tail.trim().chars().take_while(|c| c.is_ascii_digit()).collect();
+        if let Ok(secs) = digits.parse::<u64>() {
+            // Seconds or milliseconds.
+            return Some(if secs > 100_000_000_000 { secs } else { secs * 1000 });
+        }
+    }
+    let lower = text.to_lowercase();
+    let at = lower.find("resets")? + "resets".len();
+    let rest = lower[at..].trim_start_matches(|c: char| c == ' ' || c == ':').to_string();
+    let rest = rest.strip_prefix("at ").unwrap_or(&rest);
+    // A date first, for the weekly limit: "nov 24, 3pm".
+    const MONTHS: [&str; 12] = ["jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec"];
+    let mut date: Option<(u32, u32)> = None;
+    let mut rest = rest;
+    if let Some(m) = MONTHS.iter().position(|m| rest.starts_with(m)) {
+        let after = rest.trim_start_matches(|c: char| c.is_ascii_alphabetic()).trim_start();
+        let day: String = after.chars().take_while(|c| c.is_ascii_digit()).collect();
+        let d: u32 = day.parse().ok()?;
+        date = Some((m as u32 + 1, d));
+        rest = after[day.len()..].trim_start_matches(|c: char| c == ',' || c == ' ');
+        rest = rest.strip_prefix("at ").unwrap_or(rest);
+    }
+    let hour: String = rest.chars().take_while(|c| c.is_ascii_digit()).collect();
+    let mut h: u32 = hour.parse().ok()?;
+    let mut tail = &rest[hour.len()..];
+    let mut min = 0u32;
+    if let Some(t) = tail.strip_prefix(':').or_else(|| tail.strip_prefix('h')) {
+        let mm: String = t.chars().take_while(|c| c.is_ascii_digit()).collect();
+        min = if mm.is_empty() { 0 } else { mm.parse().ok()? };
+        tail = &t[mm.len()..];
+    }
+    let tail = tail.trim_start();
+    if tail.starts_with("pm") && h < 12 {
+        h += 12;
+    } else if tail.starts_with("am") && h == 12 {
+        h = 0;
+    }
+    if h > 23 || min > 59 {
+        return None;
+    }
+    let off = local_offset_ms();
+    let local_now = now as i64 + off;
+    let today = local_now.div_euclid(86_400_000);
+    let in_day = (h as i64 * 60 + min as i64) * 60_000;
+    let local = match date {
+        Some((m, d)) => {
+            let (y, _, _) = civil(today);
+            let mut t = days_from_civil(y, m, d) * 86_400_000 + in_day;
+            if t <= local_now {
+                t = days_from_civil(y + 1, m, d) * 86_400_000 + in_day;
+            }
+            t
+        }
+        None => {
+            let t = today * 86_400_000 + in_day;
+            if t <= local_now { t + 86_400_000 } else { t }
+        }
+    };
+    u64::try_from(local - off).ok()
+}
+
+/// Days since 1970-01-01 of a date (the inverse of `civil`).
+fn days_from_civil(y: i64, m: u32, d: u32) -> i64 {
+    let y = if m <= 2 { y - 1 } else { y };
+    let era = y.div_euclid(400);
+    let yoe = y - era * 400;
+    let mp = if m > 2 { m - 3 } else { m + 9 } as i64;
+    let doy = (153 * mp + 2) / 5 + d as i64 - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    era * 146_097 + doe - 719_468
+}
+
 // ------------------------------------------------------------------ dates and reports
 
 /// The local time zone's offset (`date +%z`, read once).
@@ -791,6 +887,30 @@ pub fn daily_report(day: &str, runs: &[&crate::model::RunRecord]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_subscription_limit_is_seen_with_its_reset() {
+        assert!(is_limit_message("Claude AI usage limit reached|1763650800"));
+        assert!(is_limit_message("5-hour limit reached ∙ resets 3pm"));
+        assert!(is_limit_message("You've hit your limit · resets 3pm (Europe/Paris)"));
+        assert!(!is_limit_message("Étape terminée, compilation propre. [[CONTINUER]]"));
+        // The old form carries the time stamp.
+        assert_eq!(limit_reset("Claude AI usage limit reached|1763650800", 0), Some(1_763_650_800_000));
+        // "3pm" local: the next 15:00 after now, within a day.
+        let off = local_offset_ms();
+        let day = 20_000 * 86_400_000i64; // a local midnight
+        let now = (day + 10 * 3_600_000 - off) as u64; // 10:00 local
+        assert_eq!(limit_reset("You've hit your limit · resets 3pm (Europe/Paris)", now), Some((day + 15 * 3_600_000 - off) as u64));
+        assert_eq!(limit_reset("limit reached ∙ resets 9:30am", now), Some((day + 86_400_000 + 9 * 3_600_000 + 30 * 60_000 - off) as u64));
+        assert_eq!(limit_reset("limit reached · resets 12am", now), Some((day + 86_400_000 - off) as u64));
+        // A date for the weekly limit.
+        let (y, m, d) = civil(20_003);
+        let names = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+        let text = format!("Weekly limit reached ∙ resets {} {d}, 3pm", names[m as usize - 1]);
+        assert_eq!(days_from_civil(y, m, d), 20_003);
+        assert_eq!(limit_reset(&text, now), Some((20_003 * 86_400_000i64 + 15 * 3_600_000 - off) as u64));
+        assert_eq!(limit_reset("usage limit reached", now), None);
+    }
 
     #[test]
     fn endless_sessions_find_their_own_steps() {

@@ -57,3 +57,13 @@ ajouté sans votre clic. Le texte de la consigne est dans `sync::ask_tasks`.
 
 L'utilisation est relevée par la ligne d'état de Claude Code (`orchestra statusline`, voir
 `src/usage.rs`). Si elle ne peut pas être mesurée, la session s'arrête par prudence.
+
+## La reprise automatique
+
+Une session arrêtée par la limite globale, la réserve de la semaine ou **la limite de
+l'abonnement elle-même** (le message « usage limit reached » / « You've hit your limit ·
+resets 3pm » de Claude Code, lu dans le fichier de session ou à l'écran) repart seule, avec
+la même mission, une minute après la remise à zéro du quota — si « Reprise automatique » est
+cochée dans les réglages. L'heure de remise à zéro est lue dans le message de Claude Code
+(`auto::limit_reset`), sinon dans les chiffres de la ligne d'état ; inconnue, Orchestra
+réessaie dans une heure.
