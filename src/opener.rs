@@ -40,6 +40,65 @@ pub fn open_path(path: &Path) -> Result<(), String> {
     Command::new(opener()).arg(path).spawn().map(|_| ()).map_err(|e| e.to_string())
 }
 
+/// The system's "choose a folder" dialog (Finder, Explorer, GTK/KDE), opened on `start` when
+/// it is a folder. Blocks until the person picks a folder or cancels (`None`): call it off
+/// the interface thread.
+pub fn pick_folder(prompt: &str, start: Option<&Path>) -> Option<std::path::PathBuf> {
+    let start = start.filter(|p| p.is_absolute() && p.is_dir()).map(|p| p.display().to_string()).unwrap_or_default();
+    let out = pick_folder_cmd(prompt, &start)?;
+    let s = String::from_utf8_lossy(&out).trim_end_matches(['\r', '\n']).to_string();
+    // Finder answers "/Users/me/Code/x/": keep the folder without its last slash.
+    let t = s.trim_end_matches('/');
+    let p = std::path::PathBuf::from(if t.is_empty() { "/" } else { t });
+    (p.is_absolute() && p.is_dir()).then_some(p)
+}
+
+fn run_out(cmd: &mut Command) -> Option<Vec<u8>> {
+    let o = cmd.stdin(std::process::Stdio::null()).stderr(std::process::Stdio::null()).output().ok()?;
+    (o.status.success() && !o.stdout.is_empty()).then_some(o.stdout)
+}
+
+#[cfg(target_os = "macos")]
+fn pick_folder_cmd(prompt: &str, start: &str) -> Option<Vec<u8>> {
+    // The prompt and the start folder go in as arguments, never inside the script.
+    let script = "on run argv\n\
+        set p to item 1 of argv\n\
+        set s to item 2 of argv\n\
+        activate\n\
+        if s is \"\" then\n\
+        return POSIX path of (choose folder with prompt p)\n\
+        else\n\
+        return POSIX path of (choose folder with prompt p default location (POSIX file s))\n\
+        end if\n\
+        end run";
+    run_out(Command::new("osascript").args(["-e", script, prompt, start]))
+}
+
+#[cfg(windows)]
+fn pick_folder_cmd(prompt: &str, start: &str) -> Option<Vec<u8>> {
+    let script = "Add-Type -AssemblyName System.Windows.Forms; \
+        $d = New-Object System.Windows.Forms.FolderBrowserDialog; \
+        $d.Description = $env:ORCHESTRA_PICK_PROMPT; \
+        if ($env:ORCHESTRA_PICK_START) { $d.SelectedPath = $env:ORCHESTRA_PICK_START }; \
+        if ($d.ShowDialog() -eq 'OK') { [Console]::OutputEncoding = [Text.Encoding]::UTF8; Write-Output $d.SelectedPath }";
+    run_out(Command::new("powershell").args(["-NoProfile", "-STA", "-Command", script]).env("ORCHESTRA_PICK_PROMPT", prompt).env("ORCHESTRA_PICK_START", start))
+}
+
+#[cfg(not(any(target_os = "macos", windows)))]
+fn pick_folder_cmd(prompt: &str, start: &str) -> Option<Vec<u8>> {
+    let mut zen = Command::new("zenity");
+    zen.args(["--file-selection", "--directory", "--title", prompt]);
+    if !start.is_empty() {
+        zen.arg(format!("--filename={start}/"));
+    }
+    // zenity there (even if cancelled) settles it; only a missing zenity falls back to kdialog.
+    if let Ok(o) = zen.stdin(std::process::Stdio::null()).stderr(std::process::Stdio::null()).output() {
+        return (o.status.success() && !o.stdout.is_empty()).then_some(o.stdout);
+    }
+    let home = dirs::home_dir().map(|h| h.display().to_string()).unwrap_or_else(|| "/".into());
+    run_out(Command::new("kdialog").args(["--getexistingdirectory", if start.is_empty() { &home } else { start }, "--title", prompt]))
+}
+
 #[cfg(test)]
 mod tests {
     #[test]

@@ -20,6 +20,41 @@ pub struct LiveIndex {
     pub unassigned: Vec<(String, Vec<SessionInfo>)>,
 }
 
+/// The system's folder picker for the new-project form, run on its own thread so the
+/// window keeps drawing; the chosen folder is picked up on the next frame.
+mod folder_picker {
+    use std::path::PathBuf;
+    use std::sync::Mutex;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    static BUSY: AtomicBool = AtomicBool::new(false);
+    static PICKED: Mutex<Option<PathBuf>> = Mutex::new(None);
+
+    pub fn busy() -> bool {
+        BUSY.load(Ordering::Relaxed)
+    }
+
+    pub fn start(ctx: &eframe::egui::Context, from: Option<PathBuf>) {
+        if BUSY.swap(true, Ordering::SeqCst) {
+            return;
+        }
+        let ctx = ctx.clone();
+        std::thread::spawn(move || {
+            let got = crate::opener::pick_folder(crate::tr!("Dossier du projet", "Project folder"), from.as_deref());
+            if let Some(p) = got {
+                *PICKED.lock().unwrap_or_else(|e| e.into_inner()) = Some(p);
+            }
+            BUSY.store(false, Ordering::SeqCst);
+            ctx.request_repaint();
+        });
+    }
+
+    /// The folder chosen since the last call, if any.
+    pub fn take() -> Option<PathBuf> {
+        PICKED.lock().unwrap_or_else(|e| e.into_inner()).take()
+    }
+}
+
 /// A folder offered for synchronisation.
 pub struct SyncCandidate {
     pub folder: String,
@@ -194,10 +229,24 @@ impl NotesApp {
                         ui.add_space(8.0);
                         egui::Grid::new("new-project").num_columns(2).spacing([12.0, 8.0]).show(ui, |ui| {
                             ui.label(crate::tr!("Dossier", "Folder"));
-                            let fr = ui.add(egui::TextEdit::singleline(folder).hint_text(crate::tr!("~/Code/mon-projet", "~/Code/my-project")).font(FontId::monospace(13.0)).desired_width(f32::INFINITY));
-                            if title.is_empty() && folder.is_empty() && !fr.has_focus() {
-                                fr.request_focus();
+                            if let Some(dir) = folder_picker::take() {
+                                *folder = dir.display().to_string();
                             }
+                            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                let busy = folder_picker::busy();
+                                let browse = ui
+                                    .add_enabled(!busy, egui::Button::new(crate::tr!("Parcourir…", "Browse…")))
+                                    .on_hover_text(crate::tr!("Choisir le dossier dans le Finder / l'explorateur", "Pick the folder in the Finder / file explorer"))
+                                    .on_disabled_hover_text(crate::tr!("Fenêtre de choix ouverte", "Picker window open"));
+                                if browse.clicked() {
+                                    let start = crate::project::normalize_folder(folder.trim());
+                                    folder_picker::start(ui.ctx(), start.is_dir().then_some(start).or_else(|| dirs::home_dir()));
+                                }
+                                let fr = ui.add(egui::TextEdit::singleline(folder).hint_text(crate::tr!("~/Code/mon-projet", "~/Code/my-project")).font(FontId::monospace(13.0)).desired_width(f32::INFINITY));
+                                if title.is_empty() && folder.is_empty() && !fr.has_focus() && !busy {
+                                    fr.request_focus();
+                                }
+                            });
                             ui.end_row();
                             ui.label(crate::tr!("Nom", "Name"));
                             let auto = std::path::Path::new(folder.trim()).file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
