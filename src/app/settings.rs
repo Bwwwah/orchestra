@@ -642,7 +642,8 @@ impl NotesApp {
                         }
                     }
                 } else if let Some(cmd) = ai.install() {
-                    if button(ui, crate::tr!("Installer", "Install"), t, l).on_hover_text(crate::trf!("Lance « {cmd} » dans le terminal intégré (Node.js requis)", "Runs « {cmd} » in the built-in terminal (Node.js needed)")).clicked() {
+                    let needs = if cmd.starts_with("uv ") { crate::tr!("uv requis, l'outil Python d'Astral", "uv needed, Astral's Python tool") } else { crate::tr!("Node.js requis", "Node.js needed") };
+                    if button(ui, crate::tr!("Installer", "Install"), t, l).on_hover_text(crate::trf!("Lance « {cmd} » dans le terminal intégré ({needs})", "Runs « {cmd} » in the built-in terminal ({needs})")).clicked() {
                         term = Some((crate::trf!("Installation · {}", "Installing · {}", ai.label()), cmd.to_string(), None));
                     }
                 } else if let Some(url) = ai.download_page() {
