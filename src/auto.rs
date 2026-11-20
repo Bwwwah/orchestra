@@ -332,6 +332,58 @@ pub fn discard(r: &crate::model::RunRecord) -> Result<String, String> {
     Ok(crate::tr!("Copie et branche supprimées.", "Copy and branch deleted.").into())
 }
 
+// ------------------------------------------------------------------ leftover copies
+
+/// The copies left in `data_dir/worktrees` that no session needs any more: neither a
+/// running one nor a finished one still waiting to be merged or discarded (its copy holds
+/// that work). A copy is a session's when its path, or at least its folder name, is the
+/// one the session recorded (the data folder may have moved since).
+pub fn stale_copies(runs: &[crate::model::RunRecord]) -> Vec<PathBuf> {
+    let dir = crate::store::data_dir().join("worktrees");
+    let found: Vec<PathBuf> = std::fs::read_dir(&dir).into_iter().flatten().flatten().map(|e| e.path()).filter(|p| p.is_dir()).collect();
+    stale_among(found, runs)
+}
+
+fn stale_among(found: Vec<PathBuf>, runs: &[crate::model::RunRecord]) -> Vec<PathBuf> {
+    let needed = |p: &Path| {
+        runs.iter().filter(|r| r.closed.is_empty()).any(|r| {
+            let w = Path::new(&r.worktree);
+            w == p || (w.file_name().is_some() && w.file_name() == p.file_name())
+        })
+    };
+    found.into_iter().filter(|p| !needed(p)).collect()
+}
+
+/// Remove one leftover copy the way git does it, never by hand: `git worktree remove`
+/// without force refuses a copy with changes not committed (or files not tracked), and
+/// its branch stays in the repository, commits and all. A folder that isn't a git copy is
+/// left alone. Then `git worktree prune` forgets copies whose folder is already gone.
+pub fn remove_copy(copy: &Path) -> Result<(), String> {
+    if !copy.join(".git").is_file() {
+        return Err(crate::trf!("{} n'est pas une copie git : laissée", "{} isn't a git copy: left alone", copy.display()));
+    }
+    let common = git(copy, &["rev-parse", "--path-format=absolute", "--git-common-dir"])?.trim().to_string();
+    let root = Path::new(&common).parent().ok_or("no repository")?.to_path_buf();
+    git(&root, &["worktree", "remove", &copy.display().to_string()])?;
+    let _ = git(&root, &["worktree", "prune"]);
+    Ok(())
+}
+
+/// At start: remove the leftover copies in the background (git is slow on big projects);
+/// those that can't go (changes not committed, repository gone…) stay, with a line in the log.
+pub fn clean_copies_later(copies: Vec<PathBuf>) {
+    if copies.is_empty() {
+        return;
+    }
+    std::thread::spawn(move || {
+        for c in copies {
+            if let Err(e) = remove_copy(&c) {
+                eprintln!("orchestra: copy {} kept: {e}", c.display());
+            }
+        }
+    });
+}
+
 /// Commits of the session, and the files changed but not committed.
 pub fn work_done(r: &crate::model::RunRecord, base: &str) -> (Vec<String>, usize) {
     let wt = PathBuf::from(&r.worktree);
@@ -872,6 +924,54 @@ mod tests {
         discard(&rec2).unwrap();
         assert!(!git(&repo, &["branch"]).unwrap().contains("orchestra/"));
         let _ = std::fs::remove_dir_all(repo);
+    }
+
+    /// Only copies no session needs are candidates: a running session's and a finished one
+    /// not yet merged or discarded stay, even when the data folder moved.
+    #[test]
+    fn stale_copies_are_the_ones_no_session_needs() {
+        let w = |n: &str| PathBuf::from(format!("/data/orchestra/worktrees/{n}"));
+        let run = |n: &str, closed: &str| crate::model::RunRecord { worktree: format!("/old/place/worktrees/{n}"), closed: closed.into(), ..Default::default() };
+        let runs = vec![run("en-cours", ""), run("a-fusionner", ""), run("fusionnee", "fusionné"), run("abandonnee", "abandonné")];
+        let found = vec![w("en-cours"), w("a-fusionner"), w("fusionnee"), w("abandonnee"), w("oubliee")];
+        assert_eq!(stale_among(found, &runs), vec![w("fusionnee"), w("abandonnee"), w("oubliee")]);
+    }
+
+    /// Removed through git only: a clean copy goes (its branch stays), a copy with work
+    /// not committed and a folder that isn't a git copy are both left as they are.
+    #[test]
+    fn leftover_copies_go_only_when_nothing_is_lost() {
+        let base = std::env::temp_dir().join(format!("orch-copies-{}", uuid::Uuid::new_v4().simple()));
+        let repo = base.join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        let ok = |d: &Path, a: &[&str]| git(d, a).is_ok();
+        if !ok(&repo, &["init", "-b", "main"]) {
+            return;
+        }
+        let _ = git(&repo, &["config", "user.email", "t@t"]);
+        let _ = git(&repo, &["config", "user.name", "T"]);
+        std::fs::write(repo.join("a.txt"), "a").unwrap();
+        assert!(ok(&repo, &["add", "-A"]) && ok(&repo, &["commit", "-m", "a"]));
+        let add = |name: &str| {
+            let wt = base.join("worktrees").join(name);
+            assert!(ok(&repo, &["worktree", "add", "-b", &format!("orchestra/auto-{name}"), &wt.display().to_string(), "HEAD"]));
+            wt
+        };
+        let clean = add("propre");
+        let dirty = add("modifiee");
+        std::fs::write(dirty.join("travail.txt"), "pas encore enregistré").unwrap();
+        let other = base.join("worktrees").join("autre-chose");
+        std::fs::create_dir_all(&other).unwrap();
+        std::fs::write(other.join("note.txt"), "x").unwrap();
+
+        remove_copy(&clean).unwrap();
+        assert!(!clean.exists());
+        assert!(git(&repo, &["branch"]).unwrap().contains("orchestra/auto-propre"), "the branch stays");
+        assert!(remove_copy(&dirty).is_err());
+        assert!(dirty.join("travail.txt").exists(), "uncommitted work kept");
+        assert!(remove_copy(&other).is_err());
+        assert!(other.join("note.txt").exists());
+        let _ = std::fs::remove_dir_all(&base);
     }
 
     #[test]
