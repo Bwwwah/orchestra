@@ -370,6 +370,9 @@ impl NotesApp {
     }
 
     fn save_now(&mut self) {
+        // From the check of the file to the write, like the MCP servers and the live server:
+        // an AI's write can't slip in between and be overwritten. Their holds are short.
+        let _lock = store::lock_workspace();
         // Written meanwhile by someone else (an AI through MCP, during autonomous work):
         // merge it in first rather than overwrite it.
         let disk_m = store::modified(&store::workspace_path());
