@@ -42,17 +42,51 @@ pub fn kind_icon(k: BlockKind) -> Icon {
     }
 }
 
-/// Kinds matching what was typed after "/", in menu order.
-pub fn matches(text: &str) -> Vec<(BlockKind, &'static str)> {
+/// One entry of the "/" menu: a kind of block, or a view that makes a page of its own.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Item {
+    Block(BlockKind),
+    /// A sub-page holding a database shown as a Kanban board.
+    Kanban,
+}
+
+impl Item {
+    pub fn label(self) -> &'static str {
+        match self {
+            Item::Block(k) => k.label(),
+            Item::Kanban => crate::tr!("Kanban", "Kanban"),
+        }
+    }
+    pub fn icon(self) -> Icon {
+        match self {
+            Item::Block(k) => kind_icon(k),
+            Item::Kanban => Icon::Board,
+        }
+    }
+    fn keywords(self) -> &'static [&'static str] {
+        match self {
+            Item::Block(k) => k.keywords(),
+            Item::Kanban => &["kanban", "tableau", "board", "colonnes", "base", "database", "tâches", "taches"],
+        }
+    }
+}
+
+/// Entries after the basic blocks ("Vues de base de données" in Notion).
+const VIEWS: [(Item, &str); 1] = [(Item::Kanban, "")];
+
+/// Entries matching what was typed after "/", in menu order.
+pub fn matches(text: &str) -> Vec<(Item, &'static str)> {
     let q = text.trim_start_matches('/').trim().to_lowercase();
     ORDER
         .into_iter()
+        .map(|(k, h)| (Item::Block(k), h))
+        .chain(VIEWS)
         .filter(|(k, _)| q.is_empty() || k.label().to_lowercase().contains(&q) || k.keywords().iter().any(|w| w.starts_with(&q)))
         .collect()
 }
 
 pub enum SlashEvent {
-    Pick(BlockKind),
+    Pick(Item),
     Hover(usize),
     Close,
 }
@@ -107,7 +141,7 @@ pub fn popup(ctx: &egui::Context, id: egui::Id, anchor: egui::Rect, text: &str, 
                                     resp.scroll_to_me(None);
                                 }
                             }
-                            icons::paint(ui.painter(), egui::Rect::from_center_size(egui::pos2(r.left() + 21.0, r.center().y), egui::vec2(18.0, 18.0)), kind_icon(*kind), t.text);
+                            icons::paint(ui.painter(), egui::Rect::from_center_size(egui::pos2(r.left() + 21.0, r.center().y), egui::vec2(18.0, 18.0)), kind.icon(), t.text);
                             ui.painter().text(egui::pos2(r.left() + 40.0, r.center().y), egui::Align2::LEFT_CENTER, kind.label(), FontId::proportional(16.0), t.text);
                             if !hint.is_empty() {
                                 ui.painter().text(egui::pos2(r.right() - 30.0, r.center().y), egui::Align2::RIGHT_CENTER, *hint, FontId::proportional(14.0), t.tertiary);

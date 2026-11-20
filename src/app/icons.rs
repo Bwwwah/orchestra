@@ -14,6 +14,7 @@ pub enum Icon {
     People,
     Library,
     Database,
+    Board,
     Plus,
     Sliders,
     Help,
@@ -100,6 +101,12 @@ pub fn paint(p: &egui::Painter, rect: Rect, icon: Icon, color: Color32) {
             p.rect_stroke(Rect::from_min_max(at(3.5, 4.5), at(16.5, 15.5)), 2.0 * k, s, egui::StrokeKind::Middle);
             p.line_segment([at(3.5, 8.5), at(16.5, 8.5)], s);
             p.line_segment([at(8.0, 8.5), at(8.0, 15.5)], s);
+        }
+        Icon::Board => {
+            // Three columns of cards of different heights.
+            for (x, h) in [(3.5, 12.0), (8.5, 8.0), (13.5, 10.0)] {
+                p.rect_stroke(Rect::from_min_max(at(x, 4.0), at(x + 3.0, 4.0 + h)), 1.0 * k, s, egui::StrokeKind::Middle);
+            }
         }
         Icon::Plus => {
             p.line_segment([at(4.5, 10.0), at(15.5, 10.0)], s);

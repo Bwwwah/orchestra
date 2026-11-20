@@ -33,6 +33,8 @@ enum Action {
     Duplicate(String),
     OpenRow(String, String),
     InsertSubpage { page: String, at: usize },
+    /// "/kanban": a sub-page holding a database shown as a board, linked at block `at`.
+    InsertKanban { page: String, at: usize },
     Export(String),
     NewProject(String, String),
     RevertDoc(String),
@@ -766,6 +768,11 @@ impl NotesApp {
                     self.navigate(id.clone());
                     self.focus = Some((format!("title-{id}"), None));
                 }
+                Action::InsertKanban { page, at } => {
+                    let id = insert_kanban(&mut self.ws, &page, at);
+                    self.expanded.insert(page);
+                    self.navigate(id);
+                }
             }
         }
     }
@@ -1103,7 +1110,7 @@ impl eframe::App for NotesApp {
             self.term_focus = self.term_open;
         }
         let dark = ctx.global_style().visuals.dark_mode;
-        let side_fill = rgb(if dark { original::dark::SIDEBAR } else { original::light::SIDEBAR });
+        let side_fill = chrome::side_fill(dark);
         let page_fill = rgb(if dark { original::dark::BACKGROUND } else { original::light::BACKGROUND });
         // Sidebar first: it runs the full height, beside the window buttons.
         if !self.ws.settings.sidebar_hidden {
@@ -1114,6 +1121,9 @@ impl eframe::App for NotesApp {
                 .size_range(220.0..=480.0)
                 .frame(egui::Frame::new().fill(side_fill).inner_margin(egui::Margin { left: 10, right: 10, top: 0, bottom: 8 }))
                 .show(ui, |ui| self.sidebar(ui, &mut actions));
+            // A thin violet-grey line sets the sidebar apart from the page.
+            let r = resp.response.rect;
+            ui.painter().vline(r.right() - 0.5, r.y_range(), egui::Stroke::new(1.0, chrome::side_tone(dark).border));
             let now = resp.response.rect.width();
             if (now - self.ws.settings.sidebar_width).abs() > 1.0 && ctx.input(|i| !i.pointer.any_down()) {
                 self.ws.settings.sidebar_width = now;
@@ -1764,7 +1774,7 @@ fn blocks_view(
                 let picks = if slash_open { slash::matches(&b.text) } else { vec![] };
                 if slash_open && enter && !picks.is_empty() {
                     let k = picks[slash_sel.min(picks.len() - 1)].0;
-                    apply_kind(b, k, i, &page_id, actions, &mut insert, &mut new_focus);
+                    apply_item(b, k, i, &page_id, actions, &mut insert, &mut new_focus);
                 } else if enter && !is_code {
                     let list = matches!(b.kind, BlockKind::Todo | BlockKind::Bullet | BlockKind::Numbered);
                     if list && b.text.is_empty() {
@@ -1830,7 +1840,7 @@ fn blocks_view(
             let edit_id = egui::Id::unique(("block", &b.id));
             match slash::popup(ui.ctx(), edit_id.with("slash-popup"), slash_anchor, &b.text, slash_sel, slash_scroll) {
                 Some(slash::SlashEvent::Pick(k)) => {
-                    apply_kind(b, k, i, &page_id, actions, &mut insert, &mut new_focus);
+                    apply_item(b, k, i, &page_id, actions, &mut insert, &mut new_focus);
                     if new_focus.is_none() {
                         new_focus = Some((b.id.clone(), None));
                     }
@@ -1928,6 +1938,44 @@ fn blocks_view(
         page.blocks.push(Block::new(BlockKind::Paragraph, ""));
     }
     (new_focus, focus_used)
+}
+
+/// Make the Kanban sub-page of `page` and link it at block `at`; returns its id.
+fn insert_kanban(ws: &mut Workspace, page: &str, at: usize) -> String {
+    let mut p = Page::new(crate::tr!("Kanban", "Kanban"), Some(page.to_string()));
+    p.icon = "📋".into();
+    p.blocks.clear();
+    let mut db = Database::new_default();
+    db.view = DbView::Board;
+    p.database = Some(db);
+    let id = p.id.clone();
+    ws.pages.push(p);
+    if let Some(b) = ws.page_mut(page).and_then(|par| par.blocks.get_mut(at)) {
+        b.kind = BlockKind::PageLink;
+        b.text.clear();
+        b.extra = id.clone();
+    }
+    id
+}
+
+/// What the "/" menu does with the chosen entry.
+fn apply_item(
+    b: &mut Block,
+    item: slash::Item,
+    i: usize,
+    page_id: &str,
+    actions: &mut Vec<Action>,
+    insert: &mut Option<(usize, Block)>,
+    new_focus: &mut Option<(String, Option<usize>)>,
+) {
+    match item {
+        slash::Item::Block(k) => apply_kind(b, k, i, page_id, actions, insert, new_focus),
+        slash::Item::Kanban => {
+            b.text.clear();
+            b.kind = BlockKind::PageLink;
+            actions.push(Action::InsertKanban { page: page_id.to_string(), at: i });
+        }
+    }
 }
 
 fn apply_kind(
@@ -2310,12 +2358,32 @@ mod tests {
 
     #[test]
     fn slash_menu_filters_in_notion_order() {
+        use slash::Item;
         let all = slash::matches("/");
-        assert_eq!(all.len(), 13);
-        assert_eq!(all[0].0, BlockKind::Paragraph);
-        let l: Vec<BlockKind> = slash::matches("/liste").into_iter().map(|x| x.0).collect();
-        assert_eq!(l, [BlockKind::Bullet, BlockKind::Numbered, BlockKind::Todo, BlockKind::Toggle]);
+        assert_eq!(all.len(), 14);
+        assert_eq!(all[0].0, Item::Block(BlockKind::Paragraph));
+        assert_eq!(all[13].0, Item::Kanban);
+        let l: Vec<Item> = slash::matches("/liste").into_iter().map(|x| x.0).collect();
+        assert_eq!(l, [BlockKind::Bullet, BlockKind::Numbered, BlockKind::Todo, BlockKind::Toggle].map(Item::Block));
         assert!(slash::matches("/zzz").is_empty());
+        for q in ["/kanban", "/kan", "/tableau", "/board"] {
+            assert!(slash::matches(q).iter().any(|x| x.0 == Item::Kanban), "{q}");
+        }
+    }
+
+    #[test]
+    fn slash_kanban_makes_a_board_subpage() {
+        let mut ws = Workspace::default();
+        let page = ws.create_page("Notes", None);
+        ws.page_mut(&page).unwrap().blocks = vec![Block::new(BlockKind::Paragraph, "/kanban")];
+        let id = insert_kanban(&mut ws, &page, 0);
+        let kb = ws.page(&id).unwrap();
+        assert_eq!(kb.parent.as_deref(), Some(page.as_str()));
+        let db = kb.database.as_ref().unwrap();
+        assert_eq!(db.view, DbView::Board);
+        assert!(db.columns.iter().any(|c| c.kind == ColumnKind::Select));
+        let link = &ws.page(&page).unwrap().blocks[0];
+        assert_eq!((link.kind, link.extra.as_str(), link.text.as_str()), (BlockKind::PageLink, id.as_str(), ""));
     }
 
     #[test]
