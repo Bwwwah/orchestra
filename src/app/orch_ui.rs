@@ -191,6 +191,8 @@ pub struct Orch {
     usage_polled: Option<Instant>,
     resume_checked: Option<Instant>,
     daily_checked: Option<Instant>,
+    /// A finished session's copy waiting for its second click: (run id, "merge" | "discard").
+    confirm: Option<(String, &'static str)>,
     /// An endless session on main waiting for the person to confirm the warning: a project
     /// id, or SELECTION for « Lancer la sélection ».
     confirm_main: Option<String>,
@@ -1686,6 +1688,8 @@ impl NotesApp {
         let mut all_read = false;
         let mut clear_all = false;
         let mut answer: Option<(usize, String)> = None;
+        let mut run_act: Option<(String, &'static str)> = None;
+        let confirm = self.orch.confirm.clone();
         ui.add_space(50.0);
         ui.horizontal(|ui| {
             ui.add_space(((avail - width) / 2.0).max(20.0));
@@ -1782,6 +1786,12 @@ impl NotesApp {
                         _ => (t.tertiary, crate::tr!("Info", "Info")),
                     };
                     let project = (!m.project.is_empty()).then(|| self.ws.page(&m.project).map(|p| p.display_title())).flatten();
+                    // The end of a session: its work, still in its own copy, to merge or discard.
+                    let run = (m.kind == "fin")
+                        .then_some(m.page.as_ref())
+                        .flatten()
+                        .and_then(|p| self.ws.runs.iter().find(|r| r.report.as_ref() == Some(p)))
+                        .filter(|r| !r.outcome.is_empty() && !self.orch.runs.iter().any(|l| l.id == r.id) && !self.orch.to_main.contains(&r.id));
                     let bg = super::projects::hover_begin(ui);
                     let card = egui::Frame::new()
                         .fill(if m.read { Color32::TRANSPARENT } else { t.card })
@@ -1859,6 +1869,12 @@ impl NotesApp {
                                     answer = Some((i, text));
                                 }
                             }
+                            if let Some(r) = run {
+                                let asking = confirm.as_ref().filter(|(id, _)| *id == r.id).map(|(_, a)| *a);
+                                if let Some(a) = run_actions(ui, r, asking, &t) {
+                                    run_act = Some((r.id.clone(), a));
+                                }
+                            }
                         });
                     let rect = card.response.rect;
                     // A coloured edge on the left: the kind at a glance.
@@ -1890,6 +1906,9 @@ impl NotesApp {
         if let Some((i, text)) = answer {
             self.save_answer(i, text);
         }
+        if let Some((id, a)) = run_act {
+            self.run_action(&id, a);
+        }
         if let Some(i) = remove {
             let m = self.ws.inbox.remove(i);
             self.inbox_removed.insert(m.id);
@@ -1905,6 +1924,89 @@ impl NotesApp {
             self.dirty_since.get_or_insert_with(Instant::now);
         }
     }
+
+    /// A click on a finished session's copy: ask first, then merge or discard it.
+    fn run_action(&mut self, id: &str, a: &'static str) {
+        match a {
+            "ask-merge" => self.orch.confirm = Some((id.to_string(), "merge")),
+            "ask-discard" => self.orch.confirm = Some((id.to_string(), "discard")),
+            "cancel" => self.orch.confirm = None,
+            "open" => {
+                if let Some(r) = self.ws.runs.iter().find(|r| r.id == id) {
+                    let _ = crate::opener::open_path(std::path::Path::new(&r.worktree));
+                }
+            }
+            _ => {
+                self.orch.confirm = None;
+                let Some(rec) = self.ws.runs.iter().find(|r| r.id == id).cloned() else { return };
+                let res = if a == "merge" { auto::merge(&rec) } else { auto::discard(&rec) };
+                match res {
+                    Ok(m) => {
+                        if let Some(x) = self.ws.runs.iter_mut().find(|x| x.id == id) {
+                            x.closed = if a == "merge" { crate::tr!("fusionné", "merged").into() } else { crate::tr!("abandonné", "discarded").into() };
+                        }
+                        self.dirty_since.get_or_insert_with(Instant::now);
+                        self.detect_changes();
+                        self.info(format!("{} : {m}", rec.title));
+                    }
+                    Err(e) => self.fail(format!("{} : {e}", rec.title)),
+                }
+            }
+        }
+    }
+}
+
+/// Under the end of a session: what became of its copy, or the links to deal with it
+/// (merge into the project's folder, discard, open), each risky one asked twice.
+fn run_actions(ui: &mut egui::Ui, r: &crate::model::RunRecord, asking: Option<&'static str>, t: &Tone) -> Option<&'static str> {
+    if !r.closed.is_empty() {
+        ui.add_space(4.0);
+        ui.label(RichText::new(crate::trf!("Copie : {}", "Copy: {}", r.closed)).size(12.5).color(t.tertiary));
+        return None;
+    }
+    if !std::path::Path::new(&r.worktree).is_dir() {
+        return None;
+    }
+    let mut act = None;
+    ui.add_space(4.0);
+    ui.horizontal_wrapped(|ui| {
+        ui.spacing_mut().item_spacing.x = 10.0;
+        match asking {
+            Some(a) => {
+                let what = if a == "merge" {
+                    crate::tr!("Fusionner ce travail dans votre branche actuelle ?", "Merge this work into your current branch?")
+                } else {
+                    crate::tr!("Supprimer la copie et sa branche, définitivement ?", "Delete the copy and its branch, for good?")
+                };
+                ui.label(RichText::new(what).size(12.5).color(super::projects::ORANGE));
+                if super::projects::action_link(ui, crate::tr!("Oui", "Yes")).clicked() {
+                    act = Some(a);
+                }
+                if super::projects::action_link(ui, crate::tr!("Non", "No")).clicked() {
+                    act = Some("cancel");
+                }
+            }
+            None => {
+                ui.label(RichText::new(crate::tr!("Le travail est resté dans sa copie :", "The work stayed in its copy:")).size(12.5).color(t.tertiary));
+                if super::projects::action_link(ui, crate::tr!("Fusionner", "Merge"))
+                    .on_hover_text(crate::tr!("Intègre ce travail dans la branche ouverte dans le dossier du projet", "Brings this work into the branch open in the project's folder"))
+                    .clicked()
+                {
+                    act = Some("ask-merge");
+                }
+                if super::projects::action_link(ui, crate::tr!("Abandonner", "Discard"))
+                    .on_hover_text(crate::tr!("Supprime la copie et sa branche, sans rien changer à votre dossier", "Deletes the copy and its branch, nothing changes in your folder"))
+                    .clicked()
+                {
+                    act = Some("ask-discard");
+                }
+                if super::projects::action_link(ui, crate::tr!("Ouvrir la copie", "Open the copy")).clicked() {
+                    act = Some("open");
+                }
+            }
+        }
+    });
+    act
 }
 
 

@@ -322,9 +322,7 @@ pub fn merge_into_main(r: &crate::model::RunRecord) -> Result<String, String> {
     merge(r)
 }
 
-/// Throw the session's copy and branch away. No button calls it since the « Sessions
-/// terminées » card went away; kept (and tested) until the person says where it belongs.
-#[cfg_attr(not(test), allow(dead_code))]
+/// Throw the session's copy and branch away.
 pub fn discard(r: &crate::model::RunRecord) -> Result<String, String> {
     let rd = PathBuf::from(&r.root);
     let _ = git(&rd, &["worktree", "remove", "--force", &r.worktree]);
