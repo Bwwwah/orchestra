@@ -94,13 +94,27 @@ impl SessionInfo {
         now_ms.saturating_sub(self.last_activity) < 120_000
     }
 
-    /// The shell command that reopens this session where it stopped.
-    pub fn resume_command(&self) -> String {
-        let cd = if self.cwd.is_empty() { String::new() } else { format!("cd {} && ", shell_quote(&self.cwd)) };
-        match self.tool {
-            Tool::ClaudeCode => format!("{cd}claude --resume {}", self.id),
-            Tool::Codex => format!("{cd}codex resume {}", self.id),
+    /// The id comes from a file name and ends up in a shell command: only [A-Za-z0-9-],
+    /// not starting with "-".
+    pub fn has_safe_id(&self) -> bool {
+        !self.id.is_empty() && !self.id.starts_with('-') && self.id.len() <= 128 && self.id.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-')
+    }
+
+    /// The agent command that reopens this session (without the cd), None for an unsafe id.
+    pub fn resume_args(&self) -> Option<String> {
+        if !self.has_safe_id() {
+            return None;
         }
+        Some(match self.tool {
+            Tool::ClaudeCode => format!("claude --resume {}", self.id),
+            Tool::Codex => format!("codex resume {}", self.id),
+        })
+    }
+
+    /// The shell command that reopens this session where it stopped, None for an unsafe id.
+    pub fn resume_command(&self) -> Option<String> {
+        let cd = if self.cwd.is_empty() { String::new() } else { format!("cd {} && ", shell_quote(&self.cwd)) };
+        self.resume_args().map(|a| format!("{cd}{a}"))
     }
 
     pub fn display_title(&self) -> String {
@@ -745,7 +759,13 @@ mod tests {
         assert_eq!(s.tokens, Tokens { billed: 35, cached: 1000 });
         assert_eq!(s.model, "claude-opus-5-5");
         assert_eq!(s.last_reply, "C'est fait.");
-        assert_eq!(s.resume_command(), "cd /home/me/Code/app && claude --resume abc-123");
+        assert_eq!(s.resume_command().as_deref(), Some("cd /home/me/Code/app && claude --resume abc-123"));
+        // An id with shell characters or an option is never put in a command.
+        for bad in ["abc;rm -rf ~", "$(x)", "a b", "-x", "a'b", "a/b", ""] {
+            let mut t = s.clone();
+            t.id = bad.into();
+            assert!(t.resume_command().is_none() && t.resume_args().is_none(), "{bad}");
+        }
 
         // Nothing new: nothing to do. Then the half line is finished: it is read.
         assert!(!sc.scan());
@@ -785,7 +805,7 @@ mod tests {
         assert_eq!(s.model, "gpt-5-codex");
         assert_eq!((s.user_messages, s.agent_messages), (1, 1));
         assert_eq!(s.tokens, Tokens { billed: 1300, cached: 4000 });
-        assert_eq!(s.resume_command(), "cd /home/me/Code/app && codex resume 0199a1b2-c3d4-7e5f-8a9b-0c1d2e3f4a5b");
+        assert_eq!(s.resume_command().as_deref(), Some("cd /home/me/Code/app && codex resume 0199a1b2-c3d4-7e5f-8a9b-0c1d2e3f4a5b"));
         let _ = std::fs::remove_dir_all(root);
     }
 

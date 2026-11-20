@@ -517,7 +517,7 @@ fn call_tool(name: &str, args: &Value) -> Result<String, ToolError> {
                             se.display_title(),
                             se.user_messages + se.agent_messages,
                             se.path.display(),
-                            se.resume_command()
+                            se.resume_command().unwrap_or_else(|| "(id de session invalide)".into())
                         ));
                     }
                 }

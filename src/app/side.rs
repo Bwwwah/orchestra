@@ -254,11 +254,9 @@ impl NotesApp {
             });
         ui.add_space(6.0);
         // Writing to the AI goes through its terminal (opened here if needed).
-        let resume = match s.tool {
-            crate::sessions::Tool::ClaudeCode => format!("claude --resume {}", s.id),
-            crate::sessions::Tool::Codex => format!("codex resume {}", s.id),
-        };
-        let term = self.terms.iter().position(|x| x.cmd.as_deref().is_some_and(|c| c.contains(&s.id)));
+        // An id unfit for a shell command opens a plain terminal in the folder instead.
+        let resume = s.resume_args();
+        let term = if s.has_safe_id() { self.terms.iter().position(|x| x.cmd.as_deref().is_some_and(|c| c.contains(&s.id))) } else { None };
         let hint = if term.is_some() { crate::tr!("Écrire à l'IA… (Entrée pour envoyer dans son terminal)", "Write to the AI… (Enter to send it to its terminal)") } else { crate::tr!("Écrire à l'IA… (la session s'ouvrira dans le terminal)", "Write to the AI… (the session will open in the terminal)") };
         if let Some(text) = composer(ui, &mut self.ai_draft, hint, true) {
             match term {
@@ -269,7 +267,7 @@ impl NotesApp {
                 }
                 None => {
                     let title = format!("{} · {}", s.tool.label(), crate::richtext::one_line(&s.display_title(), 24));
-                    super::term_ui::request_with_input(ui.ctx(), &title, &s.cwd, Some(resume.clone()), Some(text));
+                    super::term_ui::request_with_input(ui.ctx(), &title, &s.cwd, resume.clone(), Some(text));
                 }
             }
             self.term_open = true;
@@ -284,7 +282,7 @@ impl NotesApp {
                     }
                     None => {
                         let title = format!("{} · {}", s.tool.label(), crate::richtext::one_line(&s.display_title(), 24));
-                        super::term_ui::request(ui.ctx(), &title, &s.cwd, Some(resume));
+                        super::term_ui::request(ui.ctx(), &title, &s.cwd, resume);
                     }
                 }
             }
