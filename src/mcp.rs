@@ -818,6 +818,8 @@ mod tests {
             d
         });
         assert!(store::workspace_path().starts_with(dir), "tests must not touch the real workspace");
+        // Nor anything else of the real data folder (the tests write next to the workspace).
+        assert_eq!(&store::data_dir(), dir, "tests must not touch the real data folder");
         store::save(&Workspace::default()).unwrap();
         guard
     }
