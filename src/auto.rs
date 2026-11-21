@@ -9,8 +9,9 @@
 //! one until the work is done, a limit is reached or it is stopped.
 //!
 //! What depends on the agent is in `Agent` (command, session files) and `Reader` (the format
-//! of its sessions). Codex, Gemini CLI and Mistral Vibe have theirs, but are not started alone
-//! until their permissions and MCP server are wired too (`Agent::ready`).
+//! of its sessions). Codex, Gemini CLI and Mistral Vibe have theirs, with their permissions and
+//! Orchestra's MCP server (`Agent::config_files`), but are not started alone until these are
+//! checked on the real programs and their limits are read (`Agent::ready`).
 
 use crate::LockOrRecover;
 use serde_json::Value;
@@ -22,7 +23,7 @@ use std::process::Stdio;
 // Codex, Gemini and Vibe are chosen from the « Sessions IA » card once it has its list of
 // AIs (a later step); until then only the tests name them.
 #[allow(dead_code)]
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Agent {
     ClaudeCode,
     Codex,
@@ -67,19 +68,31 @@ impl Agent {
     /// Autonomous work is wired for it: its command (with permissions), its session files
     /// and the reading of its turns. Only Claude Code so far; the others are listed so the
     /// rest of the program can name them, and are never started alone until this is true.
+    /// Never true for an agent whose use Orchestra can't read (`usage::reports_usage`): its
+    /// sessions could not be stopped at their ceiling.
     pub fn ready(self) -> bool {
-        matches!(self, Agent::ClaudeCode)
+        matches!(self, Agent::ClaudeCode) && crate::usage::reports_usage(self)
     }
 
-    /// The command started in the hidden terminal.
-    pub fn command(self, allow_commits: bool, extra: &str) -> String {
+    /// The command started in the hidden terminal, in the copy `cwd`.
+    pub fn command(self, cwd: &Path, allow_commits: bool, extra: &str) -> String {
         match self {
-            // The strictest mode of each: every command (Codex, Gemini) or every tool (Vibe)
-            // waits for a yes. The list of allowed tools is not translated for them yet (the
-            // « Permissions » steps), so they are not `ready` and never started alone.
-            Agent::Codex => "codex --sandbox workspace-write --ask-for-approval untrusted".into(),
-            Agent::Gemini => "gemini --approval-mode default".into(),
-            Agent::Vibe => "vibe".into(),
+            // Orchestra's MCP server, and only it, on the command line (`codex_command`).
+            Agent::Codex => {
+                let git_dirs = if allow_commits { codex_git_dirs(cwd) } else { Vec::new() };
+                codex_command(&git_dirs)
+            }
+            // Its settings of the session (`config_files`) as the « system » settings, which
+            // win over the person's and the repository's; only Orchestra's MCP server.
+            Agent::Gemini => format!(
+                "GEMINI_CLI_SYSTEM_SETTINGS_PATH={} gemini --approval-mode default --allowed-mcp-server-names orchestra",
+                crate::sessions::shell_quote(&self.config_dir(cwd).join("settings.json").display().to_string())
+            ),
+            // A home of its own for the session (`config_files`): its settings and sessions.
+            Agent::Vibe => format!(
+                "VIBE_HOME={} vibe",
+                crate::sessions::shell_quote(&self.config_dir(cwd).display().to_string())
+            ),
             Agent::ClaudeCode => {
                 let (allowed, denied) = permissions(allow_commits, extra);
                 // The repository's own settings (.claude/settings*.json: hooks, permissions)
@@ -130,13 +143,81 @@ impl Agent {
                     .join(hex)
                     .join("chats")
             }
-            // Mistral Vibe: `logs/session/session_….json`, for every folder.
-            Agent::Vibe => std::env::var_os("VIBE_HOME")
-                .map(PathBuf::from)
-                .unwrap_or_else(|| dirs::home_dir().unwrap_or_default().join(".vibe"))
-                .join("logs")
-                .join("session"),
+            // Mistral Vibe: `logs/session/session_….json`, in the home of the session
+            // (`config_dir`, given as VIBE_HOME by `command`).
+            Agent::Vibe => self.config_dir(cwd).join("logs").join("session"),
         }
+    }
+
+    /// The folder of Orchestra's settings for this agent working in `cwd`: one per agent and
+    /// per copy, in Orchestra's data folder, never in the copy (`git add -A` would commit it)
+    /// nor in the person's own settings of the agent.
+    pub fn config_dir(self, cwd: &Path) -> PathBuf {
+        use sha2::Digest;
+        let hash = sha2::Sha256::digest(cwd.display().to_string().as_bytes());
+        let hex: String = hash.iter().take(8).map(|b| format!("{b:02x}")).collect();
+        crate::store::data_dir()
+            .join("agents")
+            .join(format!("{}-{hex}", self.bin()))
+    }
+
+    /// The files of the session's settings, with their text: Orchestra's MCP server (the only
+    /// one) and the rules of `rules_config`, in the agent's own format.
+    ///
+    /// - Gemini CLI: `settings.json`, read as its system settings: `mcpServers` with only
+    ///   Orchestra (trusted: its tools don't ask, as `mcp__orchestra` for Claude Code) and the
+    ///   `tools` rules.
+    /// - Mistral Vibe: `config.toml` of its own home: the rules and one `[[mcp_servers]]`
+    ///   table. Its sign-in (`.env`) stays in the person's home, linked by `write_config`.
+    /// - Claude Code and Codex: none, everything is on their command line.
+    pub fn config_files(self, cwd: &Path, allow_commits: bool, extra: &str) -> Vec<(PathBuf, String)> {
+        let dir = self.config_dir(cwd);
+        match self {
+            Agent::ClaudeCode | Agent::Codex => Vec::new(),
+            Agent::Gemini => {
+                let mut v: Value =
+                    serde_json::from_str(&self.rules_config(allow_commits, extra)).unwrap_or_default();
+                let mut server = mcp_server();
+                server["trust"] = Value::Bool(true);
+                v["mcpServers"] = serde_json::json!({ "orchestra": server });
+                let text = serde_json::to_string_pretty(&v).unwrap_or_default() + "\n";
+                vec![(dir.join("settings.json"), text)]
+            }
+            Agent::Vibe => {
+                let s = mcp_server();
+                let mut ours = format!(
+                    "[[mcp_servers]]\nname = \"orchestra\"\ntransport = \"stdio\"\ncommand = {}\nargs = [\"mcp\"]\n",
+                    toml_string(s["command"].as_str().unwrap_or("orchestra"))
+                );
+                if let Some(d) = s["env"]["ORCHESTRA_DIR"].as_str() {
+                    ours.push_str(&format!("env = {{ ORCHESTRA_DIR = {} }}\n", toml_string(d)));
+                }
+                ours.push('\n');
+                ours.push_str(&self.rules_config(allow_commits, extra));
+                let own = std::fs::read_to_string(vibe_own_home().join("config.toml")).unwrap_or_default();
+                vec![(dir.join("config.toml"), vibe_config(&own, &ours))]
+            }
+        }
+    }
+
+    /// Write the files of `config_files` before the agent starts. For Mistral Vibe, its own
+    /// home also gets a link to the person's sign-in (`~/.vibe/.env`), never a copy of it.
+    pub fn write_config(self, cwd: &Path, allow_commits: bool, extra: &str) -> Result<(), String> {
+        for (path, text) in self.config_files(cwd, allow_commits, extra) {
+            if let Some(d) = path.parent() {
+                std::fs::create_dir_all(d).map_err(|e| e.to_string())?;
+            }
+            std::fs::write(&path, text).map_err(|e| e.to_string())?;
+        }
+        #[cfg(unix)]
+        if self == Agent::Vibe {
+            let own = vibe_own_home().join(".env");
+            let link = self.config_dir(cwd).join(".env");
+            if own.is_file() && std::fs::symlink_metadata(&link).is_err() {
+                std::os::unix::fs::symlink(&own, &link).map_err(|e| e.to_string())?;
+            }
+        }
+        Ok(())
     }
 
     /// Its session files: one JSON record per line, appended (Claude Code, Codex), or one
@@ -154,8 +235,39 @@ impl Agent {
     }
 }
 
+/// The person's own home of Mistral Vibe (its settings and sign-in).
+fn vibe_own_home() -> PathBuf {
+    std::env::var_os("VIBE_HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| dirs::home_dir().unwrap_or_default().join(".vibe"))
+}
+
+/// Vibe's settings for the session: the person's own (model, providers…), less their MCP
+/// servers and their tool permissions, then Orchestra's (`ours`: its MCP server and the
+/// rules). Tables are dropped whole: TOML refuses a table defined twice, and the person's
+/// `[tools.bash]` must not loosen the session's rules.
+fn vibe_config(own: &str, ours: &str) -> String {
+    let kept: String = crate::setup::toml_tables(own)
+        .into_iter()
+        .filter(|t| {
+            let head = t.trim_start();
+            let name = head
+                .strip_prefix("[[")
+                .or_else(|| head.strip_prefix('['))
+                .map(|h| h.trim_start());
+            !name.is_some_and(|n| n.starts_with("mcp_servers") || n.starts_with("tools"))
+        })
+        .collect();
+    let kept = kept.trim_end();
+    if kept.is_empty() {
+        ours.to_string()
+    } else {
+        format!("{kept}\n\n{ours}")
+    }
+}
+
 /// The session files under `dir` (down to `depth` levels) changed since `since`, newest first.
-fn session_files(dir: &Path, depth: usize, ext: &str, since: std::time::SystemTime) -> Vec<PathBuf> {
+pub(crate) fn session_files(dir: &Path, depth: usize, ext: &str, since: std::time::SystemTime) -> Vec<PathBuf> {
     fn walk(dir: &Path, depth: usize, ext: &str, out: &mut Vec<(std::time::SystemTime, PathBuf)>) {
         for e in std::fs::read_dir(dir).into_iter().flatten().flatten() {
             let p = e.path();
@@ -203,8 +315,84 @@ fn content_text(c: &Value) -> String {
 
 // ------------------------------------------------------------------ what the AI may do
 
+/// Codex's command, its permissions mapped on its sandbox and its approvals:
+///
+/// - `--sandbox workspace-write`: its commands write only in the copy (and the temporary
+///   folder), never elsewhere on the disk; never `danger-full-access`.
+/// - `--ask-for-approval untrusted`: every command outside Codex's short list of harmless
+///   ones (and the `allow` prefix rules of `rules_config`, once written) asks first, and
+///   Orchestra refuses what is not allowed. Never `on-failure` (a command the sandbox stopped
+///   is offered again *outside* the sandbox), `on-request` (the model decides alone when to
+///   leave it) nor `never`; never `--full-auto` nor `--dangerously-bypass-approvals-and-sandbox`.
+/// - no network for its commands (`curl`, `git push`, `npm install` are refused anyway), and
+///   no web search (`WebSearch` is refused to Claude Code too).
+/// - commands get only the core environment variables (`HOME`, `PATH`, `USER`…): no tokens
+///   or keys exported in the person's shell.
+///
+/// What the sandbox doesn't do: it lets commands *read* the whole disk, so the refused paths
+/// of `AgentRules::denied_paths` (`~/.ssh/**`…) rest on the refusal of every command not
+/// allowed (`cat`, `cp` ask first, and are refused). `git_dirs`: the folders git writes to
+/// for a commit, outside the copy (see `codex_git_dirs`); empty when commits are not allowed,
+/// so a `git commit` fails in the sandbox even if asked.
+fn codex_command(git_dirs: &[PathBuf]) -> String {
+    let mut c = String::from(
+        "codex --sandbox workspace-write --ask-for-approval untrusted \
+         -c sandbox_workspace_write.network_access=false \
+         -c tools.web_search=false \
+         -c shell_environment_policy.inherit=core",
+    );
+    c.push_str(" -c ");
+    c.push_str(&crate::sessions::shell_quote(&codex_mcp()));
+    if !git_dirs.is_empty() {
+        let roots: Vec<String> = git_dirs
+            .iter()
+            .map(|d| Value::String(d.display().to_string()).to_string())
+            .collect();
+        c.push_str(" -c ");
+        c.push_str(&crate::sessions::shell_quote(&format!(
+            "sandbox_workspace_write.writable_roots=[{}]",
+            roots.join(",")
+        )));
+    }
+    c
+}
+
+/// What a commit in the copy `cwd` writes outside it: a copy's git folder is in the main
+/// repository (`.git/worktrees/<name>`, its index and HEAD), and so are the objects and the
+/// branches (`objects`, `refs`, `logs`). Not the whole `.git`: its `hooks` and `config` would
+/// let the AI leave code that the person's own git runs later.
+fn codex_git_dirs(cwd: &Path) -> Vec<PathBuf> {
+    let ask = |what: &str| {
+        git(cwd, &["rev-parse", "--path-format=absolute", what])
+            .ok()
+            .map(|s| PathBuf::from(s.trim()))
+            .filter(|p| p.is_absolute())
+    };
+    let (Some(own), Some(common)) = (ask("--git-dir"), ask("--git-common-dir")) else {
+        return Vec::new();
+    };
+    git_dirs_for(cwd, &own, &common)
+}
+
+/// `codex_git_dirs` without git: the folders among `own` (the copy's git folder) and those of
+/// `common` (the repository's) that are not already inside the copy.
+fn git_dirs_for(cwd: &Path, own: &Path, common: &Path) -> Vec<PathBuf> {
+    let mut dirs = vec![own.to_path_buf()];
+    for d in ["objects", "refs", "logs"] {
+        dirs.push(common.join(d));
+    }
+    dirs.retain(|d| !d.starts_with(cwd));
+    dirs.dedup();
+    dirs
+}
+
 /// The only MCP server of an autonomous session: Orchestra itself (this program, `mcp`).
 fn mcp_config() -> String {
+    serde_json::json!({ "mcpServers": { "orchestra": mcp_server() } }).to_string()
+}
+
+/// Orchestra's MCP server: this program with `mcp`, and its data folder if it isn't the default.
+fn mcp_server() -> Value {
     let exe = std::env::current_exe()
         .map(|p| p.display().to_string())
         .unwrap_or_else(|_| "orchestra".into());
@@ -212,7 +400,21 @@ fn mcp_config() -> String {
     if let Ok(d) = std::env::var("ORCHESTRA_DIR") {
         server["env"] = serde_json::json!({ "ORCHESTRA_DIR": d });
     }
-    serde_json::json!({ "mcpServers": { "orchestra": server } }).to_string()
+    server
+}
+
+/// Codex's MCP servers for the session: the whole `mcp_servers` table replaced by an inline
+/// one holding only Orchestra's server, so the person's other servers are not started.
+fn codex_mcp() -> String {
+    let s = mcp_server();
+    let mut entry = format!(
+        "command={},args=[\"mcp\"]",
+        toml_string(s["command"].as_str().unwrap_or("orchestra"))
+    );
+    if let Some(d) = s["env"]["ORCHESTRA_DIR"].as_str() {
+        entry.push_str(&format!(",env={{ORCHESTRA_DIR={}}}", toml_string(d)));
+    }
+    format!("mcp_servers={{orchestra={{{entry}}}}}")
 }
 
 /// Commands always allowed without asking. Reading, editing and creating files inside the
@@ -480,6 +682,159 @@ pub fn permissions(allow_commits: bool, extra: &str) -> (Vec<String>, Vec<String
     (allowed, DENIED.iter().map(|s| s.to_string()).collect())
 }
 
+/// The rules of `permissions`, written for an agent other than Claude Code. The list above is
+/// written in Claude Code's words (`Bash(git status:*)`, `Grep`, `Read(~/.ssh/**)`); the other
+/// agents only know command prefixes and their own tool names, so each rule becomes:
+///
+/// - a shell command (`Bash(x:*)` or `Bash(x)`): the prefix `x`, allowed or refused;
+/// - a tool of Claude Code (`Grep`, `WebFetch`…): the agent's tool doing the same, if it has
+///   one; a tool it has not is left out (nothing to allow or refuse);
+/// - a path (`Read(~/.ssh/**)`, `Edit(~/.zshrc)`): none of the three filters its file tools by
+///   path, so these are kept apart (`paths`) for the sandbox (Codex) or the agent's own
+///   restriction to the working folder (Gemini, Vibe);
+/// - Orchestra's MCP server (`mcp__orchestra`): wired with the MCP configuration of each agent.
+///
+/// The person's extra rules go through the same filter as for Claude Code first.
+#[allow(dead_code)]
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct AgentRules {
+    /// Shell command prefixes run without asking (`git status`, `cargo test`).
+    pub allowed_commands: Vec<String>,
+    /// Shell command prefixes always refused (`rm`, `git push`).
+    pub denied_commands: Vec<String>,
+    /// The agent's own tools run without asking (`glob`, `grep`…).
+    pub allowed_tools: Vec<String>,
+    /// The agent's own tools always refused (`web_fetch`…).
+    pub denied_tools: Vec<String>,
+    /// Paths refused to reading or editing (`~/.ssh/**`), for the sandbox.
+    pub denied_paths: Vec<String>,
+}
+
+/// A shell rule of Claude Code (`Bash(git status:*)`, `Bash(pwd)`) as a command prefix.
+fn command_prefix(rule: &str) -> Option<String> {
+    let inner = rule.strip_prefix("Bash(")?.strip_suffix(')')?;
+    let p = inner.strip_suffix(":*").unwrap_or(inner).trim();
+    (!p.is_empty()).then(|| p.to_string())
+}
+
+/// The agent's tool doing what a tool of Claude Code does, if it has one.
+fn agent_tool(agent: Agent, claude_tool: &str) -> Option<&'static str> {
+    match (agent, claude_tool) {
+        (Agent::Gemini, "Glob") => Some("glob"),
+        (Agent::Gemini, "Grep") => Some("search_file_content"),
+        (Agent::Gemini, "TodoWrite") => Some("write_todos"),
+        (Agent::Gemini, "WebFetch") => Some("web_fetch"),
+        (Agent::Gemini, "WebSearch") => Some("google_web_search"),
+        (Agent::Vibe, "Grep") => Some("grep"),
+        (Agent::Vibe, "TodoWrite") => Some("todo"),
+        (Agent::Vibe, "WebFetch") => Some("web_fetch"),
+        (Agent::Vibe, "WebSearch") => Some("web_search"),
+        // Codex has no tool list: only shell commands, and the sandbox.
+        _ => None,
+    }
+}
+
+#[allow(dead_code)]
+impl Agent {
+    /// The rules of an autonomous session in this agent's words (see `AgentRules`).
+    pub fn rules(self, allow_commits: bool, extra: &str) -> AgentRules {
+        let (allowed, denied) = permissions(allow_commits, extra);
+        let mut r = AgentRules::default();
+        fn push(v: &mut Vec<String>, x: String) {
+            if !v.contains(&x) {
+                v.push(x);
+            }
+        }
+        for (rules, allow) in [(&allowed, true), (&denied, false)] {
+            for rule in rules.iter() {
+                if let Some(cmd) = command_prefix(rule) {
+                    let v = if allow { &mut r.allowed_commands } else { &mut r.denied_commands };
+                    push(v, cmd);
+                } else if let Some(path) = rule
+                    .strip_prefix("Read(")
+                    .or_else(|| rule.strip_prefix("Edit("))
+                    .and_then(|p| p.strip_suffix(')'))
+                {
+                    if !allow {
+                        push(&mut r.denied_paths, path.to_string());
+                    }
+                } else if rule.starts_with("mcp__") {
+                    // Wired with each agent's MCP configuration.
+                } else if let Some(t) = agent_tool(self, rule) {
+                    let v = if allow { &mut r.allowed_tools } else { &mut r.denied_tools };
+                    push(v, t.to_string());
+                }
+            }
+        }
+        r
+    }
+
+    /// The rules as the agent reads them: Gemini CLI's `tools` settings (`allowed`, `exclude`,
+    /// shell commands as `run_shell_command(prefix)`), Mistral Vibe's `config.toml`
+    /// (`[tools.bash]` allowlist and denylist, `permission = "always"` for the allowed tools,
+    /// `"never"` for the refused ones), Codex's execution policy (`prefix_rule` lines of a
+    /// `.rules` file, `allow` or `forbidden`). Empty for Claude Code, whose rules are passed
+    /// on its command line.
+    pub fn rules_config(self, allow_commits: bool, extra: &str) -> String {
+        let r = self.rules(allow_commits, extra);
+        match self {
+            Agent::ClaudeCode => String::new(),
+            Agent::Gemini => {
+                let shell = |v: &[String]| -> Vec<String> {
+                    v.iter().map(|c| format!("run_shell_command({c})")).collect()
+                };
+                let mut allowed = r.allowed_tools.clone();
+                allowed.extend(shell(&r.allowed_commands));
+                let mut exclude = r.denied_tools.clone();
+                exclude.extend(shell(&r.denied_commands));
+                serde_json::to_string_pretty(&serde_json::json!({
+                    "tools": { "allowed": allowed, "exclude": exclude }
+                }))
+                .unwrap_or_default()
+            }
+            Agent::Vibe => {
+                let list = |v: &[String]| -> String {
+                    let items: Vec<String> = v.iter().map(|s| toml_string(s)).collect();
+                    format!("[{}]", items.join(", "))
+                };
+                let mut s = format!(
+                    "[tools.bash]\nallowlist = {}\ndenylist = {}\n",
+                    list(&r.allowed_commands),
+                    list(&r.denied_commands)
+                );
+                for t in &r.allowed_tools {
+                    s.push_str(&format!("\n[tools.{t}]\npermission = \"always\"\n"));
+                }
+                for t in &r.denied_tools {
+                    s.push_str(&format!("\n[tools.{t}]\npermission = \"never\"\n"));
+                }
+                s
+            }
+            Agent::Codex => {
+                let mut s = String::new();
+                for (cmds, decision) in [(&r.allowed_commands, "allow"), (&r.denied_commands, "forbidden")] {
+                    for c in cmds.iter() {
+                        let words: Vec<String> = c
+                            .split_whitespace()
+                            .map(|w| serde_json::Value::String(w.into()).to_string())
+                            .collect();
+                        s.push_str(&format!(
+                            "prefix_rule(pattern=[{}], decision=\"{decision}\")\n",
+                            words.join(", ")
+                        ));
+                    }
+                }
+                s
+            }
+        }
+    }
+}
+
+/// A TOML basic string (the same escapes as JSON for what these rules contain).
+fn toml_string(s: &str) -> String {
+    serde_json::Value::String(s.into()).to_string()
+}
+
 // ------------------------------------------------------------------ the copy of the repository
 
 fn git(dir: &Path, args: &[&str]) -> Result<String, String> {
@@ -506,11 +861,25 @@ fn git(dir: &Path, args: &[&str]) -> Result<String, String> {
     }
 }
 
+/// Where a session works. A copy of the repository on a branch of its own; or, for a
+/// project without code that has no git repository, the project's folder itself (`branch`
+/// and `base` empty: nothing to merge, discard or commit).
 pub struct Copy {
     pub root: String,
     pub worktree: String,
     pub branch: String,
     pub base: String,
+}
+
+/// A session that works right in the project's folder (no git repository): its record has
+/// no branch.
+pub fn in_place(r: &crate::model::RunRecord) -> bool {
+    r.branch.is_empty()
+}
+
+/// The folder is inside a git repository.
+pub fn is_git_repo(folder: &str) -> bool {
+    git(&crate::project::normalize_folder(folder), &["rev-parse", "--show-toplevel"]).is_ok()
 }
 
 fn slug(s: &str) -> String {
@@ -558,7 +927,22 @@ fn is_busy(copy: &Path) -> bool {
 /// A new worktree of the project's repository. `on_dev`: on the shared branch `dev`
 /// (made from HEAD the first time); otherwise, or when `dev` can't be taken (open in the
 /// person's folder, or in a copy still in use), on a branch of its own, from HEAD.
-pub fn make_copy(folder: &str, title: &str, on_dev: bool) -> Result<Copy, String> {
+///
+/// `code`: a code project. One without code (school work, paperwork…) and without a git
+/// repository is worked on right in its folder; a code project still needs a repository
+/// (its copy is what keeps the person's folder safe).
+pub fn make_copy(folder: &str, title: &str, on_dev: bool, code: bool) -> Result<Copy, String> {
+    if !code && !is_git_repo(folder) {
+        let dir = crate::project::normalize_folder(folder);
+        if !dir.is_dir() {
+            return Err(crate::tr!(
+                "le dossier du projet est introuvable",
+                "the project's folder can't be found"
+            )
+            .into());
+        }
+        return in_place_copy(&dir, &crate::store::data_dir().join("backups"), title);
+    }
     let copies = crate::store::data_dir().join("worktrees");
     if on_dev {
         match dev_copy_in(&copies, folder, title) {
@@ -708,6 +1092,9 @@ fn dev_copy_in(copies: &Path, folder: &str, title: &str) -> Result<Copy, String>
 /// End of a session on `dev`: its work stays on the branch (committed if it wasn't, sent
 /// to the remote), and the copy goes, so `dev` can be opened in the project's folder.
 pub fn park(r: &crate::model::RunRecord) -> Result<String, String> {
+    if in_place(r) {
+        return Ok(in_place_note().into());
+    }
     let wt = PathBuf::from(&r.worktree);
     if wt.is_dir()
         && !git(&wt, &["status", "--porcelain"])
@@ -865,6 +1252,9 @@ fn delete_remote_later(root: String, branch: String) {
 
 /// Bring the session's work into the branch checked out in the project's folder.
 pub fn merge(r: &crate::model::RunRecord) -> Result<String, String> {
+    if in_place(r) {
+        return Ok(in_place_note().into());
+    }
     let wt = PathBuf::from(&r.worktree);
     if wt.is_dir()
         && !git(&wt, &["status", "--porcelain"])
@@ -925,6 +1315,9 @@ pub fn merge(r: &crate::model::RunRecord) -> Result<String, String> {
 /// Merge the session's work by itself, but only when the project's folder is on its
 /// main branch (main or master): the person allowed commits on main, not elsewhere.
 pub fn merge_into_main(r: &crate::model::RunRecord) -> Result<String, String> {
+    if in_place(r) {
+        return Ok(in_place_note().into());
+    }
     let rd = PathBuf::from(&r.root);
     let into = git(&rd, &["rev-parse", "--abbrev-ref", "HEAD"])
         .unwrap_or_default()
@@ -941,6 +1334,14 @@ pub fn merge_into_main(r: &crate::model::RunRecord) -> Result<String, String> {
 
 /// Throw the session's copy and branch away.
 pub fn discard(r: &crate::model::RunRecord) -> Result<String, String> {
+    if in_place(r) {
+        // Never a folder of the person's to delete: there is no copy.
+        return Err(crate::tr!(
+            "sans dépôt git, le travail est déjà dans le dossier du projet : rien à abandonner",
+            "without a git repository, the work is already in the project's folder: nothing to discard"
+        )
+        .into());
+    }
     let rd = PathBuf::from(&r.root);
     let _ = git(&rd, &["worktree", "remove", "--force", &r.worktree]);
     let _ = git(&rd, &["worktree", "prune"]);
@@ -955,6 +1356,122 @@ pub fn discard(r: &crate::model::RunRecord) -> Result<String, String> {
     git(&rd, &["branch", "-D", &r.branch])?;
     delete_remote_later(r.root.clone(), r.branch.clone());
     Ok(crate::tr!("Copie et branche supprimées.", "Copy and branch deleted.").into())
+}
+
+/// A session right in the project's folder `dir`: no copy and no git to go back with, so a
+/// backup of the folder in `backups` first, or no session.
+fn in_place_copy(dir: &Path, backups: &Path, title: &str) -> Result<Copy, String> {
+    let backup = backup_folder(dir, backups, title)?;
+    let d = dir.display().to_string();
+    Ok(Copy {
+        root: d.clone(),
+        worktree: d,
+        branch: String::new(),
+        // For a session in place, `base` is where its backup is.
+        base: backup.display().to_string(),
+    })
+}
+
+/// The largest folder backed up before a session in place (bytes): past it, the session
+/// isn't started rather than run without a way back.
+pub const BACKUP_MAX: u64 = 2 * 1024 * 1024 * 1024;
+
+/// Backups kept per project: the oldest go.
+pub const BACKUPS_KEPT: usize = 5;
+
+/// Copy the project's folder `src` into `backups/<project>-<time>` before a session works
+/// in it (a project without git: no other way back). Links are not followed (nothing outside
+/// the folder is copied). The `BACKUPS_KEPT` latest of the project are kept. Err: too big,
+/// or the copy failed (the session then doesn't start).
+pub fn backup_folder(src: &Path, backups: &Path, title: &str) -> Result<PathBuf, String> {
+    fn size(dir: &Path, total: &mut u64) -> std::io::Result<()> {
+        for e in std::fs::read_dir(dir)? {
+            let e = e?;
+            let t = e.file_type()?;
+            if t.is_dir() {
+                size(&e.path(), total)?;
+            } else if t.is_file() {
+                *total += e.metadata()?.len();
+                if *total > BACKUP_MAX {
+                    return Ok(());
+                }
+            }
+        }
+        Ok(())
+    }
+    fn copy(from: &Path, to: &Path) -> std::io::Result<()> {
+        std::fs::create_dir_all(to)?;
+        for e in std::fs::read_dir(from)? {
+            let e = e?;
+            let t = e.file_type()?;
+            let dest = to.join(e.file_name());
+            if t.is_dir() {
+                copy(&e.path(), &dest)?;
+            } else if t.is_file() {
+                std::fs::copy(e.path(), &dest)?;
+            }
+        }
+        Ok(())
+    }
+    let mut total = 0;
+    size(src, &mut total).map_err(|e| e.to_string())?;
+    if total > BACKUP_MAX {
+        return Err(crate::trf!(
+            "le dossier du projet dépasse {} Go : trop gros pour être sauvegardé avant la session (sans dépôt git, c'est la seule façon de revenir en arrière)",
+            "the project's folder is over {} GB: too big to back up before the session (without a git repository, that's the only way back)",
+            BACKUP_MAX / (1024 * 1024 * 1024)
+        ));
+    }
+    let name = if slug(title).is_empty() {
+        "projet".to_string()
+    } else {
+        slug(title)
+    };
+    let mut dest = backups.join(format!("{name}-{}", local_stamp(crate::model::now_ms())));
+    // Two sessions in the same second: a suffix rather than one backup over the other.
+    let mut n = 2;
+    while dest.exists() {
+        dest = backups.join(format!("{name}-{}-{n}", local_stamp(crate::model::now_ms())));
+        n += 1;
+    }
+    if let Err(e) = copy(src, &dest) {
+        let _ = std::fs::remove_dir_all(&dest);
+        return Err(crate::trf!(
+            "sauvegarde du dossier avant la session impossible ({e}) : session non lancée",
+            "couldn't back up the folder before the session ({e}): session not started"
+        ));
+    }
+    // The oldest of this project's backups go (their names sort by time).
+    let prefix = format!("{name}-");
+    let mut mine: Vec<PathBuf> = std::fs::read_dir(backups)
+        .into_iter()
+        .flatten()
+        .flatten()
+        // This project's only: its name, then the date (not « projet-2-… » for « projet »).
+        .filter(|e| {
+            let f = e.file_name().to_string_lossy().to_string();
+            f.strip_prefix(&prefix).is_some_and(|rest| {
+                let b = rest.as_bytes();
+                b.len() >= 15 && b[..8].iter().all(u8::is_ascii_digit) && b[8] == b'-'
+            })
+        })
+        .map(|e| e.path())
+        .filter(|p| p.is_dir())
+        .collect();
+    mine.sort();
+    let excess = mine.len().saturating_sub(BACKUPS_KEPT);
+    for old in mine.into_iter().take(excess) {
+        let _ = std::fs::remove_dir_all(old);
+    }
+    Ok(dest)
+}
+
+/// What becomes of a session's work in a project without git.
+pub fn in_place_note() -> &'static str {
+    crate::tr!(
+        "travail fait directement dans le dossier du projet (pas de dépôt git)",
+        "work done right in the project's folder (no git repository)"
+    )
 }
 
 // ------------------------------------------------------------------ history
@@ -1080,7 +1597,8 @@ pub fn work_done(r: &crate::model::RunRecord, base: &str) -> (Vec<String>, usize
 pub struct Reader {
     path: Option<PathBuf>,
     offset: u64,
-    carry: String,
+    /// The end of the last read that isn't a whole line yet (bytes: a character may be cut).
+    carry: Vec<u8>,
     seen: HashSet<String>,
     /// Billed tokens (input, output, cache writes).
     pub tokens: u64,
@@ -1117,22 +1635,30 @@ impl Reader {
             return;
         };
         let len = f.metadata().map(|m| m.len()).unwrap_or(0);
-        if len <= self.offset {
+        if len < self.offset {
+            // Shorter than what was read: rewritten from scratch, read it again from the start
+            // (records already counted are recognised by their ids).
+            self.offset = 0;
+            self.carry.clear();
+        }
+        if len == self.offset {
             return;
         }
         if f.seek(SeekFrom::Start(self.offset)).is_err() {
             return;
         }
-        let mut buf = String::new();
-        if f.read_to_string(&mut buf).is_err() {
+        // Only up to the length seen: what the AI writes meanwhile is read next time, not
+        // twice. As bytes: a character cut at the end waits in `carry` for its other half.
+        let mut buf = std::mem::take(&mut self.carry);
+        if f.take(len - self.offset).read_to_end(&mut buf).is_err() {
             return;
         }
         self.offset = len;
         self.last_growth = Some(std::time::Instant::now());
-        let text = std::mem::take(&mut self.carry) + &buf;
-        let mut lines: Vec<&str> = text.split('\n').collect();
-        self.carry = lines.pop().unwrap_or("").to_string();
-        for l in lines {
+        let cut = buf.iter().rposition(|b| *b == b'\n').map(|i| i + 1).unwrap_or(0);
+        self.carry = buf.split_off(cut);
+        let text = String::from_utf8_lossy(&buf);
+        for l in text.split('\n').filter(|l| !l.trim().is_empty()) {
             let Ok(v) = serde_json::from_str::<Value>(l) else {
                 continue;
             };
@@ -1274,8 +1800,7 @@ impl Reader {
                             self.turn_over = !calls && !text.trim().is_empty();
                         }
                         Some("error") => {
-                            let low = text.to_lowercase();
-                            if is_limit_message(&text) || low.contains("quota exceeded") || low.contains("resource_exhausted") {
+                            if is_limit_message(&text) {
                                 self.limit_hit = Some(text);
                                 self.turn_over = true;
                             }
@@ -1340,7 +1865,25 @@ fn mission_text(
     mission: &str,
     commits: bool,
 ) -> String {
-    let commit_rule = if commits {
+    // Where it works: its own copy of the repository, or (no git) the project's folder itself.
+    let intro = if branch.is_empty() {
+        crate::tr!(
+            "Ce dossier est le dossier même du projet (pas de dépôt git) : tes modifications y sont faites directement, sans copie ni retour en arrière possible. Travaille uniquement ici, et ne supprime ni n'écrase aucun document existant sans que l'étape le demande.",
+            "This folder is the project's own folder (no git repository): your changes are made right there, with no copy and no way back. Work only here, and delete or overwrite no existing document unless the step asks for it."
+        )
+        .to_string()
+    } else {
+        crate::trf!(
+            "Ce dossier est une copie dédiée du dépôt, sur la branche {branch} : travaille uniquement ici, ne change pas de branche.",
+            "This folder is a dedicated copy of the repository, on the branch {branch}: work only here, don't switch branches."
+        )
+    };
+    let commit_rule = if branch.is_empty() {
+        crate::tr!(
+            "Il n'y a pas de git ici : aucune commande git, aucun commit.",
+            "There is no git here: no git command, no commit."
+        )
+    } else if commits {
         crate::tr!(
             "Après chaque étape terminée, fais un commit clair (git add -A puis git commit -m « … »). Ne fais jamais de git push.",
             "After each finished step, make a clear commit (git add -A then git commit -m « … »). Never git push."
@@ -1353,7 +1896,7 @@ fn mission_text(
     };
     crate::trf!(
         "Tu travailles en autonomie pour Orchestra sur le projet « {title} » (id {project_id}). \
-         Ce dossier est une copie dédiée du dépôt, sur la branche {branch} : travaille uniquement ici, ne change pas de branche.\n\
+         {intro}\n\
          1. Appelle get_project_state avec project = « {project_id} » pour l'état des lieux et les étapes.\n\
          2. Mission : {mission}\n\
          3. Prends les étapes ouvertes une par une : passe-la « doing » avec update_step, fais le travail, vérifie-le \
@@ -1369,7 +1912,7 @@ fn mission_text(
          [[CONTINUER]] s'il reste une étape ouverte que tu peux avancer, [[FINI]] s'il n'en reste aucune, \
          [[BLOQUÉ]] seulement si aucune étape ouverte ne peut plus avancer (une question posée avec ask_human n'est pas un blocage tant qu'il reste d'autres étapes).",
         "You are working autonomously for Orchestra on the project « {title} » (id {project_id}). \
-         This folder is a dedicated copy of the repository, on the branch {branch}: work only here, don't switch branches.\n\
+         {intro}\n\
          1. Call get_project_state with project = « {project_id} » for the current state and the steps.\n\
          2. Mission: {mission}\n\
          3. Take the open steps one by one: set it to « doing » with update_step, do the work, check it \
@@ -1573,6 +2116,10 @@ pub fn is_limit_message(text: &str) -> bool {
         || t.contains("hit your limit")
         || t.contains("reached your usage limit")
         || t.contains("usage limit")
+        // Gemini CLI (Google's quota) and Mistral Vibe (the API's rate limit).
+        || t.contains("quota exceeded")
+        || t.contains("resource_exhausted")
+        || t.contains("rate limit exceeded")
 }
 
 /// When the limit of such a message resets (ms), read from the message: the time stamp of
@@ -1925,13 +2472,13 @@ mod tests {
         assert_eq!(slug("Démo — Été 2026!"), "demo-ete-2026");
         assert!(
             Agent::ClaudeCode
-                .command(false, "")
+                .command(Path::new("/x"), false, "")
                 .contains("--permission-mode acceptEdits")
         );
-        assert!(!Agent::ClaudeCode.command(false, "").contains("git commit"));
+        assert!(!Agent::ClaudeCode.command(Path::new("/x"), false, "").contains("git commit"));
         assert!(
             Agent::ClaudeCode
-                .command(true, "Bash(just:*)")
+                .command(Path::new("/x"), true, "Bash(just:*)")
                 .contains("Bash(just:*)")
         );
     }
@@ -1947,9 +2494,10 @@ mod tests {
         assert!(Agent::ClaudeCode.ready());
         for a in [Agent::Codex, Agent::Gemini, Agent::Vibe] {
             assert!(!a.ready());
-            // Its program, in its strictest mode (no tool list translated yet).
-            let cmd = a.command(true, "");
-            assert!(cmd.starts_with(a.bin()), "{cmd}");
+            // Its program, in its strictest mode.
+            let cmd = a.command(Path::new("/x"), true, "");
+            // Its program, after the variables pointing to its settings of the session.
+            assert!(cmd.split_whitespace().any(|w| w == a.bin()), "{cmd}");
             assert!(!cmd.contains("yolo") && !cmd.contains("never") && !cmd.contains("danger"), "{cmd}");
             assert_ne!(a.session_dir(Path::new("/x")), Agent::ClaudeCode.session_dir(Path::new("/x")));
         }
@@ -2154,7 +2702,7 @@ mod tests {
             "{:?}",
             rejected_extra(fine)
         );
-        let cmd = Agent::ClaudeCode.command(false, "");
+        let cmd = Agent::ClaudeCode.command(Path::new("/x"), false, "");
         assert!(cmd.contains("--disallowedTools") && cmd.contains("Bash(rm:*)"));
         // Neither the repository's hooks and settings nor its .mcp.json: only Orchestra's server.
         assert!(
@@ -2164,6 +2712,204 @@ mod tests {
         let v: Value = serde_json::from_str(&mcp_config()).unwrap();
         assert_eq!(v["mcpServers"].as_object().unwrap().len(), 1);
         assert_eq!(v["mcpServers"]["orchestra"]["args"][0], "mcp");
+    }
+
+    #[test]
+    fn a_project_without_code_nor_git_is_worked_on_in_its_folder() {
+        let dir = std::env::temp_dir().join(format!("orch-nocode-{}", uuid::Uuid::new_v4().simple()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("dossier.txt"), "brouillon").unwrap();
+        let folder = dir.display().to_string();
+        if is_git_repo(&folder) {
+            // The temporary folder sits inside a repository on this machine: nothing to test.
+            let _ = std::fs::remove_dir_all(&dir);
+            return;
+        }
+        // A code project still needs a repository.
+        assert!(make_copy(&folder, "Code", false, true).is_err());
+        // Without code: the folder itself, no branch, but a backup of it first.
+        let backups = dir.with_extension("backups");
+        let c = in_place_copy(&crate::project::normalize_folder(&folder), &backups, "Inscription").unwrap();
+        assert_eq!(c.worktree, crate::project::normalize_folder(&folder).display().to_string());
+        assert!(c.branch.is_empty());
+        let saved = PathBuf::from(&c.base);
+        assert!(saved.starts_with(&backups), "{saved:?}");
+        assert_eq!(std::fs::read_to_string(saved.join("dossier.txt")).unwrap(), "brouillon");
+        // Only the latest are kept, and never another project's.
+        std::fs::create_dir_all(backups.join("inscription-2-20200101-000000")).unwrap();
+        for i in 0..BACKUPS_KEPT + 2 {
+            std::fs::create_dir_all(backups.join(format!("inscription-2019010{i}-000000"))).unwrap();
+        }
+        let again = backup_folder(&crate::project::normalize_folder(&folder), &backups, "Inscription").unwrap();
+        let mine = std::fs::read_dir(&backups)
+            .unwrap()
+            .flatten()
+            .filter(|e| {
+                let n = e.file_name().to_string_lossy().to_string();
+                n.starts_with("inscription-") && !n.starts_with("inscription-2-")
+            })
+            .count();
+        assert_eq!(mine, BACKUPS_KEPT);
+        assert!(again.is_dir() && backups.join("inscription-2-20200101-000000").is_dir());
+        let _ = std::fs::remove_dir_all(&backups);
+        let rec = crate::model::RunRecord {
+            title: "Inscription".into(),
+            root: c.root.clone(),
+            worktree: c.worktree.clone(),
+            branch: c.branch.clone(),
+            ..Default::default()
+        };
+        assert!(in_place(&rec));
+        // Nothing to merge; never anything deleted.
+        assert!(merge(&rec).is_ok() && merge_into_main(&rec).is_ok() && park(&rec).is_ok());
+        assert!(discard(&rec).is_err());
+        assert_eq!(std::fs::read_to_string(dir.join("dossier.txt")).unwrap(), "brouillon");
+        assert_eq!(work_done(&rec, ""), (vec![], 0));
+        // The AI is told where it works, and that there is no git.
+        let p = mission_prompt("Inscription", "p1", "", "Avancer", true);
+        assert!(p.contains("pas de dépôt git") || p.contains("no git repository"), "{p}");
+        assert!(!p.contains("git commit") && !p.contains("branche  ") && !p.contains("branch :"), "{p}");
+        let p = mission_prompt("Code", "p1", "dev", "Avancer", true);
+        assert!(p.contains("git commit") && p.contains("dev"), "{p}");
+        // A folder that isn't there: refused.
+        assert!(make_copy("/nulle/part/orch", "X", false, false).is_err());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn codex_stays_in_its_sandbox() {
+        // Without commits: no folder outside the copy, whatever the copy.
+        let c = Agent::Codex.command(Path::new("/x"), false, "");
+        assert!(c.starts_with("codex --sandbox workspace-write --ask-for-approval untrusted "));
+        assert!(c.contains("network_access=false") && c.contains("web_search=false"));
+        assert!(c.contains("shell_environment_policy.inherit=core"));
+        assert!(!c.contains("writable_roots"));
+        for bad in ["danger", "full-auto", "on-failure", "on-request", "never", "yolo", "bypass"] {
+            assert!(!c.contains(bad), "{bad}");
+        }
+        // A copy of a repository (git worktree): its git folder and the repository's objects
+        // and branches, never the hooks or the config.
+        let dirs = git_dirs_for(
+            Path::new("/w/copy"),
+            Path::new("/r/.git/worktrees/copy"),
+            Path::new("/r/.git"),
+        );
+        let s: Vec<String> = dirs.iter().map(|d| d.display().to_string()).collect();
+        assert_eq!(s, ["/r/.git/worktrees/copy", "/r/.git/objects", "/r/.git/refs", "/r/.git/logs"]);
+        let c = codex_command(&dirs);
+        assert!(c.ends_with(
+            " -c 'sandbox_workspace_write.writable_roots=[\"/r/.git/worktrees/copy\",\"/r/.git/objects\",\"/r/.git/refs\",\"/r/.git/logs\"]'"
+        ), "{c}");
+        assert!(!c.contains("hooks") && !c.contains("/r/.git\""));
+        // A repository of its own: everything is already in the folder, nothing added.
+        assert!(git_dirs_for(Path::new("/r"), Path::new("/r/.git"), Path::new("/r/.git")).is_empty());
+    }
+
+    #[test]
+    fn every_agent_gets_only_orchestras_mcp_server() {
+        let cwd = Path::new("/w/copy");
+        // One folder per agent and per copy, outside the copy.
+        for a in [Agent::Gemini, Agent::Vibe] {
+            assert!(!a.config_dir(cwd).starts_with(cwd));
+            assert_ne!(a.config_dir(cwd), a.config_dir(Path::new("/w/other")));
+        }
+        assert_ne!(Agent::Gemini.config_dir(cwd), Agent::Vibe.config_dir(cwd));
+        assert!(Agent::ClaudeCode.config_files(cwd, true, "").is_empty());
+        assert!(Agent::Codex.config_files(cwd, true, "").is_empty());
+
+        // Codex: the whole table of MCP servers replaced on its command line.
+        let c = Agent::Codex.command(cwd, false, "");
+        assert!(c.contains(" -c 'mcp_servers={orchestra={command=\""), "{c}");
+        assert!(c.contains(",args=[\"mcp\"]}}'"), "{c}");
+
+        // Gemini: its system settings, with Orchestra trusted and the rules.
+        let files = Agent::Gemini.config_files(cwd, false, "");
+        assert_eq!(files.len(), 1);
+        let (path, text) = &files[0];
+        let v: Value = serde_json::from_str(text).unwrap();
+        let servers = v["mcpServers"].as_object().unwrap();
+        assert_eq!(servers.len(), 1);
+        assert_eq!(v["mcpServers"]["orchestra"]["args"][0], "mcp");
+        assert_eq!(v["mcpServers"]["orchestra"]["trust"], true);
+        assert!(v["tools"]["exclude"].as_array().unwrap().iter().any(|x| x == "run_shell_command(rm)"));
+        let g = Agent::Gemini.command(cwd, false, "");
+        assert!(g.starts_with("GEMINI_CLI_SYSTEM_SETTINGS_PATH="), "{g}");
+        assert!(g.contains(&path.display().to_string()), "{g}");
+        assert!(g.ends_with(" gemini --approval-mode default --allowed-mcp-server-names orchestra"));
+
+        // Vibe: its own home, with one MCP table and the rules; its sessions are read there.
+        let files = Agent::Vibe.config_files(cwd, false, "");
+        let (path, text) = &files[0];
+        assert_eq!(path, &Agent::Vibe.config_dir(cwd).join("config.toml"));
+        assert_eq!(text.matches("[[mcp_servers]]").count(), 1);
+        assert!(text.contains("[[mcp_servers]]\nname = \"orchestra\"\ntransport = \"stdio\"\ncommand = \""));
+        // The person's own settings come along, less their MCP servers and tool permissions.
+        let own = "# mes réglages\nactive_model = \"devstral\"\n\n[[mcp_servers]]\nname = \"fetch\"\ntransport = \"stdio\"\ncommand = \"uvx\"\n\n[tools.bash]\npermission = \"always\"\n\n[[providers]]\nname = \"mistral\"\n";
+        let ours = "[[mcp_servers]]\nname = \"orchestra\"\n\n[tools.bash]\nallowlist = [\"ls\"]\n";
+        let merged = vibe_config(own, ours);
+        assert!(merged.starts_with("# mes réglages\nactive_model = \"devstral\"\n"), "{merged}");
+        assert!(merged.contains("[[providers]]\nname = \"mistral\"\n"), "{merged}");
+        assert!(!merged.contains("fetch") && !merged.contains("permission = \"always\""), "{merged}");
+        assert_eq!(merged.matches("[tools.bash]").count(), 1);
+        assert!(merged.ends_with(ours));
+        assert_eq!(vibe_config("", ours), ours);
+        assert!(text.contains("args = [\"mcp\"]\n") && text.contains("[tools.bash]\nallowlist = ["));
+        let v = Agent::Vibe.command(cwd, false, "");
+        assert!(v.starts_with("VIBE_HOME=") && v.ends_with(" vibe"), "{v}");
+        assert!(Agent::Vibe.session_dir(cwd).starts_with(Agent::Vibe.config_dir(cwd)));
+    }
+
+    #[test]
+    fn rules_are_translated_for_every_agent() {
+        let extra = "Bash(just test:*), Bash(rm -i:*), Bash, Read";
+        for agent in [Agent::Codex, Agent::Gemini, Agent::Vibe] {
+            let r = agent.rules(true, extra);
+            // Every shell rule of Claude Code is there, as a prefix.
+            for c in ["git status", "cargo test", "pwd", "git commit", "just test"] {
+                assert!(r.allowed_commands.iter().any(|a| a == c), "{agent:?} {c}");
+            }
+            for c in ["rm", "git push", "sudo", "python -c", "curl"] {
+                assert!(r.denied_commands.iter().any(|d| d == c), "{agent:?} {c}");
+            }
+            // What would lift the restriction never comes through.
+            for bad in ["rm -i", "Bash", "Read", ""] {
+                assert!(!r.allowed_commands.iter().any(|a| a == bad), "{agent:?} {bad}");
+                assert!(!r.allowed_tools.iter().any(|a| a == bad), "{agent:?} {bad}");
+            }
+            assert!(!r.allowed_commands.iter().any(|a| r.denied_commands.contains(a)));
+            assert!(r.denied_paths.iter().any(|p| p == "~/.ssh/**"));
+            // Claude Code's names never leak into another agent's lists.
+            let all = [&r.allowed_tools, &r.denied_tools, &r.allowed_commands, &r.denied_commands];
+            assert!(all.iter().all(|v| v.iter().all(|x| !x.starts_with("Bash(")
+                && !x.starts_with("mcp__")
+                && x.chars().next().is_some_and(|c| !c.is_ascii_uppercase()))));
+        }
+        let r = Agent::Codex.rules(false, "");
+        assert!(r.allowed_tools.is_empty() && r.denied_tools.is_empty());
+        assert!(!r.allowed_commands.iter().any(|a| a == "git commit"));
+        assert_eq!(Agent::Gemini.rules(false, "").denied_tools, ["web_fetch", "google_web_search"]);
+        assert!(Agent::Vibe.rules(false, "").allowed_tools.contains(&"grep".to_string()));
+
+        // Gemini: a JSON settings document.
+        let g: Value = serde_json::from_str(&Agent::Gemini.rules_config(false, "")).unwrap();
+        let allowed = g["tools"]["allowed"].as_array().unwrap();
+        assert!(allowed.iter().any(|a| a == "run_shell_command(git status)"));
+        assert!(allowed.iter().any(|a| a == "glob"));
+        let exclude = g["tools"]["exclude"].as_array().unwrap();
+        assert!(exclude.iter().any(|a| a == "run_shell_command(rm)"));
+        assert!(exclude.iter().any(|a| a == "web_fetch"));
+        // Vibe: TOML tables.
+        let v = Agent::Vibe.rules_config(false, "");
+        assert!(v.starts_with("[tools.bash]\nallowlist = [\"ls\", \"pwd\", \"git status\""));
+        assert!(v.contains("denylist = [\"rm\", ") && v.contains("\"python <<\""));
+        assert!(v.contains("[tools.grep]\npermission = \"always\""));
+        assert!(v.contains("[tools.web_fetch]\npermission = \"never\""));
+        // Codex: one prefix rule per command, words apart.
+        let c = Agent::Codex.rules_config(false, "");
+        assert!(c.contains("prefix_rule(pattern=[\"git\", \"status\"], decision=\"allow\")\n"));
+        assert!(c.contains("prefix_rule(pattern=[\"rm\"], decision=\"forbidden\")\n"));
+        assert!(!c.contains("git commit"));
+        assert!(Agent::ClaudeCode.rules_config(false, "").is_empty());
     }
 
     #[test]
@@ -2196,6 +2942,13 @@ mod tests {
         // First session: dev is made from main; its unsaved work is committed on dev, the copy goes.
         let c = dev_copy_in(&copies, &folder, "Essai").unwrap();
         assert_eq!(c.branch, DEV);
+        // What Codex may write for a commit: the copy's git folder and the repository's
+        // objects and branches, all outside the copy, none of them the hooks.
+        let dirs = codex_git_dirs(Path::new(&c.worktree));
+        assert_eq!(dirs.len(), 4, "{dirs:?}");
+        assert!(dirs.iter().all(|d| d.exists() && !d.starts_with(&c.worktree)), "{dirs:?}");
+        assert!(dirs[0].display().to_string().contains("worktrees"), "{dirs:?}");
+        assert!(dirs.iter().all(|d| !d.ends_with("hooks") && !d.ends_with("config")));
         std::fs::write(PathBuf::from(&c.worktree).join("b.txt"), "b").unwrap();
         let rec = crate::model::RunRecord {
             title: "Essai".into(),
@@ -2482,6 +3235,41 @@ mod tests {
         unsafe { std::env::remove_var("CLAUDE_CONFIG_DIR") };
         assert!(r.turn_over);
         assert_eq!(r.tokens, 20);
+        assert_eq!(signal(&r.last_text), Signal::Done);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// A session file read while it is being written: a line (and a character) cut at the
+    /// end waits for its other half; a file rewritten shorter is read again from the start.
+    #[test]
+    fn reader_survives_cut_lines_and_rewritten_files() {
+        let dir = std::env::temp_dir().join(format!("orch-reader-{}", uuid::Uuid::new_v4().simple()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let f = dir.join("s.jsonl");
+        let since = std::time::SystemTime::UNIX_EPOCH;
+        let answer = |id: &str, text: &str| {
+            format!(
+                "{{\"type\":\"assistant\",\"message\":{{\"id\":\"{id}\",\"stop_reason\":\"end_turn\",\"usage\":{{\"input_tokens\":4,\"output_tokens\":1}},\"content\":[{{\"type\":\"text\",\"text\":\"{text}\"}}]}}}}\n"
+            )
+        };
+        let line = answer("m1", "Étape terminée [[CONTINUER]]");
+        // Cut in the middle of « É » (two bytes in UTF-8).
+        let at = line.find('É').unwrap() + 1;
+        std::fs::write(&f, &line.as_bytes()[..at]).unwrap();
+        let mut r = Reader { path: Some(f.clone()), ..Default::default() };
+        r.poll(Agent::ClaudeCode, &dir, since);
+        assert_eq!((r.records, r.tokens), (0, 0), "half a line: nothing yet");
+        // The rest arrives: the line is read whole, its accent intact, once.
+        std::fs::write(&f, line.as_bytes()).unwrap();
+        r.poll(Agent::ClaudeCode, &dir, since);
+        assert_eq!((r.records, r.tokens), (1, 5));
+        assert!(r.last_text.starts_with("Étape terminée"), "{}", r.last_text);
+        r.poll(Agent::ClaudeCode, &dir, since);
+        assert_eq!(r.records, 1, "nothing read twice");
+        // Rewritten shorter, with another answer: read from the start; m1 isn't counted again.
+        std::fs::write(&f, answer("m2", "ok [[FINI]]")).unwrap();
+        r.poll(Agent::ClaudeCode, &dir, since);
+        assert_eq!(r.tokens, 10);
         assert_eq!(signal(&r.last_text), Signal::Done);
         let _ = std::fs::remove_dir_all(dir);
     }

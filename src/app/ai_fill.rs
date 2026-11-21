@@ -47,6 +47,8 @@ pub struct QuickAnswer {
     pub answer: Result<String, String>,
     /// Who answered ("Claude Code", "Codex").
     pub by: String,
+    /// How many steps the answer proposed (added to the Steps box's proposals).
+    pub steps: usize,
 }
 
 fn req_key() -> egui::Id {
@@ -102,6 +104,21 @@ fn spawn<T: Send + 'static>(
         c.request_repaint();
     });
     slot
+}
+
+/// Add `steps` to a project's proposals (ticked), less those already proposed or already in
+/// the project (`existing`, same title whatever the case); how many were added.
+fn merge_proposals(proposals: &mut Vec<(String, bool)>, existing: &[String], steps: Vec<String>) -> usize {
+    let same = |a: &str, b: &str| a.trim().to_lowercase() == b.trim().to_lowercase();
+    let mut n = 0;
+    for s in steps {
+        if existing.iter().any(|e| same(e, &s)) || proposals.iter().any(|(p, _)| same(p, &s)) {
+            continue;
+        }
+        proposals.push((s, true));
+        n += 1;
+    }
+    n
 }
 
 /// Write an AI's fill into a project: status, state of play, outside view. Steps untouched.
@@ -189,12 +206,36 @@ impl NotesApp {
                 .as_ref()
                 .map(|(_, t)| t.label().to_string())
                 .unwrap_or_default();
+            // Steps the answer proposes: to the Steps box, where they wait for the person's
+            // choice like the other proposals (never added to the project by themselves).
+            let (answer, steps) = match res {
+                Ok((a, _)) => {
+                    let (text, steps) = crate::sync::split_answer_steps(&a);
+                    (Ok(text), steps)
+                }
+                Err(e) => (Err(e), vec![]),
+            };
+            let existing: Vec<String> = self
+                .ws
+                .page(&id)
+                .and_then(|p| p.project.as_ref())
+                .map(|pr| pr.steps.iter().map(|s| s.title.clone()).collect())
+                .unwrap_or_default();
+            let n = merge_proposals(
+                self.ai.proposals.entry(id.clone()).or_default(),
+                &existing,
+                steps,
+            );
+            if self.ai.proposals.get(&id).is_some_and(Vec::is_empty) {
+                self.ai.proposals.remove(&id);
+            }
             self.ai.answers.insert(
                 id,
                 QuickAnswer {
                     question,
-                    answer: res.map(|(a, _)| a),
+                    answer,
                     by,
+                    steps: n,
                 },
             );
         }
@@ -318,5 +359,28 @@ impl NotesApp {
             .page(page_id)
             .and_then(|p| p.project.as_ref())
             .and_then(|pr| pr.code)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn steps_of_an_answer_join_the_proposals_once() {
+        let mut p = vec![("Tests : écrire le test du lecteur".to_string(), false)];
+        let existing = ["Interface : ajouter un bouton".to_string()];
+        let n = super::merge_proposals(
+            &mut p,
+            &existing,
+            vec![
+                "interface : ajouter un bouton".into(),
+                "Tests : écrire le test du lecteur".into(),
+                "Docs : décrire les sessions".into(),
+            ],
+        );
+        assert_eq!(n, 1);
+        assert_eq!(p.len(), 2);
+        // The person's choice on an older proposal is kept; the new one comes ticked.
+        assert!(!p[0].1);
+        assert_eq!(p[1], ("Docs : décrire les sessions".to_string(), true));
     }
 }

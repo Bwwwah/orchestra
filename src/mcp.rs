@@ -256,13 +256,13 @@ fn tools() -> Vec<Value> {
         ),
         tool(
             "add_steps",
-            "Add steps to follow to a project, in order. One short action per item (under ~100 characters, no Markdown, no numbering).",
+            "Add steps to follow to a project, in order. Each item is written « Theme: action » (in French « Thème : action à l'infinitif »): a short theme of 1 to 4 words, a colon, then ONE action with its verb first, e.g. « Sécurité : échapper le nom du dossier passé à git (src/git.rs) ». One action per step (no « ; », « puis », « then »), under ~140 characters, no Markdown, no numbering. If one item doesn't fit, nothing is added and the error says which to rewrite.",
             json!({"project": project, "steps":{"type":"array","items":{"type":"string"}},"source":source}),
             &["project", "steps"],
         ),
         tool(
             "update_step",
-            "Change a step's status (todo, doing, done) or title. Steps are named by step_id (from get_project_state) or by their title.",
+            "Change a step's status (todo, doing, done) or title. Steps are named by step_id (from get_project_state) or by their title. A new title is written « Theme: action », one action, like in add_steps.",
             json!({"project": project, "step":{"type":"string","description":"step_id or title"},"status":{"type":"string","enum":["todo","doing","done"]},"title":{"type":"string"}}),
             &["project", "step"],
         ),
@@ -850,6 +850,17 @@ fn call_tool(name: &str, args: &Value) -> Result<String, ToolError> {
             if steps.is_empty() {
                 return Err(ToolError::Failed("no steps given".into()));
             }
+            // Every step in the AI step format, or none is added: the AI rewrites them.
+            let (steps, bad): (Vec<_>, Vec<_>) =
+                steps.iter().map(|t| project::ai_step(t)).partition(Result::is_ok);
+            if !bad.is_empty() {
+                let why: Vec<String> = bad.into_iter().filter_map(Result::err).collect();
+                return Err(ToolError::Failed(format!(
+                    "no step added, rewrite these: {}",
+                    why.join(" | ")
+                )));
+            }
+            let steps: Vec<String> = steps.into_iter().filter_map(Result::ok).collect();
             let p = ws.page_mut(&id).unwrap();
             let pr = p.project.as_mut().unwrap();
             let ids: Vec<String> = steps.iter().map(|t| pr.add_step(t, &src)).collect();
@@ -872,9 +883,11 @@ fn call_tool(name: &str, args: &Value) -> Result<String, ToolError> {
                     pr.set_step_status(&sid, st);
                 }
             }
-            if let Some(t) = s(args, "title") {
+            // A new title from an AI follows the AI step format too (checked before anything changes).
+            let title = s(args, "title").map(project::ai_step).transpose()?;
+            if let Some(t) = title {
                 if let Some(x) = pr.steps.iter_mut().find(|x| x.id == sid) {
-                    x.title = crate::richtext::step_title(t, project::STEP_MAX);
+                    x.title = t;
                     x.updated = crate::model::now_ms();
                 }
                 pr.touch();
@@ -1135,14 +1148,14 @@ mod tests {
             for i in 0..n {
                 let pid = pid.clone();
                 s.spawn(move || {
-                    call("add_steps", json!({"project": pid, "steps": [format!("Étape parallèle {i}")], "source": "test"})).unwrap();
+                    call("add_steps", json!({"project": pid, "steps": [format!("Test : étape parallèle {i}")], "source": "test"})).unwrap();
                 });
             }
         });
         let titles: Vec<String> = steps(&pid).into_iter().map(|s| s.title).collect();
         for i in 0..n {
             assert!(
-                titles.contains(&format!("Étape parallèle {i}")),
+                titles.contains(&format!("Test : étape parallèle {i}")),
                 "étape {i} perdue : {titles:?}"
             );
         }
@@ -1314,10 +1327,19 @@ mod tests {
         assert_eq!(st[1].status, project::StepStatus::Todo);
         call(
             "update_step",
-            json!({"project": pid, "step": st[1].id, "title": "Tests E2E"}),
+            json!({"project": pid, "step": st[1].id, "title": "tests: écrire les tests E2E"}),
         )
         .unwrap();
-        assert_eq!(steps(&pid)[1].title, "Tests E2E");
+        assert_eq!(steps(&pid)[1].title, "Tests : écrire les tests E2E");
+        // A title out of the AI step format is refused, and nothing changes.
+        let err = call(
+            "update_step",
+            json!({"project": pid, "step": st[1].id, "title": "Tests E2E", "status": "done"}),
+        )
+        .unwrap_err();
+        assert!(err.contains("Expected"), "{err}");
+        assert_eq!(steps(&pid)[1].title, "Tests : écrire les tests E2E");
+        assert_eq!(steps(&pid)[1].status, project::StepStatus::Todo);
         let err = call(
             "update_step",
             json!({"project": pid, "step": "inexistante"}),
@@ -1365,13 +1387,22 @@ mod tests {
         let pid = project_with_steps(&[]);
         let out = call(
             "add_steps",
-            json!({"project": "Projet test", "steps": ["Un", " ", "Deux"]}),
+            json!({"project": "Projet test", "steps": ["Test : faire un", " ", "test: faire deux"]}),
         )
         .unwrap();
         assert!(out.starts_with("2 step(s) added"), "{out}");
         assert!(call("add_steps", json!({"project": pid, "steps": []})).is_err());
+        // One item out of the format: nothing added, the error names it.
+        let err = call(
+            "add_steps",
+            json!({"project": pid, "steps": ["Test : faire trois", "Faire quatre puis cinq"]}),
+        )
+        .unwrap_err();
+        assert!(err.contains("no step added") && err.contains("Faire quatre"), "{err}");
+        assert!(!err.contains("faire trois"), "{err}");
+        assert_eq!(steps(&pid).len(), 2);
         let state = call("get_project_state", json!({"project": pid})).unwrap();
-        assert!(state.contains("Un") && state.contains("Deux"), "{state}");
+        assert!(state.contains("Test : faire un") && state.contains("Test : faire deux"), "{state}");
         assert!(!state.contains("Projet partagé"), "{state}");
         // Shared: what others wrote is marked as information, not orders.
         let mut ws = store::load();

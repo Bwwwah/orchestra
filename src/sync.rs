@@ -579,6 +579,20 @@ pub fn parse_tasks(answer: &str) -> Vec<String> {
     out
 }
 
+/// The steps of an AI's answer that follow the AI step format (`project::ai_step`), tidied;
+/// the others are dropped rather than proposed.
+pub fn ai_steps_only(steps: Vec<String>) -> Vec<String> {
+    let mut out: Vec<String> = vec![];
+    for s in steps {
+        if let Ok(s) = crate::project::ai_step(&s)
+            && !out.contains(&s)
+        {
+            out.push(s);
+        }
+    }
+    out
+}
+
 /// Next tasks for a project, proposed by an AI that reads it (read-only). `existing`: the
 /// steps already there, not to repeat.
 pub fn ask_tasks(
@@ -636,9 +650,13 @@ pub fn ask_tasks(
         40,
         prefer,
     )?;
-    let tasks = parse_tasks(&answer);
+    let tasks = ai_steps_only(parse_tasks(&answer));
     if tasks.is_empty() {
-        return Err(crate::tr!("l'IA n'a proposé aucune tâche", "the AI proposed no task").into());
+        return Err(crate::tr!(
+            "l'IA n'a proposé aucune étape au format « Thème : action »",
+            "the AI proposed no step written « Theme: action »"
+        )
+        .into());
     }
     Ok(tasks)
 }
@@ -761,10 +779,14 @@ pub fn text_to_tasks(
     };
     let prompt = crate::trf!(
         "Transforme ce texte en tâches claires et actionnables pour un projet : regroupe ce qui va ensemble, retire les doublons \
-         et le bavardage, garde l'ordre logique. Une tâche = une action courte à l'infinitif (tu peux la préfixer d'un domaine court suivi de « : »).\n\
+         et le bavardage, garde l'ordre logique. Chaque tâche s'écrit OBLIGATOIREMENT « Thème : action à l'infinitif » : \
+         un thème court (1 à 4 mots), deux-points, puis UNE seule action (pas de « ; », pas de « puis », pas de seconde phrase ; \
+         deux actions = deux tâches). Exemple : « Inscription : envoyer le dossier au secrétariat ».\n\
          Réponds UNIQUEMENT par la liste, une tâche par ligne commençant par « - ». {tools_rule}\n\nTexte :\n{text}",
         "Turn this text into clear, actionable tasks for a project: group what belongs together, drop duplicates \
-         and chatter, keep a logical order. One task = one short action (you may prefix it with a short area followed by « : »).\n\
+         and chatter, keep a logical order. Each task MUST be written « Theme: action »: a short theme (1 to 4 words), \
+         a colon, then ONE action, verb first (no « ; », no « then », no second sentence; two actions = two tasks). \
+         Example: « Enrolment: send the file to the office ».\n\
          Answer ONLY with the list, one task per line starting with « - ». {tools_rule}\n\nText:\n{text}"
     );
     let dir = if !folder.trim().is_empty() && crate::project::normalize_folder(folder).is_dir() {
@@ -781,11 +803,11 @@ pub fn text_to_tasks(
         images,
         Weight::Light,
     )?;
-    let tasks = parse_tasks(&answer);
+    let tasks = ai_steps_only(parse_tasks(&answer));
     if tasks.is_empty() {
         return Err(crate::tr!(
-            "l'IA n'a trouvé aucune tâche dans ce texte",
-            "the AI found no task in this text"
+            "l'IA n'a trouvé aucune tâche dans ce texte (au format « Thème : action »)",
+            "the AI found no task in this text (written « Theme: action »)"
         )
         .into());
     }
@@ -892,6 +914,65 @@ pub const QUESTION_MAX: usize = 1000;
 /// `code`: a code project (feature ideas, code); otherwise a project of documents —
 /// school work, paperwork or anything else — where the answer stays about its content.
 fn question_prompt(folder: &str, question: &str, code: bool) -> String {
+    let mut p = question_prompt_base(folder, question, code);
+    p.push_str(crate::tr!(
+        "\n\nSi la question demande d'ajouter, de créer ou de proposer des étapes au projet, termine ta \
+         réponse par un bloc de code ```etapes avec une étape par ligne, au format « Thème : action à \
+         l'infinitif », une seule action par étape, 10 au plus ; elles seront proposées dans l'encadré \
+         Étapes. Sinon, pas de bloc.",
+        "\n\nIf the question asks to add, create or propose steps for the project, end your answer with a \
+         ```steps code block, one step per line, written « Theme: action », one action per step, 10 at \
+         most; they will be proposed in the Steps box. Otherwise, no block."
+    ));
+    p
+}
+
+/// The most steps one answer may propose.
+pub const ANSWER_STEPS_MAX: usize = 10;
+
+/// An answer split into the text to show and the steps it proposes: the lines of its last
+/// ```etapes (or ```étapes, ```steps) block, cleaned to one short line each, at most
+/// `ANSWER_STEPS_MAX`; the block itself is taken out of the text.
+pub fn split_answer_steps(answer: &str) -> (String, Vec<String>) {
+    let lines: Vec<&str> = answer.lines().collect();
+    let open = lines.iter().rposition(|l| {
+        let tag = l.trim().strip_prefix("```").unwrap_or("").trim().to_lowercase();
+        matches!(tag.as_str(), "etapes" | "étapes" | "steps")
+    });
+    let Some(open) = open else {
+        return (answer.trim().to_string(), vec![]);
+    };
+    let close = lines[open + 1..]
+        .iter()
+        .position(|l| l.trim().starts_with("```"))
+        .map(|i| open + 1 + i)
+        .unwrap_or(lines.len());
+    let mut steps: Vec<String> = vec![];
+    for l in &lines[open + 1..close] {
+        // A list mark (« - », « * », « • », « 3. », « 3) ») before the step, not the step's own digits.
+        let s = l.trim().trim_start_matches(['-', '*', '•']).trim_start();
+        let digits = s.len() - s.trim_start_matches(|c: char| c.is_ascii_digit()).len();
+        let s = match s[digits..].chars().next() {
+            Some('.' | ')') if digits > 0 => &s[digits + 1..],
+            _ => s,
+        }
+        .trim();
+        // Only steps in the AI step format are proposed.
+        let Ok(s) = crate::project::ai_step(&crate::richtext::one_line(s, 200)) else {
+            continue;
+        };
+        if !steps.contains(&s) && steps.len() < ANSWER_STEPS_MAX {
+            steps.push(s);
+        }
+    }
+    let mut text: Vec<&str> = lines[..open].to_vec();
+    if close < lines.len() {
+        text.extend(&lines[close + 1..]);
+    }
+    (text.join("\n").trim().to_string(), steps)
+}
+
+fn question_prompt_base(folder: &str, question: &str, code: bool) -> String {
     let q: String = question.trim().chars().take(QUESTION_MAX).collect();
     if !code {
         return crate::trf!(
@@ -1188,6 +1269,37 @@ mod tests {
             !fill_prompt("/tmp/x", true).contains("Ressources utiles")
                 && !fill_prompt("/tmp/x", true).contains("Useful resources")
         );
+    }
+
+    #[test]
+    fn an_answer_can_propose_steps() {
+        let a = "Oui, ça vaut le coup.\n\n```etapes\n- Export : ajouter le bouton PDF\n2. Tests : vérifier l'export\n2FA : activer la double authentification\n- Export : ajouter le bouton PDF\n\n```\nÀ vous de voir.";
+        let (text, steps) = split_answer_steps(a);
+        assert_eq!(text, "Oui, ça vaut le coup.\n\nÀ vous de voir.");
+        assert_eq!(
+            steps,
+            [
+                "Export : ajouter le bouton PDF",
+                "Tests : vérifier l'export",
+                "2FA : activer la double authentification"
+            ]
+        );
+        // No block: the answer as it is, no step.
+        assert_eq!(split_answer_steps("  Non.  "), ("Non.".to_string(), vec![]));
+        // Another code block stays in the text; a block left open still counts.
+        let (text, steps) =
+            split_answer_steps("```rust\nfn x() {}\n```\n```steps\nDocs: write it\nWrite it then test it");
+        assert_eq!(text, "```rust\nfn x() {}\n```");
+        // Tidied to « Theme : action »; a line out of the format is dropped.
+        assert_eq!(steps, ["Docs : write it"]);
+        assert_eq!(
+            ai_steps_only(vec!["a: faire x".into(), "Faire y".into(), "A : faire x".into()]),
+            ["A : faire x"]
+        );
+        // Bounded.
+        let many = format!("```étapes\n{}```", (0..30).map(|i| format!("T : faire {i}\n")).collect::<String>());
+        assert_eq!(split_answer_steps(&many).1.len(), ANSWER_STEPS_MAX);
+        assert!(question_prompt("/tmp/x", "?", true).contains("```"));
     }
 
     #[test]

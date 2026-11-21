@@ -277,11 +277,25 @@ struct CopyJob {
     done: std::sync::mpsc::Receiver<Result<String, String>>,
 }
 
+/// The figures of one agent's subscription, as last read.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Figures {
+    pub five: Option<f32>,
+    pub week: Option<f32>,
+    pub five_reset: Option<u64>,
+    pub week_reset: Option<u64>,
+}
+
 #[derive(Default)]
 pub struct Orch {
     pub runs: Vec<LiveRun>,
     drafts: HashMap<String, Draft>,
     watching: Option<String>,
+    /// The figures of the agents other than Claude Code (whose own are the fields below,
+    /// shown on the cards), and their last reading: each session is measured and stopped on
+    /// the subscription of its own agent, never on another's.
+    others: HashMap<Agent, Figures>,
+    others_reading: HashMap<Agent, (u64, f32, Option<u64>)>,
     /// (time of the reading, 5-hour %, its reset time).
     last_reading: Option<(u64, f32, Option<u64>)>,
     pub five: Option<f32>,
@@ -385,6 +399,20 @@ impl NotesApp {
             )
             .into());
         }
+        // Nothing to work on (and not endless, where the AI finds its steps): it would stop
+        // at once, after starting Claude Code for nothing. Also for « Lancer la sélection ».
+        if endless.is_none()
+            && !pr
+                .steps
+                .iter()
+                .any(|s| s.status != crate::project::StepStatus::Done)
+        {
+            return Err(crate::tr!(
+                "aucune étape ouverte : ajoutez des étapes, ou activez « sans fin »",
+                "no open step: add steps, or turn on « endless »"
+            )
+            .into());
+        }
         if !self.ais.plugged().contains(&crate::setup::Ai::ClaudeCode) {
             return Err(crate::tr!(
                 "Claude Code n'est pas branché (Réglages › IA)",
@@ -432,7 +460,9 @@ impl NotesApp {
             ));
         }
         // The limits are checked with Claude Code's own figures: they come through the status line.
-        if !crate::usage::tracking_on() {
+        // Not only in place: working (a status line left by an Orchestra since moved or
+        // deleted measures nothing, and the session would stop as unmeasured).
+        if !crate::usage::tracking_works() {
             crate::usage::start_tracking(&std::env::current_exe().unwrap_or_default())?;
             self.ais.tracking = true;
         }
@@ -454,9 +484,15 @@ impl NotesApp {
                 agent.label()
             ));
         }
-        let copy = auto::make_copy(&folder, &title, !pr.commit_to_main)?;
+        let code = crate::project::code_kind(&folder, pr.code);
+        let copy = auto::make_copy(&folder, &title, !on_main(pr), code)?;
+        // A project without code makes no commit (the switch isn't shown for it), and without
+        // git (worked on in its own folder) there is none to make.
+        let commits = commits && code && !copy.branch.is_empty();
         let o = &self.ws.settings.orch;
-        let cmd = agent.command(commits, &o.extra_tools);
+        let cwd = std::path::Path::new(&copy.worktree);
+        agent.write_config(cwd, commits, &o.extra_tools)?;
+        let cmd = agent.command(cwd, commits, &o.extra_tools);
         let c2 = ctx.clone();
         let mut term = Term::spawn_once(
             &crate::trf!("Autonome · {title}", "Autonomous · {title}"),
@@ -644,7 +680,11 @@ impl NotesApp {
         let pause = self.ws.settings.orch.pause_for_answer;
         let mut paused: Vec<(String, String, Wait)> = vec![];
         let mut finished: Vec<(usize, String, String)> = vec![];
+        let figures = self.figures_by_agent();
         for (i, r) in self.orch.runs.iter_mut().enumerate() {
+            // The subscription of this session's own agent; none read (an agent that tells
+            // nothing): no figures, and the session stops as unmeasured.
+            let fig = figures.get(&r.agent).copied().unwrap_or_default();
             // How the screen moves (idle = nothing drawn for a while).
             let screen = r.term.text();
             let h = hash(&screen);
@@ -713,7 +753,7 @@ impl NotesApp {
                         r.term.write(b"\r");
                         r.reader.turn_over = false;
                         r.nudged = false;
-                        r.week_at_turn = self.orch.week;
+                        r.week_at_turn = fig.week;
                         r.phase = if r.summarizing {
                             Phase::Summary(now)
                         } else {
@@ -746,10 +786,10 @@ impl NotesApp {
                     if let Some(msg) = r.reader.limit_hit.clone().or(on_screen) {
                         let now_ms = crate::model::now_ms();
                         let reset = auto::limit_reset(&msg, now_ms)
-                            .or(if self.orch.week.is_some_and(|w| w >= 99.0) {
-                                self.orch.week_reset
+                            .or(if fig.week.is_some_and(|w| w >= 99.0) {
+                                fig.week_reset
                             } else {
-                                self.orch.five_reset
+                                fig.five_reset
                             })
                             .filter(|&t| t > now_ms)
                             // Unknown: try again in an hour; still limited, it stops again.
@@ -821,7 +861,7 @@ impl NotesApp {
                         }
                         r.turns += 1;
                         // What this turn took from the week (a reset in between counts for nothing).
-                        if let (Some(a), Some(b)) = (r.week_at_turn, self.orch.week)
+                        if let (Some(a), Some(b)) = (r.week_at_turn, fig.week)
                             && b >= a
                         {
                             r.week_turn = r.week_turn.max(b - a);
@@ -845,7 +885,7 @@ impl NotesApp {
                             sig = Signal::Continue;
                         }
                         r.steps_at_turn = steps_now.iter().map(|s| s.id.clone()).collect();
-                        let five = self.orch.five;
+                        let five = fig.five;
                         r.done_streak = if sig == Signal::Done {
                             r.done_streak + 1
                         } else {
@@ -886,7 +926,7 @@ impl NotesApp {
                             limit: r.limit,
                             five,
                             global,
-                            week: self.orch.week,
+                            week: fig.week,
                             week_limit,
                             week_turn: r.week_turn,
                             measured: r.measured,
@@ -895,8 +935,8 @@ impl NotesApp {
                         });
                         // Stopped by a quota: when it resets, to start again then.
                         match stop.as_ref().map(Stop::quota) {
-                            Some(Quota::FiveHours) => r.quota_reset = self.orch.five_reset,
-                            Some(Quota::Week) => r.quota_reset = self.orch.week_reset,
+                            Some(Quota::FiveHours) => r.quota_reset = fig.five_reset,
+                            Some(Quota::Week) => r.quota_reset = fig.week_reset,
                             _ => {}
                         }
                         let reason = stop.map(|s| s.text());
@@ -1036,6 +1076,7 @@ impl NotesApp {
             return;
         }
         self.orch.usage_polled = Some(Instant::now());
+        self.other_agents_tick();
         // A window that has reset is dropped by read(): forget its old figure too, so a
         // limit reached before the reset doesn't block what follows.
         let Some(u) = crate::usage::read() else {
@@ -1063,26 +1104,56 @@ impl NotesApp {
             return;
         };
         self.orch.five = Some(five.pct);
-        let prev = self.orch.last_reading;
-        if prev.is_some_and(|(at, _, _)| at == u.at) {
-            return;
-        }
-        self.orch.last_reading = Some((u.at, five.pct, five.resets_at));
-        let rise = window_rise(prev.map(|(_, p, r)| (p, r)), five.pct, five.resets_at);
-        let deltas: Vec<u64> = self
-            .orch
-            .runs
-            .iter()
-            .map(|r| r.reader.tokens.saturating_sub(r.tokens_counted))
-            .collect();
-        let shares = split_rise(rise, &deltas);
-        for (r, s) in self.orch.runs.iter_mut().zip(shares) {
-            if u.at >= r.started_wall {
-                r.measured = true;
+        apply_reading(
+            &mut self.orch.runs,
+            Agent::ClaudeCode,
+            &mut self.orch.last_reading,
+            u.at,
+            &five,
+        );
+    }
+
+    /// The same for the other agents that have sessions running and tell their figures
+    /// (Codex); those that tell none (Gemini, Vibe) stay unmeasured, so their sessions stop
+    /// (`Stop::Unmeasured`) rather than run with no ceiling.
+    fn other_agents_tick(&mut self) {
+        let mut agents: Vec<Agent> = vec![];
+        for a in self.orch.runs.iter().map(|r| r.agent) {
+            if a != Agent::ClaudeCode && crate::usage::reports_usage(a) && !agents.contains(&a) {
+                agents.push(a);
             }
-            r.pct += s;
-            r.tokens_counted = r.reader.tokens;
         }
+        self.orch.others.retain(|a, _| agents.contains(a));
+        for a in agents {
+            let Some(u) = crate::usage::read_for(a) else {
+                // Reset or never seen: forget the old figures (as for Claude Code).
+                self.orch.others.remove(&a);
+                continue;
+            };
+            self.orch.others.insert(a, Figures::of(&u));
+            if let Some(five) = u.five() {
+                let mut last = self.orch.others_reading.get(&a).copied();
+                apply_reading(&mut self.orch.runs, a, &mut last, u.at, five);
+                if let Some(l) = last {
+                    self.orch.others_reading.insert(a, l);
+                }
+            }
+        }
+    }
+
+    /// The figures each session is measured and stopped on: those of its own agent.
+    fn figures_by_agent(&self) -> HashMap<Agent, Figures> {
+        let mut m = self.orch.others.clone();
+        m.insert(
+            Agent::ClaudeCode,
+            Figures {
+                five: self.orch.five,
+                week: self.orch.week,
+                five_reset: self.orch.five_reset,
+                week_reset: self.orch.week_reset,
+            },
+        );
+        m
     }
 
     /// Merge into main the finished sessions of projects that allow it, once closed, in
@@ -1194,6 +1265,20 @@ impl NotesApp {
         rec.turns = turns;
         rec.steps_done = newly;
         rec.resume_at = resume_at;
+        // No copy (a project without git): nothing to merge nor discard, the work is there.
+        if auto::in_place(rec) {
+            // Where the folder was backed up before the session (`base` for a session in place).
+            rec.closed = if base.is_empty() {
+                auto::in_place_note().into()
+            } else {
+                crate::trf!(
+                    "{} ; sauvegarde d'avant la session : {}",
+                    "{}; backup from before the session: {}",
+                    auto::in_place_note(),
+                    super::projects::tilde(&base)
+                )
+            };
+        }
         let rec = rec.clone();
         let (commits, dirty) = auto::work_done(&rec, &base);
         auto::push_copy_later(rec.worktree.clone());
@@ -1230,7 +1315,7 @@ impl NotesApp {
             .ws
             .page(&project)
             .and_then(|p| p.project.as_ref())
-            .is_some_and(|p| p.commit_to_main);
+            .is_some_and(on_main);
         // On the shared dev branch: the work stays there and the copy goes, so dev can be
         // opened from the Versions card (unless the session starts again by itself).
         let on_dev = rec.branch == auto::DEV && resume_at == 0;
@@ -2569,16 +2654,13 @@ impl NotesApp {
                 )
             })
             .collect();
+        // « sur main » only for code projects: a project without code (school work,
+        // paperwork…) never shows git words, and its sessions never merge into main.
         let mut to_main: HashMap<String, bool> = projects
             .iter()
-            .map(|(id, _, _)| {
-                (
-                    id.clone(),
-                    self.ws
-                        .page(id)
-                        .and_then(|p| p.project.as_ref())
-                        .is_some_and(|x| x.commit_to_main),
-                )
+            .filter_map(|(id, _, _)| {
+                let pr = self.ws.page(id).and_then(|p| p.project.as_ref())?;
+                super::projects::shows_git(ui.ctx(), pr).then(|| (id.clone(), pr.commit_to_main))
             })
             .collect();
         let to_main_before = to_main.clone();
@@ -2612,7 +2694,20 @@ impl NotesApp {
                     .italics(),
                 );
             }
-            for (id, title, folder) in &projects {
+            // What can start first: the running sessions, then the projects with open steps;
+            // those with nothing to do (no open step, not endless) folded under a link.
+            let rows: Vec<LaunchRow> = projects
+                .iter()
+                .map(|(id, _, _)| LaunchRow {
+                    busy: running.contains(id),
+                    open: open_steps.get(id).copied().unwrap_or(0),
+                    keep: drafts.get(id).is_some_and(|d| d.endless || d.pick),
+                })
+                .collect();
+            let idle_key = egui::Id::unique("orch-show-idle");
+            let show_idle = ui.ctx().data(|d| d.get_temp::<bool>(idle_key)).unwrap_or(false);
+            let (order, folded) = launch_order(&rows, show_idle);
+            for (id, title, folder) in order.iter().map(|&i| &projects[i]) {
                 let d = drafts.get_mut(id).unwrap();
                 let busy = running.contains(id);
                 let bg = super::projects::hover_begin(ui);
@@ -2642,7 +2737,7 @@ impl NotesApp {
                         });
                         if wide {
                             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                                launch_controls(ui, LaunchCx { id, d: &mut *d, busy, plugged, room, global, to_main: &mut to_main, start: &mut start, confirm_main: &mut confirm_main, budgets: &mut budgets, lk: &lk, t });
+                                launch_controls(ui, LaunchCx { id, d: &mut *d, busy, plugged, open, room, global, to_main: &mut to_main, start: &mut start, confirm_main: &mut confirm_main, budgets: &mut budgets, lk: &lk, t });
                             });
                         }
                     });
@@ -2650,7 +2745,7 @@ impl NotesApp {
                     if !wide {
                         ui.horizontal_wrapped(|ui| {
                             ui.add_space(70.0);
-                            launch_controls(ui, LaunchCx { id, d: &mut *d, busy, plugged, room, global, to_main: &mut to_main, start: &mut start, confirm_main: &mut confirm_main, budgets: &mut budgets, lk: &lk, t });
+                            launch_controls(ui, LaunchCx { id, d: &mut *d, busy, plugged, open, room, global, to_main: &mut to_main, start: &mut start, confirm_main: &mut confirm_main, budgets: &mut budgets, lk: &lk, t });
                         });
                     }
                     ui.horizontal(|ui| {
@@ -2712,6 +2807,27 @@ impl NotesApp {
                     t,
                 );
                 ui.add_space(10.0);
+            }
+            let idle = rows.iter().filter(|r| r.idle()).count();
+            if idle > 0 {
+                let s = crate::i18n::plural(idle);
+                let text = if folded > 0 {
+                    crate::trf!(
+                        "{idle} projet{s} sans étape ouverte ▾",
+                        "{idle} project{s} with no open step ▾"
+                    )
+                } else {
+                    crate::tr!("Replier les projets sans étape ouverte ▴", "Fold the projects with no open step ▴").to_string()
+                };
+                if super::projects::action_link(ui, &text)
+                    .on_hover_text(crate::tr!(
+                        "Une session sur un projet sans étape ouverte s'arrête tout de suite, sauf en mode sans fin : ajoutez-lui des étapes d'abord.",
+                        "A session on a project with no open step stops at once, unless endless: add steps to it first."
+                    ))
+                    .clicked()
+                {
+                    ui.ctx().data_mut(|d| d.insert_temp(idle_key, !show_idle));
+                }
             }
             if !picked.is_empty() {
                 ui.add_space(4.0);
@@ -3281,6 +3397,19 @@ fn run_actions(
     asking: Option<&'static str>,
     t: &Tone,
 ) -> Option<&'static str> {
+    if auto::in_place(r) {
+        ui.add_space(4.0);
+        ui.label(
+            RichText::new(crate::trf!(
+                "Pas de copie : {}.",
+                "No copy: {}.",
+                if r.closed.is_empty() { auto::in_place_note() } else { r.closed.as_str() }
+            ))
+            .size(12.5)
+            .color(t.tertiary),
+        );
+        return None;
+    }
     if !r.closed.is_empty() {
         ui.add_space(4.0);
         ui.label(
@@ -3529,9 +3658,10 @@ impl Stop {
                 "pause : la réserve minimum de la semaine ({r:.0} %) approche",
                 "paused: the week's minimum reserve ({r:.0} %) is near"
             ),
+            // Any agent's (Claude, Codex…): the session knows which by its card.
             Stop::SubscriptionLimit => crate::tr!(
-                "limite de l'abonnement Claude atteinte",
-                "Claude subscription limit reached"
+                "limite de l'abonnement de l'IA atteinte",
+                "the AI's subscription limit reached"
             )
             .into(),
             Stop::Unmeasured => crate::tr!(
@@ -3575,6 +3705,62 @@ fn stop_reason(t: &TurnEnd) -> Option<Stop> {
     } else {
         return None;
     })
+}
+
+impl Figures {
+    fn of(u: &crate::usage::Usage) -> Self {
+        Figures {
+            five: u.five().map(|w| w.pct),
+            week: u.week().map(|w| w.pct),
+            five_reset: u.five().and_then(|w| w.resets_at),
+            week_reset: u.week().and_then(|w| w.resets_at),
+        }
+    }
+}
+
+/// A new reading of `agent`'s 5-hour window (taken at `at`): its rise since `last` is shared
+/// between that agent's running sessions only, by the tokens each used since then; the
+/// sessions of other agents, on other subscriptions, get nothing of it.
+fn apply_reading(
+    runs: &mut [LiveRun],
+    agent: Agent,
+    last: &mut Option<(u64, f32, Option<u64>)>,
+    at: u64,
+    five: &crate::usage::Window,
+) {
+    let prev = *last;
+    if prev.is_some_and(|(a, _, _)| a == at) {
+        return;
+    }
+    *last = Some((at, five.pct, five.resets_at));
+    let rise = window_rise(prev.map(|(_, p, r)| (p, r)), five.pct, five.resets_at);
+    let sessions: Vec<(Agent, u64)> = runs
+        .iter()
+        .map(|r| (r.agent, r.reader.tokens.saturating_sub(r.tokens_counted)))
+        .collect();
+    for (r, s) in runs.iter_mut().zip(agent_shares(&sessions, agent, rise)) {
+        let Some(s) = s else { continue };
+        if at >= r.started_wall {
+            r.measured = true;
+        }
+        r.pct += s;
+        r.tokens_counted = r.reader.tokens;
+    }
+}
+
+/// Each session's share of a rise of `agent`'s window (`sessions`: each one's agent and the
+/// tokens it used since the last reading): None for the sessions of other agents.
+fn agent_shares(sessions: &[(Agent, u64)], agent: Agent, rise: f32) -> Vec<Option<f32>> {
+    let deltas: Vec<u64> = sessions
+        .iter()
+        .filter(|(a, _)| *a == agent)
+        .map(|(_, d)| *d)
+        .collect();
+    let mut shares = split_rise(rise, &deltas).into_iter();
+    sessions
+        .iter()
+        .map(|(a, _)| if *a == agent { shares.next() } else { None })
+        .collect()
 }
 
 /// The last `n` lines of a terminal screen that hold something.
@@ -4240,6 +4426,51 @@ const WEEK_ONE_LINE: f32 = 520.0;
 /// Below this width, a running session's links go under its title.
 const RUN_ONE_LINE: f32 = 460.0;
 
+/// The project's sessions merge into main by themselves: « sur main » ticked, and a code
+/// project (the box isn't shown for one without code, so an old tick there counts for nothing).
+fn on_main(pr: &crate::project::Project) -> bool {
+    pr.commit_to_main && crate::project::code_kind(&pr.folder, pr.code)
+}
+
+/// A project's line in « Lancer une session », for its place in the list.
+#[derive(Clone, Copy, Debug, Default)]
+struct LaunchRow {
+    /// A session runs on it.
+    busy: bool,
+    /// Its steps not done.
+    open: usize,
+    /// Kept in view even with nothing open: endless (the AI finds its steps), or picked.
+    keep: bool,
+}
+
+impl LaunchRow {
+    /// Nothing to start on: a session would stop at once.
+    fn idle(&self) -> bool {
+        !self.busy && self.open == 0 && !self.keep
+    }
+}
+
+/// The order of the lines (indices into `rows`): running first, then those with open steps,
+/// then the idle ones — left out unless `show_idle`, and counted (the second value).
+fn launch_order(rows: &[LaunchRow], show_idle: bool) -> (Vec<usize>, usize) {
+    let rank = |r: &LaunchRow| {
+        if r.busy {
+            0
+        } else if r.idle() {
+            2
+        } else {
+            1
+        }
+    };
+    let mut order: Vec<usize> = (0..rows.len()).collect();
+    order.sort_by_key(|&i| rank(&rows[i]));
+    let folded = if show_idle { 0 } else { rows.iter().filter(|r| r.idle()).count() };
+    if !show_idle {
+        order.retain(|&i| !rows[i].idle());
+    }
+    (order, folded)
+}
+
 /// Below this width, a project's controls in « Lancer une session » go under it.
 const LAUNCH_ONE_LINE: f32 = 620.0;
 
@@ -4249,6 +4480,8 @@ struct LaunchCx<'a> {
     d: &'a mut Draft,
     busy: bool,
     plugged: bool,
+    /// Its open steps: none (and not endless), nothing to start on.
+    open: usize,
     /// What is left of the global limit for this project.
     room: f32,
     global: f32,
@@ -4269,6 +4502,7 @@ fn launch_controls(ui: &mut egui::Ui, c: LaunchCx<'_>) {
         d,
         busy,
         plugged,
+        open,
         room,
         global,
         to_main,
@@ -4303,6 +4537,11 @@ fn launch_controls(ui: &mut egui::Ui, c: LaunchCx<'_>) {
             "Branchez d'abord Claude Code",
             "Plug in Claude Code first"
         ));
+    } else if open == 0 && !d.endless {
+        start_button(ui, false, t).on_disabled_hover_text(crate::tr!(
+            "Aucune étape ouverte : la session s'arrêterait tout de suite. Ajoutez des étapes au projet, ou activez « sans fin » pour que l'IA trouve elle-même les suivantes.",
+            "No open step: the session would stop at once. Add steps to the project, or turn on « endless » so the AI finds the next ones itself."
+        ));
     } else if room < 1.0 {
         start_button(ui, false, t).on_disabled_hover_text(crate::trf!(
             "La limite globale ({global:.0} %) est déjà répartie entre les autres projets",
@@ -4317,9 +4556,13 @@ fn launch_controls(ui: &mut egui::Ui, c: LaunchCx<'_>) {
         }
     }
     ui.add_space(4.0);
-    super::settings::switch(ui, &mut d.commits, lk).on_hover_text(crate::tr!("L'IA peut faire des commits sur sa branche (Orchestra l'envoie sur GitHub après chaque tour).\nGardé pour les prochaines sessions de ce projet.", "The AI may commit on its branch (Orchestra pushes it to GitHub after each turn).\nKept for this project's next sessions."));
-    ui.label(RichText::new("commits").size(12.0).color(t.tertiary));
-    ui.add_space(6.0);
+    // « commits » and « sur main » only for a code project (`to_main` holds only those): one
+    // without code shows no git words, and its sessions make no commit.
+    if to_main.contains_key(id) {
+        super::settings::switch(ui, &mut d.commits, lk).on_hover_text(crate::tr!("L'IA peut faire des commits sur sa branche (Orchestra l'envoie sur GitHub après chaque tour).\nGardé pour les prochaines sessions de ce projet.", "The AI may commit on its branch (Orchestra pushes it to GitHub after each turn).\nKept for this project's next sessions."));
+        ui.label(RichText::new("commits").size(12.0).color(t.tertiary));
+        ui.add_space(6.0);
+    }
     if let Some(m) = to_main.get_mut(id) {
         ui.checkbox(m, RichText::new(crate::tr!("sur main", "on main")).size(12.0).color(t.tertiary)).on_hover_text(crate::tr!(
             "À la fin de chaque session, son travail est fusionné tout seul dans main (seulement si le dossier du projet est sur main ou master)",
@@ -4484,6 +4727,22 @@ mod tests {
         assert!(!super::endless_on_main(true, false));
         assert!(!super::endless_on_main(false, true));
         assert!(!super::endless_main_warning().is_empty());
+    }
+
+    #[test]
+    fn a_project_without_code_never_merges_into_main() {
+        let mut pr = crate::project::Project {
+            commit_to_main: true,
+            code: Some(true),
+            ..Default::default()
+        };
+        assert!(super::on_main(&pr));
+        // « sur main » ticked before the project was set as without code: it counts for nothing.
+        pr.code = Some(false);
+        assert!(!super::on_main(&pr));
+        pr.code = Some(true);
+        pr.commit_to_main = false;
+        assert!(!super::on_main(&pr));
     }
 
     /// The Orchestration page shows the waiting questions first, then the recent answers;
@@ -4780,6 +5039,7 @@ mod tests {
                                 d: &mut d,
                                 busy: false,
                                 plugged: true,
+                                open: 3,
                                 room: 60.0,
                                 global: 60.0,
                                 to_main: &mut to_main,
@@ -4796,6 +5056,76 @@ mod tests {
             });
             assert!(row <= width + 0.5, "à {width} px : commandes sur {row} px");
         }
+    }
+
+    #[test]
+    fn what_can_start_comes_first_and_idle_projects_fold() {
+        use super::{LaunchRow, launch_order};
+        let r = |busy, open, keep| LaunchRow { busy, open, keep };
+        let rows = [
+            r(false, 0, false), // 0: nothing to do
+            r(false, 2, false), // 1: open steps
+            r(true, 0, false),  // 2: running
+            r(false, 0, true),  // 3: endless, no step yet
+            r(false, 5, false), // 4: open steps
+        ];
+        // Running, then those that can start (in their own order), idle ones folded.
+        assert_eq!(launch_order(&rows, false), (vec![2, 1, 3, 4], 1));
+        // Unfolded: the idle ones last.
+        assert_eq!(launch_order(&rows, true), (vec![2, 1, 3, 4, 0], 0));
+        assert_eq!(launch_order(&[], false), (vec![], 0));
+    }
+
+    /// A project without code (absent from `to_main`) gets neither « commits » nor « sur main »:
+    /// its controls come out narrower than a code project's.
+    #[test]
+    fn a_project_without_code_shows_no_git_switches() {
+        let width_of = |code: bool| {
+            let mut w = 0.0;
+            column(2000.0, |ui| {
+                let t = super::tone(false);
+                let lk = super::super::settings::look(false);
+                let id = "p".to_string();
+                let mut d = super::Draft {
+                    mission: String::new(),
+                    limit: 20.0,
+                    commits: true,
+                    pick: false,
+                    endless: false,
+                    end: Default::default(),
+                };
+                let mut to_main: super::HashMap<String, bool> = super::HashMap::new();
+                if code {
+                    to_main.insert(id.clone(), false);
+                }
+                let (mut start, mut confirm) = (vec![], None);
+                let r = ui.horizontal(|ui| {
+                    super::launch_controls(
+                        ui,
+                        super::LaunchCx {
+                            id: &id,
+                            d: &mut d,
+                            busy: false,
+                            plugged: true,
+                            open: 3,
+                            room: 60.0,
+                            global: 60.0,
+                            to_main: &mut to_main,
+                            start: &mut start,
+                            confirm_main: &mut confirm,
+                            budgets: &mut vec![],
+                            lk: &lk,
+                            t: &t,
+                        },
+                    );
+                });
+                w = r.response.rect.width();
+            });
+            w
+        };
+        let (code, nocode) = (width_of(true), width_of(false));
+        // The switch, « commits », the box and « sur main »: well over 100 px.
+        assert!(code - nocode > 100.0, "code {code} px, sans code {nocode} px");
     }
 
     /// The case reported: the 5-hour window already at 75 % when a session starts with a
@@ -4856,6 +5186,45 @@ mod tests {
             }
         );
         assert_eq!(window_bar(120.0, 5.0, 50.0, 200.0).stop, 100.0);
+    }
+
+    #[test]
+    fn each_session_is_stopped_on_its_own_agents_subscription() {
+        use super::{Agent, Figures, Stop, agent_shares, stop_reason};
+        // A rise of Codex's window goes to the Codex sessions only, by their tokens.
+        let sessions = [(Agent::ClaudeCode, 500), (Agent::Codex, 300), (Agent::Codex, 100)];
+        let s = agent_shares(&sessions, Agent::Codex, 8.0);
+        assert_eq!(s[0], None);
+        assert!((s[1].unwrap() - 6.0).abs() < 0.01 && (s[2].unwrap() - 2.0).abs() < 0.01);
+        let s = agent_shares(&sessions, Agent::ClaudeCode, 4.0);
+        assert!((s[0].unwrap() - 4.0).abs() < 0.01 && s[1].is_none() && s[2].is_none());
+        // Claude Code's window full, Codex's not: the Codex session goes on.
+        let claude = Figures { five: Some(80.0), ..Default::default() };
+        let codex = Figures { five: Some(10.0), week: Some(5.0), ..Default::default() };
+        let end = |f: Figures| {
+            let mut t = calm();
+            (t.five, t.week) = (f.five, f.week);
+            stop_reason(&t)
+        };
+        assert_eq!(end(claude), Some(Stop::GlobalLimit(60.0)));
+        assert_eq!(end(codex), None);
+        // An agent that tells no figures: never measured, so it stops at its second turn.
+        let mut t = calm();
+        (t.five, t.week, t.measured, t.turns) = (None, None, false, 2);
+        assert_eq!(stop_reason(&t), Some(Stop::Unmeasured));
+        // And none is ever started alone without its figures.
+        for a in Agent::ALL {
+            assert!(!a.ready() || crate::usage::reports_usage(a), "{a:?}");
+        }
+        // Their limit messages end the session on the spot.
+        for m in [
+            "You've hit your usage limit. Try again in 2 hours.",
+            "[API Error: Quota exceeded for quota metric 'Gemini 2.5 Pro Requests']",
+            "RESOURCE_EXHAUSTED",
+            "Error: Rate limit exceeded (429)",
+        ] {
+            assert!(crate::auto::is_limit_message(m), "{m}");
+        }
     }
 
     /// A turn that ends with nothing to stop on: under every limit, measured, few turns.

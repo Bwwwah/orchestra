@@ -194,11 +194,19 @@ pub fn read() -> Option<Usage> {
         let c = &v["cachedUsageUtilization"];
         let w = from_cache(c);
         if !w.is_empty() {
-            let at = ["fetchedAt", "timestamp", "updatedAt", "lastUpdated"]
+            let stamped = ["fetchedAt", "timestamp", "updatedAt", "lastUpdated"]
                 .iter()
-                .find_map(|k| c.get(*k).and_then(time_ms))
-                .unwrap_or_else(|| mtime_ms(&cj));
-            if best.as_ref().is_none_or(|b| at > b.at) {
+                .find_map(|k| c.get(*k).and_then(time_ms));
+            // Without its own time, the cache only stands in when nothing else is there:
+            // ~/.claude.json is rewritten all the time for other things, so its date would
+            // pass old figures for newer than the status line's, and switching between the
+            // two would count rises that never happened (and use up a session's budget).
+            let newer = match stamped {
+                Some(at) => best.as_ref().is_none_or(|b| at > b.at),
+                None => best.is_none(),
+            };
+            if newer {
+                let at = stamped.unwrap_or_else(|| mtime_ms(&cj));
                 best = Some(Usage { windows: w, at });
             }
         }
@@ -206,6 +214,110 @@ pub fn read() -> Option<Usage> {
     let mut u = best?;
     u.windows.retain(|w| w.resets_at.is_none_or(|r| r > now));
     (!u.windows.is_empty()).then_some(u)
+}
+
+// ------------------------------------------------------------------ the other agents
+//
+// What each agent tells about its limits, on this machine, without a request:
+//
+// - Codex (ChatGPT subscription): every `token_count` event of its session files carries
+//   `rate_limits`, a `primary` window (5 h) and a `secondary` one (week), each with
+//   `used_percent`, `window_minutes` and `resets_at` (seconds since epoch; older versions
+//   wrote `resets_in_seconds`). Read here, the same windows as Claude Code's.
+// - Gemini CLI: its free or paid quota is a number of requests per day, counted by Google
+//   and never written locally (`/stats` only shows the tokens of the session). Nothing to read.
+// - Mistral Vibe: billed by use on an API key, with no subscription window; its session files
+//   hold tokens and cost, not a limit. Nothing to read.
+
+/// The agents whose use of the subscription Orchestra can read (the ceiling of a session
+/// rests on it).
+pub fn reports_usage(agent: crate::auto::Agent) -> bool {
+    use crate::auto::Agent;
+    matches!(agent, Agent::ClaudeCode | Agent::Codex)
+}
+
+/// The latest figures of an agent; None for those that tell none (see above).
+pub fn read_for(agent: crate::auto::Agent) -> Option<Usage> {
+    use crate::auto::Agent;
+    match agent {
+        Agent::ClaudeCode => read(),
+        Agent::Codex => read_codex(),
+        Agent::Gemini | Agent::Vibe => None,
+    }
+}
+
+/// Codex's figures, from its most recent session files (whatever their folder: the limits are
+/// those of the account).
+fn read_codex() -> Option<Usage> {
+    let now = crate::model::now_ms();
+    // A week back: the weekly window is still meaningful, older files are not.
+    let since = std::time::SystemTime::now() - std::time::Duration::from_secs(7 * 24 * 3600);
+    let dir = std::env::var_os("CODEX_HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| dirs::home_dir().unwrap_or_default().join(".codex"))
+        .join("sessions");
+    for f in crate::auto::session_files(&dir, 4, "jsonl", since).into_iter().take(5) {
+        let Ok(mut file) = std::fs::File::open(&f) else { continue };
+        // The last events are enough: the end of the file only (records may be long).
+        let len = file.metadata().map(|m| m.len()).unwrap_or(0);
+        let start = len.saturating_sub(512 * 1024);
+        let mut buf = Vec::new();
+        use std::io::Seek;
+        if file.seek(std::io::SeekFrom::Start(start)).is_err()
+            || file.take(len - start).read_to_end(&mut buf).is_err()
+        {
+            continue;
+        }
+        let text = String::from_utf8_lossy(&buf);
+        if let Some(mut u) = codex_usage(&text, mtime_ms(&f)) {
+            u.windows.retain(|w| w.resets_at.is_none_or(|r| r > now));
+            if !u.windows.is_empty() {
+                return Some(u);
+            }
+        }
+    }
+    None
+}
+
+/// The last `rate_limits` of a Codex session file's text. `file_ms`: when the file last
+/// changed, for records without their own time.
+fn codex_usage(text: &str, file_ms: u64) -> Option<Usage> {
+    for line in text.lines().rev() {
+        if !line.contains("rate_limits") {
+            continue;
+        }
+        let Ok(v) = serde_json::from_str::<Value>(line) else { continue };
+        let rl = &v["payload"]["rate_limits"];
+        if !rl.is_object() {
+            continue;
+        }
+        let at = v.get("timestamp").and_then(time_ms).unwrap_or(file_ms);
+        let mut windows: Vec<Window> = ["primary", "secondary"]
+            .iter()
+            .filter_map(|k| {
+                let w = &rl[*k];
+                let pct = w["used_percent"].as_f64()? as f32;
+                let minutes = w["window_minutes"].as_u64();
+                let label = match (minutes, *k) {
+                    (Some(300), _) | (None, "primary") => label_for("five_hour"),
+                    (Some(10080), _) | (None, _) => label_for("seven_day"),
+                    (Some(m), _) if m % 1440 == 0 => format!("{} j", m / 1440),
+                    (Some(m), _) if m % 60 == 0 => format!("{} h", m / 60),
+                    (Some(m), _) => format!("{m} min"),
+                };
+                let resets_at = w.get("resets_at").and_then(time_ms).or_else(|| {
+                    w["resets_in_seconds"].as_u64().map(|s| at + s * 1000)
+                });
+                Some(Window { label, pct: pct.clamp(0.0, 100.0), resets_at })
+            })
+            .collect();
+        if windows.is_empty() {
+            continue;
+        }
+        windows.sort_by_key(|w| order(&w.label));
+        return Some(Usage { windows, at });
+    }
+    None
 }
 
 impl Usage {
@@ -481,11 +593,94 @@ fn settings_file() -> PathBuf {
     claude_dir().join("settings.json")
 }
 
+/// The status line command: this program with `statusline`, and the data folder when it isn't
+/// the default one (else the figures would be kept where this Orchestra never reads them).
 fn our_command(exe: &std::path::Path) -> String {
+    let env = std::env::var("ORCHESTRA_DIR")
+        .ok()
+        .filter(|d| !d.trim().is_empty())
+        .map(|d| format!("ORCHESTRA_DIR={} ", crate::sessions::shell_quote(&d)))
+        .unwrap_or_default();
     format!(
-        "{} statusline",
+        "{env}{} statusline",
         crate::sessions::shell_quote(&exe.display().to_string())
     )
+}
+
+/// The words of a command as `shell_quote` writes them: plain words, or quoted with `'…'`
+/// (a quote inside written `'\''`).
+fn command_words(cmd: &str) -> Vec<String> {
+    let mut words = vec![];
+    let mut cur = String::new();
+    let (mut quoted, mut any) = (false, false);
+    let mut chars = cmd.chars().peekable();
+    while let Some(c) = chars.next() {
+        match c {
+            '\'' => {
+                quoted = !quoted;
+                any = true;
+            }
+            '\\' if !quoted => {
+                if let Some(n) = chars.next() {
+                    cur.push(n);
+                }
+            }
+            c if c.is_whitespace() && !quoted => {
+                if any || !cur.is_empty() {
+                    words.push(std::mem::take(&mut cur));
+                }
+                any = false;
+            }
+            c => cur.push(c),
+        }
+    }
+    if any || !cur.is_empty() {
+        words.push(cur);
+    }
+    words
+}
+
+/// What a status line command of ours runs: its program and its data folder (None: the
+/// default one). None when it isn't ours.
+fn command_target(cmd: &str) -> Option<(PathBuf, Option<String>)> {
+    let mut w = command_words(cmd);
+    if w.last().map(String::as_str) != Some("statusline") {
+        return None;
+    }
+    w.pop();
+    let dir = match w.first().and_then(|x| x.strip_prefix("ORCHESTRA_DIR=")) {
+        Some(d) => {
+            let d = d.to_string();
+            w.remove(0);
+            Some(d)
+        }
+        None => None,
+    };
+    (w.len() == 1).then(|| (PathBuf::from(&w[0]), dir))
+}
+
+/// Our status line is in place AND works: its program is still there (an Orchestra moved,
+/// updated or built in a copy since deleted leaves a command that fails, and then no figure
+/// ever comes: the sessions stop as unmeasured), and it keeps the figures in this Orchestra's
+/// data folder.
+pub fn tracking_works() -> bool {
+    let here = std::env::var("ORCHESTRA_DIR").ok().filter(|d| !d.trim().is_empty());
+    command_target(&status_command()).is_some_and(|(exe, dir)| exe.is_file() && dir == here)
+}
+
+/// Our status line is in place but its program is gone: nothing is measured any more. Put
+/// right by itself (not when it is another Orchestra's that works: they would take turns).
+pub fn tracking_broken() -> bool {
+    command_target(&status_command()).is_some_and(|(exe, _)| !exe.is_file())
+}
+
+/// Claude Code's status line command, as its settings hold it.
+fn status_command() -> String {
+    std::fs::read_to_string(settings_file())
+        .ok()
+        .and_then(|t| serde_json::from_str::<Value>(&t).ok())
+        .and_then(|v| v["statusLine"]["command"].as_str().map(String::from))
+        .unwrap_or_default()
 }
 
 /// Our status line is the one Claude Code runs.
@@ -580,6 +775,31 @@ fn restore_status_line(v: &mut Value, prev: Option<&str>) -> Result<bool, String
         }
     }
     Ok(true)
+}
+
+#[test]
+fn a_status_line_of_ours_is_read_back() {
+    // As written by our_command: quoted program, optional data folder.
+    assert_eq!(
+        command_target("'/Applications/Orchestra.app/Contents/MacOS/orchestra' statusline"),
+        Some((PathBuf::from("/Applications/Orchestra.app/Contents/MacOS/orchestra"), None))
+    );
+    assert_eq!(
+        command_target("ORCHESTRA_DIR='/tmp/my data' /usr/local/bin/orchestra statusline"),
+        Some((PathBuf::from("/usr/local/bin/orchestra"), Some("/tmp/my data".into())))
+    );
+    // A quote inside a quoted path.
+    let exe = PathBuf::from("/Users/a/l'app/orchestra");
+    let cmd = format!("{} statusline", crate::sessions::shell_quote(&exe.display().to_string()));
+    assert_eq!(command_target(&cmd), Some((exe, None)));
+    // Not ours.
+    assert_eq!(command_target("~/bin/ma-ligne.sh"), None);
+    assert_eq!(command_target("statusline"), None);
+    assert_eq!(command_target("a b statusline"), None);
+    assert_eq!(command_target(""), None);
+    // What our_command writes reads back to the same program.
+    let me = std::env::current_exe().unwrap();
+    assert_eq!(command_target(&our_command(&me)).map(|(p, _)| p), Some(me));
 }
 
 #[test]
@@ -777,6 +997,36 @@ mod tests {
         ];
         assert_eq!(day_total(&h, now), Some(25.0 + 15.0));
         assert_eq!(day_total(&[], now), None);
+    }
+
+    #[test]
+    fn codex_limits_are_read_from_its_session() {
+        use crate::auto::Agent;
+        let text = concat!(
+            r#"{"timestamp":"2026-11-21T10:00:00.000Z","type":"session_meta","payload":{"cwd":"/x"}}"#, "\n",
+            r#"{"timestamp":"2026-11-21T10:01:00.000Z","type":"event_msg","payload":{"type":"token_count","rate_limits":{"primary":{"used_percent":10.0,"window_minutes":300,"resets_at":1795000000},"secondary":{"used_percent":3.0,"window_minutes":10080,"resets_at":1795500000}}}}"#, "\n",
+            r#"{"timestamp":"2026-11-21T10:02:00.000Z","type":"event_msg","payload":{"type":"token_count","rate_limits":{"secondary":{"used_percent":4.5,"window_minutes":10080,"resets_in_seconds":3600},"primary":{"used_percent":12.5,"window_minutes":300,"resets_in_seconds":60}}}}"#, "\n",
+            r#"{"timestamp":"2026-11-21T10:03:00.000Z","type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"rate_limits ?"}]}}"#, "\n",
+        );
+        let u = codex_usage(text, 0).unwrap();
+        // The last figures, in the same windows and order as Claude Code's.
+        let at = crate::sessions::parse_iso_ms("2026-11-21T10:02:00.000Z").unwrap();
+        assert_eq!(u.at, at);
+        assert_eq!(u.five().unwrap().pct, 12.5);
+        assert_eq!(u.five().unwrap().resets_at, Some(at + 60_000));
+        assert_eq!(u.week().unwrap().pct, 4.5);
+        assert_eq!(u.windows[0].label, "Session (5 h)");
+        // An older record with times in seconds since epoch.
+        let first = text.lines().nth(1).unwrap();
+        let u = codex_usage(first, 0).unwrap();
+        assert_eq!(u.five().unwrap().resets_at, Some(1_795_000_000_000));
+        // Nothing to read: no figures, never a made-up 0 %.
+        assert!(codex_usage("", 0).is_none());
+        assert!(codex_usage(r#"{"payload":{"rate_limits":null}}"#, 0).is_none());
+        assert!(codex_usage(r#"{"payload":{"rate_limits":{"primary":{}}}}"#, 0).is_none());
+        assert!(reports_usage(Agent::ClaudeCode) && reports_usage(Agent::Codex));
+        assert!(!reports_usage(Agent::Gemini) && !reports_usage(Agent::Vibe));
+        assert!(read_for(Agent::Gemini).is_none() && read_for(Agent::Vibe).is_none());
     }
 
     #[test]

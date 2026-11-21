@@ -14,6 +14,47 @@ use std::path::{Component, Path, PathBuf};
 pub const SUMMARY_MAX: usize = 4000;
 pub const STEP_MAX: usize = 2000;
 
+/// How an AI must write a step, said in its prompts and in the MCP tools' errors.
+pub const AI_STEP_FORMAT: &str = "« Theme: action » — a short theme (1 to 4 words), a colon, then ONE action with its verb first (in French: « Thème : action à l'infinitif »), e.g. « Sécurité : échapper le nom du dossier passé à git (src/git.rs) ». One action per step: no « ; », « puis », « then », no second sentence.";
+
+/// A step written by an AI, checked against `AI_STEP_FORMAT` and tidied (one line, « Thème :
+/// action » spacing, the theme's first letter upper case). Err: why it doesn't fit, to tell
+/// the AI so it rewrites the step. The person's own steps are never checked.
+pub fn ai_step(title: &str) -> Result<String, String> {
+    let t = crate::richtext::step_title(title, STEP_MAX);
+    let bad = |why: &str| Err(format!("« {t} » : {why}. Expected {AI_STEP_FORMAT}"));
+    let Some((theme, action)) = t.split_once(':') else {
+        return bad("no theme before a colon");
+    };
+    let (theme, action) = (theme.trim(), action.trim());
+    let words = theme.split_whitespace().count();
+    if words == 0 || words > 4 || theme.chars().count() > 40 {
+        return bad("the theme must be 1 to 4 words");
+    }
+    if theme.chars().any(|c| matches!(c, '(' | ')' | '«' | '»' | '"' | '`')) {
+        return bad("the theme must be a plain word or two");
+    }
+    if action.chars().filter(|c| c.is_alphabetic()).count() < 3 {
+        return bad("no action after the colon");
+    }
+    let low = format!(" {} ", action.to_lowercase());
+    let two = action.contains(';')
+        || [" puis ", " ensuite ", " then ", " and then ", " et ensuite "]
+            .iter()
+            .any(|w| low.contains(w))
+        // A second sentence: « . » followed by a capital letter.
+        || action
+            .split(". ")
+            .skip(1)
+            .any(|s| s.chars().next().is_some_and(char::is_uppercase));
+    if two {
+        return bad("one action per step (split it into several steps)");
+    }
+    let mut c = theme.chars();
+    let theme: String = c.next().map(|f| f.to_uppercase().chain(c).collect()).unwrap_or_default();
+    Ok(format!("{theme} : {action}"))
+}
+
 /// A state of play built from lists, so every AI's summary has the same shape:
 /// "Fait", "En cours", "Bloquants", then free notes.
 pub fn summary_from_parts(
@@ -1123,6 +1164,35 @@ pub fn project_to_markdown(page: &Page) -> String {
 mod tests {
     use super::*;
     use crate::model::Workspace;
+
+    #[test]
+    fn ai_steps_are_one_action_under_a_theme() {
+        // Fitting, tidied: « Thème : action », first letter of the theme upper case.
+        for (given, kept) in [
+            ("Sécurité : échapper le nom du dossier (src/git.rs)", "Sécurité : échapper le nom du dossier (src/git.rs)"),
+            ("interface: ajouter un bouton", "Interface : ajouter un bouton"),
+            ("Mesure d'usage :garder la dernière valeur", "Mesure d'usage : garder la dernière valeur"),
+            ("Docs: write the guide (v2.1. see notes)", "Docs : write the guide (v2.1. see notes)"),
+            ("Quota : fixer le plafond à 50 % (src/app/orch_ui.rs: stop_reason)", "Quota : fixer le plafond à 50 % (src/app/orch_ui.rs: stop_reason)"),
+        ] {
+            assert_eq!(ai_step(given).as_deref(), Ok(kept), "{given}");
+        }
+        // Not fitting: no theme, a long theme, no action, two actions.
+        for bad in [
+            "Ajouter un bouton",
+            "Il faudrait vraiment revoir tout ceci : ajouter un bouton",
+            "Interface :",
+            "Interface : ?!",
+            "(src) : corriger",
+            "Interface : ajouter un bouton ; le tester",
+            "Interface : ajouter un bouton puis le tester",
+            "Interface : ajouter un bouton. Ensuite le tester",
+            "Tests: write it, then run it",
+        ] {
+            let e = ai_step(bad).unwrap_err();
+            assert!(e.contains("Expected") && e.contains("Theme"), "{bad}: {e}");
+        }
+    }
 
     /// The budget per session is saved with the project, comes back on loading, and stays
     /// this computer's own when a shared copy comes in.

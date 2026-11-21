@@ -1400,7 +1400,7 @@ pub(super) fn project_panel(ui: &mut egui::Ui, cx: &mut Cx) -> Option<super::not
 /// Whether the project page shows the git card, re-detected every few seconds per folder
 /// (a `git init` or new source files show it without reopening the page).
 /// The person's forced choice (code / non-code) wins.
-fn shows_git(ctx: &egui::Context, pr: &Project) -> bool {
+pub(super) fn shows_git(ctx: &egui::Context, pr: &Project) -> bool {
     pr.code.unwrap_or_else(|| detected_code(ctx, &pr.folder))
 }
 
@@ -2009,6 +2009,52 @@ fn steps_glow(age: f64) -> f32 {
 }
 
 #[cfg(test)]
+mod session_pick_tests {
+    use super::{Color32, new_session_pick};
+
+    #[test]
+    fn the_new_session_line_offers_an_ai_then_its_models() {
+        let l = [
+            ("Claude Code", Some("claude"), Color32::RED),
+            ("Mistral Vibe", Some("vibe"), Color32::BLUE),
+            ("Shell", None, Color32::GRAY),
+        ];
+        // Nothing chosen yet: the first AI, its default model.
+        let p = new_session_pick(&l, "", "");
+        assert_eq!((p.label, p.cmd, p.model.as_str()), ("Claude Code", Some("claude"), ""));
+        assert!(p.models.contains(&"opus"));
+        // A model it offers is kept; another AI's model goes back to « par défaut ».
+        assert_eq!(new_session_pick(&l, "Claude Code", "sonnet").model, "sonnet");
+        assert_eq!(new_session_pick(&l, "Claude Code", "gpt-5").model, "");
+        // An AI without a model list (Vibe, the shell): only « par défaut ».
+        let p = new_session_pick(&l, "Mistral Vibe", "opus");
+        assert!(p.models.is_empty() && p.model.is_empty());
+        assert_eq!(new_session_pick(&l, "Shell", "").cmd, None);
+        // An AI unplugged since: the first one again.
+        assert_eq!(new_session_pick(&l, "Codex", "gpt-5").label, "Claude Code");
+        assert_eq!(new_session_pick(&[], "Codex", "").label, "Shell");
+        // The command: --model for a chosen model, nothing added for « par défaut ».
+        assert_eq!(new_session_pick(&l, "Claude Code", "").command().as_deref(), Some("claude"));
+        assert_eq!(
+            new_session_pick(&l, "Claude Code", "opus").command().as_deref(),
+            Some("claude --model opus")
+        );
+        // A model not offered never reaches the command line.
+        assert_eq!(
+            new_session_pick(&l, "Claude Code", "x; rm -rf ~").command().as_deref(),
+            Some("claude")
+        );
+        assert_eq!(new_session_pick(&l, "Mistral Vibe", "opus").command().as_deref(), Some("vibe"));
+        assert_eq!(new_session_pick(&l, "Shell", "opus").command(), None);
+        // Every AI that opens in a terminal knows its models (possibly none).
+        for a in crate::setup::Ai::ALL {
+            assert_eq!(crate::setup::Ai::from_label(a.label()), Some(a));
+            assert!(a.models().iter().all(|m| !m.is_empty() && !m.contains(' ')));
+        }
+    }
+}
+
+#[cfg(test)]
 mod glow_tests {
     /// The Steps card glows fully, then fades, then stops (never before, never after).
     #[test]
@@ -2316,22 +2362,87 @@ fn sessions_card(ui: &mut egui::Ui, cx: &mut Cx, extra: f32) -> f32 {
                     .file_name()
                     .map(|n| n.to_string_lossy().to_string())
                     .unwrap_or_default();
-                for (label, cmd, accent) in cx.launchers.clone() {
-                    let accent = if cmd.is_none() { t.secondary } else { accent };
-                    if launch_pill(ui, label, accent, t)
-                        .on_hover_text(crate::trf!(
-                            "Ouvrir {label} dans {name}, dans le terminal intégré",
-                            "Open {label} in {name}, in the built-in terminal"
+                let launchers = cx.launchers.clone();
+                let (ai_key, model_key) = (
+                    egui::Id::unique(("session-ai", page_id)),
+                    egui::Id::unique(("session-model", page_id)),
+                );
+                let (mut ai, mut model) = ui.ctx().data(|d| {
+                    (
+                        d.get_temp::<String>(ai_key).unwrap_or_default(),
+                        d.get_temp::<String>(model_key).unwrap_or_default(),
+                    )
+                });
+                let pick = new_session_pick(&launchers, &ai, &model);
+                // The AI.
+                let before = ai.clone();
+                egui::ComboBox::from_id_salt(("session-ai-list", page_id))
+                    .selected_text(pick.label)
+                    .width(130.0)
+                    .show_ui(ui, |ui| {
+                        for (label, _, _) in &launchers {
+                            ui.selectable_value(&mut ai, label.to_string(), *label);
+                        }
+                    })
+                    .response
+                    .on_hover_text(crate::tr!("L'IA à ouvrir", "The AI to open"));
+                if ai != before {
+                    // Another AI: its own models, so back to « par défaut ».
+                    model.clear();
+                }
+                let pick = new_session_pick(&launchers, &ai, &model);
+                // A model this AI doesn't offer (or no longer): back to « par défaut ».
+                model = pick.model.clone();
+                // Its model: « par défaut » (the AI's own choice), then those it offers.
+                ui.add_enabled_ui(!pick.models.is_empty(), |ui| {
+                    egui::ComboBox::from_id_salt(("session-model-list", page_id))
+                        .selected_text(if model.is_empty() {
+                            crate::tr!("Modèle par défaut", "Default model")
+                        } else {
+                            model.as_str()
+                        })
+                        .width(150.0)
+                        .show_ui(ui, |ui| {
+                            ui.selectable_value(
+                                &mut model,
+                                String::new(),
+                                crate::tr!("Par défaut", "Default"),
+                            );
+                            for m in pick.models {
+                                ui.selectable_value(&mut model, m.to_string(), *m);
+                            }
+                        })
+                        .response
+                        .on_hover_text(crate::tr!(
+                            "Le modèle de la session ; « par défaut » laisse l'IA choisir",
+                            "The session's model; « default » lets the AI choose"
                         ))
-                        .clicked()
-                    {
-                        super::term_ui::request(
-                            ui.ctx(),
-                            &format!("{label} · {name}"),
-                            pr.folder.trim(),
-                            cmd.map(String::from),
-                        );
-                    }
+                        .on_disabled_hover_text(crate::tr!(
+                            "Cette IA choisit son modèle dans ses propres réglages",
+                            "This AI picks its model in its own settings"
+                        ));
+                });
+                ui.ctx().data_mut(|d| {
+                    d.insert_temp(ai_key, ai.clone());
+                    d.insert_temp(model_key, model.clone());
+                });
+                // The model just chosen in the list, if any.
+                let pick = new_session_pick(&launchers, &ai, &model);
+                let label = pick.label;
+                let accent = if pick.cmd.is_none() { t.secondary } else { pick.accent };
+                if launch_pill(ui, crate::tr!("Ouvrir", "Open"), accent, t)
+                    .on_hover_text(crate::trf!(
+                        "Ouvrir {label} dans {name}, dans le terminal intégré",
+                        "Open {label} in {name}, in the built-in terminal"
+                    ))
+                    .clicked()
+                {
+                    let title = if pick.model.is_empty() {
+                        format!("{label} · {name}")
+                    } else {
+                        format!("{label} ({}) · {name}", pick.model)
+                    };
+                    super::term_ui::request(ui.ctx(), &title, pr.folder.trim(), pick.command());
                 }
             });
             ui.add_space(8.0);
@@ -2987,6 +3098,50 @@ pub(super) fn folder_view(
 }
 
 /// "Nouvelle session" buttons: a small terminal mark tinted per tool, then the name.
+/// What the « Nouvelle session » line of the « Sessions IA » card opens.
+#[derive(Debug, PartialEq)]
+struct SessionPick {
+    label: &'static str,
+    cmd: Option<&'static str>,
+    accent: Color32,
+    /// The models offered for it (empty: only « par défaut »).
+    models: &'static [&'static str],
+    /// The model chosen; empty for « par défaut ».
+    model: String,
+}
+
+/// The AI chosen by its label among `launchers` (the first one when that label is gone, an
+/// AI unplugged meanwhile), and the model chosen if that AI offers it (else « par défaut »).
+fn new_session_pick(
+    launchers: &[(&'static str, Option<&'static str>, Color32)],
+    ai: &str,
+    model: &str,
+) -> SessionPick {
+    let (label, cmd, accent) = launchers
+        .iter()
+        .find(|(l, _, _)| *l == ai)
+        .or(launchers.first())
+        .copied()
+        .unwrap_or(("Shell", None, Color32::GRAY));
+    let models = crate::setup::Ai::from_label(label).map(|a| a.models()).unwrap_or(&[]);
+    let model = if models.contains(&model) { model.to_string() } else { String::new() };
+    SessionPick { label, cmd, accent, models, model }
+}
+
+impl SessionPick {
+    /// The command opened in the terminal: the AI's program, with `--model <name>` (an option
+    /// Claude Code, Codex and Gemini CLI all take) for a chosen model, and nothing added for
+    /// « par défaut ». None: the shell.
+    fn command(&self) -> Option<String> {
+        let cmd = self.cmd?;
+        Some(if self.model.is_empty() {
+            cmd.to_string()
+        } else {
+            format!("{cmd} --model {}", crate::sessions::shell_quote(&self.model))
+        })
+    }
+}
+
 fn launch_pill(ui: &mut egui::Ui, label: &str, accent: Color32, t: &Tone) -> egui::Response {
     let font = FontId::proportional(12.5);
     let g = ui.painter().layout_no_wrap(label.to_string(), font, t.text);
@@ -3259,6 +3414,12 @@ fn quick_question(ui: &mut egui::Ui, cx: &mut Cx) {
             });
         } else if let Some(a) = cx.ai.answers.get(page_id) {
             card_rule(ui, t);
+            // The app's labels can't be selected (a click on them does something else); the
+            // answer's can: drag over it to select, ⌘C to copy, or « Copier » for all of it.
+            ui.style_mut().interaction.selectable_labels = true;
+            let copied_key = egui::Id::unique(("quick-answer-copied", page_id));
+            let copied_at: Option<f64> = ui.ctx().data(|d| d.get_temp(copied_key));
+            let now_s = ui.input(|i| i.time);
             ui.horizontal(|ui| {
                 ui.add(
                     egui::Label::new(
@@ -3282,12 +3443,47 @@ fn quick_question(ui: &mut egui::Ui, cx: &mut Cx) {
                     {
                         close = true;
                     }
+                    if let Ok(md) = &a.answer {
+                        let just = copied_at.is_some_and(|at| now_s - at < 1.5);
+                        let label = if just {
+                            crate::tr!("Copié", "Copied")
+                        } else {
+                            crate::tr!("Copier", "Copy")
+                        };
+                        if quiet_link(ui, label, t)
+                            .on_hover_text(crate::tr!(
+                                "Copier toute la réponse (Markdown)",
+                                "Copy the whole answer (Markdown)"
+                            ))
+                            .clicked()
+                        {
+                            // The answer as the AI wrote it (Markdown).
+                            ui.ctx().copy_text(md.trim().to_string());
+                            ui.ctx().data_mut(|d| d.insert_temp(copied_key, now_s));
+                        }
+                        if just {
+                            ui.ctx().request_repaint_after(std::time::Duration::from_millis(300));
+                        }
+                    }
                 });
             });
             ui.add_space(4.0);
             match &a.answer {
                 Ok(md) => {
                     super::rich::markdown(ui, md, 13.5, t);
+                    if a.steps > 0 {
+                        ui.add_space(4.0);
+                        let s = crate::i18n::plural(a.steps);
+                        ui.label(
+                            RichText::new(crate::trf!(
+                                "{} étape{s} proposée{s} dans l'encadré Étapes : cochez celles à garder.",
+                                "{} step{s} proposed in the Steps box: tick the ones to keep.",
+                                a.steps
+                            ))
+                            .size(12.5)
+                            .color(GREEN),
+                        );
+                    }
                     if !a.by.is_empty() {
                         ui.add_space(2.0);
                         ui.label(

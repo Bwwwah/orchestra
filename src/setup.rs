@@ -171,7 +171,7 @@ fn vibe_config() -> PathBuf {
 
 /// The file cut into its tables: each piece starts at a `[…]` header (the first one may
 /// have none: the top-level keys).
-fn toml_tables(text: &str) -> Vec<String> {
+pub(crate) fn toml_tables(text: &str) -> Vec<String> {
     let mut out: Vec<String> = vec![String::new()];
     for line in text.split_inclusive('\n') {
         if line.trim_start().starts_with('[') && !out.last().is_some_and(|t| t.is_empty()) {
@@ -368,6 +368,24 @@ impl Ai {
             _ => None,
         }
     }
+    /// The models offered in the « Sessions IA » card besides « par défaut » (what the AI
+    /// itself picks): names its own `--model` option takes. Empty: only « par défaut ».
+    pub fn models(self) -> &'static [&'static str] {
+        match self {
+            // Claude Code's aliases follow the latest model of each family.
+            Ai::ClaudeCode => &["opus", "sonnet", "haiku"],
+            Ai::Codex => &["gpt-5-codex", "gpt-5"],
+            Ai::Gemini => &["gemini-2.5-pro", "gemini-2.5-flash"],
+            // Mistral Vibe picks its model in its own settings (active_model).
+            _ => &[],
+        }
+    }
+
+    /// The AI of the setup list shown under this label, if any.
+    pub fn from_label(label: &str) -> Option<Ai> {
+        Ai::ALL.into_iter().find(|a| a.label() == label)
+    }
+
     /// What to type in a terminal to sign in with one's account.
     pub fn login(self) -> Option<(&'static str, &'static str)> {
         match self {
