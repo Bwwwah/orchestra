@@ -49,6 +49,8 @@ pub struct QuickAnswer {
     pub by: String,
     /// How many steps the answer proposed (added to the Steps box's proposals).
     pub steps: usize,
+    /// (folder, command) reopening the AI's conversation in a terminal, to carry it on.
+    pub resume: Option<(String, String)>,
 }
 
 fn req_key() -> egui::Id {
@@ -62,8 +64,8 @@ pub fn request(ctx: &egui::Context, r: AiReq) {
 
 /// A page filled by an AI, and which one, once done.
 type FillSlot = Slot<Result<(Fill, Tool), String>>;
-/// A quick question: the answer, and the AI that gave it, once done.
-type AnswerSlot = Slot<Result<(String, Tool), String>>;
+/// A quick question: the answer, the AI that gave it and its conversation, once done.
+type AnswerSlot = Slot<Result<crate::sync::QuestionReply, String>>;
 
 #[derive(Default)]
 pub struct AiJobs {
@@ -204,16 +206,16 @@ impl NotesApp {
             let res = slot.lock_or_recover().take().unwrap();
             let by = res
                 .as_ref()
-                .map(|(_, t)| t.label().to_string())
+                .map(|r| r.tool.label().to_string())
                 .unwrap_or_default();
             // Steps the answer proposes: to the Steps box, where they wait for the person's
             // choice like the other proposals (never added to the project by themselves).
-            let (answer, steps) = match res {
-                Ok((a, _)) => {
-                    let (text, steps) = crate::sync::split_answer_steps(&a);
-                    (Ok(text), steps)
+            let (answer, steps, resume) = match res {
+                Ok(r) => {
+                    let (text, steps) = crate::sync::split_answer_steps(&r.answer);
+                    (Ok(text), steps, r.resume)
                 }
-                Err(e) => (Err(e), vec![]),
+                Err(e) => (Err(e), vec![], None),
             };
             let existing: Vec<String> = self
                 .ws
@@ -236,6 +238,7 @@ impl NotesApp {
                     answer,
                     by,
                     steps: n,
+                    resume,
                 },
             );
         }

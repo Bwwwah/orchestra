@@ -755,6 +755,8 @@ pub(super) fn action_link(ui: &mut egui::Ui, text: &str) -> egui::Response {
             color.gamma_multiply(0.35 + 0.65 * a),
         );
     }
+    // Screen readers (and the tests) find it by its text, like a button.
+    resp.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, text));
     resp.on_hover_cursor(egui::CursorIcon::PointingHand)
 }
 
@@ -2099,6 +2101,7 @@ mod session_pick_tests {
 mod new_step_field_tests {
     use super::*;
     use egui_kittest::Harness;
+    use egui_kittest::kittest::Queryable;
 
     #[derive(Default)]
     struct S {
@@ -2117,10 +2120,8 @@ mod new_step_field_tests {
         h.run();
     }
 
-    /// The « Ajouter une étape » field keeps the focus while steps are added above it
-    /// (by Enter, or by an AI meanwhile): what is typed goes on landing in it.
-    #[test]
-    fn typing_a_step_is_not_cut_when_the_list_above_changes() {
+    /// One card of project « p1 » drawn by `draw`, with the app's fonts.
+    fn harness(draw: fn(&mut egui::Ui, &mut Cx)) -> Harness<'static, S> {
         let t = tone(false);
         let mut h = Harness::builder().with_size([700.0, 700.0]).build_ui_state(
             move |ui, s: &mut S| {
@@ -2145,13 +2146,60 @@ mod new_step_field_tests {
                     questions: &[],
                     answered: &mut s.answered,
                 };
-                steps_card(ui, &mut cx, 0.0);
+                draw(ui, &mut cx);
             },
             S::default(),
         );
         setup_fonts(&h.ctx);
         h.run();
         h.state_mut().draw = true;
+        h
+    }
+
+    /// An answered quick question offers to carry the conversation on: the button opens a
+    /// terminal on the AI's conversation, in the folder where the question was asked.
+    #[test]
+    fn a_quick_answer_can_be_carried_on_in_a_terminal() {
+        let mut h = harness(quick_question);
+        let answer = |resume| super::super::ai_fill::QuickAnswer {
+            question: "Faut-il un mode hors ligne ?".into(),
+            answer: Ok("Oui, petit changement.".into()),
+            by: "Claude Code".into(),
+            steps: 0,
+            resume,
+        };
+        // No conversation id given back: no button.
+        h.state_mut().ai.answers.insert("p1".into(), answer(None));
+        h.run();
+        assert!(h.query_by_label("Poursuivre la conversation").is_none());
+        let cmd = "claude --resume 0199a2b3-c4d5-7e6f-8a9b-0c1d2e3f4a5b";
+        h.state_mut()
+            .ai
+            .answers
+            .insert("p1".into(), answer(Some(("/tmp/projet".into(), cmd.into()))));
+        h.run();
+        h.get_by_label("Poursuivre la conversation").click();
+        h.run();
+        let req = h
+            .ctx
+            .data_mut(|d| {
+                d.remove_temp::<super::super::term_ui::TermRequest>(egui::Id::unique(
+                    "term-request",
+                ))
+            })
+            .expect("a terminal is asked for");
+        assert_eq!(req.cmd.as_deref(), Some(cmd));
+        assert_eq!(req.cwd, "/tmp/projet");
+        assert_eq!(req.title, "Faut-il un mode hors ligne ?");
+    }
+
+    /// The « Ajouter une étape » field keeps the focus while steps are added above it
+    /// (by Enter, or by an AI meanwhile): what is typed goes on landing in it.
+    #[test]
+    fn typing_a_step_is_not_cut_when_the_list_above_changes() {
+        let mut h = harness(|ui, cx| {
+            steps_card(ui, cx, 0.0);
+        });
         // Open the field, as a click on « Ajouter une étape » does.
         h.ctx
             .data_mut(|d| d.insert_temp(egui::Id::unique(("adding-step", "p1")), true));
@@ -3583,6 +3631,16 @@ fn review_sections(ui: &mut egui::Ui, text: &str, t: &Tone) {
     }
 }
 
+/// The tab title of a quick question carried on in a terminal: the question, short.
+fn resume_title(question: &str) -> String {
+    let q = crate::richtext::one_line(question, 40);
+    if q.is_empty() {
+        crate::tr!("Question rapide", "Quick question").to_string()
+    } else {
+        q
+    }
+}
+
 /// Full-width card at the bottom of a project: an AI's short, honest outside view —
 /// opinion, similar projects that appeared, what to do next.
 /// "Question rapide": one line to ask the AI something about the project (« would this
@@ -3729,13 +3787,42 @@ fn quick_question(ui: &mut egui::Ui, cx: &mut Cx) {
                             .color(GREEN),
                         );
                     }
-                    if !a.by.is_empty() {
+                    if !a.by.is_empty() || a.resume.is_some() {
                         ui.add_space(2.0);
-                        ui.label(
-                            RichText::new(crate::trf!("réponse de {}", "answer by {}", a.by))
-                                .size(11.5)
-                                .color(t.tertiary),
-                        );
+                        ui.horizontal(|ui| {
+                            if !a.by.is_empty() {
+                                ui.label(
+                                    RichText::new(crate::trf!(
+                                        "réponse de {}",
+                                        "answer by {}",
+                                        a.by
+                                    ))
+                                    .size(11.5)
+                                    .color(t.tertiary),
+                                );
+                            }
+                            if let Some((cwd, cmd)) = &a.resume
+                                && action_link(
+                                    ui,
+                                    crate::tr!(
+                                        "Poursuivre la conversation",
+                                        "Carry on the conversation"
+                                    ),
+                                )
+                                .on_hover_text(crate::tr!(
+                                    "Rouvrir cet échange avec l'IA dans un terminal, pour lui répondre ou creuser la question",
+                                    "Reopen this exchange with the AI in a terminal, to answer it or dig further"
+                                ))
+                                .clicked()
+                            {
+                                super::term_ui::request(
+                                    ui.ctx(),
+                                    &resume_title(&a.question),
+                                    cwd,
+                                    Some(cmd.clone()),
+                                );
+                            }
+                        });
                     }
                 }
                 Err(e) => {
