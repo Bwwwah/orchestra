@@ -195,6 +195,9 @@ struct Draft {
     /// Where the next session stops, in absolute % of the 5-hour window, as chosen (None:
     /// the default, see `ceiling_choice`).
     ceiling: Option<f32>,
+    /// The ceiling was changed in the launch card since Orchestra opened: it then wins over
+    /// that of a session already running (see `draft_ceiling`).
+    touched: bool,
     commits: bool,
     pick: bool,
     /// Endless mode, and its end conditions as set in the launch card.
@@ -212,6 +215,7 @@ impl Draft {
         Draft {
             mission: String::new(),
             ceiling: pr.and_then(|x| x.session_ceiling),
+            touched: false,
             commits: prefs.commits,
             pick: false,
             endless: prefs.endless,
@@ -254,6 +258,19 @@ fn ceiling_floor(five: Option<f32>, global: f32) -> f32 {
 fn ceiling_choice(chosen: Option<f32>, five: Option<f32>, default_share: f32, global: f32) -> f32 {
     let want = chosen.unwrap_or_else(|| five.unwrap_or(0.0) + default_share).round();
     want.clamp(ceiling_floor(five, global), global.max(1.0))
+}
+
+/// The ceiling of the sessions already running on the subscription (the highest, if they
+/// differ): where a session started beside them begins (see `draft_ceiling`).
+fn running_ceiling(ceilings: impl IntoIterator<Item = Option<f32>>) -> Option<f32> {
+    ceilings.into_iter().flatten().reduce(f32::max)
+}
+
+/// The ceiling a project's next session is offered (before `ceiling_choice` puts it in
+/// bounds): beside a session already running, that session's (« stop at 50 % » for both),
+/// unless the person changed this project's since Orchestra opened; else the one kept.
+fn draft_ceiling(d: &Draft, running: Option<f32>) -> Option<f32> {
+    if d.touched { d.ceiling } else { running.or(d.ceiling) }
 }
 
 /// Whether a session can start under the global limit: at least 1 % of the window is left.
@@ -2738,8 +2755,12 @@ impl NotesApp {
             .collect();
         let global = self.ws.settings.orch.global_limit;
         // Each session stops at its own ceiling on the 5-hour window (absolute), all under the
-        // global limit: nothing to share out between them.
+        // global limit: nothing to share out between them. One started beside them begins
+        // from their ceiling.
         let five = self.orch.five;
+        let running_at = running_ceiling(
+            self.orch.runs.iter().filter(|r| r.agent == Agent::ClaudeCode).map(|r| r.ceiling),
+        );
         let open_steps: HashMap<String, usize> = projects
             .iter()
             .map(|(id, _, _)| {
@@ -2840,7 +2861,7 @@ impl NotesApp {
                         });
                         if wide {
                             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                                launch_controls(ui, LaunchCx { id, d: &mut *d, busy, plugged, open, five, default_share: dl, global, to_main: &mut to_main, start: &mut start, confirm_main: &mut confirm_main, ceilings: &mut ceilings, lk: &lk, t });
+                                launch_controls(ui, LaunchCx { id, d: &mut *d, busy, plugged, open, five, running_at, default_share: dl, global, to_main: &mut to_main, start: &mut start, confirm_main: &mut confirm_main, ceilings: &mut ceilings, lk: &lk, t });
                             });
                         }
                     });
@@ -2848,7 +2869,7 @@ impl NotesApp {
                     if !wide {
                         ui.horizontal_wrapped(|ui| {
                             ui.add_space(70.0);
-                            launch_controls(ui, LaunchCx { id, d: &mut *d, busy, plugged, open, five, default_share: dl, global, to_main: &mut to_main, start: &mut start, confirm_main: &mut confirm_main, ceilings: &mut ceilings, lk: &lk, t });
+                            launch_controls(ui, LaunchCx { id, d: &mut *d, busy, plugged, open, five, running_at, default_share: dl, global, to_main: &mut to_main, start: &mut start, confirm_main: &mut confirm_main, ceilings: &mut ceilings, lk: &lk, t });
                         });
                     }
                     ui.horizontal(|ui| {
@@ -3034,7 +3055,10 @@ impl NotesApp {
                 .map(|p| p.display_title())
                 .unwrap_or_default();
             let o = &self.ws.settings.orch;
-            let ceiling = ceiling_choice(d.ceiling, self.orch.five, o.default_limit, global);
+            // As shown in the card: the sessions started together in a selection don't change
+            // each other's ceiling.
+            let want = draft_ceiling(&d, running_at);
+            let ceiling = ceiling_choice(want, self.orch.five, o.default_limit, global);
             let endless = if d.endless { Some(d.end.clone()) } else { None };
             match self.launch_run(ctx, &id, &d.mission, ceiling, d.commits, endless) {
                 Ok(()) => {
@@ -4659,6 +4683,8 @@ struct LaunchCx<'a> {
     open: usize,
     /// The 5-hour window's figure, and the settings' default share above it.
     five: Option<f32>,
+    /// The ceiling of the sessions already running (`running_ceiling`).
+    running_at: Option<f32>,
     default_share: f32,
     global: f32,
     to_main: &'a mut HashMap<String, bool>,
@@ -4680,6 +4706,7 @@ fn launch_controls(ui: &mut egui::Ui, c: LaunchCx<'_>) {
         plugged,
         open,
         five,
+        running_at,
         default_share,
         global,
         to_main,
@@ -4751,7 +4778,7 @@ fn launch_controls(ui: &mut egui::Ui, c: LaunchCx<'_>) {
     // The ceiling chosen stays as it is: it is only shown raised above the window's figure
     // (and again at the start), so a window that rose meanwhile never changes it for good.
     let floor = ceiling_floor(five, global);
-    let mut shown = ceiling_choice(d.ceiling, five, default_share, global);
+    let mut shown = ceiling_choice(draft_ceiling(d, running_at), five, default_share, global);
     // Read « arrêt à 50 % » whichever way the controls are laid out.
     let rtl = ui.layout().prefer_right_to_left();
     let label = |ui: &mut egui::Ui| {
@@ -4769,11 +4796,20 @@ fn launch_controls(ui: &mut egui::Ui, c: LaunchCx<'_>) {
     );
     if dv.changed() {
         d.ceiling = Some(shown);
+        d.touched = true;
         ceilings.push((id.clone(), shown));
     }
-    let now = five
+    let mut now = five
         .map(|f| crate::trf!("La fenêtre est à {f:.0} % : ", "The window is at {f:.0} %: "))
         .unwrap_or_default();
+    if let Some(r) = running_at
+        && !d.touched
+    {
+        now = crate::trf!(
+            "Une session tourne déjà avec un plafond de {r:.0} % : celle-ci part du même. {now}",
+            "A session is already running with a ceiling of {r:.0} %: this one starts from the same. {now}"
+        );
+    }
     dv.on_hover_text(crate::trf!(
         "Plafond de la prochaine session de ce projet, en % de la fenêtre de 5 h de l'abonnement, votre propre usage compris : elle s'arrête quand la fenêtre l'atteint (ex. 37 % utilisés et un plafond de 50 % : elle peut en prendre 13). {now}de {floor:.0} à {global:.0} % (la limite globale). Le plafond choisi est gardé pour les prochaines sessions de ce projet, même après un redémarrage.",
         "Ceiling of this project's next session, in % of the subscription's 5-hour window, your own use included: it stops when the window reaches it (e.g. 37 % used and a ceiling of 50 %: it may take 13). {now}from {floor:.0} to {global:.0} % (the global limit). The ceiling chosen is kept for this project's next sessions, even after a restart."
@@ -4900,6 +4936,32 @@ mod tests {
         assert!(room_left(Some(89.0), 90.0));
         assert!(!room_left(Some(89.5), 90.0));
         assert!(room_left(None, 90.0));
+    }
+
+    /// A session started beside one already running begins from its ceiling (« stop at
+    /// 50 % » for both), not from the window plus a share, nor from the one kept, unless the
+    /// person changed it in the card since Orchestra opened.
+    #[test]
+    fn a_parallel_session_starts_from_the_running_ceiling() {
+        use super::{Draft, ceiling_choice, draft_ceiling, running_ceiling};
+        assert_eq!(running_ceiling([]), None);
+        assert_eq!(running_ceiling([None, Some(50.0)]), Some(50.0));
+        assert_eq!(running_ceiling([Some(45.0), Some(50.0), None]), Some(50.0));
+        let kept = crate::project::Project { session_ceiling: Some(70.0), ..Default::default() };
+        let mut d = Draft::new(Some(&kept), true);
+        // Nothing running: the one kept.
+        assert_eq!(draft_ceiling(&d, None), Some(70.0));
+        // 50 % running, the window at 42 %: 50 for this one too.
+        assert_eq!(draft_ceiling(&d, Some(50.0)), Some(50.0));
+        assert_eq!(ceiling_choice(draft_ceiling(&d, Some(50.0)), Some(42.0), 20.0, 90.0), 50.0);
+        // Nothing kept either: still the running one, not 42 + 20.
+        let fresh = Draft::new(None, true);
+        assert_eq!(ceiling_choice(draft_ceiling(&fresh, Some(50.0)), Some(42.0), 20.0, 90.0), 50.0);
+        // Changed in the card (to 60 %): the person's choice wins.
+        (d.ceiling, d.touched) = (Some(60.0), true);
+        assert_eq!(draft_ceiling(&d, Some(50.0)), Some(60.0));
+        // The running ceiling already reached by the window: raised just above it.
+        assert_eq!(ceiling_choice(draft_ceiling(&fresh, Some(50.0)), Some(50.2), 20.0, 90.0), 51.0);
     }
 
     #[test]
@@ -5202,6 +5264,7 @@ mod tests {
                 let mut d = super::Draft {
                     mission: String::new(),
                     ceiling: Some(50.0),
+                    touched: false,
                     commits: true,
                     pick: false,
                     endless: false,
@@ -5222,6 +5285,7 @@ mod tests {
                                 plugged: true,
                                 open: 3,
                                 five: Some(37.0),
+                                running_at: None,
                                 default_share: 20.0,
                                 global: 60.0,
                                 to_main: &mut to_main,
@@ -5271,6 +5335,7 @@ mod tests {
                 let mut d = super::Draft {
                     mission: String::new(),
                     ceiling: Some(50.0),
+                    touched: false,
                     commits: true,
                     pick: false,
                     endless: false,
@@ -5291,6 +5356,7 @@ mod tests {
                             plugged: true,
                             open: 3,
                             five: Some(37.0),
+                            running_at: Some(50.0),
                             default_share: 20.0,
                             global: 60.0,
                             to_main: &mut to_main,
