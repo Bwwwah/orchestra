@@ -22,6 +22,69 @@ fn book() -> &'static Book {
     B.get_or_init(Default::default)
 }
 
+/// « Corriger dans une branche fix » clicked: the project and the important findings, taken
+/// by the orchestration (`take_fix_request`), which adds the steps and starts the session.
+#[derive(Clone, Default)]
+pub(super) struct FixRequest {
+    pub project: String,
+    pub findings: Vec<Finding>,
+}
+
+fn fix_key() -> egui::Id {
+    egui::Id::unique("cve-fix-request")
+}
+
+pub(super) fn take_fix_request(ctx: &egui::Context) -> Option<FixRequest> {
+    ctx.data_mut(|d| d.remove_temp::<FixRequest>(fix_key()))
+}
+
+/// The findings worth a fix session right away: high or critical.
+pub(super) fn important(findings: &[&Finding]) -> Vec<Finding> {
+    findings
+        .iter()
+        .filter(|f| f.severity.important())
+        .map(|f| (*f).clone())
+        .collect()
+}
+
+/// One step per vulnerable package, « Thème : action » like the AI's steps.
+pub(super) fn fix_steps(findings: &[Finding]) -> Vec<String> {
+    let mut out: Vec<String> = vec![];
+    for f in findings {
+        let to = f
+            .fix
+            .as_deref()
+            .map(|x| crate::trf!(" ({x})", " ({x})"))
+            .unwrap_or_default();
+        let s = crate::trf!(
+            "Veille CVE : corriger {} dans {}{to}",
+            "CVE watch: fix {} in {}{to}",
+            f.id,
+            f.package
+        );
+        if !out.contains(&s) {
+            out.push(s);
+        }
+    }
+    out
+}
+
+/// The fix session's mission.
+pub(super) fn fix_mission(findings: &[Finding]) -> String {
+    let list: Vec<String> = findings
+        .iter()
+        .map(|f| {
+            let fix = f.fix.as_deref().map(|x| format!(" → {x}")).unwrap_or_default();
+            format!("{} ({} {}{fix})", f.id, f.package, f.version)
+        })
+        .collect();
+    crate::trf!(
+        "Corrige les failles de sécurité importantes trouvées dans les dépendances : {}. Mets à jour chaque dépendance vers une version corrigée (en changeant le moins possible), puis vérifie que le projet compile et que ses tests passent. Passe les étapes « Veille CVE » une par une.",
+        "Fix the important security vulnerabilities found in the dependencies: {}. Update each dependency to a fixed version (changing as little as possible), then check that the project builds and its tests pass. Go through the « CVE watch » steps one by one.",
+        list.join(", ")
+    )
+}
+
 const RED: Color32 = Color32::from_rgb(224, 62, 62);
 /// Findings listed before « … et N autres ».
 const SHOWN: usize = 6;
@@ -94,7 +157,13 @@ fn summary(reports: &[EcoReport]) -> String {
     }
 }
 
-pub(super) fn watch_card(ui: &mut egui::Ui, folder: &str, t: &Tone, extra: f32) -> f32 {
+pub(super) fn watch_card(
+    ui: &mut egui::Ui,
+    project: &str,
+    folder: &str,
+    t: &Tone,
+    extra: f32,
+) -> f32 {
     let ctx = ui.ctx().clone();
     let ecos = if folder.is_empty() {
         vec![]
@@ -172,6 +241,29 @@ pub(super) fn watch_card(ui: &mut egui::Ui, folder: &str, t: &Tone, extra: f32) 
                         .size(12.0)
                         .color(t.tertiary),
                     );
+                }
+                let urgent = important(&found);
+                if !urgent.is_empty() {
+                    ui.add_space(4.0);
+                    let r = ui.add(egui::Button::new(
+                        RichText::new(crate::tr!(
+                            "Corriger dans une branche fix",
+                            "Fix in a fix branch"
+                        ))
+                        .size(13.0)
+                        .color(RED),
+                    ));
+                    if r
+                        .on_hover_text(crate::trf!(
+                            "Ajoute une étape « Veille CVE » par faille importante ({}), puis lance une session autonome sur une branche à part (orchestra/auto-fix-…) qui met à jour les dépendances et vérifie le projet. Rien n'arrive sur main sans votre fusion.",
+                            "Adds a « CVE watch » step per important vulnerability ({}), then starts an autonomous session on a branch of its own (orchestra/auto-fix-…) that updates the dependencies and checks the project. Nothing reaches main without your merge.",
+                            urgent.len()
+                        ))
+                        .clicked()
+                    {
+                        let req = FixRequest { project: project.to_string(), findings: urgent };
+                        ui.ctx().data_mut(|d| d.insert_temp(fix_key(), req));
+                    }
                 }
             }
         }
@@ -261,6 +353,29 @@ mod tests {
             fix: None,
             url: None,
         }
+    }
+
+    /// The fix session gets one step per important vulnerability, and a mission naming them.
+    #[test]
+    fn a_fix_session_is_built_from_the_important_findings() {
+        let mut a = finding("CVE-2024-1", Severity::Critical);
+        a.package = "foo".into();
+        a.fix = Some(">=1.2.3".into());
+        let low = finding("RUSTSEC-9", Severity::Low);
+        let mut b = finding("GHSA-x", Severity::High);
+        b.package = "bar".into();
+        let urgent = important(&[&a, &low, &b, &a]);
+        assert_eq!(urgent.len(), 3);
+        let steps = fix_steps(&urgent);
+        // Never twice the same step; never the minor one.
+        assert_eq!(steps.len(), 2);
+        if !crate::i18n::en() {
+            assert_eq!(steps[0], "Veille CVE : corriger CVE-2024-1 dans foo (>=1.2.3)");
+            assert_eq!(steps[1], "Veille CVE : corriger GHSA-x dans bar");
+        }
+        let m = fix_mission(&urgent);
+        assert!(m.contains("CVE-2024-1 (foo 1 → >=1.2.3)"), "{m}");
+        assert!(!m.contains("RUSTSEC-9"));
     }
 
     #[test]

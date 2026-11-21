@@ -504,7 +504,47 @@ fn hash(s: &str) -> u64 {
 }
 
 impl NotesApp {
-    /// Start an autonomous session on a project.
+    /// « Corriger dans une branche fix » (Veille · CVE card): one « Veille CVE » step per
+    /// important vulnerability not already listed, then a session on a fix branch, with the
+    /// project's own ceiling and AI.
+    fn cve_fix_tick(&mut self, ctx: &egui::Context) {
+        let Some(req) = super::watch::take_fix_request(ctx) else {
+            return;
+        };
+        let Some(pr) = self.ws.page_mut(&req.project).and_then(|p| p.project.as_mut()) else {
+            return;
+        };
+        for s in super::watch::fix_steps(&req.findings) {
+            let open = pr
+                .steps
+                .iter()
+                .any(|x| x.title == s && x.status != crate::project::StepStatus::Done);
+            if !open {
+                pr.add_step(&s, "veille");
+            }
+        }
+        let d = Draft::new(Some(pr), true);
+        let ceiling_kept = pr.session_ceiling;
+        self.dirty_since.get_or_insert_with(Instant::now);
+        let o = &self.ws.settings.orch;
+        let five = self.agent_figures(d.agent).five;
+        let ceiling = ceiling_choice(ceiling_kept, five, o.default_limit, o.global_limit);
+        let mission = super::watch::fix_mission(&req.findings);
+        let n = match self.launch_run(ctx, &req.project, &mission, ceiling, true, None, d.agent, true) {
+            Ok(()) => super::notices::Notice::Info(crate::tr!(
+                "Session de correction lancée sur une branche fix : fusionnez-la une fois vérifiée.",
+                "Fix session started on a fix branch: merge it once checked."
+            ).into()),
+            Err(e) => super::notices::Notice::Error(crate::trf!(
+                "Étapes « Veille CVE » ajoutées, mais la session n'a pas pu partir : {e}",
+                "« CVE watch » steps added, but the session couldn't start: {e}"
+            )),
+        };
+        self.notice(n);
+    }
+
+    /// Start an autonomous session on a project. `fix`: a security fix (CVE watch), always on
+    /// a branch of its own named `orchestra/auto-fix-…`, never on `dev`.
     #[allow(clippy::too_many_arguments)]
     fn launch_run(
         &mut self,
@@ -515,6 +555,7 @@ impl NotesApp {
         commits: bool,
         endless: Option<crate::model::EndConditions>,
         agent: Agent,
+        fix: bool,
     ) -> Result<(), String> {
         if self.orch.runs.iter().any(|r| r.project == project) {
             return Err(crate::tr!(
@@ -634,7 +675,11 @@ impl NotesApp {
             .collect();
         let steps_at_turn: Vec<String> = steps_at_start.iter().map(|(id, _)| id.clone()).collect();
         let code = crate::project::code_kind(&folder, pr.code);
-        let copy = auto::make_copy(&folder, &title, !on_main(pr), code)?;
+        let copy = if fix {
+            auto::make_copy(&folder, &format!("fix {title}"), false, code)?
+        } else {
+            auto::make_copy(&folder, &title, !on_main(pr), code)?
+        };
         // A project without code makes no commit (the switch isn't shown for it), and without
         // git (worked on in its own folder) there is none to make.
         let commits = commits && code && !copy.branch.is_empty();
@@ -822,10 +867,11 @@ impl NotesApp {
         {
             let o = &self.ws.settings.orch;
             let l = ceiling_choice(None, self.orch.five, o.default_limit, o.global_limit);
-            if let Err(e) = self.launch_run(ctx, &pid, "", l, true, None, Agent::ClaudeCode) {
+            if let Err(e) = self.launch_run(ctx, &pid, "", l, true, None, Agent::ClaudeCode, false) {
                 eprintln!("auto-run : {e}");
             }
         }
+        self.cve_fix_tick(ctx);
         let now = Instant::now();
         let global = self.ws.settings.orch.global_limit;
         let week_limit = self.ws.settings.orch.week_limit;
@@ -1213,7 +1259,7 @@ impl NotesApp {
                 let share = if rec.limit > 0.0 { rec.limit } else { o.default_limit };
                 ceiling_choice(None, five, share, o.global_limit)
             };
-            match self.launch_run(ctx, &rec.project, &rec.mission, ceiling, rec.commits_allowed, rec.endless.clone(), agent) {
+            match self.launch_run(ctx, &rec.project, &rec.mission, ceiling, rec.commits_allowed, rec.endless.clone(), agent, rec.branch.contains("/auto-fix-")) {
                 Ok(()) => self.ws.notify(
                     "info",
                     &rec.project,
@@ -3199,7 +3245,7 @@ impl NotesApp {
             let want = draft_ceiling(&d, running_of(d.agent));
             let ceiling = ceiling_choice(want, five_of(d.agent), o.default_limit, global);
             let endless = if d.endless { Some(d.end.clone()) } else { None };
-            match self.launch_run(ctx, &id, &d.mission, ceiling, d.commits, endless, d.agent) {
+            match self.launch_run(ctx, &id, &d.mission, ceiling, d.commits, endless, d.agent, false) {
                 Ok(()) => {
                     if let Some(x) = self.orch.drafts.get_mut(&id) {
                         x.pick = false;
