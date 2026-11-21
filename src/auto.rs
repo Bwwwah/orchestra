@@ -9,8 +9,9 @@
 //! one until the work is done, a limit is reached or it is stopped.
 //!
 //! What depends on the agent is in `Agent` (command, session files) and `Reader` (the format
-//! of its sessions). Codex, Gemini CLI and Mistral Vibe have theirs, but are not started alone
-//! until their permissions and MCP server are wired too (`Agent::ready`).
+//! of its sessions). Codex, Gemini CLI and Mistral Vibe have theirs, with their permissions and
+//! Orchestra's MCP server (`Agent::config_files`), but are not started alone until these are
+//! checked on the real programs and their limits are read (`Agent::ready`).
 
 use crate::LockOrRecover;
 use serde_json::Value;
@@ -74,15 +75,22 @@ impl Agent {
     /// The command started in the hidden terminal, in the copy `cwd`.
     pub fn command(self, cwd: &Path, allow_commits: bool, extra: &str) -> String {
         match self {
+            // Orchestra's MCP server, and only it, on the command line (`codex_command`).
             Agent::Codex => {
                 let git_dirs = if allow_commits { codex_git_dirs(cwd) } else { Vec::new() };
                 codex_command(&git_dirs)
             }
-            // The strictest mode of each: every command or every tool waits for a yes. Their
-            // rules are translated (`Agent::rules_config`) but not yet written where each one
-            // reads them, so they are not `ready` and never started alone.
-            Agent::Gemini => "gemini --approval-mode default".into(),
-            Agent::Vibe => "vibe".into(),
+            // Its settings of the session (`config_files`) as the « system » settings, which
+            // win over the person's and the repository's; only Orchestra's MCP server.
+            Agent::Gemini => format!(
+                "GEMINI_CLI_SYSTEM_SETTINGS_PATH={} gemini --approval-mode default --allowed-mcp-server-names orchestra",
+                crate::sessions::shell_quote(&self.config_dir(cwd).join("settings.json").display().to_string())
+            ),
+            // A home of its own for the session (`config_files`): its settings and sessions.
+            Agent::Vibe => format!(
+                "VIBE_HOME={} vibe",
+                crate::sessions::shell_quote(&self.config_dir(cwd).display().to_string())
+            ),
             Agent::ClaudeCode => {
                 let (allowed, denied) = permissions(allow_commits, extra);
                 // The repository's own settings (.claude/settings*.json: hooks, permissions)
@@ -133,13 +141,83 @@ impl Agent {
                     .join(hex)
                     .join("chats")
             }
-            // Mistral Vibe: `logs/session/session_….json`, for every folder.
-            Agent::Vibe => std::env::var_os("VIBE_HOME")
+            // Mistral Vibe: `logs/session/session_….json`, in the home of the session
+            // (`config_dir`, given as VIBE_HOME by `command`).
+            Agent::Vibe => self.config_dir(cwd).join("logs").join("session"),
+        }
+    }
+
+    /// The folder of Orchestra's settings for this agent working in `cwd`: one per agent and
+    /// per copy, in Orchestra's data folder, never in the copy (`git add -A` would commit it)
+    /// nor in the person's own settings of the agent.
+    pub fn config_dir(self, cwd: &Path) -> PathBuf {
+        use sha2::Digest;
+        let hash = sha2::Sha256::digest(cwd.display().to_string().as_bytes());
+        let hex: String = hash.iter().take(8).map(|b| format!("{b:02x}")).collect();
+        crate::store::data_dir()
+            .join("agents")
+            .join(format!("{}-{hex}", self.bin()))
+    }
+
+    /// The files of the session's settings, with their text: Orchestra's MCP server (the only
+    /// one) and the rules of `rules_config`, in the agent's own format.
+    ///
+    /// - Gemini CLI: `settings.json`, read as its system settings: `mcpServers` with only
+    ///   Orchestra (trusted: its tools don't ask, as `mcp__orchestra` for Claude Code) and the
+    ///   `tools` rules.
+    /// - Mistral Vibe: `config.toml` of its own home: the rules and one `[[mcp_servers]]`
+    ///   table. Its sign-in (`.env`) stays in the person's home, linked by `write_config`.
+    /// - Claude Code and Codex: none, everything is on their command line.
+    pub fn config_files(self, cwd: &Path, allow_commits: bool, extra: &str) -> Vec<(PathBuf, String)> {
+        let dir = self.config_dir(cwd);
+        match self {
+            Agent::ClaudeCode | Agent::Codex => Vec::new(),
+            Agent::Gemini => {
+                let mut v: Value =
+                    serde_json::from_str(&self.rules_config(allow_commits, extra)).unwrap_or_default();
+                let mut server = mcp_server();
+                server["trust"] = Value::Bool(true);
+                v["mcpServers"] = serde_json::json!({ "orchestra": server });
+                let text = serde_json::to_string_pretty(&v).unwrap_or_default() + "\n";
+                vec![(dir.join("settings.json"), text)]
+            }
+            Agent::Vibe => {
+                let s = mcp_server();
+                let mut text = format!(
+                    "[[mcp_servers]]\nname = \"orchestra\"\ntransport = \"stdio\"\ncommand = {}\nargs = [\"mcp\"]\n",
+                    toml_string(s["command"].as_str().unwrap_or("orchestra"))
+                );
+                if let Some(d) = s["env"]["ORCHESTRA_DIR"].as_str() {
+                    text.push_str(&format!("env = {{ ORCHESTRA_DIR = {} }}\n", toml_string(d)));
+                }
+                text.push('\n');
+                text.push_str(&self.rules_config(allow_commits, extra));
+                vec![(dir.join("config.toml"), text)]
+            }
+        }
+    }
+
+    /// Write the files of `config_files` before the agent starts. For Mistral Vibe, its own
+    /// home also gets a link to the person's sign-in (`~/.vibe/.env`), never a copy of it.
+    pub fn write_config(self, cwd: &Path, allow_commits: bool, extra: &str) -> Result<(), String> {
+        for (path, text) in self.config_files(cwd, allow_commits, extra) {
+            if let Some(d) = path.parent() {
+                std::fs::create_dir_all(d).map_err(|e| e.to_string())?;
+            }
+            std::fs::write(&path, text).map_err(|e| e.to_string())?;
+        }
+        #[cfg(unix)]
+        if self == Agent::Vibe {
+            let own = std::env::var_os("VIBE_HOME")
                 .map(PathBuf::from)
                 .unwrap_or_else(|| dirs::home_dir().unwrap_or_default().join(".vibe"))
-                .join("logs")
-                .join("session"),
+                .join(".env");
+            let link = self.config_dir(cwd).join(".env");
+            if own.is_file() && std::fs::symlink_metadata(&link).is_err() {
+                std::os::unix::fs::symlink(&own, &link).map_err(|e| e.to_string())?;
+            }
         }
+        Ok(())
     }
 
     /// Its session files: one JSON record per line, appended (Claude Code, Codex), or one
@@ -232,6 +310,8 @@ fn codex_command(git_dirs: &[PathBuf]) -> String {
          -c tools.web_search=false \
          -c shell_environment_policy.inherit=core",
     );
+    c.push_str(" -c ");
+    c.push_str(&crate::sessions::shell_quote(&codex_mcp()));
     if !git_dirs.is_empty() {
         let roots: Vec<String> = git_dirs
             .iter()
@@ -277,6 +357,11 @@ fn git_dirs_for(cwd: &Path, own: &Path, common: &Path) -> Vec<PathBuf> {
 
 /// The only MCP server of an autonomous session: Orchestra itself (this program, `mcp`).
 fn mcp_config() -> String {
+    serde_json::json!({ "mcpServers": { "orchestra": mcp_server() } }).to_string()
+}
+
+/// Orchestra's MCP server: this program with `mcp`, and its data folder if it isn't the default.
+fn mcp_server() -> Value {
     let exe = std::env::current_exe()
         .map(|p| p.display().to_string())
         .unwrap_or_else(|_| "orchestra".into());
@@ -284,7 +369,21 @@ fn mcp_config() -> String {
     if let Ok(d) = std::env::var("ORCHESTRA_DIR") {
         server["env"] = serde_json::json!({ "ORCHESTRA_DIR": d });
     }
-    serde_json::json!({ "mcpServers": { "orchestra": server } }).to_string()
+    server
+}
+
+/// Codex's MCP servers for the session: the whole `mcp_servers` table replaced by an inline
+/// one holding only Orchestra's server, so the person's other servers are not started.
+fn codex_mcp() -> String {
+    let s = mcp_server();
+    let mut entry = format!(
+        "command={},args=[\"mcp\"]",
+        toml_string(s["command"].as_str().unwrap_or("orchestra"))
+    );
+    if let Some(d) = s["env"]["ORCHESTRA_DIR"].as_str() {
+        entry.push_str(&format!(",env={{ORCHESTRA_DIR={}}}", toml_string(d)));
+    }
+    format!("mcp_servers={{orchestra={{{entry}}}}}")
 }
 
 /// Commands always allowed without asking. Reading, editing and creating files inside the
@@ -2174,7 +2273,12 @@ mod tests {
             assert!(!a.ready());
             // Its program, in its strictest mode.
             let cmd = a.command(Path::new("/x"), true, "");
-            assert!(cmd.starts_with(a.bin()), "{cmd}");
+            // Its program, after the variables pointing to its settings of the session.
+            let bin = format!("' {}", a.bin());
+            assert!(
+                cmd.starts_with(a.bin()) || cmd.contains(&format!("{bin} ")) || cmd.ends_with(&bin),
+                "{cmd}"
+            );
             assert!(!cmd.contains("yolo") && !cmd.contains("never") && !cmd.contains("danger"), "{cmd}");
             assert_ne!(a.session_dir(Path::new("/x")), Agent::ClaudeCode.session_dir(Path::new("/x")));
         }
@@ -2418,6 +2522,50 @@ mod tests {
         assert!(!c.contains("hooks") && !c.contains("/r/.git\""));
         // A repository of its own: everything is already in the folder, nothing added.
         assert!(git_dirs_for(Path::new("/r"), Path::new("/r/.git"), Path::new("/r/.git")).is_empty());
+    }
+
+    #[test]
+    fn every_agent_gets_only_orchestras_mcp_server() {
+        let cwd = Path::new("/w/copy");
+        // One folder per agent and per copy, outside the copy.
+        for a in [Agent::Gemini, Agent::Vibe] {
+            assert!(!a.config_dir(cwd).starts_with(cwd));
+            assert_ne!(a.config_dir(cwd), a.config_dir(Path::new("/w/other")));
+        }
+        assert_ne!(Agent::Gemini.config_dir(cwd), Agent::Vibe.config_dir(cwd));
+        assert!(Agent::ClaudeCode.config_files(cwd, true, "").is_empty());
+        assert!(Agent::Codex.config_files(cwd, true, "").is_empty());
+
+        // Codex: the whole table of MCP servers replaced on its command line.
+        let c = Agent::Codex.command(cwd, false, "");
+        assert!(c.contains(" -c 'mcp_servers={orchestra={command=\""), "{c}");
+        assert!(c.contains(",args=[\"mcp\"]}}'"), "{c}");
+
+        // Gemini: its system settings, with Orchestra trusted and the rules.
+        let files = Agent::Gemini.config_files(cwd, false, "");
+        assert_eq!(files.len(), 1);
+        let (path, text) = &files[0];
+        let v: Value = serde_json::from_str(text).unwrap();
+        let servers = v["mcpServers"].as_object().unwrap();
+        assert_eq!(servers.len(), 1);
+        assert_eq!(v["mcpServers"]["orchestra"]["args"][0], "mcp");
+        assert_eq!(v["mcpServers"]["orchestra"]["trust"], true);
+        assert!(v["tools"]["exclude"].as_array().unwrap().iter().any(|x| x == "run_shell_command(rm)"));
+        let g = Agent::Gemini.command(cwd, false, "");
+        assert!(g.starts_with("GEMINI_CLI_SYSTEM_SETTINGS_PATH="), "{g}");
+        assert!(g.contains(&path.display().to_string()), "{g}");
+        assert!(g.ends_with(" gemini --approval-mode default --allowed-mcp-server-names orchestra"));
+
+        // Vibe: its own home, with one MCP table and the rules; its sessions are read there.
+        let files = Agent::Vibe.config_files(cwd, false, "");
+        let (path, text) = &files[0];
+        assert_eq!(path, &Agent::Vibe.config_dir(cwd).join("config.toml"));
+        assert_eq!(text.matches("[[mcp_servers]]").count(), 1);
+        assert!(text.starts_with("[[mcp_servers]]\nname = \"orchestra\"\ntransport = \"stdio\"\ncommand = \""));
+        assert!(text.contains("args = [\"mcp\"]\n") && text.contains("[tools.bash]\nallowlist = ["));
+        let v = Agent::Vibe.command(cwd, false, "");
+        assert!(v.starts_with("VIBE_HOME=") && v.ends_with(" vibe"), "{v}");
+        assert!(Agent::Vibe.session_dir(cwd).starts_with(Agent::Vibe.config_dir(cwd)));
     }
 
     #[test]
