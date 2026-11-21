@@ -5105,8 +5105,8 @@ fn agent_unavailable(agent: Agent) -> Option<&'static str> {
         None
     } else if !crate::usage::reports_usage(agent) {
         Some(crate::tr!(
-            "Pas encore possible : Orchestra ne peut pas lire l'usage de son abonnement, donc ne pourrait pas l'arrêter à son plafond.",
-            "Not possible yet: Orchestra can't read its subscription's use, so couldn't stop it at its ceiling."
+            "Pas encore possible : une session s'arrête à son « arrêt à », un % de l'abonnement, et cette IA ne donne pas ce % (voir sa tuile à gauche). Orchestra ne saurait pas quand l'arrêter.",
+            "Not possible yet: a session stops at its « stop at », a % of the subscription, and this AI doesn't give that % (see its tile on the left). Orchestra wouldn't know when to stop it."
         ))
     } else {
         Some(crate::tr!(
@@ -5194,6 +5194,9 @@ fn agent_pick(ui: &mut egui::Ui, id: &str, d: &mut Draft, busy: bool, connected:
             .selected_text(RichText::new(d.agent.label()).size(12.5))
             .width(110.0)
             .show_ui(ui, |ui| {
+                // Wide enough for the reason written under an AI that can't be chosen.
+                ui.set_min_width(260.0);
+                ui.set_max_width(260.0);
                 for a in agent_choices(connected, d.agent) {
                     let why = if connected.contains(&a) {
                         agent_unavailable(a)
@@ -5210,8 +5213,15 @@ fn agent_pick(ui: &mut egui::Ui, id: &str, d: &mut Draft, busy: bool, connected:
                     if r.clicked() {
                         d.agent = a;
                     }
+                    // Said under it, not only on hover: a greyed AI with no word looks broken.
                     if let Some(w) = why {
-                        r.on_disabled_hover_text(w);
+                        ui.add(
+                            egui::Label::new(
+                                RichText::new(w).size(11.5).color(ui.visuals().weak_text_color()),
+                            )
+                            .wrap(),
+                        );
+                        ui.add_space(4.0);
                     }
                 }
             })
@@ -5372,6 +5382,9 @@ mod tests {
         for a in Agent::ALL {
             assert_eq!(agent_unavailable(a).is_none(), a.ready(), "{a:?}");
         }
+        // Mistral Vibe: the reason names what's missing, the % behind « arrêt à ».
+        let why = agent_unavailable(Agent::Vibe).unwrap();
+        assert!(why.contains("arrêt à") || why.contains("stop at"), "{why}");
         // Only the plugged AIs are listed, in the usual order, plus the one already chosen.
         use super::agent_choices;
         let plugged = [Agent::Vibe, Agent::ClaudeCode];
