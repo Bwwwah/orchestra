@@ -2009,6 +2009,39 @@ fn steps_glow(age: f64) -> f32 {
 }
 
 #[cfg(test)]
+mod session_pick_tests {
+    use super::{Color32, new_session_pick};
+
+    #[test]
+    fn the_new_session_line_offers_an_ai_then_its_models() {
+        let l = [
+            ("Claude Code", Some("claude"), Color32::RED),
+            ("Mistral Vibe", Some("vibe"), Color32::BLUE),
+            ("Shell", None, Color32::GRAY),
+        ];
+        // Nothing chosen yet: the first AI, its default model.
+        let p = new_session_pick(&l, "", "");
+        assert_eq!((p.label, p.cmd, p.model.as_str()), ("Claude Code", Some("claude"), ""));
+        assert!(p.models.contains(&"opus"));
+        // A model it offers is kept; another AI's model goes back to « par défaut ».
+        assert_eq!(new_session_pick(&l, "Claude Code", "sonnet").model, "sonnet");
+        assert_eq!(new_session_pick(&l, "Claude Code", "gpt-5").model, "");
+        // An AI without a model list (Vibe, the shell): only « par défaut ».
+        let p = new_session_pick(&l, "Mistral Vibe", "opus");
+        assert!(p.models.is_empty() && p.model.is_empty());
+        assert_eq!(new_session_pick(&l, "Shell", "").cmd, None);
+        // An AI unplugged since: the first one again.
+        assert_eq!(new_session_pick(&l, "Codex", "gpt-5").label, "Claude Code");
+        assert_eq!(new_session_pick(&[], "Codex", "").label, "Shell");
+        // Every AI that opens in a terminal knows its models (possibly none).
+        for a in crate::setup::Ai::ALL {
+            assert_eq!(crate::setup::Ai::from_label(a.label()), Some(a));
+            assert!(a.models().iter().all(|m| !m.is_empty() && !m.contains(' ')));
+        }
+    }
+}
+
+#[cfg(test)]
 mod glow_tests {
     /// The Steps card glows fully, then fades, then stops (never before, never after).
     #[test]
@@ -2316,22 +2349,85 @@ fn sessions_card(ui: &mut egui::Ui, cx: &mut Cx, extra: f32) -> f32 {
                     .file_name()
                     .map(|n| n.to_string_lossy().to_string())
                     .unwrap_or_default();
-                for (label, cmd, accent) in cx.launchers.clone() {
-                    let accent = if cmd.is_none() { t.secondary } else { accent };
-                    if launch_pill(ui, label, accent, t)
-                        .on_hover_text(crate::trf!(
-                            "Ouvrir {label} dans {name}, dans le terminal intégré",
-                            "Open {label} in {name}, in the built-in terminal"
+                let launchers = cx.launchers.clone();
+                let (ai_key, model_key) = (
+                    egui::Id::unique(("session-ai", page_id)),
+                    egui::Id::unique(("session-model", page_id)),
+                );
+                let (mut ai, mut model) = ui.ctx().data(|d| {
+                    (
+                        d.get_temp::<String>(ai_key).unwrap_or_default(),
+                        d.get_temp::<String>(model_key).unwrap_or_default(),
+                    )
+                });
+                let pick = new_session_pick(&launchers, &ai, &model);
+                // The AI.
+                let before = ai.clone();
+                egui::ComboBox::from_id_salt(("session-ai-list", page_id))
+                    .selected_text(pick.label)
+                    .width(130.0)
+                    .show_ui(ui, |ui| {
+                        for (label, _, _) in &launchers {
+                            ui.selectable_value(&mut ai, label.to_string(), *label);
+                        }
+                    })
+                    .response
+                    .on_hover_text(crate::tr!("L'IA à ouvrir", "The AI to open"));
+                if ai != before {
+                    // Another AI: its own models, so back to « par défaut ».
+                    model.clear();
+                }
+                let pick = new_session_pick(&launchers, &ai, &model);
+                // A model this AI doesn't offer (or no longer): back to « par défaut ».
+                model = pick.model.clone();
+                // Its model: « par défaut » (the AI's own choice), then those it offers.
+                ui.add_enabled_ui(!pick.models.is_empty(), |ui| {
+                    egui::ComboBox::from_id_salt(("session-model-list", page_id))
+                        .selected_text(if model.is_empty() {
+                            crate::tr!("Modèle par défaut", "Default model")
+                        } else {
+                            model.as_str()
+                        })
+                        .width(150.0)
+                        .show_ui(ui, |ui| {
+                            ui.selectable_value(
+                                &mut model,
+                                String::new(),
+                                crate::tr!("Par défaut", "Default"),
+                            );
+                            for m in pick.models {
+                                ui.selectable_value(&mut model, m.to_string(), *m);
+                            }
+                        })
+                        .response
+                        .on_hover_text(crate::tr!(
+                            "Le modèle de la session ; « par défaut » laisse l'IA choisir",
+                            "The session's model; « default » lets the AI choose"
                         ))
-                        .clicked()
-                    {
-                        super::term_ui::request(
-                            ui.ctx(),
-                            &format!("{label} · {name}"),
-                            pr.folder.trim(),
-                            cmd.map(String::from),
-                        );
-                    }
+                        .on_disabled_hover_text(crate::tr!(
+                            "Cette IA choisit son modèle dans ses propres réglages",
+                            "This AI picks its model in its own settings"
+                        ));
+                });
+                ui.ctx().data_mut(|d| {
+                    d.insert_temp(ai_key, ai.clone());
+                    d.insert_temp(model_key, model.clone());
+                });
+                let label = pick.label;
+                let accent = if pick.cmd.is_none() { t.secondary } else { pick.accent };
+                if launch_pill(ui, crate::tr!("Ouvrir", "Open"), accent, t)
+                    .on_hover_text(crate::trf!(
+                        "Ouvrir {label} dans {name}, dans le terminal intégré",
+                        "Open {label} in {name}, in the built-in terminal"
+                    ))
+                    .clicked()
+                {
+                    super::term_ui::request(
+                        ui.ctx(),
+                        &format!("{label} · {name}"),
+                        pr.folder.trim(),
+                        pick.cmd.map(String::from),
+                    );
                 }
             });
             ui.add_space(8.0);
@@ -2987,6 +3083,36 @@ pub(super) fn folder_view(
 }
 
 /// "Nouvelle session" buttons: a small terminal mark tinted per tool, then the name.
+/// What the « Nouvelle session » line of the « Sessions IA » card opens.
+#[derive(Debug, PartialEq)]
+struct SessionPick {
+    label: &'static str,
+    cmd: Option<&'static str>,
+    accent: Color32,
+    /// The models offered for it (empty: only « par défaut »).
+    models: &'static [&'static str],
+    /// The model chosen; empty for « par défaut ».
+    model: String,
+}
+
+/// The AI chosen by its label among `launchers` (the first one when that label is gone, an
+/// AI unplugged meanwhile), and the model chosen if that AI offers it (else « par défaut »).
+fn new_session_pick(
+    launchers: &[(&'static str, Option<&'static str>, Color32)],
+    ai: &str,
+    model: &str,
+) -> SessionPick {
+    let (label, cmd, accent) = launchers
+        .iter()
+        .find(|(l, _, _)| *l == ai)
+        .or(launchers.first())
+        .copied()
+        .unwrap_or(("Shell", None, Color32::GRAY));
+    let models = crate::setup::Ai::from_label(label).map(|a| a.models()).unwrap_or(&[]);
+    let model = if models.contains(&model) { model.to_string() } else { String::new() };
+    SessionPick { label, cmd, accent, models, model }
+}
+
 fn launch_pill(ui: &mut egui::Ui, label: &str, accent: Color32, t: &Tone) -> egui::Response {
     let font = FontId::proportional(12.5);
     let g = ui.painter().layout_no_wrap(label.to_string(), font, t.text);
