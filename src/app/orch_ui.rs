@@ -2636,9 +2636,7 @@ impl NotesApp {
                             ui.add_space(2.0);
                             ui.horizontal(|ui| {
                                 ui.add_space(20.0);
-                                ui.label(
-                                    RichText::new("✦").size(13.0).color(super::projects::BLUE),
-                                );
+                                working_mark(ui, t);
                                 let mut job = egui::text::LayoutJob::default();
                                 job.append(
                                     crate::tr!("En train de s'occuper de ", "Busy with "),
@@ -4751,6 +4749,17 @@ fn ring(
         [c + d * (r - 6.0), c + d * (r + 6.0)],
         egui::Stroke::new(2.0, super::projects::ORANGE),
     );
+}
+
+/// The mark before « En train de s'occuper de … »: a step in progress, as in the steps card
+/// (a ring with a dot), drawn rather than a glyph (« ✦ » is missing from the app's font and
+/// showed as a stack of lines), in the card's muted grey.
+fn working_mark(ui: &mut egui::Ui, t: &Tone) {
+    let (r, _) = ui.allocate_exact_size(egui::vec2(14.0, 14.0), egui::Sense::hover());
+    let c = r.center();
+    ui.painter()
+        .circle_stroke(c, 5.0, egui::Stroke::new(1.3, t.tertiary));
+    ui.painter().circle_filled(c, 2.0, t.secondary);
 }
 
 /// A colour per project, stable (from its name).
