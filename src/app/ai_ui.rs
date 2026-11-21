@@ -223,6 +223,16 @@ impl NotesApp {
             self.ais.usage_read = Some(Instant::now());
             self.ais.usage = crate::usage::read();
             self.ais.tracking = crate::usage::tracking_on();
+            // Our status line left pointing to an Orchestra that is gone (moved, updated, or
+            // built in a deleted copy): it measures nothing, so the sessions would stop as
+            // unmeasured. Put this one back in its place.
+            if self.ais.tracking
+                && crate::usage::tracking_broken()
+                && let Err(e) =
+                    crate::usage::start_tracking(&std::env::current_exe().unwrap_or_default())
+            {
+                eprintln!("orchestra: status line not repaired: {e}");
+            }
         }
     }
 

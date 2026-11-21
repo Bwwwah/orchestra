@@ -460,7 +460,9 @@ impl NotesApp {
             ));
         }
         // The limits are checked with Claude Code's own figures: they come through the status line.
-        if !crate::usage::tracking_on() {
+        // Not only in place: working (a status line left by an Orchestra since moved or
+        // deleted measures nothing, and the session would stop as unmeasured).
+        if !crate::usage::tracking_works() {
             crate::usage::start_tracking(&std::env::current_exe().unwrap_or_default())?;
             self.ais.tracking = true;
         }

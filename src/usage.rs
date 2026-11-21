@@ -194,11 +194,19 @@ pub fn read() -> Option<Usage> {
         let c = &v["cachedUsageUtilization"];
         let w = from_cache(c);
         if !w.is_empty() {
-            let at = ["fetchedAt", "timestamp", "updatedAt", "lastUpdated"]
+            let stamped = ["fetchedAt", "timestamp", "updatedAt", "lastUpdated"]
                 .iter()
-                .find_map(|k| c.get(*k).and_then(time_ms))
-                .unwrap_or_else(|| mtime_ms(&cj));
-            if best.as_ref().is_none_or(|b| at > b.at) {
+                .find_map(|k| c.get(*k).and_then(time_ms));
+            // Without its own time, the cache only stands in when nothing else is there:
+            // ~/.claude.json is rewritten all the time for other things, so its date would
+            // pass old figures for newer than the status line's, and switching between the
+            // two would count rises that never happened (and use up a session's budget).
+            let newer = match stamped {
+                Some(at) => best.as_ref().is_none_or(|b| at > b.at),
+                None => best.is_none(),
+            };
+            if newer {
+                let at = stamped.unwrap_or_else(|| mtime_ms(&cj));
                 best = Some(Usage { windows: w, at });
             }
         }
@@ -585,11 +593,94 @@ fn settings_file() -> PathBuf {
     claude_dir().join("settings.json")
 }
 
+/// The status line command: this program with `statusline`, and the data folder when it isn't
+/// the default one (else the figures would be kept where this Orchestra never reads them).
 fn our_command(exe: &std::path::Path) -> String {
+    let env = std::env::var("ORCHESTRA_DIR")
+        .ok()
+        .filter(|d| !d.trim().is_empty())
+        .map(|d| format!("ORCHESTRA_DIR={} ", crate::sessions::shell_quote(&d)))
+        .unwrap_or_default();
     format!(
-        "{} statusline",
+        "{env}{} statusline",
         crate::sessions::shell_quote(&exe.display().to_string())
     )
+}
+
+/// The words of a command as `shell_quote` writes them: plain words, or quoted with `'…'`
+/// (a quote inside written `'\''`).
+fn command_words(cmd: &str) -> Vec<String> {
+    let mut words = vec![];
+    let mut cur = String::new();
+    let (mut quoted, mut any) = (false, false);
+    let mut chars = cmd.chars().peekable();
+    while let Some(c) = chars.next() {
+        match c {
+            '\'' => {
+                quoted = !quoted;
+                any = true;
+            }
+            '\\' if !quoted => {
+                if let Some(n) = chars.next() {
+                    cur.push(n);
+                }
+            }
+            c if c.is_whitespace() && !quoted => {
+                if any || !cur.is_empty() {
+                    words.push(std::mem::take(&mut cur));
+                }
+                any = false;
+            }
+            c => cur.push(c),
+        }
+    }
+    if any || !cur.is_empty() {
+        words.push(cur);
+    }
+    words
+}
+
+/// What a status line command of ours runs: its program and its data folder (None: the
+/// default one). None when it isn't ours.
+fn command_target(cmd: &str) -> Option<(PathBuf, Option<String>)> {
+    let mut w = command_words(cmd);
+    if w.last().map(String::as_str) != Some("statusline") {
+        return None;
+    }
+    w.pop();
+    let dir = match w.first().and_then(|x| x.strip_prefix("ORCHESTRA_DIR=")) {
+        Some(d) => {
+            let d = d.to_string();
+            w.remove(0);
+            Some(d)
+        }
+        None => None,
+    };
+    (w.len() == 1).then(|| (PathBuf::from(&w[0]), dir))
+}
+
+/// Our status line is in place AND works: its program is still there (an Orchestra moved,
+/// updated or built in a copy since deleted leaves a command that fails, and then no figure
+/// ever comes: the sessions stop as unmeasured), and it keeps the figures in this Orchestra's
+/// data folder.
+pub fn tracking_works() -> bool {
+    let here = std::env::var("ORCHESTRA_DIR").ok().filter(|d| !d.trim().is_empty());
+    command_target(&status_command()).is_some_and(|(exe, dir)| exe.is_file() && dir == here)
+}
+
+/// Our status line is in place but its program is gone: nothing is measured any more. Put
+/// right by itself (not when it is another Orchestra's that works: they would take turns).
+pub fn tracking_broken() -> bool {
+    command_target(&status_command()).is_some_and(|(exe, _)| !exe.is_file())
+}
+
+/// Claude Code's status line command, as its settings hold it.
+fn status_command() -> String {
+    std::fs::read_to_string(settings_file())
+        .ok()
+        .and_then(|t| serde_json::from_str::<Value>(&t).ok())
+        .and_then(|v| v["statusLine"]["command"].as_str().map(String::from))
+        .unwrap_or_default()
 }
 
 /// Our status line is the one Claude Code runs.
@@ -684,6 +775,31 @@ fn restore_status_line(v: &mut Value, prev: Option<&str>) -> Result<bool, String
         }
     }
     Ok(true)
+}
+
+#[test]
+fn a_status_line_of_ours_is_read_back() {
+    // As written by our_command: quoted program, optional data folder.
+    assert_eq!(
+        command_target("'/Applications/Orchestra.app/Contents/MacOS/orchestra' statusline"),
+        Some((PathBuf::from("/Applications/Orchestra.app/Contents/MacOS/orchestra"), None))
+    );
+    assert_eq!(
+        command_target("ORCHESTRA_DIR='/tmp/my data' /usr/local/bin/orchestra statusline"),
+        Some((PathBuf::from("/usr/local/bin/orchestra"), Some("/tmp/my data".into())))
+    );
+    // A quote inside a quoted path.
+    let exe = PathBuf::from("/Users/a/l'app/orchestra");
+    let cmd = format!("{} statusline", crate::sessions::shell_quote(&exe.display().to_string()));
+    assert_eq!(command_target(&cmd), Some((exe, None)));
+    // Not ours.
+    assert_eq!(command_target("~/bin/ma-ligne.sh"), None);
+    assert_eq!(command_target("statusline"), None);
+    assert_eq!(command_target("a b statusline"), None);
+    assert_eq!(command_target(""), None);
+    // What our_command writes reads back to the same program.
+    let me = std::env::current_exe().unwrap();
+    assert_eq!(command_target(&our_command(&me)).map(|(p, _)| p), Some(me));
 }
 
 #[test]
