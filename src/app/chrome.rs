@@ -149,18 +149,28 @@ impl NotesApp {
         }
         let drag_from = child.cursor().left();
         // The app's name, painted only (so the empty title area still moves the window).
-        if row.right() - drag_from > 130.0 {
+        if row.right() - drag_from > 190.0 {
             let pos = egui::pos2(drag_from + 6.0, row.center().y);
             child.painter().circle_stroke(pos + egui::vec2(5.0, 0.0), 4.5, egui::Stroke::new(2.0, violet(dark)));
             child.painter().text(pos + egui::vec2(15.0, 0.0), egui::Align2::LEFT_CENTER, "Orchestra", semibold(13.5), t.secondary);
         }
         child.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             ui.add_space(4.0);
+            ui.spacing_mut().item_spacing.x = 2.0;
             if icons::button(ui, Icon::Compose, 26.0, t.secondary, t.hover, crate::tr!("Nouvelle page (Cmd/Ctrl+N)", "New page (Cmd/Ctrl+N)")).clicked() {
                 actions.push(Action::NewPage(None));
             }
+            // The AI and collaboration shortcuts, next to it.
+            let co = self.settings_tab == Some(SettingsTab::Collab);
+            if icons::button(ui, Icon::People, 26.0, if co { t.text } else { t.secondary }, t.hover, crate::tr!("Collaboration : partager des projets en équipe", "Collaboration: share projects with a team")).clicked() {
+                self.open_settings(SettingsTab::Collab);
+            }
+            let ai = self.settings_tab == Some(SettingsTab::Ai);
+            if icons::button(ui, Icon::Sparkle, 26.0, if ai { t.text } else { t.secondary }, t.hover, crate::tr!("Brancher et régler les IA (MCP)", "Plug in and set up the AIs (MCP)")).clicked() {
+                self.open_settings(SettingsTab::Ai);
+            }
         });
-        let drag = egui::Rect::from_min_max(egui::pos2(drag_from + 4.0, row.top()), egui::pos2(row.right() - 36.0, row.bottom()));
+        let drag = egui::Rect::from_min_max(egui::pos2(drag_from + 4.0, row.top()), egui::pos2(row.right() - 92.0, row.bottom()));
         window_drag_area(ui, drag, ui.scope_id().with("side-drag"));
 
         // Search box with its shortcut badge.
@@ -182,33 +192,11 @@ impl NotesApp {
                 self.search_focus = true;
             }
         }
-        // "Accueil" pill, then the AI and collaboration shortcuts as icons.
+        // "Accueil": a row like the others, highlighted only when open.
         ui.add_space(10.0);
-        ui.horizontal(|ui| {
-            ui.spacing_mut().item_spacing.x = 6.0;
-            let home = self.view == View::Home;
-            let g = ui.painter().layout_no_wrap(crate::tr!("Accueil", "Home").into(), semibold(14.0), t.text);
-            let (rect, resp) = ui.allocate_exact_size(egui::vec2(g.size().x + 44.0, 30.0), egui::Sense::click());
-            // Always shaded, like the reference; a little more on hover or when open.
-            ui.painter().rect_filled(rect, 8.0, t.selected);
-            if home || resp.hovered() {
-                ui.painter().rect_filled(rect, 8.0, t.hover);
-            }
-            icons::paint(ui.painter(), egui::Rect::from_center_size(rect.left_center() + egui::vec2(17.0, 0.0), egui::vec2(18.0, 18.0)), Icon::Home, violet(dark));
-            ui.painter().galley(egui::pos2(rect.left() + 32.0, rect.center().y - g.size().y / 2.0), g, t.text);
-            if resp.clicked() {
-                self.view = View::Home;
-            }
-            let ai = self.settings_tab == Some(SettingsTab::Ai);
-            if icons::button(ui, Icon::Sparkle, 30.0, if ai { t.text } else { t.secondary }, t.hover, crate::tr!("Brancher et régler les IA (MCP)", "Plug in and set up the AIs (MCP)")).clicked() {
-                self.open_settings(SettingsTab::Ai);
-            }
-            let co = self.settings_tab == Some(SettingsTab::Collab);
-            if icons::button(ui, Icon::People, 30.0, if co { t.text } else { t.secondary }, t.hover, crate::tr!("Collaboration : partager des projets en équipe", "Collaboration: share projects with a team")).clicked() {
-                self.open_settings(SettingsTab::Collab);
-            }
-        });
-        ui.add_space(12.0);
+        if side_item(ui, SideIcon::Line(Icon::Home), crate::tr!("Accueil", "Home"), self.view == View::Home, 0.0, &t).clicked() {
+            self.view = View::Home;
+        }
         if side_item(ui, SideIcon::Line(Icon::TodoList), crate::tr!("Projets", "Projects"), self.view == View::Projects, 0.0, &t).clicked() {
             self.view = View::Projects;
         }
