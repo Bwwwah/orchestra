@@ -3842,12 +3842,7 @@ fn apply_reading(
     at: u64,
     five: &crate::usage::Window,
 ) {
-    let prev = *last;
-    if prev.is_some_and(|(a, _, _)| a == at) {
-        return;
-    }
-    *last = Some((at, five.pct, five.resets_at));
-    let rise = window_rise(prev.map(|(_, p, r)| (p, r)), five.pct, five.resets_at);
+    let Some(rise) = next_rise(last, at, five) else { return };
     let sessions: Vec<(Agent, u64)> = runs
         .iter()
         .map(|r| (r.agent, r.reader.tokens.saturating_sub(r.tokens_counted)))
@@ -3881,6 +3876,23 @@ fn agent_shares(sessions: &[(Agent, u64)], agent: Agent, rise: f32) -> Vec<Optio
 fn last_lines(screen: &str, n: usize) -> String {
     let lines: Vec<&str> = screen.lines().filter(|l| !l.trim().is_empty()).collect();
     lines[lines.len().saturating_sub(n)..].join("\n")
+}
+
+/// The rise of the 5-hour window that a new reading (taken at `at`) brings since `last`,
+/// which it then becomes; None for the reading already counted. A failed reading never gets
+/// here and leaves `last` as it was: what was used meanwhile is counted whole by the next
+/// reading that succeeds, so a measure that fails for a while loses nothing of a budget.
+fn next_rise(
+    last: &mut Option<(u64, f32, Option<u64>)>,
+    at: u64,
+    five: &crate::usage::Window,
+) -> Option<f32> {
+    let prev = *last;
+    if prev.is_some_and(|(a, _, _)| a == at) {
+        return None;
+    }
+    *last = Some((at, five.pct, five.resets_at));
+    Some(window_rise(prev.map(|(_, p, r)| (p, r)), five.pct, five.resets_at))
 }
 
 /// How much the 5-hour window rose since the last reading (`prev`: its figure and reset
@@ -5334,6 +5346,53 @@ mod tests {
         // The next reading that succeeds wins, even lower (the window started again).
         let fresh = Figures { five: Some(2.0), five_reset: Some(now + 18_000_000), ..Default::default() };
         assert_eq!(last.merged(Some(fresh), now).five, Some(2.0));
+    }
+
+    /// A session measured, then the readings fail for a while, then come back: as `usage_tick`
+    /// goes (figures merged with the last known ones, the rise counted from the last reading
+    /// that succeeded, the stop decided on both).
+    #[test]
+    fn a_failed_measure_neither_stops_the_session_nor_lets_it_pass_the_ceiling() {
+        use super::{Figures, Stop, next_rise, stop_reason};
+        let reset = 10_000_000;
+        let win = |pct: f32| crate::usage::Window { label: "5h".into(), pct, resets_at: Some(reset) };
+        let fig = |pct: f32| Figures { five: Some(pct), five_reset: Some(reset), ..Default::default() };
+        let mut last = None;
+        let mut shown = Figures::default();
+        let mut pct = 0.0; // the session's own use (it is alone: every rise is its own)
+        let mut take = |at: u64, reading: Option<f32>, shown: &mut Figures, pct: &mut f32| {
+            *shown = shown.merged(reading.map(fig), at);
+            if let Some(p) = reading
+                && let Some(rise) = next_rise(&mut last, at, &win(p))
+            {
+                *pct += rise;
+            }
+        };
+        let turn = |shown: &Figures, pct: f32, turns: u32| {
+            let mut t = calm();
+            (t.five, t.week, t.pct, t.limit, t.global, t.turns) = (shown.five, None, pct, 20.0, 60.0, turns);
+            stop_reason(&t)
+        };
+        // Started at 30 %, measured up to 38 %.
+        take(1_000, Some(30.0), &mut shown, &mut pct);
+        take(2_000, Some(38.0), &mut shown, &mut pct);
+        assert!((pct - 8.0).abs() < 0.01);
+        // The readings fail over several turns: the session goes on, on the last known figure.
+        for (i, at) in (3_000..60_000).step_by(3_000).enumerate() {
+            take(at, None, &mut shown, &mut pct);
+            assert_eq!(shown.five, Some(38.0), "never 0 %");
+            assert_eq!(turn(&shown, pct, 3 + i as u32), None, "a failed measure doesn't stop it");
+        }
+        // Meanwhile the window went to 52 %: the next reading counts all of it, so the
+        // budget (20 % of the window) stops the session, nothing lost while it failed.
+        take(61_000, Some(52.0), &mut shown, &mut pct);
+        assert!((pct - 22.0).abs() < 0.01, "{pct}");
+        assert_eq!(turn(&shown, pct, 30), Some(Stop::Budget(20.0)));
+        // And the global limit holds on the kept figure alone, readings failing.
+        let mut t = calm();
+        let kept = fig(61.0).merged(None, 70_000);
+        (t.five, t.pct) = (kept.five, 1.0);
+        assert_eq!(stop_reason(&t), Some(Stop::GlobalLimit(60.0)));
     }
 
     #[test]
