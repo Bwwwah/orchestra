@@ -579,6 +579,20 @@ pub fn parse_tasks(answer: &str) -> Vec<String> {
     out
 }
 
+/// The steps of an AI's answer that follow the AI step format (`project::ai_step`), tidied;
+/// the others are dropped rather than proposed.
+pub fn ai_steps_only(steps: Vec<String>) -> Vec<String> {
+    let mut out: Vec<String> = vec![];
+    for s in steps {
+        if let Ok(s) = crate::project::ai_step(&s)
+            && !out.contains(&s)
+        {
+            out.push(s);
+        }
+    }
+    out
+}
+
 /// Next tasks for a project, proposed by an AI that reads it (read-only). `existing`: the
 /// steps already there, not to repeat.
 pub fn ask_tasks(
@@ -636,9 +650,13 @@ pub fn ask_tasks(
         40,
         prefer,
     )?;
-    let tasks = parse_tasks(&answer);
+    let tasks = ai_steps_only(parse_tasks(&answer));
     if tasks.is_empty() {
-        return Err(crate::tr!("l'IA n'a proposé aucune tâche", "the AI proposed no task").into());
+        return Err(crate::tr!(
+            "l'IA n'a proposé aucune étape au format « Thème : action »",
+            "the AI proposed no step written « Theme: action »"
+        )
+        .into());
     }
     Ok(tasks)
 }
@@ -761,10 +779,14 @@ pub fn text_to_tasks(
     };
     let prompt = crate::trf!(
         "Transforme ce texte en tâches claires et actionnables pour un projet : regroupe ce qui va ensemble, retire les doublons \
-         et le bavardage, garde l'ordre logique. Une tâche = une action courte à l'infinitif (tu peux la préfixer d'un domaine court suivi de « : »).\n\
+         et le bavardage, garde l'ordre logique. Chaque tâche s'écrit OBLIGATOIREMENT « Thème : action à l'infinitif » : \
+         un thème court (1 à 4 mots), deux-points, puis UNE seule action (pas de « ; », pas de « puis », pas de seconde phrase ; \
+         deux actions = deux tâches). Exemple : « Inscription : envoyer le dossier au secrétariat ».\n\
          Réponds UNIQUEMENT par la liste, une tâche par ligne commençant par « - ». {tools_rule}\n\nTexte :\n{text}",
         "Turn this text into clear, actionable tasks for a project: group what belongs together, drop duplicates \
-         and chatter, keep a logical order. One task = one short action (you may prefix it with a short area followed by « : »).\n\
+         and chatter, keep a logical order. Each task MUST be written « Theme: action »: a short theme (1 to 4 words), \
+         a colon, then ONE action, verb first (no « ; », no « then », no second sentence; two actions = two tasks). \
+         Example: « Enrolment: send the file to the office ».\n\
          Answer ONLY with the list, one task per line starting with « - ». {tools_rule}\n\nText:\n{text}"
     );
     let dir = if !folder.trim().is_empty() && crate::project::normalize_folder(folder).is_dir() {
@@ -781,11 +803,11 @@ pub fn text_to_tasks(
         images,
         Weight::Light,
     )?;
-    let tasks = parse_tasks(&answer);
+    let tasks = ai_steps_only(parse_tasks(&answer));
     if tasks.is_empty() {
         return Err(crate::tr!(
-            "l'IA n'a trouvé aucune tâche dans ce texte",
-            "the AI found no task in this text"
+            "l'IA n'a trouvé aucune tâche dans ce texte (au format « Thème : action »)",
+            "the AI found no task in this text (written « Theme: action »)"
         )
         .into());
     }
@@ -935,8 +957,11 @@ pub fn split_answer_steps(answer: &str) -> (String, Vec<String>) {
             _ => s,
         }
         .trim();
-        let s: String = crate::richtext::one_line(s, 200);
-        if !s.is_empty() && !steps.contains(&s) && steps.len() < ANSWER_STEPS_MAX {
+        // Only steps in the AI step format are proposed.
+        let Ok(s) = crate::project::ai_step(&crate::richtext::one_line(s, 200)) else {
+            continue;
+        };
+        if !steps.contains(&s) && steps.len() < ANSWER_STEPS_MAX {
             steps.push(s);
         }
     }
@@ -1262,9 +1287,15 @@ mod tests {
         // No block: the answer as it is, no step.
         assert_eq!(split_answer_steps("  Non.  "), ("Non.".to_string(), vec![]));
         // Another code block stays in the text; a block left open still counts.
-        let (text, steps) = split_answer_steps("```rust\nfn x() {}\n```\n```steps\nDocs: write it");
+        let (text, steps) =
+            split_answer_steps("```rust\nfn x() {}\n```\n```steps\nDocs: write it\nWrite it then test it");
         assert_eq!(text, "```rust\nfn x() {}\n```");
-        assert_eq!(steps, ["Docs: write it"]);
+        // Tidied to « Theme : action »; a line out of the format is dropped.
+        assert_eq!(steps, ["Docs : write it"]);
+        assert_eq!(
+            ai_steps_only(vec!["a: faire x".into(), "Faire y".into(), "A : faire x".into()]),
+            ["A : faire x"]
+        );
         // Bounded.
         let many = format!("```étapes\n{}```", (0..30).map(|i| format!("T : faire {i}\n")).collect::<String>());
         assert_eq!(split_answer_steps(&many).1.len(), ANSWER_STEPS_MAX);
