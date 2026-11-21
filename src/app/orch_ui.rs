@@ -4753,13 +4753,15 @@ fn ring(
 
 /// The mark before « En train de s'occuper de … »: a step in progress, as in the steps card
 /// (a ring with a dot), drawn rather than a glyph (« ✦ » is missing from the app's font and
-/// showed as a stack of lines), in the card's muted grey.
+/// showed as a stack of lines), in the card's muted grey: the same size as the green dot of
+/// the session's title (radius 4), so the two marks read as one family, the green one alone
+/// carrying colour.
 fn working_mark(ui: &mut egui::Ui, t: &Tone) {
-    let (r, _) = ui.allocate_exact_size(egui::vec2(14.0, 14.0), egui::Sense::hover());
+    let (r, _) = ui.allocate_exact_size(egui::vec2(12.0, 14.0), egui::Sense::hover());
     let c = r.center();
     ui.painter()
-        .circle_stroke(c, 5.0, egui::Stroke::new(1.3, t.tertiary));
-    ui.painter().circle_filled(c, 2.0, t.secondary);
+        .circle_stroke(c, 4.0, egui::Stroke::new(1.2, t.tertiary));
+    ui.painter().circle_filled(c, 1.6, t.tertiary);
 }
 
 /// A colour per project, stable (from its name).
