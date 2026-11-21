@@ -15,6 +15,9 @@ pub struct Ais {
     pub done_msg: Arc<Mutex<Option<Result<String, String>>>>,
     pub usage: Option<crate::usage::Usage>,
     pub usage_read: Option<Instant>,
+    /// The other plugged AIs (not Claude Code) and their figures when Orchestra can read
+    /// them (Codex); None for those that tell none (Gemini, Vibe). Read with `usage`.
+    pub others: Vec<(crate::auto::Agent, Option<crate::usage::Usage>)>,
     pub tracking: bool,
     /// An install started from the settings (built-in terminal): the AI, when it started,
     /// and the last check of whether it is there yet. Plugged in as soon as it is.
@@ -41,6 +44,30 @@ impl Ais {
     /// The AIs of « Nouvelle session » (« Sessions IA » card): see `launchers_from`.
     pub fn launchers(&self) -> Vec<(&'static str, Option<&'static str>, Color32)> {
         launchers_from(self.states.lock_or_recover().as_deref().unwrap_or(&[]))
+    }
+}
+
+/// The plugged AIs whose quota is shown besides Claude's subscription: the agents other than
+/// Claude Code, in the setup list's order (never an app such as Cursor or Claude Desktop).
+pub fn other_quota_agents(plugged: &[Ai]) -> Vec<crate::auto::Agent> {
+    use crate::auto::Agent;
+    Agent::ALL
+        .into_iter()
+        .filter(|a| *a != Agent::ClaudeCode && plugged.contains(&a.ai()))
+        .collect()
+}
+
+#[cfg(test)]
+mod other_quota_tests {
+    use super::{Ai, other_quota_agents};
+    use crate::auto::Agent;
+
+    #[test]
+    fn only_the_other_plugged_agents_get_a_quota_tile() {
+        let plugged = [Ai::Vibe, Ai::ClaudeCode, Ai::Cursor, Ai::Codex];
+        assert_eq!(other_quota_agents(&plugged), [Agent::Codex, Agent::Vibe]);
+        assert!(other_quota_agents(&[Ai::ClaudeCode, Ai::ClaudeDesktop]).is_empty());
+        assert!(other_quota_agents(&[]).is_empty());
     }
 }
 
@@ -222,6 +249,10 @@ impl NotesApp {
         {
             self.ais.usage_read = Some(Instant::now());
             self.ais.usage = crate::usage::read();
+            self.ais.others = other_quota_agents(&self.ais.plugged())
+                .into_iter()
+                .map(|a| (a, crate::usage::read_for(a)))
+                .collect();
             self.ais.tracking = crate::usage::tracking_on();
             // Our status line left pointing to an Orchestra that is gone (moved, updated, or
             // built in a deleted copy): it measures nothing, so the sessions would stop as
@@ -312,8 +343,19 @@ mod reset_tests {
 }
 
 impl NotesApp {
-    /// Bottom of the sidebar: the Claude subscription at a glance; details on hover.
+    /// Bottom of the sidebar: the Claude subscription, then the quota of every other plugged
+    /// AI (Codex, Gemini, Mistral Vibe…), each in its own tile; details on hover.
     pub(super) fn usage_widget(&mut self, ui: &mut egui::Ui, t: &Tone) {
+        self.claude_usage_tile(ui, t);
+        for (agent, usage) in self.ais.others.clone() {
+            if other_usage_tile(ui, agent, usage.as_ref(), t).clicked() {
+                self.open_settings(SettingsTab::Ai);
+            }
+        }
+    }
+
+    /// The Claude subscription at a glance.
+    fn claude_usage_tile(&mut self, ui: &mut egui::Ui, t: &Tone) {
         let plugged = self.ais.plugged().contains(&Ai::ClaudeCode);
         let usage = self.ais.usage.clone();
         if usage.is_none() && !plugged && !self.ais.tracking {
@@ -460,15 +502,157 @@ impl NotesApp {
     }
 }
 
+/// "Abonnement Codex", "Quota Gemini": the title of an agent's tile.
+pub(super) fn quota_title(agent: crate::auto::Agent) -> String {
+    if crate::usage::reports_usage(agent) {
+        crate::trf!("Abonnement {}", "{} subscription", agent.label())
+    } else {
+        crate::trf!("Quota {}", "{} quota", agent.label())
+    }
+}
+
+/// A plugged AI other than Claude Code, in the sidebar: its windows (5 h, week) when Orchestra
+/// reads them, "en attente…" until a first reading, or "non lisible" with the reason on hover.
+fn other_usage_tile(
+    ui: &mut egui::Ui,
+    agent: crate::auto::Agent,
+    usage: Option<&crate::usage::Usage>,
+    t: &Tone,
+) -> egui::Response {
+    let (r, g, b) = agent.ai().accent();
+    let accent = Color32::from_rgb(r, g, b);
+    ui.add_space(6.0);
+    let w = ui.available_width();
+    let shown: Vec<crate::usage::Window> = usage
+        .map(|u| u.windows.iter().take(2).cloned().collect())
+        .unwrap_or_default();
+    let h = if shown.is_empty() {
+        28.0
+    } else {
+        26.0 + 20.0 * shown.len() as f32
+    };
+    let (rect, resp) = ui.allocate_exact_size(egui::vec2(w, h), egui::Sense::click());
+    let hov = ui
+        .ctx()
+        .animate_bool_with_time(resp.id.with("hov"), resp.hovered(), 0.15);
+    let p = ui.painter();
+    p.rect_filled(rect, 10.0, t.hover.gamma_multiply(0.4 + 0.6 * hov));
+    p.rect_stroke(
+        rect,
+        10.0,
+        egui::Stroke::new(1.0, t.border.lerp_to_gamma(accent, 0.35 * hov)),
+        egui::StrokeKind::Inside,
+    );
+    let top = rect.top() + 14.0;
+    p.circle_filled(egui::pos2(rect.left() + 16.0, top), 4.0, accent);
+    p.text(
+        egui::pos2(rect.left() + 28.0, top),
+        egui::Align2::LEFT_CENTER,
+        quota_title(agent),
+        semibold(12.5),
+        t.text,
+    );
+    let head = match usage {
+        Some(u) => five_reset_in(u, crate::model::now_ms())
+            .unwrap_or_else(|| super::chrome::relative_time(u.at)),
+        None if crate::usage::reports_usage(agent) => crate::tr!("en attente…", "waiting…").into(),
+        None => crate::tr!("non lisible", "not readable").into(),
+    };
+    p.text(
+        egui::pos2(rect.right() - 12.0, top),
+        egui::Align2::RIGHT_CENTER,
+        head,
+        FontId::proportional(11.0),
+        t.tertiary,
+    );
+    for (i, win) in shown.iter().enumerate() {
+        let y = rect.top() + 34.0 + 20.0 * i as f32;
+        let short = if win.label.starts_with("Session") {
+            "5 h".to_string()
+        } else {
+            win.label.replace("Semaine", crate::tr!("Sem.", "Wk"))
+        };
+        p.text(
+            egui::pos2(rect.left() + 12.0, y),
+            egui::Align2::LEFT_CENTER,
+            short,
+            FontId::proportional(11.5),
+            t.secondary,
+        );
+        let pct_x = rect.right() - 12.0;
+        let color = level_color(win.pct);
+        p.text(
+            egui::pos2(pct_x, y),
+            egui::Align2::RIGHT_CENTER,
+            format!("{:.0} %", win.pct),
+            semibold(11.5),
+            color,
+        );
+        let bar = egui::Rect::from_min_max(
+            egui::pos2(rect.left() + 58.0, y - 2.5),
+            egui::pos2(pct_x - 40.0, y + 2.5),
+        );
+        p.rect_filled(bar, 2.5, t.fill);
+        p.rect_filled(
+            egui::Rect::from_min_size(
+                bar.min,
+                egui::vec2(bar.width() * win.pct / 100.0, bar.height()),
+            ),
+            2.5,
+            color,
+        );
+    }
+    resp.on_hover_ui(|ui| {
+        ui.set_min_width(240.0);
+        ui.label(RichText::new(quota_title(agent)).font(semibold(14.0)));
+        ui.add_space(4.0);
+        match (usage, crate::usage::unreadable_reason(agent)) {
+            (_, Some(why)) => {
+                ui.label(RichText::new(why).size(12.5).color(t.secondary));
+            }
+            (None, None) => {
+                ui.label(RichText::new(crate::trf!(
+                    "Les chiffres arrivent à la prochaine réponse de {} (ils sont lus dans ses fichiers de session).",
+                    "The figures arrive with {}'s next answer (read from its session files).",
+                    agent.label()
+                )).size(12.5).color(t.secondary));
+            }
+            (Some(u), None) => {
+                for win in &u.windows {
+                    let reset = win
+                        .resets_at
+                        .map(|r| crate::trf!(" · repart à zéro {}", " · resets {}", when(r)))
+                        .unwrap_or_default();
+                    ui.label(
+                        RichText::new(format!(
+                            "{} : {:.0} %{reset}",
+                            crate::usage::shown(&win.label),
+                            win.pct
+                        ))
+                        .size(13.0),
+                    );
+                }
+                ui.label(
+                    RichText::new(crate::trf!(
+                        "Relevé par {} {}",
+                        "Read from {} {}",
+                        agent.label(),
+                        super::chrome::relative_time(u.at)
+                    ))
+                    .size(11.5)
+                    .color(t.tertiary),
+                );
+            }
+        }
+    })
+}
+
 /// "Abonnement Claude  Session (5 h) ▓▓░ 23 % · 15:40   Semaine ▓░░ 41 % · lun." in one line.
-pub(super) fn usage_strip(ui: &mut egui::Ui, u: &crate::usage::Usage, t: &Tone) {
+/// `title`: whose subscription it is ("Abonnement Claude", "Abonnement Codex").
+pub(super) fn usage_strip(ui: &mut egui::Ui, title: &str, u: &crate::usage::Usage, t: &Tone) {
     ui.horizontal_wrapped(|ui| {
         ui.spacing_mut().item_spacing.x = 8.0;
-        ui.label(
-            RichText::new(crate::tr!("Abonnement Claude", "Claude subscription"))
-                .size(12.5)
-                .color(t.tertiary),
-        );
+        ui.label(RichText::new(title).size(12.5).color(t.tertiary));
         for w in &u.windows {
             let color = if w.pct >= 90.0 {
                 Color32::from_rgb(224, 62, 62)
@@ -505,8 +689,8 @@ pub(super) fn usage_strip(ui: &mut egui::Ui, u: &crate::usage::Usage, t: &Tone) 
                 .map(|r| crate::trf!("Repart à zéro {}", "Resets {}", when(r)))
                 .unwrap_or_default();
             resp.response.on_hover_text(crate::trf!(
-                "{reset}\nChiffres de Claude Code, relevés {}",
-                "{reset}\nClaude Code's figures, read {}",
+                "{reset}\n{title} : chiffres relevés {}",
+                "{reset}\n{title}: figures read {}",
                 super::chrome::relative_time(u.at)
             ));
         }

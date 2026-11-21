@@ -576,6 +576,34 @@ pub(super) fn versions_card(
                         });
                     }
                 });
+                // TEST: start the project as it is on this branch, in the built-in terminal.
+                let cmd = test_command(std::path::Path::new(&s.root));
+                let r = ui.add_enabled(
+                    idle && cmd.is_some(),
+                    egui::Button::new(RichText::new(crate::tr!("▶ TEST", "▶ TEST")).size(12.5).color(if idle && cmd.is_some() { GREEN } else { t.tertiary })),
+                );
+                let tip = match &cmd {
+                    Some(c) => crate::trf!(
+                        "Lance le projet tel qu'il est sur la branche {} (choisie à gauche), dans le terminal intégré : {c}",
+                        "Starts the project as it is on the branch {} (picked on the left), in the built-in terminal: {c}",
+                        s.branch
+                    ),
+                    None => String::new(),
+                };
+                let why = if !idle {
+                    crate::tr!("Une action est en cours", "An action is running")
+                } else {
+                    crate::tr!(
+                        "Rien n'indique comment lancer ce projet (Cargo.toml, script dev ou start de package.json, cible run d'un Makefile, main.py…)",
+                        "Nothing tells how to start this project (Cargo.toml, package.json's dev or start script, a Makefile's run target, main.py…)"
+                    )
+                };
+                if r.on_hover_text(tip).on_disabled_hover_text(why).clicked()
+                    && let Some(c) = cmd
+                {
+                    let title = crate::trf!("Test · {}", "Test · {}", s.branch);
+                    super::term_ui::request(ui.ctx(), &title, &s.root, Some(c));
+                }
             });
             ui.add_space(8.0);
             if let Some(what) = busy {
@@ -943,6 +971,44 @@ pub(super) fn versions_card(
     })
 }
 
+/// How to start the project for a try, read from its folder: `cargo run`, npm's `dev` or
+/// `start` script (installing the packages first when they aren't there), `make run`, or a
+/// Python entry point. None when nothing tells how.
+pub(super) fn test_command(root: &std::path::Path) -> Option<String> {
+    if root.join("Cargo.toml").is_file() {
+        return Some("cargo run".into());
+    }
+    if let Some(pkg) = std::fs::read_to_string(root.join("package.json"))
+        .ok()
+        .and_then(|t| serde_json::from_str::<serde_json::Value>(&t).ok())
+    {
+        let scripts = &pkg["scripts"];
+        let run = ["dev", "start", "serve", "preview"]
+            .into_iter()
+            .find(|k| scripts.get(*k).is_some_and(|v| v.is_string()))
+            .map(|k| if k == "start" { "npm start".to_string() } else { format!("npm run {k}") });
+        if let Some(run) = run {
+            return Some(if root.join("node_modules").is_dir() {
+                run
+            } else {
+                format!("npm install && {run}")
+            });
+        }
+    }
+    if let Ok(make) = std::fs::read_to_string(root.join("Makefile"))
+        && make.lines().any(|l| l.starts_with("run:"))
+    {
+        return Some("make run".into());
+    }
+    if root.join("manage.py").is_file() {
+        return Some("python3 manage.py runserver".into());
+    }
+    ["main.py", "app.py"]
+        .into_iter()
+        .find(|f| root.join(f).is_file())
+        .map(|f| format!("python3 {f}"))
+}
+
 /// The name of a row ("Branche", "Actions") in a fixed-width column: the pills on the
 /// right of the rows start at the same place.
 fn row_label(ui: &mut egui::Ui, text: &str, t: &Tone) {
@@ -1187,4 +1253,33 @@ fn suggest_release(
             Err(e) => Outcome::Failed(e),
         },
     );
+}
+
+#[cfg(test)]
+mod test_command_tests {
+    use super::test_command;
+
+    #[test]
+    fn the_test_command_comes_from_the_project_folder() {
+        let dir = std::env::temp_dir().join(format!("orch-test-cmd-{}", uuid::Uuid::new_v4().simple()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let w = |f: &str, s: &str| std::fs::write(dir.join(f), s).unwrap();
+        assert_eq!(test_command(&dir), None);
+        w("app.py", "");
+        assert_eq!(test_command(&dir).as_deref(), Some("python3 app.py"));
+        w("Makefile", "build:\n\tcc x.c\nrun: build\n\t./a.out\n");
+        assert_eq!(test_command(&dir).as_deref(), Some("make run"));
+        // npm: the dev script before start; packages installed first when missing.
+        w("package.json", r#"{"scripts":{"start":"node s.js","test":"jest"}}"#);
+        assert_eq!(test_command(&dir).as_deref(), Some("npm install && npm start"));
+        w("package.json", r#"{"scripts":{"start":"node s.js","dev":"vite"}}"#);
+        std::fs::create_dir_all(dir.join("node_modules")).unwrap();
+        assert_eq!(test_command(&dir).as_deref(), Some("npm run dev"));
+        // A package.json with no way to start it doesn't hide the others.
+        w("package.json", r#"{"scripts":{"test":"jest"}}"#);
+        assert_eq!(test_command(&dir).as_deref(), Some("make run"));
+        w("Cargo.toml", "[package]\nname = \"x\"\n");
+        assert_eq!(test_command(&dir).as_deref(), Some("cargo run"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

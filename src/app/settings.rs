@@ -1381,12 +1381,43 @@ impl NotesApp {
         match &self.ais.usage {
             Some(u) => {
                 ui.add_space(4.0);
-                super::ai_ui::usage_strip(ui, u, t);
+                super::ai_ui::usage_strip(
+                    ui,
+                    crate::tr!("Abonnement Claude", "Claude subscription"),
+                    u,
+                    t,
+                );
             }
             None if self.ais.tracking => {
                 ui.label(RichText::new(crate::tr!("Les chiffres arrivent à la prochaine réponse de Claude Code (lancez-le depuis un projet).", "The figures arrive with Claude Code's next answer (start it from a project).")).size(13.0).color(t.tertiary));
             }
             None => {}
+        }
+        // The quota of the other plugged AIs: read when they tell it, else why not.
+        let others = self.ais.others.clone();
+        if !others.is_empty() {
+            section(ui, crate::tr!("Quota des autres IA", "Quota of the other AIs"), t, l);
+            for (agent, usage) in &others {
+                let title = super::ai_ui::quota_title(*agent);
+                match (usage, crate::usage::unreadable_reason(*agent)) {
+                    (Some(u), _) => super::ai_ui::usage_strip(ui, &title, u, t),
+                    (None, why) => {
+                        let why = why.map(str::to_string).unwrap_or_else(|| {
+                            crate::trf!(
+                                "Les chiffres arrivent à la prochaine réponse de {}.",
+                                "The figures arrive with {}'s next answer.",
+                                agent.label()
+                            )
+                        });
+                        ui.label(
+                            RichText::new(format!("{title} — {why}"))
+                                .size(13.0)
+                                .color(t.tertiary),
+                        );
+                    }
+                }
+                ui.add_space(4.0);
+            }
         }
         if let Some((ai, on)) = toggle {
             self.set_ai(&ctx, ai, on);

@@ -9,6 +9,7 @@
 #[macro_use]
 mod i18n;
 mod app;
+mod audit;
 mod auto;
 mod awake;
 mod clip;

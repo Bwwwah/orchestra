@@ -504,7 +504,47 @@ fn hash(s: &str) -> u64 {
 }
 
 impl NotesApp {
-    /// Start an autonomous session on a project.
+    /// « Corriger dans une branche fix » (Veille · CVE card): one « Veille CVE » step per
+    /// important vulnerability not already listed, then a session on a fix branch, with the
+    /// project's own ceiling and AI.
+    fn cve_fix_tick(&mut self, ctx: &egui::Context) {
+        let Some(req) = super::watch::take_fix_request(ctx) else {
+            return;
+        };
+        let Some(pr) = self.ws.page_mut(&req.project).and_then(|p| p.project.as_mut()) else {
+            return;
+        };
+        for s in super::watch::fix_steps(&req.findings) {
+            let open = pr
+                .steps
+                .iter()
+                .any(|x| x.title == s && x.status != crate::project::StepStatus::Done);
+            if !open {
+                pr.add_step(&s, "veille");
+            }
+        }
+        let d = Draft::new(Some(pr), true);
+        let ceiling_kept = pr.session_ceiling;
+        self.dirty_since.get_or_insert_with(Instant::now);
+        let o = &self.ws.settings.orch;
+        let five = self.agent_figures(d.agent).five;
+        let ceiling = ceiling_choice(ceiling_kept, five, o.default_limit, o.global_limit);
+        let mission = super::watch::fix_mission(&req.findings);
+        let n = match self.launch_run(ctx, &req.project, &mission, ceiling, true, None, d.agent, true) {
+            Ok(()) => super::notices::Notice::Info(crate::tr!(
+                "Session de correction lancée sur une branche fix : fusionnez-la une fois vérifiée.",
+                "Fix session started on a fix branch: merge it once checked."
+            ).into()),
+            Err(e) => super::notices::Notice::Error(crate::trf!(
+                "Étapes « Veille CVE » ajoutées, mais la session n'a pas pu partir : {e}",
+                "« CVE watch » steps added, but the session couldn't start: {e}"
+            )),
+        };
+        self.notice(n);
+    }
+
+    /// Start an autonomous session on a project. `fix`: a security fix (CVE watch), always on
+    /// a branch of its own named `orchestra/auto-fix-…`, never on `dev`.
     #[allow(clippy::too_many_arguments)]
     fn launch_run(
         &mut self,
@@ -515,6 +555,7 @@ impl NotesApp {
         commits: bool,
         endless: Option<crate::model::EndConditions>,
         agent: Agent,
+        fix: bool,
     ) -> Result<(), String> {
         if self.orch.runs.iter().any(|r| r.project == project) {
             return Err(crate::tr!(
@@ -634,7 +675,11 @@ impl NotesApp {
             .collect();
         let steps_at_turn: Vec<String> = steps_at_start.iter().map(|(id, _)| id.clone()).collect();
         let code = crate::project::code_kind(&folder, pr.code);
-        let copy = auto::make_copy(&folder, &title, !on_main(pr), code)?;
+        let copy = if fix {
+            auto::make_copy(&folder, &format!("fix {title}"), false, code)?
+        } else {
+            auto::make_copy(&folder, &title, !on_main(pr), code)?
+        };
         // A project without code makes no commit (the switch isn't shown for it), and without
         // git (worked on in its own folder) there is none to make.
         let commits = commits && code && !copy.branch.is_empty();
@@ -822,10 +867,11 @@ impl NotesApp {
         {
             let o = &self.ws.settings.orch;
             let l = ceiling_choice(None, self.orch.five, o.default_limit, o.global_limit);
-            if let Err(e) = self.launch_run(ctx, &pid, "", l, true, None, Agent::ClaudeCode) {
+            if let Err(e) = self.launch_run(ctx, &pid, "", l, true, None, Agent::ClaudeCode, false) {
                 eprintln!("auto-run : {e}");
             }
         }
+        self.cve_fix_tick(ctx);
         let now = Instant::now();
         let global = self.ws.settings.orch.global_limit;
         let week_limit = self.ws.settings.orch.week_limit;
@@ -1213,7 +1259,7 @@ impl NotesApp {
                 let share = if rec.limit > 0.0 { rec.limit } else { o.default_limit };
                 ceiling_choice(None, five, share, o.global_limit)
             };
-            match self.launch_run(ctx, &rec.project, &rec.mission, ceiling, rec.commits_allowed, rec.endless.clone(), agent) {
+            match self.launch_run(ctx, &rec.project, &rec.mission, ceiling, rec.commits_allowed, rec.endless.clone(), agent, rec.branch.contains("/auto-fix-")) {
                 Ok(()) => self.ws.notify(
                     "info",
                     &rec.project,
@@ -2850,6 +2896,12 @@ impl NotesApp {
             .collect();
         let running: Vec<String> = self.orch.runs.iter().map(|r| r.project.clone()).collect();
         let plugged = self.ais.plugged().contains(&crate::setup::Ai::ClaudeCode);
+        let connected: Vec<Agent> = self
+            .ais
+            .plugged()
+            .into_iter()
+            .filter_map(Agent::from_ai)
+            .collect();
         let mut start: Vec<String> = vec![];
         let picked: Vec<String> = projects
             .iter()
@@ -2994,7 +3046,7 @@ impl NotesApp {
                         });
                         if wide {
                             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                                launch_controls(ui, LaunchCx { id, d: &mut *d, busy, plugged, open, five, running_at, default_share: dl, global, to_main: &mut to_main, start: &mut start, confirm_main: &mut confirm_main, ceilings: &mut ceilings, lk: &lk, t });
+                                launch_controls(ui, LaunchCx { id, d: &mut *d, busy, plugged, connected: &connected, open, five, running_at, default_share: dl, global, to_main: &mut to_main, start: &mut start, confirm_main: &mut confirm_main, ceilings: &mut ceilings, lk: &lk, t });
                             });
                         }
                     });
@@ -3002,7 +3054,7 @@ impl NotesApp {
                     if !wide {
                         ui.horizontal_wrapped(|ui| {
                             ui.add_space(70.0);
-                            launch_controls(ui, LaunchCx { id, d: &mut *d, busy, plugged, open, five, running_at, default_share: dl, global, to_main: &mut to_main, start: &mut start, confirm_main: &mut confirm_main, ceilings: &mut ceilings, lk: &lk, t });
+                            launch_controls(ui, LaunchCx { id, d: &mut *d, busy, plugged, connected: &connected, open, five, running_at, default_share: dl, global, to_main: &mut to_main, start: &mut start, confirm_main: &mut confirm_main, ceilings: &mut ceilings, lk: &lk, t });
                         });
                     }
                     ui.horizontal(|ui| {
@@ -3193,7 +3245,7 @@ impl NotesApp {
             let want = draft_ceiling(&d, running_of(d.agent));
             let ceiling = ceiling_choice(want, five_of(d.agent), o.default_limit, global);
             let endless = if d.endless { Some(d.end.clone()) } else { None };
-            match self.launch_run(ctx, &id, &d.mission, ceiling, d.commits, endless, d.agent) {
+            match self.launch_run(ctx, &id, &d.mission, ceiling, d.commits, endless, d.agent, false) {
                 Ok(()) => {
                     if let Some(x) = self.orch.drafts.get_mut(&id) {
                         x.pick = false;
@@ -4812,6 +4864,8 @@ struct LaunchCx<'a> {
     d: &'a mut Draft,
     busy: bool,
     plugged: bool,
+    /// The AIs plugged into Orchestra on this machine (the choice of the AI lists only them).
+    connected: &'a [Agent],
     /// Its open steps: none (and not endless), nothing to start on.
     open: usize,
     /// The 5-hour window's figure, and the settings' default share above it.
@@ -4837,6 +4891,7 @@ fn launch_controls(ui: &mut egui::Ui, c: LaunchCx<'_>) {
         d,
         busy,
         plugged,
+        connected,
         open,
         five,
         running_at,
@@ -4894,7 +4949,7 @@ fn launch_controls(ui: &mut egui::Ui, c: LaunchCx<'_>) {
         }
     }
     ui.add_space(4.0);
-    agent_pick(ui, id, d, busy);
+    agent_pick(ui, id, d, busy, connected);
     ui.add_space(6.0);
     // « commits » and « sur main » only for a code project (`to_main` holds only those): one
     // without code shows no git words, and its sessions make no commit.
@@ -4966,16 +5021,34 @@ fn agent_unavailable(agent: Agent) -> Option<&'static str> {
     }
 }
 
-/// The AI a project's sessions are started with: those wired for working alone can be
-/// picked, the others are listed greyed out with the reason. Kept for the next sessions.
-fn agent_pick(ui: &mut egui::Ui, id: &str, d: &mut Draft, busy: bool) {
+/// The AIs listed in a project's choice of the AI: those plugged into Orchestra, in the usual
+/// order, plus the one already chosen even if it's no longer plugged (so the choice shown is
+/// never hidden). AIs not installed or unplugged are left out.
+fn agent_choices(connected: &[Agent], current: Agent) -> Vec<Agent> {
+    Agent::ALL
+        .into_iter()
+        .filter(|a| *a == current || connected.contains(a))
+        .collect()
+}
+
+/// The AI a project's sessions are started with, among the plugged ones: those wired for
+/// working alone can be picked, the others are listed greyed out with the reason. Kept for
+/// the next sessions.
+fn agent_pick(ui: &mut egui::Ui, id: &str, d: &mut Draft, busy: bool, connected: &[Agent]) {
     ui.add_enabled_ui(!busy, |ui| {
         egui::ComboBox::from_id_salt(("run-agent", id))
             .selected_text(RichText::new(d.agent.label()).size(12.5))
             .width(110.0)
             .show_ui(ui, |ui| {
-                for a in Agent::ALL {
-                    let why = agent_unavailable(a);
+                for a in agent_choices(connected, d.agent) {
+                    let why = if connected.contains(&a) {
+                        agent_unavailable(a)
+                    } else {
+                        Some(crate::tr!(
+                            "Pas branchée à Orchestra sur cet ordinateur : branchez-la dans Réglages › IA.",
+                            "Not plugged into Orchestra on this computer: plug it in under Settings › AI."
+                        ))
+                    };
                     let r = ui.add_enabled(
                         why.is_none(),
                         egui::Button::selectable(d.agent == a, a.label()),
@@ -5145,6 +5218,15 @@ mod tests {
         for a in Agent::ALL {
             assert_eq!(agent_unavailable(a).is_none(), a.ready(), "{a:?}");
         }
+        // Only the plugged AIs are listed, in the usual order, plus the one already chosen.
+        use super::agent_choices;
+        let plugged = [Agent::Vibe, Agent::ClaudeCode];
+        assert_eq!(agent_choices(&plugged, Agent::ClaudeCode), [Agent::ClaudeCode, Agent::Vibe]);
+        assert_eq!(
+            agent_choices(&plugged, Agent::Codex),
+            [Agent::ClaudeCode, Agent::Codex, Agent::Vibe]
+        );
+        assert_eq!(agent_choices(&[], Agent::ClaudeCode), [Agent::ClaudeCode]);
     }
 
     /// A project's ceiling and share are worked out on the subscription of the AI chosen for
@@ -5579,6 +5661,7 @@ mod tests {
                                 d: &mut d,
                                 busy: false,
                                 plugged: true,
+                                connected: &[super::Agent::ClaudeCode],
                                 open: 3,
                                 five: Some(37.0),
                                 running_at: None,
@@ -5651,6 +5734,7 @@ mod tests {
                             d: &mut d,
                             busy: false,
                             plugged: true,
+                            connected: &[super::Agent::ClaudeCode],
                             open: 3,
                             five: Some(37.0),
                             running_at: Some(50.0),
