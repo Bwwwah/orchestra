@@ -134,10 +134,18 @@ impl Agent {
             }
             // Its settings of the session (`config_files`) as the « system » settings, which
             // win over the person's and the repository's; only Orchestra's MCP server.
-            Agent::Gemini => format!(
-                "GEMINI_CLI_SYSTEM_SETTINGS_PATH={} gemini --approval-mode default --allowed-mcp-server-names orchestra",
-                crate::sessions::shell_quote(&self.config_dir(cwd).join("settings.json").display().to_string())
-            ),
+            // With a model, `--model` rather than the person's default.
+            Agent::Gemini => {
+                let mut c = format!(
+                    "GEMINI_CLI_SYSTEM_SETTINGS_PATH={} gemini --approval-mode default --allowed-mcp-server-names orchestra",
+                    crate::sessions::shell_quote(&self.config_dir(cwd).join("settings.json").display().to_string())
+                );
+                if let Some(m) = model_arg(model) {
+                    c.push_str(" --model ");
+                    c.push_str(&crate::sessions::shell_quote(m));
+                }
+                c
+            }
             // A home of its own for the session (`config_files`): its settings, its sessions
             // and the loop running its turns in headless mode (`VIBE_TURNS`).
             Agent::Vibe => {
@@ -3363,6 +3371,21 @@ mod tests {
         for bad in ["", "  ", "--dangerously-skip-permissions", "x; rm -rf ~", "a b", "$(id)"] {
             assert_eq!(model_arg(bad), None, "{bad}");
             let c = claude_command(&allowed, &denied, None, bad);
+            assert!(!c.contains("--model"), "{c}");
+        }
+    }
+
+    /// The model chosen for a session reaches Gemini CLI as `--model`, quoted; no model or a
+    /// name that isn't one adds nothing.
+    #[test]
+    fn the_chosen_model_reaches_gemini() {
+        let cwd = Path::new("/x");
+        let plain = Agent::Gemini.command(cwd, false, "", "");
+        assert!(!plain.contains("--model"), "{plain}");
+        let c = Agent::Gemini.command(cwd, false, "", "gemini-2.5-flash");
+        assert!(c.ends_with(" --allowed-mcp-server-names orchestra --model gemini-2.5-flash"), "{c}");
+        for bad in ["--yolo", "x; echo hi", "$(id)", "a b"] {
+            let c = Agent::Gemini.command(cwd, false, "", bad);
             assert!(!c.contains("--model"), "{c}");
         }
     }
