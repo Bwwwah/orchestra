@@ -40,6 +40,17 @@ impl Agent {
         self.ai().label()
     }
 
+    /// The bare name of the AI's maker or model, for the sidebar usage tiles: "Claude",
+    /// "Codex", "Gemini", "Mistral".
+    pub fn short_name(self) -> &'static str {
+        match self {
+            Agent::ClaudeCode => "Claude",
+            Agent::Codex => "Codex",
+            Agent::Gemini => "Gemini",
+            Agent::Vibe => "Mistral",
+        }
+    }
+
     /// The same AI in the setup list (installation, sign-in, MCP).
     pub fn ai(self) -> crate::setup::Ai {
         use crate::setup::Ai;
@@ -2381,6 +2392,12 @@ pub fn daily_report(day: &str, runs: &[&crate::model::RunRecord]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn short_names_have_no_subscription_or_quota_prefix() {
+        let names: Vec<_> = Agent::ALL.iter().map(|a| a.short_name()).collect();
+        assert_eq!(names, ["Claude", "Codex", "Gemini", "Mistral"]);
+    }
 
     #[test]
     fn the_subscription_limit_is_seen_with_its_reset() {

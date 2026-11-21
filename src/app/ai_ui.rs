@@ -390,7 +390,7 @@ impl NotesApp {
         p.text(
             egui::pos2(rect.left() + 28.0, top),
             egui::Align2::LEFT_CENTER,
-            crate::tr!("Abonnement Claude", "Claude subscription"),
+            crate::auto::Agent::ClaudeCode.short_name(),
             semibold(12.5),
             t.text,
         );
@@ -548,7 +548,7 @@ fn other_usage_tile(
     p.text(
         egui::pos2(rect.left() + 28.0, top),
         egui::Align2::LEFT_CENTER,
-        quota_title(agent),
+        agent.short_name(),
         semibold(12.5),
         t.text,
     );
