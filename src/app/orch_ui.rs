@@ -303,6 +303,12 @@ fn row_share(running: Option<f32>, suspended_endless: bool) -> Option<f32> {
     }
 }
 
+/// What a picked project's session may take from the 5-hour window, in percentage points:
+/// its ceiling less what the window already holds (`five`), never below zero.
+fn picked_share(ceiling: f32, five: Option<f32>) -> f32 {
+    (ceiling - five.unwrap_or(0.0)).max(0.0)
+}
+
 /// A share as the launch card shows it: « 0 % » at the start, then to a tenth (« 2,5 % »).
 fn share_text(p: f32) -> String {
     if p < 0.05 { "0 %".into() } else { format!("{} %", crate::i18n::dec1(p)) }
@@ -2902,7 +2908,18 @@ impl NotesApp {
                                 ui.label(RichText::new(title).font(semibold(14.5)).color(t.text));
                                 let (txt, col) = if busy { (crate::tr!("au travail", "at work").to_string(), super::projects::GREEN) } else if open == 0 { (crate::tr!("aucune étape ouverte", "no open step").to_string(), t.tertiary) } else { ({ let s = crate::i18n::plural(open); crate::trf!("{open} étape{s} ouverte{s}", "{open} open step{s}") }, t.secondary) };
                                 ui.label(RichText::new(txt).size(12.0).color(col));
-                                if let Some(p) = row_share(run_pct.get(id).copied(), suspended_endless.contains(id)) {
+                                // Picked (and not running): what its session may take, above
+                                // what the window already holds.
+                                if d.pick && !busy {
+                                    let c = ceiling_choice(draft_ceiling(d, running_at), five, dl, global);
+                                    let p = picked_share(c, five);
+                                    ui.label(RichText::new(crate::trf!("jusqu'à +{p:.0} %", "up to +{p:.0} %")).size(12.0).color(super::projects::BLUE))
+                                        .on_hover_text(crate::trf!(
+                                            "La part de la fenêtre de 5 h que cette session pourra prendre : son plafond ({c:.0} %) moins ce que la fenêtre contient déjà ({:.0} %).",
+                                            "The share of the 5-hour window this session may take: its ceiling ({c:.0} %) less what the window already holds ({:.0} %).",
+                                            five.unwrap_or(0.0)
+                                        ));
+                                } else if let Some(p) = row_share(run_pct.get(id).copied(), suspended_endless.contains(id)) {
                                     ui.label(RichText::new(share_text(p)).size(12.0).color(if busy { super::projects::GREEN } else { t.tertiary }))
                                         .on_hover_text(crate::tr!("Ce que la session de ce projet a pris de la fenêtre de 5 h depuis son lancement : 0 % tant qu'elle n'est pas lancée.", "What this project's session took from the 5-hour window since it started: 0 % until it is started."));
                                 }
@@ -5004,6 +5021,21 @@ mod tests {
         assert_eq!(share_text(0.0), "0 %");
         assert_eq!(share_text(0.01), "0 %");
         assert!(share_text(2.5) == "2,5 %" || share_text(2.5) == "2.5 %");
+    }
+
+    /// Picked, a project shows what its session may take: its ceiling less what the window
+    /// holds (37 % used, « stop at 50 % »: up to +13 %).
+    #[test]
+    fn a_picked_session_shows_what_it_may_take() {
+        use super::{Draft, ceiling_choice, draft_ceiling, picked_share};
+        assert_eq!(picked_share(50.0, Some(37.0)), 13.0);
+        assert_eq!(picked_share(50.0, None), 50.0);
+        assert_eq!(picked_share(50.0, Some(55.0)), 0.0);
+        // As the card works it out: from the draft's ceiling, in bounds.
+        let mut d = Draft::new(None, true);
+        (d.ceiling, d.touched) = (Some(50.0), true);
+        let c = ceiling_choice(draft_ceiling(&d, None), Some(37.0), 20.0, 90.0);
+        assert_eq!(picked_share(c, Some(37.0)), 13.0);
     }
 
     #[test]
