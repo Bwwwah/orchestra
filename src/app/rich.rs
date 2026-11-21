@@ -389,6 +389,67 @@ mod tests {
         );
     }
 
+    /// A drag from the first line of a box to its last one selects every line in between,
+    /// heading, paragraphs and list lines alike, and Copy gives them all.
+    #[test]
+    fn every_line_of_a_box_can_be_selected_at_once() {
+        use egui_kittest::Harness;
+        use egui_kittest::kittest::Queryable;
+        let t = super::super::tone(false);
+        let md = "## Fait\n\nPremière ligne\n\n- Deuxième ligne\n- Troisième ligne\n\nDernière ligne";
+        let mut h = Harness::builder().with_size([500.0, 400.0]).build_ui(move |ui| {
+            // The app's fonts (semibold headings) first; they take effect on the next frame.
+            let ready = egui::Id::unique("fonts-ready");
+            if ui.data(|d| d.get_temp::<bool>(ready).is_none()) {
+                super::super::setup_fonts(ui.ctx());
+                ui.data_mut(|d| d.insert_temp(ready, true));
+                return;
+            }
+            markdown(ui, md, 14.0, &t);
+        });
+        h.run();
+        let first = h.get_by_label("Fait").rect();
+        let last = h.get_by_label("Dernière ligne").rect();
+        let (from, to) = (
+            egui::pos2(first.left() + 1.0, first.center().y),
+            egui::pos2(last.right() - 1.0, last.center().y),
+        );
+        h.event(egui::Event::PointerMoved(from));
+        h.event(egui::Event::PointerButton {
+            pos: from,
+            button: egui::PointerButton::Primary,
+            pressed: true,
+            modifiers: Default::default(),
+        });
+        h.run();
+        for k in 1..=8 {
+            h.event(egui::Event::PointerMoved(from + (to - from) * (k as f32 / 8.0)));
+            h.run();
+        }
+        h.event(egui::Event::PointerButton {
+            pos: to,
+            button: egui::PointerButton::Primary,
+            pressed: false,
+            modifiers: Default::default(),
+        });
+        h.run();
+        h.event(egui::Event::Copy);
+        h.step();
+        let copied: String = h
+            .output()
+            .platform_output
+            .commands
+            .iter()
+            .filter_map(|c| match c {
+                egui::OutputCommand::CopyText(s) => Some(s.clone()),
+                _ => None,
+            })
+            .collect();
+        for line in ["Fait", "Première", "Deuxième", "Troisième", "Dernière"] {
+            assert!(copied.contains(line), "{line} missing in {copied:?}");
+        }
+    }
+
     fn show(text: &str) -> String {
         runs(text)
             .into_iter()

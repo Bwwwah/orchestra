@@ -705,7 +705,7 @@ pub fn is_report_day(t: &str) -> bool {
             .all(|(i, c)| i == 4 || i == 7 || c.is_ascii_digit())
 }
 
-/// The folder of "Rapports des IA" that holds the daily summaries (several projects).
+/// The folder of "Rapports des IA" that holds the daily summaries.
 pub fn daily_shelf_title() -> &'static str {
     crate::tr!("Bilans de la journée", "Daily summaries")
 }
@@ -969,7 +969,7 @@ pub struct OrchSettings {
     pub default_limit: f32,
     /// The AI may commit on its own branch.
     pub allow_commits: bool,
-    /// Local hour of the day's overall report (when several projects ran).
+    /// Local hour of the day's overall report (once a session ended that day).
     pub report_hour: u8,
     /// Most turns in one session.
     pub max_turns: u32,

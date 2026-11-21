@@ -53,7 +53,7 @@ ajouté sans votre clic. Le texte de la consigne est dans `sync::ask_tasks`.
 | Part par projet | 20 % | réglée sur la ligne de chaque projet au lancement ; les parts ensemble ne dépassent jamais la limite globale |
 | Tours au plus | 30 | nombre de tours d'une session |
 | Commits | non | l'IA peut faire des commits sur sa branche ; Orchestra envoie la branche sur GitHub après chaque tour et en fin de session |
-| Rapport du jour | 19 h | heure du rapport d'ensemble quand plusieurs projets ont tourné |
+| Rapport du jour | 19 h | heure du bilan de la journée, dès qu'une session a fini dans la journée (même un seul projet, même si d'autres sessions tournent encore) |
 
 L'utilisation est relevée par la ligne d'état de Claude Code (`orchestra statusline`, voir
 `src/usage.rs`). Si elle ne peut pas être mesurée, la session s'arrête par prudence.
@@ -67,3 +67,21 @@ la même mission, une minute après la remise à zéro du quota — si « Repris
 cochée dans les réglages. L'heure de remise à zéro est lue dans le message de Claude Code
 (`auto::limit_reset`), sinon dans les chiffres de la ligne d'état ; inconnue, Orchestra
 réessaie dans une heure.
+
+## La veille des failles (CVE)
+
+La veille se règle **projet par projet**, sur la page du projet :
+
+1. Ouvrez le projet (barre latérale → Projets, puis le projet).
+2. Descendez jusqu'à la carte **« VEILLE · CVE »**, à côté de la carte Versions. Elle
+   n'apparaît que pour un projet de code (dossier renseigné, dépôt git ou type « code »
+   choisi dans les réglages du projet).
+3. Cochez **« Veille automatique (une fois par jour) »** en bas de la carte.
+
+Tant qu'Orchestra est ouvert, les dépendances sont alors vérifiées une fois par jour
+(`cargo audit` pour `Cargo.lock`, `npm audit` pour `package-lock.json`, à la racine du
+dossier ; `cargo install cargo-audit` s'il manque). Une faille élevée ou critique pas encore
+traitée ajoute ses étapes « Veille CVE : corriger … » et lance seule une session de
+correction sur une branche à part (`orchestra/auto-fix-…`) ; rien n'arrive sur `main` sans
+votre fusion. Sans la case cochée, « Vérifier maintenant » lance un contrôle à la main et
+« Corriger dans une branche fix » la correction. Le réglage vaut pour cet ordinateur seulement.
