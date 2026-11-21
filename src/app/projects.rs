@@ -1672,6 +1672,7 @@ fn steps_card(ui: &mut egui::Ui, cx: &mut Cx, extra: f32) -> f32 {
             .filter(|s| s.status != StepStatus::Done)
             .count();
         let mut open_rows: Vec<(String, egui::Rect)> = vec![];
+        let mut set_model: Option<(String, String)> = None;
         for i in rows {
             let s = &pr.steps[i];
             let open_key = ("step-open", s.id.as_str());
@@ -1765,6 +1766,13 @@ fn steps_card(ui: &mut egui::Ui, cx: &mut Cx, extra: f32) -> f32 {
                                 .collect::<Vec<_>>()
                                 .join(" · ");
                             ui.label(RichText::new(line).size(12.0).color(t.tertiary));
+                        }
+                        if !ro && s.status != StepStatus::Done {
+                            let mut m = s.model.clone();
+                            step_model_pick(ui, &s.id, &mut m, t);
+                            if m != s.model {
+                                set_model = Some((s.id.clone(), m));
+                            }
                         }
                         r
                     })
@@ -1948,6 +1956,9 @@ fn steps_card(ui: &mut egui::Ui, cx: &mut Cx, extra: f32) -> f32 {
         if let Some(id) = remove {
             pr.remove_step(&id);
         }
+        if let Some((id, m)) = set_model {
+            pr.set_step_model(&id, &m);
+        }
         // "+ Ajouter une étape": a quiet line aligned with the steps; click to type.
         if ro {
             return;
@@ -2070,6 +2081,49 @@ fn steps_card(ui: &mut egui::Ui, cx: &mut Cx, extra: f32) -> f32 {
         ui.ctx().request_repaint();
     }
     h
+}
+
+/// The model imposed on a step (empty: that of the project, else Orchestra's choice), among
+/// those of every AI; one of an AI other than the session's is set aside at launch.
+fn step_model_pick(ui: &mut egui::Ui, step_id: &str, model: &mut String, t: &Tone) {
+    ui.horizontal(|ui| {
+        ui.label(
+            RichText::new(crate::tr!("Modèle", "Model"))
+                .size(12.0)
+                .color(t.tertiary),
+        );
+        egui::ComboBox::from_id_salt(("step-model", step_id))
+            .selected_text(RichText::new(if model.is_empty() {
+                crate::tr!("automatique", "automatic")
+            } else {
+                model.as_str()
+            }).size(12.0))
+            .width(150.0)
+            .show_ui(ui, |ui| {
+                ui.set_min_width(220.0);
+                ui.selectable_value(
+                    model,
+                    String::new(),
+                    crate::tr!("Automatique", "Automatic"),
+                );
+                // Read only while open: the lists come from the AIs' files.
+                for a in crate::auto::Agent::ALL {
+                    ui.separator();
+                    ui.label(RichText::new(a.label()).size(11.5).color(t.tertiary));
+                    for m in crate::catalog::available(a) {
+                        let text = format!("{} · {}", m.label, m.tier.label());
+                        ui.add_enabled_ui(!m.needs_higher_plan, |ui| {
+                            ui.selectable_value(model, m.id.clone(), text);
+                        });
+                    }
+                }
+            })
+            .response
+            .on_hover_text(crate::tr!(
+                "Le modèle de la session qui prendra cette étape. « Automatique » : celui du projet (Orchestration › Options), sinon le moins cher capable de la faire. Un modèle d'une autre IA que celle de la session est ignoré.",
+                "The model of the session that takes this step. « Automatic »: the project's (Orchestration › Options), else the cheapest able to do it. A model of another AI than the session's is ignored."
+            ));
+    });
 }
 
 /// How strongly the Steps card glows `age` seconds after arriving from « Ajouter des

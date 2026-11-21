@@ -480,6 +480,63 @@ pub fn choosable(agent: Agent) -> Vec<ModelInfo> {
     }
 }
 
+/// The model the person imposed, and why it is used.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Imposed {
+    pub model: String,
+    /// Short French reason, shown with the choice.
+    pub reason: String,
+}
+
+/// The model the person imposed for the session about to start with `agent`: that of the
+/// step it takes first (`step_model`), else the project's (`project_model`). A name that
+/// another AI offers and `agent` doesn't is set aside (the AI would refuse it and the session
+/// stop at once); a name no list knows is kept, the person may know a newer one. `lists`:
+/// the models of each AI (`available`).
+pub fn imposed_from(
+    step_model: &str,
+    project_model: &str,
+    agent: Agent,
+    lists: &[(Agent, Vec<ModelInfo>)],
+) -> Option<Imposed> {
+    let fits = |name: &str| {
+        let has = |a: Agent| {
+            lists
+                .iter()
+                .any(|(x, ms)| *x == a && ms.iter().any(|m| m.id == name))
+        };
+        has(agent) || !Agent::ALL.iter().any(|&a| a != agent && has(a))
+    };
+    [
+        (step_model, "imposé pour l'étape"),
+        (project_model, "imposé pour le projet"),
+    ]
+    .into_iter()
+    .map(|(m, why)| (m.trim(), why))
+    .find(|(m, _)| !m.is_empty() && plain(m) && fits(m))
+    .map(|(m, why)| Imposed {
+        model: m.to_string(),
+        reason: why.to_string(),
+    })
+}
+
+/// `imposed_from` for the session about to start on `pr`: the step is the one the AI takes
+/// first (see `estimate_session`), the lists those of this computer.
+pub fn imposed(
+    pr: &crate::project::Project,
+    agent: Agent,
+    me: &str,
+    now: u64,
+) -> Option<Imposed> {
+    let step = pr.next_step_for(me, now).map(|s| s.model.as_str()).unwrap_or("");
+    let project = pr.launch.as_ref().map(|l| l.model.as_str()).unwrap_or("");
+    if step.trim().is_empty() && project.trim().is_empty() {
+        return None;
+    }
+    let lists: Vec<_> = Agent::ALL.iter().map(|&a| (a, available(a))).collect();
+    imposed_from(step, project, agent, &lists)
+}
+
 /// A name safe on a command line and in a TOML string: no space, quote or shell sign.
 fn plain(s: &str) -> bool {
     !s.is_empty()
@@ -705,5 +762,53 @@ mod tests {
         let codex = vec![nano, ModelInfo::new("gpt-5.2-mini", "mini")];
         assert_eq!(light(&codex).map(|m| m.id.as_str()), Some("gpt-5.2-mini"));
         assert!(light(&[]).is_none());
+    }
+
+    #[test]
+    fn a_model_imposed_on_the_step_wins_over_the_project_then_the_choice() {
+        let lists: Vec<_> = Agent::ALL.iter().map(|&a| (a, builtin(a))).collect();
+        let cc = Agent::ClaudeCode;
+        let got = |s: &str, p: &str, a: Agent| imposed_from(s, p, a, &lists);
+        // Nothing imposed: Orchestra chooses.
+        assert_eq!(got("", "  ", cc), None);
+        // The project's, then the step's over it.
+        let i = got("", "opus", cc).unwrap();
+        assert_eq!((i.model.as_str(), i.reason.as_str()), ("opus", "imposé pour le projet"));
+        let i = got("haiku", "opus", cc).unwrap();
+        assert_eq!((i.model.as_str(), i.reason.as_str()), ("haiku", "imposé pour l'étape"));
+        // Another AI's model is set aside: the project's is used, else nothing.
+        assert_eq!(got("gemini-2.5-pro", "opus", cc).unwrap().model, "opus");
+        assert_eq!(got("gemini-2.5-pro", "", cc), None);
+        assert_eq!(got("gemini-2.5-pro", "", Agent::Gemini).unwrap().model, "gemini-2.5-pro");
+        // A name no list knows is kept (a newer model); one unsafe on a command line isn't.
+        assert_eq!(got("claude-opus-9", "", cc).unwrap().model, "claude-opus-9");
+        assert_eq!(got("opus; rm -rf ~", "sonnet", cc).unwrap().model, "sonnet");
+    }
+
+    #[test]
+    fn the_step_taken_first_gives_the_imposed_model() {
+        let mut pr = crate::project::Project::default();
+        let a = pr.add_step("première", "moi");
+        let b = pr.add_step("seconde", "moi");
+        assert!(pr.set_step_model(&b, "haiku"));
+        assert!(!pr.set_step_model("nope", "haiku"));
+        // The first open step has none: nothing imposed.
+        assert_eq!(imposed(&pr, Agent::ClaudeCode, "", 0), None);
+        pr.set_step_status(&a, crate::project::StepStatus::Done);
+        assert_eq!(imposed(&pr, Agent::ClaudeCode, "", 0).unwrap().model, "haiku");
+        // Cleared: back to the project's.
+        pr.set_step_model(&b, " ");
+        pr.launch = Some(crate::project::LaunchPrefs {
+            commits: true,
+            endless: false,
+            end: Default::default(),
+            agent: None,
+            model: "opus".into(),
+        });
+        assert_eq!(imposed(&pr, Agent::ClaudeCode, "", 0).unwrap().model, "opus");
+        // Leaving this computer, the step's model and the launch choices stay here.
+        pr.set_step_model(&b, "haiku");
+        pr.strip_local();
+        assert!(pr.steps.iter().all(|s| s.model.is_empty()) && pr.launch.is_none());
     }
 }

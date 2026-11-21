@@ -294,6 +294,8 @@ struct Draft {
     end: crate::model::EndConditions,
     /// The AI the session is started with.
     agent: Agent,
+    /// The model imposed for the project's sessions (empty: Orchestra chooses).
+    model: String,
 }
 
 impl Draft {
@@ -312,6 +314,7 @@ impl Draft {
             endless: prefs.endless,
             end: prefs.end,
             agent: prefs.agent.unwrap_or(Agent::ClaudeCode),
+            model: prefs.model,
         }
     }
 
@@ -323,6 +326,7 @@ impl Draft {
             end: self.end.clone(),
             // Claude Code, the default, isn't written.
             agent: (self.agent != Agent::ClaudeCode).then_some(self.agent),
+            model: self.model.clone(),
         }
     }
 }
@@ -338,6 +342,7 @@ fn default_prefs(commits: bool) -> crate::project::LaunchPrefs {
             ..Default::default()
         },
         agent: None,
+        model: String::new(),
     }
 }
 
@@ -853,10 +858,23 @@ impl NotesApp {
             &crate::store::computer_id(),
             crate::model::now_ms(),
         );
-        // No model imposed (a restart keeps the one first chosen): the cheapest able to do
-        // the step, among the models of the AI chosen in the card, whose limits were just
-        // checked. None found (Vibe without its own list): the AI's own default.
-        let picked = if model.trim().is_empty() {
+        // A restart keeps the model first chosen. Else the one the person imposed for the
+        // step taken first, or for the project. Else the cheapest able to do the step, among
+        // the models of the AI chosen in the card, whose limits were just checked. None found
+        // (Vibe without its own list): the AI's own default.
+        let imposed = if model.trim().is_empty() {
+            crate::catalog::imposed(
+                pr,
+                agent,
+                &crate::store::computer_id(),
+                crate::model::now_ms(),
+            )
+        } else {
+            None
+        };
+        let picked = if let Some(i) = &imposed {
+            Some(i.model.clone())
+        } else if model.trim().is_empty() {
             crate::catalog::choose(
                 &[(agent, crate::catalog::choosable(agent))],
                 difficulty.tier,
@@ -3280,7 +3298,12 @@ impl NotesApp {
                                 ui.ctx().data_mut(|m| m.insert_temp(opts_key, opened));
                             }
                             if !opened {
-                                let s = options_summary(d.agent, d.endless, !d.mission.trim().is_empty(), to_main.get(id).copied(), d.commits);
+                                let mut s = options_summary(d.agent, d.endless, !d.mission.trim().is_empty(), to_main.get(id).copied(), d.commits);
+                                // A model imposed: said beside its AI.
+                                if !d.model.is_empty() {
+                                    let at = usize::from(d.agent != Agent::ClaudeCode);
+                                    s.insert(at, d.model.clone());
+                                }
                                 if !s.is_empty() {
                                     ui.label(RichText::new(s.join(" · ")).size(12.0).color(t.tertiary));
                                 }
@@ -5336,6 +5359,7 @@ fn launch_options(
 ) {
     ui.label(RichText::new(crate::tr!("IA", "AI")).size(12.0).color(t.tertiary));
     agent_pick(ui, id, d, busy, connected);
+    model_pick(ui, id, d, busy);
     ui.add_space(8.0);
     if to_main.contains_key(id) {
         super::settings::switch(ui, &mut d.commits, lk).on_hover_text(crate::tr!("L'IA peut faire des commits sur sa branche (Orchestra l'envoie sur GitHub après chaque tour).\nGardé pour les prochaines sessions de ce projet.", "The AI may commit on its branch (Orchestra pushes it to GitHub after each turn).\nKept for this project's next sessions."));
@@ -5402,6 +5426,10 @@ fn agent_pick(ui: &mut egui::Ui, id: &str, d: &mut Draft, busy: bool, connected:
                         egui::Button::selectable(d.agent == a, a.label()),
                     );
                     if r.clicked() {
+                        // Another AI: its own models, so back to Orchestra's choice.
+                        if d.agent != a {
+                            d.model.clear();
+                        }
                         d.agent = a;
                     }
                     // Said under it, not only on hover: a greyed AI with no word looks broken.
@@ -5420,6 +5448,40 @@ fn agent_pick(ui: &mut egui::Ui, id: &str, d: &mut Draft, busy: bool, connected:
             .on_hover_text(crate::tr!(
                 "L'IA qui travaille sur ce projet. Gardée pour les prochaines sessions de ce projet.",
                 "The AI working on this project. Kept for this project's next sessions."
+            ));
+    });
+}
+
+/// The model of the project's sessions: « Automatique » (the cheapest able to do the step,
+/// see `catalog::choose`), or one the AI offers, imposed. A step's own model wins over it.
+fn model_pick(ui: &mut egui::Ui, id: &str, d: &mut Draft, busy: bool) {
+    ui.add_enabled_ui(!busy, |ui| {
+        egui::ComboBox::from_id_salt(("run-model", id))
+            .selected_text(RichText::new(if d.model.is_empty() {
+                crate::tr!("Modèle auto", "Auto model")
+            } else {
+                d.model.as_str()
+            }).size(12.5))
+            .width(130.0)
+            .show_ui(ui, |ui| {
+                ui.set_min_width(200.0);
+                ui.selectable_value(
+                    &mut d.model,
+                    String::new(),
+                    crate::tr!("Automatique", "Automatic"),
+                );
+                // Read only while open: the lists come from the AIs' files.
+                for m in crate::catalog::available(d.agent) {
+                    let text = format!("{} · {}", m.label, m.tier.label());
+                    ui.add_enabled_ui(!m.needs_higher_plan, |ui| {
+                        ui.selectable_value(&mut d.model, m.id.clone(), text);
+                    });
+                }
+            })
+            .response
+            .on_hover_text(crate::tr!(
+                "Le modèle des sessions de ce projet. « Automatique » : le moins cher capable de faire l'étape. Un modèle imposé sur une étape passe avant.\nGardé pour les prochaines sessions de ce projet.",
+                "The model of this project's sessions. « Automatic »: the cheapest able to do the step. A model imposed on a step comes first.\nKept for this project's next sessions."
             ));
     });
 }
@@ -5496,7 +5558,7 @@ mod tests {
                 turns: Some(12),
                 ..Default::default()
             },
-            agent: None,
+            agent: None, model: String::new(),
         };
         let p = Project {
             session_ceiling: Some(95.0),
@@ -6051,7 +6113,7 @@ mod tests {
                     pick: false,
                     endless: false,
                     end: Default::default(),
-                    agent: super::Agent::ClaudeCode,
+                    agent: super::Agent::ClaudeCode, model: String::new(),
                 };
                 let mut to_main: super::HashMap<String, bool> =
                     [(id.clone(), false)].into_iter().collect();
@@ -6122,7 +6184,7 @@ mod tests {
                     pick: false,
                     endless: false,
                     end: Default::default(),
-                    agent: super::Agent::ClaudeCode,
+                    agent: super::Agent::ClaudeCode, model: String::new(),
                 };
                 let mut to_main: super::HashMap<String, bool> = super::HashMap::new();
                 if code {
