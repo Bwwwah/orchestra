@@ -75,8 +75,9 @@ impl Agent {
     pub fn command(self, allow_commits: bool, extra: &str) -> String {
         match self {
             // The strictest mode of each: every command (Codex, Gemini) or every tool (Vibe)
-            // waits for a yes. The list of allowed tools is not translated for them yet (the
-            // « Permissions » steps), so they are not `ready` and never started alone.
+            // waits for a yes. Their rules are translated (`Agent::rules_config`) but not yet
+            // written where each one reads them, nor Codex's sandbox mapped, so they are not
+            // `ready` and never started alone.
             Agent::Codex => "codex --sandbox workspace-write --ask-for-approval untrusted".into(),
             Agent::Gemini => "gemini --approval-mode default".into(),
             Agent::Vibe => "vibe".into(),
@@ -478,6 +479,159 @@ pub fn permissions(allow_commits: bool, extra: &str) -> (Vec<String>, Vec<String
         }
     }
     (allowed, DENIED.iter().map(|s| s.to_string()).collect())
+}
+
+/// The rules of `permissions`, written for an agent other than Claude Code. The list above is
+/// written in Claude Code's words (`Bash(git status:*)`, `Grep`, `Read(~/.ssh/**)`); the other
+/// agents only know command prefixes and their own tool names, so each rule becomes:
+///
+/// - a shell command (`Bash(x:*)` or `Bash(x)`): the prefix `x`, allowed or refused;
+/// - a tool of Claude Code (`Grep`, `WebFetch`…): the agent's tool doing the same, if it has
+///   one; a tool it has not is left out (nothing to allow or refuse);
+/// - a path (`Read(~/.ssh/**)`, `Edit(~/.zshrc)`): none of the three filters its file tools by
+///   path, so these are kept apart (`paths`) for the sandbox (Codex) or the agent's own
+///   restriction to the working folder (Gemini, Vibe);
+/// - Orchestra's MCP server (`mcp__orchestra`): wired with the MCP configuration of each agent.
+///
+/// The person's extra rules go through the same filter as for Claude Code first.
+#[allow(dead_code)]
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct AgentRules {
+    /// Shell command prefixes run without asking (`git status`, `cargo test`).
+    pub allowed_commands: Vec<String>,
+    /// Shell command prefixes always refused (`rm`, `git push`).
+    pub denied_commands: Vec<String>,
+    /// The agent's own tools run without asking (`glob`, `grep`…).
+    pub allowed_tools: Vec<String>,
+    /// The agent's own tools always refused (`web_fetch`…).
+    pub denied_tools: Vec<String>,
+    /// Paths refused to reading or editing (`~/.ssh/**`), for the sandbox.
+    pub denied_paths: Vec<String>,
+}
+
+/// A shell rule of Claude Code (`Bash(git status:*)`, `Bash(pwd)`) as a command prefix.
+fn command_prefix(rule: &str) -> Option<String> {
+    let inner = rule.strip_prefix("Bash(")?.strip_suffix(')')?;
+    let p = inner.strip_suffix(":*").unwrap_or(inner).trim();
+    (!p.is_empty()).then(|| p.to_string())
+}
+
+/// The agent's tool doing what a tool of Claude Code does, if it has one.
+fn agent_tool(agent: Agent, claude_tool: &str) -> Option<&'static str> {
+    match (agent, claude_tool) {
+        (Agent::Gemini, "Glob") => Some("glob"),
+        (Agent::Gemini, "Grep") => Some("search_file_content"),
+        (Agent::Gemini, "TodoWrite") => Some("write_todos"),
+        (Agent::Gemini, "WebFetch") => Some("web_fetch"),
+        (Agent::Gemini, "WebSearch") => Some("google_web_search"),
+        (Agent::Vibe, "Grep") => Some("grep"),
+        (Agent::Vibe, "TodoWrite") => Some("todo"),
+        (Agent::Vibe, "WebFetch") => Some("web_fetch"),
+        (Agent::Vibe, "WebSearch") => Some("web_search"),
+        // Codex has no tool list: only shell commands, and the sandbox.
+        _ => None,
+    }
+}
+
+#[allow(dead_code)]
+impl Agent {
+    /// The rules of an autonomous session in this agent's words (see `AgentRules`).
+    pub fn rules(self, allow_commits: bool, extra: &str) -> AgentRules {
+        let (allowed, denied) = permissions(allow_commits, extra);
+        let mut r = AgentRules::default();
+        fn push(v: &mut Vec<String>, x: String) {
+            if !v.contains(&x) {
+                v.push(x);
+            }
+        }
+        for (rules, allow) in [(&allowed, true), (&denied, false)] {
+            for rule in rules.iter() {
+                if let Some(cmd) = command_prefix(rule) {
+                    let v = if allow { &mut r.allowed_commands } else { &mut r.denied_commands };
+                    push(v, cmd);
+                } else if let Some(path) = rule
+                    .strip_prefix("Read(")
+                    .or_else(|| rule.strip_prefix("Edit("))
+                    .and_then(|p| p.strip_suffix(')'))
+                {
+                    if !allow {
+                        push(&mut r.denied_paths, path.to_string());
+                    }
+                } else if rule.starts_with("mcp__") {
+                    // Wired with each agent's MCP configuration.
+                } else if let Some(t) = agent_tool(self, rule) {
+                    let v = if allow { &mut r.allowed_tools } else { &mut r.denied_tools };
+                    push(v, t.to_string());
+                }
+            }
+        }
+        r
+    }
+
+    /// The rules as the agent reads them: Gemini CLI's `tools` settings (`allowed`, `exclude`,
+    /// shell commands as `run_shell_command(prefix)`), Mistral Vibe's `config.toml`
+    /// (`[tools.bash]` allowlist and denylist, `permission = "always"` for the allowed tools,
+    /// `"never"` for the refused ones), Codex's execution policy (`prefix_rule` lines of a
+    /// `.rules` file, `allow` or `forbidden`). Empty for Claude Code, whose rules are passed
+    /// on its command line.
+    pub fn rules_config(self, allow_commits: bool, extra: &str) -> String {
+        let r = self.rules(allow_commits, extra);
+        match self {
+            Agent::ClaudeCode => String::new(),
+            Agent::Gemini => {
+                let shell = |v: &[String]| -> Vec<String> {
+                    v.iter().map(|c| format!("run_shell_command({c})")).collect()
+                };
+                let mut allowed = r.allowed_tools.clone();
+                allowed.extend(shell(&r.allowed_commands));
+                let mut exclude = r.denied_tools.clone();
+                exclude.extend(shell(&r.denied_commands));
+                serde_json::to_string_pretty(&serde_json::json!({
+                    "tools": { "allowed": allowed, "exclude": exclude }
+                }))
+                .unwrap_or_default()
+            }
+            Agent::Vibe => {
+                let list = |v: &[String]| -> String {
+                    let items: Vec<String> = v.iter().map(|s| toml_string(s)).collect();
+                    format!("[{}]", items.join(", "))
+                };
+                let mut s = format!(
+                    "[tools.bash]\nallowlist = {}\ndenylist = {}\n",
+                    list(&r.allowed_commands),
+                    list(&r.denied_commands)
+                );
+                for t in &r.allowed_tools {
+                    s.push_str(&format!("\n[tools.{t}]\npermission = \"always\"\n"));
+                }
+                for t in &r.denied_tools {
+                    s.push_str(&format!("\n[tools.{t}]\npermission = \"never\"\n"));
+                }
+                s
+            }
+            Agent::Codex => {
+                let mut s = String::new();
+                for (cmds, decision) in [(&r.allowed_commands, "allow"), (&r.denied_commands, "forbidden")] {
+                    for c in cmds.iter() {
+                        let words: Vec<String> = c
+                            .split_whitespace()
+                            .map(|w| serde_json::Value::String(w.into()).to_string())
+                            .collect();
+                        s.push_str(&format!(
+                            "prefix_rule(pattern=[{}], decision=\"{decision}\")\n",
+                            words.join(", ")
+                        ));
+                    }
+                }
+                s
+            }
+        }
+    }
+}
+
+/// A TOML basic string (the same escapes as JSON for what these rules contain).
+fn toml_string(s: &str) -> String {
+    serde_json::Value::String(s.into()).to_string()
 }
 
 // ------------------------------------------------------------------ the copy of the repository
@@ -2164,6 +2318,59 @@ mod tests {
         let v: Value = serde_json::from_str(&mcp_config()).unwrap();
         assert_eq!(v["mcpServers"].as_object().unwrap().len(), 1);
         assert_eq!(v["mcpServers"]["orchestra"]["args"][0], "mcp");
+    }
+
+    #[test]
+    fn rules_are_translated_for_every_agent() {
+        let extra = "Bash(just test:*), Bash(rm -i:*), Bash, Read";
+        for agent in [Agent::Codex, Agent::Gemini, Agent::Vibe] {
+            let r = agent.rules(true, extra);
+            // Every shell rule of Claude Code is there, as a prefix.
+            for c in ["git status", "cargo test", "pwd", "git commit", "just test"] {
+                assert!(r.allowed_commands.iter().any(|a| a == c), "{agent:?} {c}");
+            }
+            for c in ["rm", "git push", "sudo", "python -c", "curl"] {
+                assert!(r.denied_commands.iter().any(|d| d == c), "{agent:?} {c}");
+            }
+            // What would lift the restriction never comes through.
+            for bad in ["rm -i", "Bash", "Read", ""] {
+                assert!(!r.allowed_commands.iter().any(|a| a == bad), "{agent:?} {bad}");
+                assert!(!r.allowed_tools.iter().any(|a| a == bad), "{agent:?} {bad}");
+            }
+            assert!(!r.allowed_commands.iter().any(|a| r.denied_commands.contains(a)));
+            assert!(r.denied_paths.iter().any(|p| p == "~/.ssh/**"));
+            // Claude Code's names never leak into another agent's lists.
+            let all = [&r.allowed_tools, &r.denied_tools, &r.allowed_commands, &r.denied_commands];
+            assert!(all.iter().all(|v| v.iter().all(|x| !x.starts_with("Bash(")
+                && !x.starts_with("mcp__")
+                && x.chars().next().is_some_and(|c| !c.is_ascii_uppercase()))));
+        }
+        let r = Agent::Codex.rules(false, "");
+        assert!(r.allowed_tools.is_empty() && r.denied_tools.is_empty());
+        assert!(!r.allowed_commands.iter().any(|a| a == "git commit"));
+        assert_eq!(Agent::Gemini.rules(false, "").denied_tools, ["web_fetch", "google_web_search"]);
+        assert!(Agent::Vibe.rules(false, "").allowed_tools.contains(&"grep".to_string()));
+
+        // Gemini: a JSON settings document.
+        let g: Value = serde_json::from_str(&Agent::Gemini.rules_config(false, "")).unwrap();
+        let allowed = g["tools"]["allowed"].as_array().unwrap();
+        assert!(allowed.iter().any(|a| a == "run_shell_command(git status)"));
+        assert!(allowed.iter().any(|a| a == "glob"));
+        let exclude = g["tools"]["exclude"].as_array().unwrap();
+        assert!(exclude.iter().any(|a| a == "run_shell_command(rm)"));
+        assert!(exclude.iter().any(|a| a == "web_fetch"));
+        // Vibe: TOML tables.
+        let v = Agent::Vibe.rules_config(false, "");
+        assert!(v.starts_with("[tools.bash]\nallowlist = [\"ls\", \"pwd\", \"git status\""));
+        assert!(v.contains("denylist = [\"rm\", ") && v.contains("\"python <<\""));
+        assert!(v.contains("[tools.grep]\npermission = \"always\""));
+        assert!(v.contains("[tools.web_fetch]\npermission = \"never\""));
+        // Codex: one prefix rule per command, words apart.
+        let c = Agent::Codex.rules_config(false, "");
+        assert!(c.contains("prefix_rule(pattern=[\"git\", \"status\"], decision=\"allow\")\n"));
+        assert!(c.contains("prefix_rule(pattern=[\"rm\"], decision=\"forbidden\")\n"));
+        assert!(!c.contains("git commit"));
+        assert!(Agent::ClaudeCode.rules_config(false, "").is_empty());
     }
 
     #[test]
