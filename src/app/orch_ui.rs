@@ -507,6 +507,15 @@ fn endless_main_warning() -> &'static str {
     )
 }
 
+/// The one line of help at the top of « Lancer une session », in sight rather than in
+/// tooltips: what a session does, when it stops, and how to start several.
+fn launch_help() -> &'static str {
+    crate::tr!(
+        "Une session lance une IA sur les étapes ouvertes du projet. Elle s'arrête quand la fenêtre de 5 h atteint son « arrêt à ». Cochez plusieurs projets pour les lancer ensemble.",
+        "A session sets an AI to work on the project's open steps. It stops when the 5-hour window reaches its « stops at ». Tick several projects to start them together."
+    )
+}
+
 fn default_mission() -> &'static str {
     crate::tr!(
         "Avance sur les étapes ouvertes du projet, dans l'ordre, en vérifiant ton travail.",
@@ -3015,6 +3024,10 @@ impl NotesApp {
                 &launch_subtitle(five_of(Agent::ClaudeCode)),
                 t,
             );
+            if !projects.is_empty() {
+                ui.add(egui::Label::new(RichText::new(launch_help()).size(12.0).color(t.tertiary)).wrap());
+                ui.add_space(6.0);
+            }
             if !plugged {
                 ui.label(
                     RichText::new(crate::tr!(
@@ -3134,7 +3147,9 @@ impl NotesApp {
                         });
                         ui.horizontal(|ui| {
                             ui.add_space(70.0);
-                            ui.add(egui::TextEdit::singleline(&mut d.mission).hint_text(default_mission()).desired_width(f32::INFINITY).font(FontId::proportional(13.0)).margin(egui::Margin::symmetric(8, 5)));
+                            ui.label(RichText::new(crate::tr!("Consigne (facultatif)", "Mission (optional)")).size(12.0).color(t.tertiary));
+                            ui.add(egui::TextEdit::singleline(&mut d.mission).hint_text(default_mission()).desired_width(f32::INFINITY).font(FontId::proportional(13.0)).margin(egui::Margin::symmetric(8, 5)))
+                                .on_hover_text(crate::tr!("Ce que l'IA doit faire pendant la session. Vide : la consigne grisée, avancer sur les étapes ouvertes dans l'ordre.", "What the AI should do during the session. Empty: the greyed one, move forward on the open steps in order."));
                         });
                     }
                     if !busy {
@@ -3148,7 +3163,7 @@ impl NotesApp {
                             ));
                             ui.label(RichText::new(crate::tr!("sans fin", "endless")).size(12.0).color(if d.endless { t.text } else { t.tertiary }));
                             if d.endless {
-                                ui.label(RichText::new(crate::tr!("· s'arrête après", "· stops after")).size(12.0).color(t.tertiary));
+                                ui.label(RichText::new(crate::tr!("· s'arrête dès que l'une est atteinte :", "· stops as soon as one is reached:")).size(12.0).color(t.tertiary));
                                 end_conditions(ui, &mut d.end, t);
                             }
                         });
@@ -4871,12 +4886,12 @@ fn end_conditions(ui: &mut egui::Ui, c: &mut crate::model::EndConditions, t: &To
     if let Some(n) = c.turns.as_mut() {
         ui.add(egui::DragValue::new(n).range(1..=1000));
     }
-    ui.checkbox(&mut c.when_done, small(crate::tr!("plus d'étape ouverte", "no open step left"))).on_hover_text(crate::tr!(
+    ui.checkbox(&mut c.when_done, small(crate::tr!("toutes les étapes faites", "all steps done"))).on_hover_text(crate::tr!(
         "Coché : la session s'arrête une fois les étapes faites. Décoché : l'IA crée elle-même les étapes suivantes et continue.",
         "Ticked: the session stops once the steps are done. Unticked: the AI creates the next steps itself and goes on."
     ));
     if c.hours.is_none() && c.steps.is_none() && c.turns.is_none() && !c.when_done {
-        ui.label(RichText::new(crate::tr!("(plafond seulement)", "(ceiling only)")).size(12.0).color(super::projects::ORANGE)).on_hover_text(crate::tr!(
+        ui.label(RichText::new(crate::tr!("(aucune : seulement à « arrêt à »)", "(none: only at « stops at »)")).size(12.0).color(t.tertiary)).on_hover_text(crate::tr!(
             "Sans condition, la session tourne jusqu'à son plafond, la limite globale ou la réserve de la semaine (ou deux tours de suite sans rien à faire).",
             "With no condition, the session runs until its ceiling, the global limit or the week's reserve (or two turns in a row with nothing to do)."
         ));
@@ -5402,6 +5417,15 @@ mod tests {
         assert_eq!(share_text(0.0), "0 %");
         assert_eq!(share_text(0.01), "0 %");
         assert!(share_text(2.5) == "2,5 %" || share_text(2.5) == "2.5 %");
+    }
+
+    #[test]
+    fn the_launch_card_explains_itself_in_sight() {
+        let h = super::launch_help();
+        // What a session does, when it stops, how to start several: all in one visible line.
+        assert!(h.contains("5 h"), "{h}");
+        assert!(h.contains("arrêt à") || h.contains("stops at"), "{h}");
+        assert!(h.contains("plusieurs") || h.contains("several"), "{h}");
     }
 
     #[test]
