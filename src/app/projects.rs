@@ -3471,6 +3471,19 @@ fn quick_question(ui: &mut egui::Ui, cx: &mut Cx) {
             match &a.answer {
                 Ok(md) => {
                     super::rich::markdown(ui, md, 13.5, t);
+                    if a.steps > 0 {
+                        ui.add_space(4.0);
+                        let s = crate::i18n::plural(a.steps);
+                        ui.label(
+                            RichText::new(crate::trf!(
+                                "{} étape{s} proposée{s} dans l'encadré Étapes : cochez celles à garder.",
+                                "{} step{s} proposed in the Steps box: tick the ones to keep.",
+                                a.steps
+                            ))
+                            .size(12.5)
+                            .color(GREEN),
+                        );
+                    }
                     if !a.by.is_empty() {
                         ui.add_space(2.0);
                         ui.label(

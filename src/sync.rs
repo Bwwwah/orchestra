@@ -892,6 +892,62 @@ pub const QUESTION_MAX: usize = 1000;
 /// `code`: a code project (feature ideas, code); otherwise a project of documents —
 /// school work, paperwork or anything else — where the answer stays about its content.
 fn question_prompt(folder: &str, question: &str, code: bool) -> String {
+    let mut p = question_prompt_base(folder, question, code);
+    p.push_str(crate::tr!(
+        "\n\nSi la question demande d'ajouter, de créer ou de proposer des étapes au projet, termine ta \
+         réponse par un bloc de code ```etapes avec une étape par ligne, au format « Thème : action à \
+         l'infinitif », une seule action par étape, 10 au plus ; elles seront proposées dans l'encadré \
+         Étapes. Sinon, pas de bloc.",
+        "\n\nIf the question asks to add, create or propose steps for the project, end your answer with a \
+         ```steps code block, one step per line, written « Theme: action », one action per step, 10 at \
+         most; they will be proposed in the Steps box. Otherwise, no block."
+    ));
+    p
+}
+
+/// The most steps one answer may propose.
+pub const ANSWER_STEPS_MAX: usize = 10;
+
+/// An answer split into the text to show and the steps it proposes: the lines of its last
+/// ```etapes (or ```étapes, ```steps) block, cleaned to one short line each, at most
+/// `ANSWER_STEPS_MAX`; the block itself is taken out of the text.
+pub fn split_answer_steps(answer: &str) -> (String, Vec<String>) {
+    let lines: Vec<&str> = answer.lines().collect();
+    let open = lines.iter().rposition(|l| {
+        let tag = l.trim().strip_prefix("```").unwrap_or("").trim().to_lowercase();
+        matches!(tag.as_str(), "etapes" | "étapes" | "steps")
+    });
+    let Some(open) = open else {
+        return (answer.trim().to_string(), vec![]);
+    };
+    let close = lines[open + 1..]
+        .iter()
+        .position(|l| l.trim().starts_with("```"))
+        .map(|i| open + 1 + i)
+        .unwrap_or(lines.len());
+    let mut steps: Vec<String> = vec![];
+    for l in &lines[open + 1..close] {
+        // A list mark (« - », « * », « • », « 3. », « 3) ») before the step, not the step's own digits.
+        let s = l.trim().trim_start_matches(['-', '*', '•']).trim_start();
+        let digits = s.len() - s.trim_start_matches(|c: char| c.is_ascii_digit()).len();
+        let s = match s[digits..].chars().next() {
+            Some('.' | ')') if digits > 0 => &s[digits + 1..],
+            _ => s,
+        }
+        .trim();
+        let s: String = crate::richtext::one_line(s, 200);
+        if !s.is_empty() && !steps.contains(&s) && steps.len() < ANSWER_STEPS_MAX {
+            steps.push(s);
+        }
+    }
+    let mut text: Vec<&str> = lines[..open].to_vec();
+    if close < lines.len() {
+        text.extend(&lines[close + 1..]);
+    }
+    (text.join("\n").trim().to_string(), steps)
+}
+
+fn question_prompt_base(folder: &str, question: &str, code: bool) -> String {
     let q: String = question.trim().chars().take(QUESTION_MAX).collect();
     if !code {
         return crate::trf!(
@@ -1188,6 +1244,31 @@ mod tests {
             !fill_prompt("/tmp/x", true).contains("Ressources utiles")
                 && !fill_prompt("/tmp/x", true).contains("Useful resources")
         );
+    }
+
+    #[test]
+    fn an_answer_can_propose_steps() {
+        let a = "Oui, ça vaut le coup.\n\n```etapes\n- Export : ajouter le bouton PDF\n2. Tests : vérifier l'export\n2FA : activer la double authentification\n- Export : ajouter le bouton PDF\n\n```\nÀ vous de voir.";
+        let (text, steps) = split_answer_steps(a);
+        assert_eq!(text, "Oui, ça vaut le coup.\n\nÀ vous de voir.");
+        assert_eq!(
+            steps,
+            [
+                "Export : ajouter le bouton PDF",
+                "Tests : vérifier l'export",
+                "2FA : activer la double authentification"
+            ]
+        );
+        // No block: the answer as it is, no step.
+        assert_eq!(split_answer_steps("  Non.  "), ("Non.".to_string(), vec![]));
+        // Another code block stays in the text; a block left open still counts.
+        let (text, steps) = split_answer_steps("```rust\nfn x() {}\n```\n```steps\nDocs: write it");
+        assert_eq!(text, "```rust\nfn x() {}\n```");
+        assert_eq!(steps, ["Docs: write it"]);
+        // Bounded.
+        let many = format!("```étapes\n{}```", (0..30).map(|i| format!("T : faire {i}\n")).collect::<String>());
+        assert_eq!(split_answer_steps(&many).1.len(), ANSWER_STEPS_MAX);
+        assert!(question_prompt("/tmp/x", "?", true).contains("```"));
     }
 
     #[test]
