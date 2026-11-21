@@ -619,21 +619,24 @@ pub(super) fn versions_card(
                             });
                         }
                         let base = crate::git::main_branch(&s);
-                        let can_merge = idle && s.remote.is_some() && s.branch != base && s.changes.is_empty() && s.behind == 0;
-                        let r = ui.add_enabled(can_merge, egui::Button::new(RichText::new(crate::trf!("Demander la fusion dans {base}", "Request a merge into {base}")).size(13.0)));
-                        let why = if !idle { crate::tr!("Une action est en cours", "An action is running").to_string() } else if s.remote.is_none() { crate::tr!("Pas encore de dépôt distant", "No remote repository yet").to_string() } else if s.branch == base { crate::trf!("Vous êtes déjà sur {base}", "You're already on {base}") } else if !s.changes.is_empty() { crate::tr!("Enregistrez d'abord les modifications", "Save the changes first").to_string() } else { crate::tr!("Récupérez d'abord les nouveautés de GitHub", "Pull GitHub's new commits first").to_string() };
-                        let tip = if s.gh { crate::trf!("Envoie la branche, puis ouvre une demande de fusion (pull request) dans {base} sur GitHub", "Pushes the branch, then opens a pull request into {base} on GitHub") } else { crate::trf!("Envoie la branche, puis ouvre la page GitHub pour demander sa fusion dans {base}", "Pushes the branch, then opens GitHub's page to request its merge into {base}") };
-                        if r.on_hover_text(tip).on_disabled_hover_text(why).clicked() {
-                            let (root, branch, up, gh, github) = (s.root.clone(), s.branch.clone(), s.upstream.is_some(), s.gh, s.github.clone());
-                            v.start(page_id, folder, crate::tr!("Demande de fusion", "Merge request"), &ctx, move || match crate::git::request_merge(&root, &branch, base, up, gh, github.as_deref()) {
-                                Ok((m, url)) => {
-                                    if let Some(u) = url {
-                                        open_url(&u);
+                        // Déjà sur la branche principale : rien à fusionner, le bouton n'apparaît pas.
+                        if s.branch != base {
+                            let can_merge = idle && s.remote.is_some() && s.changes.is_empty() && s.behind == 0;
+                            let r = ui.add_enabled(can_merge, egui::Button::new(RichText::new(crate::trf!("Demander la fusion dans {base}", "Request a merge into {base}")).size(13.0)));
+                            let why = if !idle { crate::tr!("Une action est en cours", "An action is running") } else if s.remote.is_none() { crate::tr!("Pas encore de dépôt distant", "No remote repository yet") } else if !s.changes.is_empty() { crate::tr!("Enregistrez d'abord les modifications", "Save the changes first") } else { crate::tr!("Récupérez d'abord les nouveautés de GitHub", "Pull GitHub's new commits first") };
+                            let tip = if s.gh { crate::trf!("Envoie la branche, puis ouvre une demande de fusion (pull request) dans {base} sur GitHub", "Pushes the branch, then opens a pull request into {base} on GitHub") } else { crate::trf!("Envoie la branche, puis ouvre la page GitHub pour demander sa fusion dans {base}", "Pushes the branch, then opens GitHub's page to request its merge into {base}") };
+                            if r.on_hover_text(tip).on_disabled_hover_text(why).clicked() {
+                                let (root, branch, up, gh, github) = (s.root.clone(), s.branch.clone(), s.upstream.is_some(), s.gh, s.github.clone());
+                                v.start(page_id, folder, crate::tr!("Demande de fusion", "Merge request"), &ctx, move || match crate::git::request_merge(&root, &branch, base, up, gh, github.as_deref()) {
+                                    Ok((m, url)) => {
+                                        if let Some(u) = url {
+                                            open_url(&u);
+                                        }
+                                        Outcome::Done(m)
                                     }
-                                    Outcome::Done(m)
-                                }
-                                Err(e) => Outcome::Failed(e),
-                            });
+                                    Err(e) => Outcome::Failed(e),
+                                });
+                            }
                         }
                         let can_release = idle && s.changes.is_empty() && s.since_tag > 0;
                         let r = ui.add_enabled(can_release, egui::Button::new(RichText::new(crate::tr!("Publier une version", "Publish a version")).size(13.0)));
