@@ -236,7 +236,7 @@ impl Agent {
 }
 
 /// The session files under `dir` (down to `depth` levels) changed since `since`, newest first.
-fn session_files(dir: &Path, depth: usize, ext: &str, since: std::time::SystemTime) -> Vec<PathBuf> {
+pub(crate) fn session_files(dir: &Path, depth: usize, ext: &str, since: std::time::SystemTime) -> Vec<PathBuf> {
     fn walk(dir: &Path, depth: usize, ext: &str, out: &mut Vec<(std::time::SystemTime, PathBuf)>) {
         for e in std::fs::read_dir(dir).into_iter().flatten().flatten() {
             let p = e.path();

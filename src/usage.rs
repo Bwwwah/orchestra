@@ -208,6 +208,112 @@ pub fn read() -> Option<Usage> {
     (!u.windows.is_empty()).then_some(u)
 }
 
+// ------------------------------------------------------------------ the other agents
+//
+// What each agent tells about its limits, on this machine, without a request:
+//
+// - Codex (ChatGPT subscription): every `token_count` event of its session files carries
+//   `rate_limits`, a `primary` window (5 h) and a `secondary` one (week), each with
+//   `used_percent`, `window_minutes` and `resets_at` (seconds since epoch; older versions
+//   wrote `resets_in_seconds`). Read here, the same windows as Claude Code's.
+// - Gemini CLI: its free or paid quota is a number of requests per day, counted by Google
+//   and never written locally (`/stats` only shows the tokens of the session). Nothing to read.
+// - Mistral Vibe: billed by use on an API key, with no subscription window; its session files
+//   hold tokens and cost, not a limit. Nothing to read.
+
+/// The agents whose use of the subscription Orchestra can read (the ceiling of a session
+/// rests on it: the « Quota » step).
+#[allow(dead_code)]
+pub fn reports_usage(agent: crate::auto::Agent) -> bool {
+    use crate::auto::Agent;
+    matches!(agent, Agent::ClaudeCode | Agent::Codex)
+}
+
+/// The latest figures of an agent; None for those that tell none (see above).
+#[allow(dead_code)]
+pub fn read_for(agent: crate::auto::Agent) -> Option<Usage> {
+    use crate::auto::Agent;
+    match agent {
+        Agent::ClaudeCode => read(),
+        Agent::Codex => read_codex(),
+        Agent::Gemini | Agent::Vibe => None,
+    }
+}
+
+/// Codex's figures, from its most recent session files (whatever their folder: the limits are
+/// those of the account).
+fn read_codex() -> Option<Usage> {
+    let now = crate::model::now_ms();
+    // A week back: the weekly window is still meaningful, older files are not.
+    let since = std::time::SystemTime::now() - std::time::Duration::from_secs(7 * 24 * 3600);
+    let dir = std::env::var_os("CODEX_HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| dirs::home_dir().unwrap_or_default().join(".codex"))
+        .join("sessions");
+    for f in crate::auto::session_files(&dir, 4, "jsonl", since).into_iter().take(5) {
+        let Ok(mut file) = std::fs::File::open(&f) else { continue };
+        // The last events are enough: the end of the file only (records may be long).
+        let len = file.metadata().map(|m| m.len()).unwrap_or(0);
+        let start = len.saturating_sub(512 * 1024);
+        let mut buf = Vec::new();
+        use std::io::Seek;
+        if file.seek(std::io::SeekFrom::Start(start)).is_err()
+            || file.take(len - start).read_to_end(&mut buf).is_err()
+        {
+            continue;
+        }
+        let text = String::from_utf8_lossy(&buf);
+        if let Some(mut u) = codex_usage(&text, mtime_ms(&f)) {
+            u.windows.retain(|w| w.resets_at.is_none_or(|r| r > now));
+            if !u.windows.is_empty() {
+                return Some(u);
+            }
+        }
+    }
+    None
+}
+
+/// The last `rate_limits` of a Codex session file's text. `file_ms`: when the file last
+/// changed, for records without their own time.
+fn codex_usage(text: &str, file_ms: u64) -> Option<Usage> {
+    for line in text.lines().rev() {
+        if !line.contains("rate_limits") {
+            continue;
+        }
+        let Ok(v) = serde_json::from_str::<Value>(line) else { continue };
+        let rl = &v["payload"]["rate_limits"];
+        if !rl.is_object() {
+            continue;
+        }
+        let at = v.get("timestamp").and_then(time_ms).unwrap_or(file_ms);
+        let mut windows: Vec<Window> = ["primary", "secondary"]
+            .iter()
+            .filter_map(|k| {
+                let w = &rl[*k];
+                let pct = w["used_percent"].as_f64()? as f32;
+                let minutes = w["window_minutes"].as_u64();
+                let label = match (minutes, *k) {
+                    (Some(300), _) | (None, "primary") => label_for("five_hour"),
+                    (Some(10080), _) | (None, _) => label_for("seven_day"),
+                    (Some(m), _) if m % 1440 == 0 => format!("{} j", m / 1440),
+                    (Some(m), _) if m % 60 == 0 => format!("{} h", m / 60),
+                    (Some(m), _) => format!("{m} min"),
+                };
+                let resets_at = w.get("resets_at").and_then(time_ms).or_else(|| {
+                    w["resets_in_seconds"].as_u64().map(|s| at + s * 1000)
+                });
+                Some(Window { label, pct: pct.clamp(0.0, 100.0), resets_at })
+            })
+            .collect();
+        if windows.is_empty() {
+            continue;
+        }
+        windows.sort_by_key(|w| order(&w.label));
+        return Some(Usage { windows, at });
+    }
+    None
+}
+
 impl Usage {
     /// The 5-hour window.
     pub fn five(&self) -> Option<&Window> {
@@ -777,6 +883,36 @@ mod tests {
         ];
         assert_eq!(day_total(&h, now), Some(25.0 + 15.0));
         assert_eq!(day_total(&[], now), None);
+    }
+
+    #[test]
+    fn codex_limits_are_read_from_its_session() {
+        use crate::auto::Agent;
+        let text = concat!(
+            r#"{"timestamp":"2026-11-21T10:00:00.000Z","type":"session_meta","payload":{"cwd":"/x"}}"#, "\n",
+            r#"{"timestamp":"2026-11-21T10:01:00.000Z","type":"event_msg","payload":{"type":"token_count","rate_limits":{"primary":{"used_percent":10.0,"window_minutes":300,"resets_at":1795000000},"secondary":{"used_percent":3.0,"window_minutes":10080,"resets_at":1795500000}}}}"#, "\n",
+            r#"{"timestamp":"2026-11-21T10:02:00.000Z","type":"event_msg","payload":{"type":"token_count","rate_limits":{"secondary":{"used_percent":4.5,"window_minutes":10080,"resets_in_seconds":3600},"primary":{"used_percent":12.5,"window_minutes":300,"resets_in_seconds":60}}}}"#, "\n",
+            r#"{"timestamp":"2026-11-21T10:03:00.000Z","type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"rate_limits ?"}]}}"#, "\n",
+        );
+        let u = codex_usage(text, 0).unwrap();
+        // The last figures, in the same windows and order as Claude Code's.
+        let at = crate::sessions::parse_iso_ms("2026-11-21T10:02:00.000Z").unwrap();
+        assert_eq!(u.at, at);
+        assert_eq!(u.five().unwrap().pct, 12.5);
+        assert_eq!(u.five().unwrap().resets_at, Some(at + 60_000));
+        assert_eq!(u.week().unwrap().pct, 4.5);
+        assert_eq!(u.windows[0].label, "Session (5 h)");
+        // An older record with times in seconds since epoch.
+        let first = text.lines().nth(1).unwrap();
+        let u = codex_usage(first, 0).unwrap();
+        assert_eq!(u.five().unwrap().resets_at, Some(1_795_000_000_000));
+        // Nothing to read: no figures, never a made-up 0 %.
+        assert!(codex_usage("", 0).is_none());
+        assert!(codex_usage(r#"{"payload":{"rate_limits":null}}"#, 0).is_none());
+        assert!(codex_usage(r#"{"payload":{"rate_limits":{"primary":{}}}}"#, 0).is_none());
+        assert!(reports_usage(Agent::ClaudeCode) && reports_usage(Agent::Codex));
+        assert!(!reports_usage(Agent::Gemini) && !reports_usage(Agent::Vibe));
+        assert!(read_for(Agent::Gemini).is_none() && read_for(Agent::Vibe).is_none());
     }
 
     #[test]
