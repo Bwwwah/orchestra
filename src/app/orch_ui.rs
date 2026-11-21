@@ -784,7 +784,7 @@ impl NotesApp {
                         .then(|| last_lines(&screen, 12))
                         .filter(|tail| auto::is_limit_message(tail));
                     if let Some(msg) = r.reader.limit_hit.clone().or(on_screen) {
-                        let now_ms = crate::model::now_ms();
+                        let now_ms = crate::model::wall_ms();
                         let reset = auto::limit_reset(&msg, now_ms)
                             .or(if fig.week.is_some_and(|w| w >= 99.0) {
                                 fig.week_reset
@@ -1028,7 +1028,7 @@ impl NotesApp {
             return;
         }
         self.orch.resume_checked = Some(Instant::now());
-        let now = crate::model::now_ms();
+        let now = crate::model::wall_ms();
         if !self.ws.settings.orch.auto_resume {
             return;
         }
@@ -1242,7 +1242,7 @@ impl NotesApp {
             r.turns,
         );
         // Stopped by a quota: start again by itself once it resets (if that is allowed).
-        let now = crate::model::now_ms();
+        let now = crate::model::wall_ms();
         let resume_at = r
             .quota_reset
             .filter(|&reset| self.ws.settings.orch.auto_resume && reset > now)
@@ -2428,7 +2428,7 @@ impl NotesApp {
     /// The sessions stopped by the 5-hour or weekly limit that start again by themselves
     /// once it resets: shown like the running ones, in orange, suspended. False when none.
     fn suspended_card(&mut self, ui: &mut egui::Ui, t: &Tone, actions: &mut Vec<Action>) -> bool {
-        let now = crate::model::now_ms();
+        let now = crate::model::wall_ms();
         let running: Vec<&str> = self.orch.runs.iter().map(|r| r.project.as_str()).collect();
         let list = crate::model::suspended_runs(&self.ws.runs, now, &running);
         if list.is_empty() {

@@ -2194,7 +2194,15 @@ pub fn limit_reset(text: &str, now: u64) -> Option<u64> {
         }
         None => {
             let t = today * 86_400_000 + in_day;
-            if t <= local_now { t + 86_400_000 } else { t }
+            // An hour of the last hour: the reset is just due and not seen yet (the hour is
+            // rounded, or the quota lags behind it). Try again soon, not tomorrow.
+            if t <= local_now && local_now - t < 3_600_000 {
+                local_now + 5 * 60_000
+            } else if t <= local_now {
+                t + 86_400_000
+            } else {
+                t
+            }
         }
     };
     u64::try_from(local - off).ok()
@@ -2397,8 +2405,8 @@ mod tests {
             Some((day + 15 * 3_600_000 - off) as u64)
         );
         assert_eq!(
-            limit_reset("limit reached ∙ resets 9:30am", now),
-            Some((day + 86_400_000 + 9 * 3_600_000 + 30 * 60_000 - off) as u64)
+            limit_reset("limit reached ∙ resets 8:30am", now),
+            Some((day + 86_400_000 + 8 * 3_600_000 + 30 * 60_000 - off) as u64)
         );
         assert_eq!(
             limit_reset("limit reached · resets 12am", now),
@@ -2419,6 +2427,13 @@ mod tests {
             Some((20_003 * 86_400_000i64 + 15 * 3_600_000 - off) as u64)
         );
         assert_eq!(limit_reset("usage limit reached", now), None);
+        // Still limited a minute after "1:20pm": the reset is late, try again in 5 minutes
+        // (not tomorrow at 13:20).
+        let late = (day + 13 * 3_600_000 + 21 * 60_000 - off) as u64;
+        assert_eq!(
+            limit_reset("You've hit your 5-hour limit · resets 1:20pm (Europe/Paris)", late),
+            Some(late + 5 * 60_000)
+        );
     }
 
     #[test]

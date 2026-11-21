@@ -6,19 +6,34 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+/// The hybrid clock (ms). Each call steps it by at least one, so asked more than a thousand
+/// times a second (each session's row, every frame) it used to run minutes ahead of the
+/// real time after a while, and a session suspended until a quota reset started again
+/// before the reset. Its lead from these steps is now capped (`LEAD_MAX_MS`).
 static CLOCK: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+/// The latest time seen from another computer.
+static SEEN: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+/// How far ahead of the real (or seen) time the steps of one per call may take the clock;
+/// past it, the clock waits for the real time (equal stamps rather than a drift).
+const LEAD_MAX_MS: u64 = 1000;
+
+/// The computer's own time (ms since 1970), whatever was seen from other computers: for
+/// what must happen at a real time, such as starting again once a quota has reset.
+pub fn wall_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
+}
 
 /// Milliseconds since 1970, never going backwards and never behind a time seen from another
 /// computer (a hybrid clock), so "most recent edit wins" holds even if clocks differ a little.
 pub fn now_ms() -> u64 {
     use std::sync::atomic::Ordering;
-    let sys = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_millis() as u64)
-        .unwrap_or(0);
+    let base = wall_ms().max(SEEN.load(Ordering::SeqCst));
     let mut cur = CLOCK.load(Ordering::SeqCst);
     loop {
-        let next = sys.max(cur + 1);
+        let next = clock_step(cur, base);
         match CLOCK.compare_exchange(cur, next, Ordering::SeqCst, Ordering::SeqCst) {
             Ok(_) => return next,
             Err(v) => cur = v,
@@ -26,9 +41,21 @@ pub fn now_ms() -> u64 {
     }
 }
 
+/// The clock's next value from `cur`, `base` being the real (or seen) time: one more, up to
+/// `LEAD_MAX_MS` ahead of `base`.
+fn clock_step(cur: u64, base: u64) -> u64 {
+    if cur < base + LEAD_MAX_MS {
+        base.max(cur + 1)
+    } else {
+        cur
+    }
+}
+
 /// Note a time received from another computer.
 pub fn observe_clock(t: u64) {
-    CLOCK.fetch_max(t, std::sync::atomic::Ordering::SeqCst);
+    use std::sync::atomic::Ordering;
+    SEEN.fetch_max(t, Ordering::SeqCst);
+    CLOCK.fetch_max(t, Ordering::SeqCst);
 }
 
 pub fn new_id() -> String {
@@ -1779,6 +1806,26 @@ mod tests {
 #[cfg(test)]
 mod starter_tests {
     use super::*;
+
+    /// Asked the time far more than a thousand times a millisecond, the clock goes at most
+    /// `LEAD_MAX_MS` ahead of the real time (it used to add a millisecond per call, without
+    /// end), and never backwards.
+    #[test]
+    fn the_clock_never_runs_far_ahead_of_the_real_time() {
+        let base = 1_000_000;
+        let mut cur = 0;
+        for _ in 0..100_000 {
+            let next = clock_step(cur, base);
+            assert!(next >= cur);
+            cur = next;
+        }
+        assert_eq!(cur, base + LEAD_MAX_MS);
+        // Strictly increasing while within the lead.
+        assert_eq!(clock_step(base, base), base + 1);
+        // The real time moved on: the clock follows it.
+        assert_eq!(clock_step(cur, base + 5_000), base + 5_000);
+        assert!(wall_ms() + LEAD_MAX_MS + 100 >= now_ms());
+    }
 
     /// The welcome page explains the app, keeps fixed ids (shared by two fresh installs that
     /// sync) and still ends on the link to its "Notes" sub-page.
