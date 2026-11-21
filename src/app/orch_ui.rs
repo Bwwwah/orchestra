@@ -3123,8 +3123,7 @@ impl NotesApp {
                     if !busy {
                         ui.horizontal_wrapped(|ui| {
                             ui.add_space(70.0);
-                            let arrow = if opened { "▴" } else { "▾" };
-                            if super::projects::quiet_link(ui, &crate::trf!("Options {arrow}", "Options {arrow}"), t)
+                            if options_button(ui, opened, t)
                                 .on_hover_text(crate::tr!("L'IA, les commits, la fusion dans main, une consigne et le mode sans fin. Gardés pour les prochaines sessions de ce projet.", "The AI, commits, merging into main, a mission and endless mode. Kept for this project's next sessions."))
                                 .clicked()
                             {
@@ -5099,6 +5098,47 @@ fn launch_controls(ui: &mut egui::Ui, c: LaunchCx<'_>) {
     }
 }
 
+/// « Options » of a launch row: a framed button (sliders, the word, a chevron), as legible
+/// as the row's other controls; it stays lit while the options are open.
+fn options_button(ui: &mut egui::Ui, opened: bool, t: &Tone) -> egui::Response {
+    let text = crate::tr!("Options", "Options");
+    let font = FontId::proportional(13.5);
+    let g = ui.painter().layout_no_wrap(text.to_string(), font, t.secondary);
+    // icon 16 · gap 6 · text · gap 6 · chevron 10, padded 10 on each side.
+    let size = egui::vec2(10.0 + 16.0 + 6.0 + g.size().x + 6.0 + 10.0 + 10.0, 28.0);
+    let (rect, resp) = ui.allocate_exact_size(size, egui::Sense::click());
+    let a = ui
+        .ctx()
+        .animate_bool_with_time(resp.id.with("hov"), resp.hovered() || opened, 0.14);
+    let p = ui.painter();
+    p.rect_filled(rect, 7.0, t.hover.gamma_multiply(0.5 + 0.5 * a));
+    p.rect_stroke(
+        rect,
+        7.0,
+        egui::Stroke::new(1.0, t.border.lerp_to_gamma(t.secondary, 0.35 * a)),
+        egui::StrokeKind::Inside,
+    );
+    let color = t.secondary.lerp_to_gamma(t.text, a);
+    let cy = rect.center().y;
+    let icon = egui::Rect::from_center_size(egui::pos2(rect.left() + 18.0, cy), egui::vec2(16.0, 16.0));
+    icons::paint(p, icon, icons::Icon::Sliders, color);
+    let tx = icon.right() + 6.0;
+    p.galley_with_override_text_color(egui::pos2(tx, cy - g.size().y / 2.0), g.clone(), color);
+    // Chevron: down when folded, up when open.
+    let cx = tx + g.size().x + 6.0 + 5.0;
+    let dy = if opened { -2.0 } else { 2.0 };
+    let stroke = egui::Stroke::new(1.5, color);
+    p.line_segment([egui::pos2(cx - 4.0, cy - dy), egui::pos2(cx, cy + dy)], stroke);
+    p.line_segment([egui::pos2(cx, cy + dy), egui::pos2(cx + 4.0, cy - dy)], stroke);
+    let label = if opened {
+        crate::tr!("Options, ouvertes", "Options, open")
+    } else {
+        crate::tr!("Options, repliées", "Options, folded")
+    };
+    resp.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, label));
+    resp.on_hover_cursor(egui::CursorIcon::PointingHand)
+}
+
 /// Why an AI can't be chosen for a session started alone, if it can't (None: it can).
 fn agent_unavailable(agent: Agent) -> Option<&'static str> {
     if agent.ready() {
@@ -5690,6 +5730,27 @@ mod tests {
     }
 
     use eframe::egui;
+
+    /// « Options » is a real button: as tall as the row's controls (28 px), wider than the
+    /// word alone (icon, chevron, padding), the same size folded or open.
+    #[test]
+    fn the_options_button_is_large_enough_to_read_and_hit() {
+        let t = crate::app::tone(false);
+        let mut sizes = vec![];
+        for opened in [false, true] {
+            column(400.0, |ui| {
+                let word = ui
+                    .painter()
+                    .layout_no_wrap("Options".into(), egui::FontId::proportional(12.5), t.text)
+                    .size();
+                let r = super::options_button(ui, opened, &t).rect;
+                assert!(r.height() >= 28.0, "{r:?}");
+                assert!(r.width() >= word.x + 40.0, "{r:?} {word:?}");
+                sizes.push(r.size());
+            });
+        }
+        assert!(sizes.len() >= 2 && sizes.windows(2).all(|w| w[0] == w[1]), "{sizes:?}");
+    }
 
     /// Runs `add` in a column of `width` px, as `orchestra_view` sets it (`ui.set_width`),
     /// without a window. Two passes: egui settles sizes on the second.
