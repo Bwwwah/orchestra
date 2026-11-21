@@ -1726,42 +1726,24 @@ impl NotesApp {
         id
     }
 
-    /// The day's overall report, at the chosen hour, when several projects ran that day
-    /// (and for yesterday, if Orchestra was closed at that hour).
+    /// The day's overall report, at the chosen hour, as soon as a session ended that day
+    /// (and for yesterday, if Orchestra was closed at that hour). Sessions still running
+    /// don't hold it back: with sessions that never stop, it never came.
     fn daily_tick(&mut self) {
         if self
             .orch
             .daily_checked
             .is_some_and(|t| t.elapsed() < Duration::from_secs(60))
-            || !self.orch.runs.is_empty()
         {
             return;
         }
         self.orch.daily_checked = Some(Instant::now());
-        let now = crate::model::now_ms();
-        let today = auto::local_day(now);
-        let yesterday = auto::local_day(now.saturating_sub(86_400_000));
-        let mut days = vec![yesterday];
-        if auto::local_hour(now) >= self.ws.settings.orch.report_hour {
-            days.push(today);
-        }
-        for day in days {
-            if self.ws.settings.orch.last_daily >= day {
-                continue;
-            }
-            let runs: Vec<crate::model::RunRecord> = self
-                .ws
-                .runs
-                .iter()
-                .filter(|r| r.ended > 0 && auto::local_day(r.ended) == day)
-                .cloned()
-                .collect();
+        let o = &self.ws.settings.orch;
+        let due = auto::daily_due(crate::model::now_ms(), o.report_hour, &o.last_daily, &self.ws.runs);
+        for (day, runs) in due {
             let mut projects: Vec<&str> = runs.iter().map(|r| r.project.as_str()).collect();
             projects.sort();
             projects.dedup();
-            if projects.len() < 2 {
-                continue;
-            }
             let refs: Vec<&crate::model::RunRecord> = runs.iter().collect();
             let md = auto::daily_report(&day, &refs);
             let page = self.report_page(
@@ -1770,11 +1752,12 @@ impl NotesApp {
                 crate::tr!("Bilan de la journée", "Daily summary"),
                 &md,
             );
+            let (p, n) = (projects.len(), runs.len());
             let text = crate::trf!(
-                "{} projets, {} sessions",
-                "{} projects, {} sessions",
-                projects.len(),
-                runs.len()
+                "{p} projet{}, {n} session{}",
+                "{p} project{}, {n} session{}",
+                crate::i18n::plural(p),
+                crate::i18n::plural(n)
             );
             self.ws.notify(
                 "rapport",
@@ -2509,8 +2492,8 @@ impl NotesApp {
                     ui,
                     crate::tr!("Bilan de la journée", "Daily summary"),
                     crate::tr!(
-                        "Quand plusieurs projets ont travaillé",
-                        "When several projects worked"
+                        "Dès qu'une session a travaillé",
+                        "Once a session has worked"
                     ),
                     &mut |ui| {
                         let mut h = o.report_hour as u32;

@@ -2649,6 +2649,33 @@ pub fn session_report(
     s
 }
 
+/// The days whose overall report is due at `now`, with their ended sessions: yesterday
+/// (Orchestra may have been closed at the hour), and today once `hour` has come; not those
+/// already written (`last`, YYYY-MM-DD), nor a day without any ended session. One project is
+/// enough, and sessions still running don't hold it back (they always run on some setups).
+pub fn daily_due(
+    now: u64,
+    hour: u8,
+    last: &str,
+    runs: &[crate::model::RunRecord],
+) -> Vec<(String, Vec<crate::model::RunRecord>)> {
+    let mut days = vec![local_day(now.saturating_sub(86_400_000))];
+    if local_hour(now) >= hour {
+        days.push(local_day(now));
+    }
+    days.into_iter()
+        .filter(|d| last < d.as_str())
+        .filter_map(|d| {
+            let of_day: Vec<crate::model::RunRecord> = runs
+                .iter()
+                .filter(|r| r.ended > 0 && local_day(r.ended) == d)
+                .cloned()
+                .collect();
+            (!of_day.is_empty()).then_some((d, of_day))
+        })
+        .collect()
+}
+
 /// The day's overall report, from the sessions of the day.
 pub fn daily_report(day: &str, runs: &[&crate::model::RunRecord]) -> String {
     let total: f32 = runs.iter().map(|r| r.pct).sum();
@@ -2690,6 +2717,33 @@ pub fn daily_report(day: &str, runs: &[&crate::model::RunRecord]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_daily_report_comes_for_one_project_and_once_a_day() {
+        let now = crate::model::now_ms();
+        let today = local_day(now);
+        let yesterday = local_day(now.saturating_sub(86_400_000));
+        let run = |ended: u64| crate::model::RunRecord {
+            project: "p".into(),
+            ended,
+            outcome: "fini".into(),
+            ..Default::default()
+        };
+        // A single project that worked today and yesterday: both days are due (hour 0).
+        let runs = vec![run(now), run(now.saturating_sub(86_400_000)), run(0)];
+        let due = daily_due(now, 0, "", &runs);
+        let days: Vec<&str> = due.iter().map(|(d, _)| d.as_str()).collect();
+        assert_eq!(days, [yesterday.as_str(), today.as_str()]);
+        assert!(due.iter().all(|(_, r)| r.len() == 1), "the running one (ended 0) is left out");
+        // Written already: nothing more.
+        assert!(daily_due(now, 0, &today, &runs).is_empty());
+        // Before the hour (24 never comes): only yesterday.
+        let due = daily_due(now, 24, "", &runs);
+        assert_eq!(due.len(), 1);
+        assert_eq!(due[0].0, yesterday);
+        // No session ended that day: no report.
+        assert!(daily_due(now, 0, "", &[run(0)]).is_empty());
+    }
 
     #[test]
     fn short_names_have_no_subscription_or_quota_prefix() {
