@@ -226,6 +226,10 @@ impl NotesApp {
             side_w: 0.0,
             dock_h: 0.0,
         };
+        // Reports of older versions, all projects mixed under each day: each to its project.
+        if app.ws.sort_reports_by_project() > 0 {
+            app.dirty_since = Some(Instant::now());
+        }
         app.restore_terminals(&cc.egui_ctx);
         if std::env::var_os("ORCHESTRA_NO_SESSIONS").is_none() {
             let plug = !app.ws.settings.no_auto_mcp;
@@ -1462,13 +1466,18 @@ impl NotesApp {
     }
 }
 
-/// The day pages of "Rapports des IA" other than `day`, when `day` is one of them.
+/// The pages next to `day` in "Rapports des IA", when `day` is one of its folders (one per
+/// project) or a day page in one of them (or straight in it, from older versions).
 fn other_report_days(ws: &Workspace, day: &str) -> Vec<String> {
     let root = ws.settings.orch.reports_page.as_str();
-    if root.is_empty() || ws.page(day).and_then(|p| p.parent.as_deref()) != Some(root) {
+    let parent = ws.page(day).and_then(|p| p.parent.clone());
+    let Some(parent) = parent else { return vec![] };
+    let in_reports = parent == root
+        || ws.page(&parent).and_then(|p| p.parent.as_deref()) == Some(root);
+    if root.is_empty() || !in_reports {
         return vec![];
     }
-    ws.children(Some(root))
+    ws.children(Some(&parent))
         .iter()
         .map(|p| p.id.clone())
         .filter(|id| id != day)
@@ -3458,6 +3467,15 @@ mod tests {
         let sub = ws.create_page("Sous-page", Some(other.clone()));
         assert_eq!(other_report_days(&ws, &d2), std::slice::from_ref(&d1));
         assert_eq!(other_report_days(&ws, &d1), [d2]);
+        // In a project's folder: its days fold each other, and the folders too.
+        let f1 = ws.create_page("Orchestra", Some(root.clone()));
+        let f2 = ws.create_page("École", Some(root.clone()));
+        let e1 = ws.create_page("2026-11-19", Some(f1.clone()));
+        let e2 = ws.create_page("2026-11-20", Some(f1.clone()));
+        let report = ws.create_page("Orchestra · 14:05", Some(e2.clone()));
+        assert_eq!(other_report_days(&ws, &e2), std::slice::from_ref(&e1));
+        assert!(other_report_days(&ws, &f1).contains(&f2));
+        assert!(other_report_days(&ws, &report).is_empty(), "a report folds nothing");
         // Pages outside the reports, and the reports page itself, fold nothing.
         assert!(
             other_report_days(&ws, &other).is_empty()

@@ -694,6 +694,27 @@ pub struct RunRecord {
 /// Days of reports kept as they are in "Rapports des IA"; the older ones are too many.
 pub const REPORT_DAYS_KEPT: usize = 14;
 
+/// A page titled with a day (YYYY-MM-DD): a day of reports.
+pub fn is_report_day(t: &str) -> bool {
+    let b = t.as_bytes();
+    b.len() == 10
+        && b[4] == b'-'
+        && b[7] == b'-'
+        && b.iter()
+            .enumerate()
+            .all(|(i, c)| i == 4 || i == 7 || c.is_ascii_digit())
+}
+
+/// The folder of "Rapports des IA" that holds the daily summaries (several projects).
+pub fn daily_shelf_title() -> &'static str {
+    crate::tr!("Bilans de la journée", "Daily summaries")
+}
+
+/// The title of a daily summary page, in either language.
+fn is_daily_title(t: &str) -> bool {
+    t == "Bilan de la journée" || t == "Daily summary"
+}
+
 /// The steps a session report lists under « Étapes terminées » (« aucune » left out).
 fn finished_steps(report: &Page) -> Vec<String> {
     let heading = |k: BlockKind| {
@@ -1231,88 +1252,230 @@ Cmd/Ctrl+P or K to search all pages.").into();
             })
     }
 
-    /// "Rapports des IA" grows a page a day: the day pages beyond the `REPORT_DAYS_KEPT`
-    /// most recent ones are too many (to condense), oldest first. Only pages titled with a
-    /// day (YYYY-MM-DD) count, so a summary page put there is left alone.
-    pub fn old_report_days(&self) -> Vec<String> {
+    /// The pages of "Rapports des IA" that hold days: the reports page itself (where older
+    /// Orchestras put every day) and each folder in it (one per project, one for the daily
+    /// summaries).
+    fn report_shelves(&self) -> Vec<String> {
         let root = self.settings.orch.reports_page.as_str();
-        if root.is_empty() {
+        if root.is_empty() || self.page(root).is_none_or(|p| p.trashed) {
             return vec![];
         }
-        let is_day = |t: &str| {
-            let b = t.as_bytes();
-            b.len() == 10
-                && b[4] == b'-'
-                && b[7] == b'-'
-                && b.iter()
-                    .enumerate()
-                    .all(|(i, c)| i == 4 || i == 7 || c.is_ascii_digit())
-        };
-        let mut days: Vec<&Page> = self
-            .children(Some(root))
-            .into_iter()
-            .filter(|p| is_day(&p.title))
-            .collect();
-        days.sort_by(|a, b| a.title.cmp(&b.title));
-        let over = days.len().saturating_sub(REPORT_DAYS_KEPT);
-        days.into_iter().take(over).map(|p| p.id.clone()).collect()
+        let mut out = vec![root.to_string()];
+        out.extend(
+            self.children(Some(root))
+                .into_iter()
+                .filter(|p| !is_report_day(&p.title))
+                .map(|p| p.id.clone()),
+        );
+        out
+    }
+
+    /// Each shelf of "Rapports des IA" grows a page a day: in each, the day pages beyond the
+    /// `REPORT_DAYS_KEPT` most recent ones are too many (to condense), oldest first. Only
+    /// pages titled with a day (YYYY-MM-DD) count, so a summary page put there is left alone.
+    pub fn old_report_days(&self) -> Vec<String> {
+        let mut out = vec![];
+        for shelf in self.report_shelves() {
+            let mut days: Vec<&Page> = self
+                .children(Some(&shelf))
+                .into_iter()
+                .filter(|p| is_report_day(&p.title))
+                .collect();
+            days.sort_by(|a, b| a.title.cmp(&b.title));
+            let over = days.len().saturating_sub(REPORT_DAYS_KEPT);
+            out.extend(days.into_iter().take(over).map(|p| p.id.clone()));
+        }
+        out
     }
 
     /// Condense the report days that are too many (`old_report_days`) into one summary page
-    /// under "Rapports des IA": per day, each report's title and the steps it finished. The
-    /// day pages then go to the trash (they can be brought back from there). Returns the
-    /// summary page and how many days went into it; None when there was nothing to do.
+    /// per shelf (the project's folder, or "Rapports des IA" itself): per day, each report's
+    /// title and the steps it finished. The day pages then go to the trash (they can be
+    /// brought back from there). Returns the first summary page and how many days went into
+    /// the summaries; None when there was nothing to do.
     pub fn condense_old_reports(&mut self) -> Option<(String, usize)> {
         let days = self.old_report_days();
         if days.is_empty() {
             return None;
         }
-        let root = self.settings.orch.reports_page.clone();
-        let mut md = String::new();
+        let mut shelves: Vec<(String, Vec<String>)> = vec![];
         for day in &days {
-            let Some(d) = self.page(day) else { continue };
-            md.push_str(&format!("## {}\n\n", d.title));
-            let reports = self.children(Some(day));
-            if reports.is_empty() {
-                md.push_str(crate::tr!("- (aucun rapport)\n", "- (no report)\n"));
+            let Some(parent) = self.page(day).and_then(|p| p.parent.clone()) else {
+                continue;
+            };
+            match shelves.iter_mut().find(|(s, _)| *s == parent) {
+                Some((_, d)) => d.push(day.clone()),
+                None => shelves.push((parent, vec![day.clone()])),
             }
-            for r in reports {
-                let steps = finished_steps(r);
-                if steps.is_empty() {
-                    md.push_str(&format!("- {}\n", r.display_title()));
+        }
+        let mut first = None;
+        for (shelf, days) in &shelves {
+            let mut md = String::new();
+            for day in days {
+                let Some(d) = self.page(day) else { continue };
+                md.push_str(&format!("## {}\n\n", d.title));
+                let reports = self.children(Some(day));
+                if reports.is_empty() {
+                    md.push_str(crate::tr!("- (aucun rapport)\n", "- (no report)\n"));
+                }
+                for r in reports {
+                    let steps = finished_steps(r);
+                    if steps.is_empty() {
+                        md.push_str(&format!("- {}\n", r.display_title()));
+                    } else {
+                        md.push_str(&format!(
+                            "- **{}** : {}\n",
+                            r.display_title(),
+                            steps.join(" ; ")
+                        ));
+                    }
+                }
+                md.push('\n');
+            }
+            let blocks = crate::store::page_from_markdown(&md, "").blocks;
+            let title = crate::tr!("Synthèse des anciens rapports", "Summary of older reports");
+            let existing = self
+                .children(Some(shelf))
+                .iter()
+                .find(|p| p.title == title)
+                .map(|p| p.id.clone());
+            let id = existing.unwrap_or_else(|| {
+                let id = self.create_page(title, Some(shelf.clone()));
+                if let Some(p) = self.page_mut(&id) {
+                    p.icon = "🗂".into();
+                    p.blocks.clear();
+                }
+                id
+            });
+            if let Some(p) = self.page_mut(&id) {
+                p.blocks.extend(blocks);
+                p.touch();
+            }
+            for day in days {
+                self.set_trashed(day, true);
+            }
+            first.get_or_insert(id);
+        }
+        first.map(|id| (id, days.len()))
+    }
+
+    /// "Rapports des IA", created when missing (or in the trash).
+    pub fn reports_root(&mut self) -> String {
+        let id = self.settings.orch.reports_page.clone();
+        if self.page(&id).is_some_and(|p| !p.trashed) {
+            return id;
+        }
+        let id = self.create_page(crate::tr!("Rapports des IA", "AI reports"), None);
+        if let Some(p) = self.page_mut(&id) {
+            p.icon = "📒".into();
+        }
+        self.settings.orch.reports_page = id.clone();
+        id
+    }
+
+    /// The page titled `title` under `parent`, created (with `icon`) when there is none.
+    fn child_titled(&mut self, parent: &str, title: &str, icon: &str) -> String {
+        if let Some(p) = self.children(Some(parent)).iter().find(|p| p.title == title) {
+            return p.id.clone();
+        }
+        let id = self.create_page(title, Some(parent.to_string()));
+        if let Some(p) = self.page_mut(&id) {
+            p.icon = icon.into();
+        }
+        id
+    }
+
+    /// The folder of "Rapports des IA" for the reports of `project` (its title), or for the
+    /// daily summaries when None: the reports of one project never mixed with another's.
+    /// Not inside the project's own page: a shared project would send its reports to the
+    /// other members.
+    pub fn report_shelf(&mut self, project: Option<&str>) -> String {
+        let root = self.reports_root();
+        match project {
+            Some(id) => {
+                let title = self
+                    .page(id)
+                    .map(|p| p.display_title())
+                    .unwrap_or_else(|| crate::tr!("Autres", "Other").to_string());
+                self.child_titled(&root, &title, "📁")
+            }
+            None => self.child_titled(&root, daily_shelf_title(), "🗓"),
+        }
+    }
+
+    /// The page of `day` in the folder of `project` (None: the daily summaries), created
+    /// when missing: where a report of that day goes.
+    pub fn report_day(&mut self, project: Option<&str>, day: &str) -> String {
+        let shelf = self.report_shelf(project);
+        self.child_titled(&shelf, day, "📅")
+    }
+
+    /// The reports that older Orchestras put straight in "Rapports des IA › <day>", all
+    /// projects mixed, moved to their project's folder (« Rapports des IA › <project> ›
+    /// <day> »); a day page left empty goes to the trash. The project of a report is the
+    /// session's that wrote it, else the one its title starts with (« <project> · 14:05 »);
+    /// a daily summary goes to the daily summaries. Returns how many reports moved.
+    pub fn sort_reports_by_project(&mut self) -> usize {
+        let root = self.settings.orch.reports_page.clone();
+        if root.is_empty() || self.page(&root).is_none_or(|p| p.trashed) {
+            return 0;
+        }
+        let days: Vec<(String, String)> = self
+            .children(Some(&root))
+            .into_iter()
+            .filter(|p| is_report_day(&p.title))
+            .map(|p| (p.id.clone(), p.title.clone()))
+            .collect();
+        let mut moved = 0;
+        for (day_id, day) in days {
+            let reports: Vec<(String, String)> = self
+                .children(Some(&day_id))
+                .into_iter()
+                .map(|p| (p.id.clone(), p.title.clone()))
+                .collect();
+            for (id, title) in reports {
+                let project = self.report_project(&id, &title);
+                let daily = project.is_none() && is_daily_title(&title);
+                let target = if project.is_some() || daily {
+                    self.report_day(project.as_deref(), &day)
                 } else {
-                    md.push_str(&format!(
-                        "- **{}** : {}\n",
-                        r.display_title(),
-                        steps.join(" ; ")
-                    ));
+                    // Neither a session's report nor a summary: left where the person put it.
+                    continue;
+                };
+                if let Some(p) = self.page_mut(&id) {
+                    p.parent = Some(target);
+                    p.touch();
+                    moved += 1;
                 }
             }
-            md.push('\n');
-        }
-        let blocks = crate::store::page_from_markdown(&md, "").blocks;
-        let title = crate::tr!("Synthèse des anciens rapports", "Summary of older reports");
-        let existing = self
-            .children(Some(&root))
-            .iter()
-            .find(|p| p.title == title)
-            .map(|p| p.id.clone());
-        let id = existing.unwrap_or_else(|| {
-            let id = self.create_page(title, Some(root.clone()));
-            if let Some(p) = self.page_mut(&id) {
-                p.icon = "🗂".into();
-                p.blocks.clear();
+            if self.children(Some(&day_id)).is_empty() {
+                self.set_trashed(&day_id, true);
+                if let Some(r) = self.page_mut(&root) {
+                    r.blocks
+                        .retain(|b| !(b.kind == BlockKind::PageLink && b.extra == day_id));
+                    r.touch();
+                }
             }
-            id
-        });
-        if let Some(p) = self.page_mut(&id) {
-            p.blocks.extend(blocks);
-            p.touch();
         }
-        for day in &days {
-            self.set_trashed(day, true);
+        moved
+    }
+
+    /// The project a report page belongs to: the session's that wrote it (`RunRecord::report`),
+    /// else the project whose title starts the report's (« <project> · 14:05 »).
+    fn report_project(&self, report: &str, title: &str) -> Option<String> {
+        if let Some(r) = self
+            .runs
+            .iter()
+            .find(|r| r.report.as_deref() == Some(report))
+            && self.page(&r.project).is_some_and(|p| !p.trashed)
+        {
+            return Some(r.project.clone());
         }
-        Some((id, days.len()))
+        let (name, _) = title.rsplit_once(" · ")?;
+        self.pages
+            .iter()
+            .find(|p| !p.trashed && p.project.is_some() && p.display_title() == name)
+            .map(|p| p.id.clone())
     }
 
     pub fn children(&self, parent: Option<&str>) -> Vec<&Page> {
@@ -1541,6 +1704,88 @@ mod tests {
         let i = ws.pages.iter().position(|p| p.id == ids[0]).unwrap();
         ws.pages[i].trashed = true;
         assert_eq!(ws.old_report_days().len(), 2);
+    }
+
+    /// Each project's reports go to its own folder of "Rapports des IA", the daily summaries
+    /// to theirs; the reports of older versions, all mixed under each day, are sorted the same.
+    #[test]
+    fn reports_are_kept_by_project() {
+        let mut ws = super::Workspace::default();
+        let orch = ws.create_page("Orchestra", None);
+        ws.page_mut(&orch).unwrap().project = Some(super::Project::new(""));
+        let ecole = ws.create_page("École", None);
+        ws.page_mut(&ecole).unwrap().project = Some(super::Project::new(""));
+        // New reports: root › project › day, one folder per project, made once.
+        let d1 = ws.report_day(Some(&orch), "2026-11-21");
+        let d2 = ws.report_day(Some(&ecole), "2026-11-21");
+        assert_ne!(d1, d2, "two projects, two folders");
+        assert_eq!(ws.report_day(Some(&orch), "2026-11-21"), d1, "found again");
+        let root = ws.settings.orch.reports_page.clone();
+        let folder = |ws: &super::Workspace, day: &str| {
+            let f = ws.page(day).unwrap().parent.clone().unwrap();
+            let p = ws.page(&f).unwrap();
+            assert_eq!(p.parent.as_deref(), Some(root.as_str()));
+            p.title.clone()
+        };
+        assert_eq!(folder(&ws, &d1), "Orchestra");
+        assert_eq!(folder(&ws, &d2), "École");
+        let daily = ws.report_day(None, "2026-11-21");
+        assert_eq!(folder(&ws, &daily), super::daily_shelf_title());
+        // Not in the project's own page (a shared project would send them to the others).
+        assert!(ws.children(Some(&orch)).is_empty());
+
+        // An older layout: root › day › reports of every project.
+        let old_day = ws.create_page("2026-11-20", Some(root.clone()));
+        let push =
+            |ws: &mut super::Workspace, title: &str| ws.create_page(title, Some(old_day.clone()));
+        let by_run = push(&mut ws, "Titre changé · 09:00");
+        ws.runs.push(super::RunRecord {
+            project: ecole.clone(),
+            report: Some(by_run.clone()),
+            ..Default::default()
+        });
+        let by_title = push(&mut ws, "Orchestra · 11:55");
+        let summary = push(&mut ws, "Bilan de la journée");
+        let mine = push(&mut ws, "Mes notes");
+        assert_eq!(ws.sort_reports_by_project(), 3);
+        let parent = |ws: &super::Workspace, id: &str| ws.page(id).unwrap().parent.clone().unwrap();
+        assert_eq!(folder(&ws, &parent(&ws, &by_run)), "École", "the session's project");
+        assert_eq!(folder(&ws, &parent(&ws, &by_title)), "Orchestra", "the title's project");
+        assert_eq!(folder(&ws, &parent(&ws, &summary)), super::daily_shelf_title());
+        assert_eq!(ws.page(&parent(&ws, &by_title)).unwrap().title, "2026-11-20", "same day");
+        // A page the person put there stays, and so does its day.
+        assert_eq!(parent(&ws, &mine), old_day);
+        assert!(!ws.page(&old_day).unwrap().trashed);
+        // Once its last page is gone, an old day goes to the trash; nothing moves twice.
+        ws.page_mut(&mine).unwrap().parent = Some(d1.clone());
+        assert_eq!(ws.sort_reports_by_project(), 0);
+        assert!(ws.page(&old_day).unwrap().trashed);
+        assert!(
+            !ws.page(&root).unwrap().blocks.iter().any(|b| b.extra == old_day),
+            "no link left to it"
+        );
+    }
+
+    /// Too many days in a project's folder: condensed there, the other folders untouched.
+    #[test]
+    fn report_days_condense_in_their_project_folder() {
+        let mut ws = super::Workspace::default();
+        let orch = ws.create_page("Orchestra", None);
+        ws.page_mut(&orch).unwrap().project = Some(super::Project::new(""));
+        let ecole = ws.create_page("École", None);
+        ws.page_mut(&ecole).unwrap().project = Some(super::Project::new(""));
+        for d in 1..=super::REPORT_DAYS_KEPT + 1 {
+            ws.report_day(Some(&orch), &format!("2026-10-{d:02}"));
+        }
+        ws.report_day(Some(&ecole), "2026-09-01");
+        let old = ws.old_report_days();
+        assert_eq!(old.len(), 1, "only the project with too many days");
+        let shelf = ws.report_shelf(Some(&orch));
+        assert_eq!(ws.page(&old[0]).unwrap().parent.as_deref(), Some(shelf.as_str()));
+        let (sum, n) = ws.condense_old_reports().unwrap();
+        assert_eq!(n, 1);
+        assert_eq!(ws.page(&sum).unwrap().parent.as_deref(), Some(shelf.as_str()));
+        assert!(ws.old_report_days().is_empty());
     }
 
     /// The days over go into one summary page (titles and finished steps), then to the trash;

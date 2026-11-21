@@ -1572,6 +1572,7 @@ impl NotesApp {
         let md = auto::session_report(&rec, &commits, dirty, summary);
         let day = auto::local_day(rec.ended);
         let page = self.report_page(
+            Some(&rec.project),
             &day,
             &format!("{} · {}", rec.title, auto::hm(rec.started)),
             &md,
@@ -1624,38 +1625,10 @@ impl NotesApp {
         ));
     }
 
-    /// A page under "Rapports des IA › <day>".
-    fn report_page(&mut self, day: &str, title: &str, md: &str) -> String {
-        let root = {
-            let id = self.ws.settings.orch.reports_page.clone();
-            if self.ws.page(&id).is_some_and(|p| !p.trashed) {
-                id
-            } else {
-                let id = self
-                    .ws
-                    .create_page(crate::tr!("Rapports des IA", "AI reports"), None);
-                if let Some(p) = self.ws.page_mut(&id) {
-                    p.icon = "📒".into();
-                }
-                self.ws.settings.orch.reports_page = id.clone();
-                id
-            }
-        };
-        let day_page = match self
-            .ws
-            .children(Some(&root))
-            .iter()
-            .find(|p| p.title == day && !p.trashed)
-        {
-            Some(p) => p.id.clone(),
-            None => {
-                let id = self.ws.create_page(day, Some(root.clone()));
-                if let Some(p) = self.ws.page_mut(&id) {
-                    p.icon = "📅".into();
-                }
-                id
-            }
-        };
+    /// A page under "Rapports des IA › <project> › <day>" (`project` None: the daily
+    /// summaries' folder): each project's reports on their own.
+    fn report_page(&mut self, project: Option<&str>, day: &str, title: &str, md: &str) -> String {
+        let day_page = self.ws.report_day(project, day);
         let mut page = crate::store::page_from_markdown(md, title);
         page.title = title.to_string();
         page.icon = "📋".into();
@@ -1704,6 +1677,7 @@ impl NotesApp {
             let refs: Vec<&crate::model::RunRecord> = runs.iter().collect();
             let md = auto::daily_report(&day, &refs);
             let page = self.report_page(
+                None,
                 &day,
                 crate::tr!("Bilan de la journée", "Daily summary"),
                 &md,
