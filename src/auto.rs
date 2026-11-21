@@ -8,8 +8,8 @@
 //! the instructions, reads the session file to know when a turn is over, and starts the next
 //! one until the work is done, a limit is reached or it is stopped.
 //!
-//! Only Claude Code for now; what depends on the agent is in `Agent` (command, session
-//! files), so Codex can be added there.
+//! What depends on the agent is in `Agent` (command, session files). Codex, Gemini CLI and
+//! Mistral Vibe are listed there, but only Claude Code is wired so far (`Agent::ready`).
 
 use crate::LockOrRecover;
 use serde_json::Value;
@@ -18,21 +18,71 @@ use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 
+// Codex, Gemini and Vibe are chosen from the « Sessions IA » card once it has its list of
+// AIs (a later step); until then only the tests name them.
+#[allow(dead_code)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Agent {
     ClaudeCode,
+    Codex,
+    Gemini,
+    Vibe,
 }
 
+#[allow(dead_code)]
 impl Agent {
+    pub const ALL: [Agent; 4] = [Agent::ClaudeCode, Agent::Codex, Agent::Gemini, Agent::Vibe];
+
     pub fn label(self) -> &'static str {
+        self.ai().label()
+    }
+
+    /// The same AI in the setup list (installation, sign-in, MCP).
+    pub fn ai(self) -> crate::setup::Ai {
+        use crate::setup::Ai;
         match self {
-            Agent::ClaudeCode => "Claude Code",
+            Agent::ClaudeCode => Ai::ClaudeCode,
+            Agent::Codex => Ai::Codex,
+            Agent::Gemini => Ai::Gemini,
+            Agent::Vibe => Ai::Vibe,
         }
+    }
+
+    /// The agent able to work alone for an AI of the setup list, if any (not the apps).
+    pub fn from_ai(ai: crate::setup::Ai) -> Option<Agent> {
+        Agent::ALL.into_iter().find(|a| a.ai() == ai)
+    }
+
+    /// Its program, as typed in a terminal.
+    pub fn bin(self) -> &'static str {
+        match self {
+            Agent::ClaudeCode => "claude",
+            Agent::Codex => "codex",
+            Agent::Gemini => "gemini",
+            Agent::Vibe => "vibe",
+        }
+    }
+
+    /// Autonomous work is wired for it: its command (with permissions), its session files
+    /// and the reading of its turns. Only Claude Code so far; the others are listed so the
+    /// rest of the program can name them, and are never started alone until this is true.
+    pub fn ready(self) -> bool {
+        matches!(self, Agent::ClaudeCode)
     }
 
     /// The command started in the hidden terminal.
     pub fn command(self, allow_commits: bool, extra: &str) -> String {
         match self {
+            // Not wired yet (see `ready`): never start an agent without its permissions,
+            // the terminal only says so and closes.
+            Agent::Codex | Agent::Gemini | Agent::Vibe => {
+                let msg = crate::trf!(
+                    "Le travail autonome n'est pas encore possible avec {}.",
+                    "Autonomous work isn't possible yet with {}.",
+                    self.label()
+                );
+                format!("echo {}; exit 1", crate::sessions::shell_quote(&msg))
+            }
             Agent::ClaudeCode => {
                 let (allowed, denied) = permissions(allow_commits, extra);
                 // The repository's own settings (.claude/settings*.json: hooks, permissions)
@@ -64,6 +114,15 @@ impl Agent {
                     .collect();
                 root.join("projects").join(enc)
             }
+            // Their own folders; the session format of each is read at a later step.
+            Agent::Codex => std::env::var_os("CODEX_HOME")
+                .map(PathBuf::from)
+                .unwrap_or_else(|| dirs::home_dir().unwrap_or_default().join(".codex"))
+                .join("sessions"),
+            Agent::Gemini => dirs::home_dir().unwrap_or_default().join(".gemini").join("tmp"),
+            Agent::Vibe => std::env::var_os("VIBE_HOME")
+                .map(PathBuf::from)
+                .unwrap_or_else(|| dirs::home_dir().unwrap_or_default().join(".vibe")),
         }
     }
 }
@@ -1672,6 +1731,24 @@ mod tests {
                 .command(true, "Bash(just:*)")
                 .contains("Bash(just:*)")
         );
+    }
+
+    #[test]
+    fn agents_match_the_setup_list_and_only_claude_runs_alone() {
+        for a in Agent::ALL {
+            assert_eq!(Agent::from_ai(a.ai()), Some(a));
+            assert_eq!(a.ai().launch(), Some(a.bin()));
+            assert!(!a.label().is_empty());
+        }
+        assert_eq!(Agent::from_ai(crate::setup::Ai::Cursor), None);
+        assert!(Agent::ClaudeCode.ready());
+        for a in [Agent::Codex, Agent::Gemini, Agent::Vibe] {
+            assert!(!a.ready());
+            // Not wired: its program is never started, the terminal just says so.
+            let cmd = a.command(true, "");
+            assert!(cmd.starts_with("echo ") && cmd.ends_with("exit 1"), "{cmd}");
+            assert_ne!(a.session_dir(Path::new("/x")), Agent::ClaudeCode.session_dir(Path::new("/x")));
+        }
     }
 
     #[test]

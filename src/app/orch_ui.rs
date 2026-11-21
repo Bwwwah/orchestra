@@ -446,8 +446,15 @@ impl NotesApp {
             .map(|s| (s.id.clone(), s.status == crate::project::StepStatus::Done))
             .collect();
         let steps_at_turn: Vec<String> = steps_at_start.iter().map(|(id, _)| id.clone()).collect();
-        let copy = auto::make_copy(&folder, &title, !pr.commit_to_main)?;
         let agent = Agent::ClaudeCode;
+        if !agent.ready() {
+            return Err(crate::trf!(
+                "le travail autonome n'est pas encore possible avec {}",
+                "autonomous work isn't possible yet with {}",
+                agent.label()
+            ));
+        }
+        let copy = auto::make_copy(&folder, &title, !pr.commit_to_main)?;
         let o = &self.ws.settings.orch;
         let cmd = agent.command(commits, &o.extra_tools);
         let c2 = ctx.clone();
