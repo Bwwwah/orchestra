@@ -40,4 +40,5 @@ assets = [
     ["target/release/orchestra", "usr/bin/", "755"],
     ["packaging/orchestra.desktop", "usr/share/applications/", "644"],
     ["assets/icon-512.png", "usr/share/icons/hicolor/512x512/apps/orchestra.png", "644"],
+    ["assets/icon-256.png", "usr/share/icons/hicolor/256x256/apps/orchestra.png", "644"],
 ]

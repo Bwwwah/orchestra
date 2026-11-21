@@ -25,16 +25,9 @@ lipo -create -output "$APP/Contents/MacOS/orchestra" \
 sed "s/__VERSION__/$VERSION/g" packaging/Info.plist > "$APP/Contents/Info.plist"
 printf 'APPL????' > "$APP/Contents/PkgInfo"
 
-# Icon: every size macOS asks for, from the 1024 px picture.
-ICONSET="dist/AppIcon.iconset"
-mkdir -p "$ICONSET"
-for s in 16 32 128 256 512; do
-  sips -z $s $s packaging/icon-1024.png --out "$ICONSET/icon_${s}x${s}.png" >/dev/null
-  d=$((s * 2))
-  sips -z $d $d packaging/icon-1024.png --out "$ICONSET/icon_${s}x${s}@2x.png" >/dev/null
-done
-iconutil -c icns "$ICONSET" -o "$APP/Contents/Resources/AppIcon.icns"
-rm -rf "$ICONSET"
+# Icon: every size macOS asks for, made from the logo by `cargo run --example icons`
+# (assets/logo-source.png → assets/AppIcon.icns).
+cp assets/AppIcon.icns "$APP/Contents/Resources/AppIcon.icns"
 
 cp packaging/LISEZMOI.txt "dist/Orchestra/LISEZMOI.txt"
 

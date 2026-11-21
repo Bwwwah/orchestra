@@ -82,6 +82,10 @@ jobs:
         shell: pwsh
         run: |
           cargo build --release
+          # The icon inside orchestra.exe itself (Explorer, taskbar, shortcuts), from
+          # assets/icon.ico (made by `cargo run --example icons`).
+          choco install rcedit -y --no-progress
+          rcedit target/release/orchestra.exe --set-icon assets/icon.ico
           New-Item -ItemType Directory -Force out | Out-Null
           $tag = $env:GITHUB_REF_NAME
           Copy-Item target/release/orchestra.exe "out/Orchestra-$tag-Windows-portable.exe"

@@ -429,4 +429,32 @@ mod icon_tests {
         let i = super::app_icon();
         assert_eq!((i.width, i.height), (256, 256));
     }
+
+    /// Every icon the builds point at (macOS script, Windows installer and .exe, Linux
+    /// package) exists, in the right format: the ones `cargo run --example icons` makes.
+    #[test]
+    fn the_builds_point_at_the_new_icons() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        let read = |p: &str| std::fs::read(root.join(p)).unwrap_or_else(|e| panic!("{p}: {e}"));
+        let text = |p: &str| String::from_utf8(read(p)).unwrap();
+        // macOS: the .icns copied into the app.
+        assert!(text("packaging/build-macos.sh").contains("cp assets/AppIcon.icns"));
+        assert_eq!(&read("assets/AppIcon.icns")[..4], b"icns");
+        // Windows: the installer's icon, and the one set into orchestra.exe.
+        assert!(text("packaging/orchestra.iss").contains(r"SetupIconFile=..\assets\icon.ico"));
+        assert!(text(".github/workflows/release.yml").contains("--set-icon assets/icon.ico"));
+        assert_eq!(&read("assets/icon.ico")[..4], &[0, 0, 1, 0]);
+        // Linux: the package's icons, each a PNG of the size its folder says.
+        let cargo = text("Cargo.toml");
+        for (file, size) in [("assets/icon-512.png", 512), ("assets/icon-256.png", 256)] {
+            assert!(
+                cargo.contains(&format!("\"{file}\", \"usr/share/icons/hicolor/{size}x{size}/apps/orchestra.png\"")),
+                "{file}"
+            );
+            let png = read(file);
+            assert_eq!(&png[..4], b"\x89PNG");
+            let w = u32::from_be_bytes(png[16..20].try_into().unwrap());
+            assert_eq!(w, size, "{file}");
+        }
+    }
 }
