@@ -236,6 +236,22 @@ pub fn reports_usage(agent: crate::auto::Agent) -> bool {
     matches!(agent, Agent::ClaudeCode | Agent::Codex)
 }
 
+/// Why an agent's quota can't be shown, in a few words (None when Orchestra reads it).
+pub fn unreadable_reason(agent: crate::auto::Agent) -> Option<&'static str> {
+    use crate::auto::Agent;
+    match agent {
+        Agent::ClaudeCode | Agent::Codex => None,
+        Agent::Gemini => Some(crate::tr!(
+            "Quota compté par Google en requêtes par jour, jamais écrit sur cet ordinateur.",
+            "Quota counted by Google in requests per day, never written on this computer."
+        )),
+        Agent::Vibe => Some(crate::tr!(
+            "Facturé à l'usage sur une clé d'API Mistral : pas de fenêtre d'abonnement à suivre.",
+            "Billed by use on a Mistral API key: no subscription window to follow."
+        )),
+    }
+}
+
 /// The latest figures of an agent; None for those that tell none (see above).
 pub fn read_for(agent: crate::auto::Agent) -> Option<Usage> {
     use crate::auto::Agent;
@@ -1027,6 +1043,10 @@ mod tests {
         assert!(reports_usage(Agent::ClaudeCode) && reports_usage(Agent::Codex));
         assert!(!reports_usage(Agent::Gemini) && !reports_usage(Agent::Vibe));
         assert!(read_for(Agent::Gemini).is_none() && read_for(Agent::Vibe).is_none());
+        // Every agent either has its figures read or says why not, never both.
+        for a in Agent::ALL {
+            assert_eq!(unreadable_reason(a).is_none(), reports_usage(a), "{a:?}");
+        }
     }
 
     #[test]
