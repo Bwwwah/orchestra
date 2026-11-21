@@ -24,6 +24,10 @@
 	<string>11.0</string>
 	<key>LSApplicationCategoryType</key>
 	<string>public.app-category.productivity</string>
+	<!-- No App Nap: with the window hidden or the screen off, Orchestra still drives the
+	     autonomous sessions on time (see src/app/conductor.rs). -->
+	<key>NSAppSleepDisabled</key>
+	<true/>
 	<key>NSHighResolutionCapable</key>
 	<true/>
 	<key>NSAppleEventsUsageDescription</key>

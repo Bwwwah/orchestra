@@ -280,7 +280,7 @@ fn run_window(open: Option<String>) -> i32 {
             .with_title_shown(false),
         ..Default::default()
     };
-    match eframe::run_native("Orchestra", options, Box::new(move |cc| Ok(Box::new(app::NotesApp::new(cc, open))))) {
+    match eframe::run_native("Orchestra", options, Box::new(move |cc| Ok(Box::new(app::Shell::new(cc, open))))) {
         Ok(()) => 0,
         Err(e) => {
             eprintln!("orchestra: impossible d'ouvrir la fenêtre : {e}");
