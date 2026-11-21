@@ -312,6 +312,13 @@ fn picked_share(ceiling: f32, five: Option<f32>, running: Option<f32>) -> f32 {
     (ceiling - taken).max(0.0)
 }
 
+/// Whether a launch row shows what its session may take (`picked_share`) rather than its
+/// base share: once picked, or once its ceiling was set by hand in the card; never while
+/// its session runs (its own use is shown then).
+fn shows_picked_share(picked: bool, set_by_hand: bool, busy: bool) -> bool {
+    (picked || set_by_hand) && !busy
+}
+
 /// How `picked_share` was worked out, for its tooltip.
 fn picked_share_text(ceiling: f32, five: Option<f32>, running: Option<f32>) -> String {
     let p = picked_share(ceiling, five, running);
@@ -2927,9 +2934,9 @@ impl NotesApp {
                                 ui.label(RichText::new(title).font(semibold(14.5)).color(t.text));
                                 let (txt, col) = if busy { (crate::tr!("au travail", "at work").to_string(), super::projects::GREEN) } else if open == 0 { (crate::tr!("aucune étape ouverte", "no open step").to_string(), t.tertiary) } else { ({ let s = crate::i18n::plural(open); crate::trf!("{open} étape{s} ouverte{s}", "{open} open step{s}") }, t.secondary) };
                                 ui.label(RichText::new(txt).size(12.0).color(col));
-                                // Picked (and not running): what its session may take, above
-                                // what the window already holds.
-                                if d.pick && !busy {
+                                // Picked, or its ceiling set by hand (and not running): what its
+                                // session may take, above what is already taken.
+                                if shows_picked_share(d.pick, d.touched, busy) {
                                     let c = ceiling_choice(draft_ceiling(d, running_at), five, dl, global);
                                     let p = picked_share(c, five, running_at);
                                     ui.label(RichText::new(crate::trf!("jusqu'à +{p:.0} %", "up to +{p:.0} %")).size(12.0).color(super::projects::BLUE))
@@ -5059,6 +5066,12 @@ mod tests {
         assert_eq!(picked_share(60.0, Some(55.0), Some(50.0)), 5.0);
         let t = picked_share_text(60.0, Some(42.0), Some(50.0));
         assert!(t.contains("50 %") && t.contains("10 %"), "{t}");
+        // Shown once picked, and also once the ceiling is set by hand; not while running.
+        use super::shows_picked_share;
+        assert!(!shows_picked_share(false, false, false));
+        assert!(shows_picked_share(true, false, false));
+        assert!(shows_picked_share(false, true, false));
+        assert!(!shows_picked_share(true, true, true));
     }
 
     #[test]
