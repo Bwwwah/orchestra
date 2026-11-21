@@ -38,19 +38,52 @@ impl Ais {
             .unwrap_or_default()
     }
 
-    /// Buttons for "Nouvelle session": the plugged agents that run in a terminal, then the shell.
+    /// The AIs of « Nouvelle session » (« Sessions IA » card): see `launchers_from`.
     pub fn launchers(&self) -> Vec<(&'static str, Option<&'static str>, Color32)> {
-        let mut out: Vec<(&'static str, Option<&'static str>, Color32)> = self
-            .plugged()
-            .into_iter()
-            .filter_map(|a| {
-                let (r, g, b) = a.accent();
-                a.launch()
-                    .map(|c| (a.label(), Some(c), Color32::from_rgb(r, g, b)))
-            })
-            .collect();
-        out.push(("Shell", None, Color32::GRAY));
-        out
+        launchers_from(self.states.lock_or_recover().as_deref().unwrap_or(&[]))
+    }
+}
+
+/// The AIs of the setup list installed on this machine that open in a terminal, in the order
+/// of that list (plugged into the dashboard or not: one can work without Orchestra's MCP),
+/// then the shell. While the first check runs (`states` empty), only the shell.
+pub fn launchers_from(states: &[AiState]) -> Vec<(&'static str, Option<&'static str>, Color32)> {
+    let mut out: Vec<(&'static str, Option<&'static str>, Color32)> = Ai::ALL
+        .into_iter()
+        .filter(|a| states.iter().any(|s| s.ai == *a && s.installed))
+        .filter_map(|a| {
+            let (r, g, b) = a.accent();
+            a.launch()
+                .map(|c| (a.label(), Some(c), Color32::from_rgb(r, g, b)))
+        })
+        .collect();
+    out.push(("Shell", None, Color32::GRAY));
+    out
+}
+
+#[cfg(test)]
+mod launcher_tests {
+    use super::{Ai, AiState, launchers_from};
+
+    #[test]
+    fn only_the_installed_ais_that_open_in_a_terminal_are_offered() {
+        let st = |ai, installed, plugged| AiState { ai, installed, plugged, install: None };
+        let states = [
+            st(Ai::Vibe, true, false),
+            st(Ai::Gemini, false, false),
+            st(Ai::ClaudeCode, true, true),
+            st(Ai::Cursor, true, true),
+            st(Ai::Codex, true, false),
+        ];
+        let labels: Vec<&str> = launchers_from(&states).iter().map(|l| l.0).collect();
+        // The setup list's order; installed even if not plugged; never an app (Cursor) nor
+        // an AI that isn't there (Gemini); the shell last.
+        assert_eq!(labels, ["Claude Code", "Codex", "Mistral Vibe", "Shell"]);
+        let l = launchers_from(&states);
+        assert_eq!(l[0].1, Some("claude"));
+        assert_eq!(l.last().unwrap().1, None);
+        // Before the first check: the shell only.
+        assert_eq!(launchers_from(&[]).len(), 1);
     }
 }
 
