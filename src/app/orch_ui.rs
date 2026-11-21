@@ -273,6 +273,25 @@ fn draft_ceiling(d: &Draft, running: Option<f32>) -> Option<f32> {
     if d.touched { d.ceiling } else { running.or(d.ceiling) }
 }
 
+/// What the ceiling of a session started beside running ones (`running`: theirs) means,
+/// for the launch card's tooltip: empty with none running. `chosen`: this one's ceiling,
+/// `touched`: changed by the person (higher or lower than theirs, for this one only).
+fn parallel_note(running: Option<f32>, chosen: f32, touched: bool) -> String {
+    let Some(r) = running else { return String::new() };
+    if !touched || (chosen - r).abs() < 0.5 {
+        crate::trf!(
+            "Une session tourne déjà avec un plafond de {r:.0} % : celle-ci part du même ; vous pouvez le monter (ex. {:.0} %) pour celle-ci seulement. ",
+            "A session is already running with a ceiling of {r:.0} %: this one starts from the same; you may raise it (e.g. {:.0} %) for this one only. ",
+            (r + 10.0).min(100.0)
+        )
+    } else {
+        crate::trf!(
+            "Celle-ci s'arrêtera à {chosen:.0} %, celle déjà en cours garde son plafond ({r:.0} %). ",
+            "This one will stop at {chosen:.0} %, the one already running keeps its ceiling ({r:.0} %). "
+        )
+    }
+}
+
 /// Whether a session can start under the global limit: at least 1 % of the window is left.
 fn room_left(five: Option<f32>, global: f32) -> bool {
     five.is_none_or(|f| global - f >= 1.0)
@@ -4802,13 +4821,8 @@ fn launch_controls(ui: &mut egui::Ui, c: LaunchCx<'_>) {
     let mut now = five
         .map(|f| crate::trf!("La fenêtre est à {f:.0} % : ", "The window is at {f:.0} %: "))
         .unwrap_or_default();
-    if let Some(r) = running_at
-        && !d.touched
-    {
-        now = crate::trf!(
-            "Une session tourne déjà avec un plafond de {r:.0} % : celle-ci part du même. {now}",
-            "A session is already running with a ceiling of {r:.0} %: this one starts from the same. {now}"
-        );
+    if !busy {
+        now = parallel_note(running_at, shown, d.touched) + &now;
     }
     dv.on_hover_text(crate::trf!(
         "Plafond de la prochaine session de ce projet, en % de la fenêtre de 5 h de l'abonnement, votre propre usage compris : elle s'arrête quand la fenêtre l'atteint (ex. 37 % utilisés et un plafond de 50 % : elle peut en prendre 13). {now}de {floor:.0} à {global:.0} % (la limite globale). Le plafond choisi est gardé pour les prochaines sessions de ce projet, même après un redémarrage.",
@@ -4941,6 +4955,32 @@ mod tests {
     /// A session started beside one already running begins from its ceiling (« stop at
     /// 50 % » for both), not from the window plus a share, nor from the one kept, unless the
     /// person changed it in the card since Orchestra opened.
+    /// The next session may get a higher ceiling than the one running (« stop at 60 % »
+    /// beside 50 %): offered, accepted, and each stops at its own.
+    #[test]
+    fn the_next_session_may_stop_higher() {
+        use super::{Draft, Stop, ceiling_choice, draft_ceiling, parallel_note, stop_reason};
+        let mut d = Draft::new(None, true);
+        (d.ceiling, d.touched) = (Some(60.0), true);
+        let c = ceiling_choice(draft_ceiling(&d, Some(50.0)), Some(42.0), 20.0, 90.0);
+        assert_eq!(c, 60.0);
+        // Nothing shares the global limit out any more: 60 beside 50 is fine.
+        // The window at 55 %: the first stops at its 50 %, the second goes on to 60 %.
+        let at = |ceiling: f32, five: f32| {
+            let mut t = calm();
+            (t.ceiling, t.five, t.pct, t.limit, t.global) = (Some(ceiling), Some(five), 5.0, 90.0, 90.0);
+            stop_reason(&t)
+        };
+        assert_eq!(at(50.0, 55.0), Some(Stop::Ceiling(50.0)));
+        assert_eq!(at(60.0, 55.0), None);
+        assert_eq!(at(60.0, 60.0), Some(Stop::Ceiling(60.0)));
+        // What the tooltip says: the offer, then the outcome once raised.
+        assert!(parallel_note(None, 60.0, true).is_empty());
+        assert!(parallel_note(Some(50.0), 50.0, false).contains("60 %"));
+        let n = parallel_note(Some(50.0), 60.0, true);
+        assert!(n.contains("60 %") && n.contains("50 %"), "{n}");
+    }
+
     #[test]
     fn a_parallel_session_starts_from_the_running_ceiling() {
         use super::{Draft, ceiling_choice, draft_ceiling, running_ceiling};
