@@ -505,14 +505,16 @@ fn vibe_api_key() -> Result<String, String> {
 /// Asks Mistral for the budget (a few seconds at most), as JSON to keep:
 /// `{"at", "budget"}` or `{"at", "error"}`.
 fn fetch_vibe_budget(now: u64) -> Value {
+    // `lasting`: a failure that won't pass by itself (see `vibe_budget_merge`).
     let fail = |e: String| json!({ "at": now, "error": e });
+    let lasting = |e: String| json!({ "at": now, "error": e, "lasting": true });
     let key = match vibe_api_key() {
         Ok(k) => k,
-        Err(e) => return fail(e),
+        Err(e) => return lasting(e),
     };
     let p = crate::sync::shell_path();
     let Some(curl) = crate::sync::which("curl", &p) else {
-        return fail(crate::tr!("« curl » introuvable.", "« curl » not found.").into());
+        return lasting(crate::tr!("« curl » introuvable.", "« curl » not found.").into());
     };
     let child = crate::proc::command(curl)
         .args(["-sS", "--max-time", "8", "-H", "@-", "-w", "\n%{http_code}", VIBE_BUDGET_URL])
@@ -539,6 +541,7 @@ fn fetch_vibe_budget(now: u64) -> Value {
             Ok(v) => json!({ "at": now, "budget": v }),
             Err(_) => fail(crate::tr!("Réponse de Mistral illisible.", "Mistral's answer unreadable.").into()),
         },
+        Ok(s @ (401 | 403 | 404)) => lasting(vibe_budget_status_problem(s)),
         Ok(s) if s > 0 => fail(vibe_budget_status_problem(s)),
         _ => {
             let err = String::from_utf8_lossy(&o.stderr);
@@ -585,19 +588,47 @@ fn vibe_budget_state() -> (Option<Usage>, Option<String>) {
         .ok()
         .and_then(|t| serde_json::from_str(&t).ok())
         .unwrap_or(Value::Null);
-    let at = kept["at"].as_u64().unwrap_or(0);
+    // Last time Mistral was asked: the answer's, or a failed try that kept older figures.
+    let at = kept["at"].as_u64().unwrap_or(0).max(kept["tried"].as_u64().unwrap_or(0));
     if !cfg!(test)
         && (at + VIBE_BUDGET_EVERY_MS < now || at > now)
         && vibe_dir().is_dir()
         && !VIBE_FETCHING.swap(true, Ordering::SeqCst)
     {
         std::thread::spawn(move || {
-            let v = fetch_vibe_budget(now);
-            let _ = std::fs::write(vibe_budget_file(), v.to_string());
+            let file = vibe_budget_file();
+            let old: Value = std::fs::read_to_string(&file)
+                .ok()
+                .and_then(|t| serde_json::from_str(&t).ok())
+                .unwrap_or(Value::Null);
+            let v = vibe_budget_merge(&old, fetch_vibe_budget(now), now);
+            // In one piece: the app reads it every 20 s (and the MCP server too), a half-written
+            // file would read as « not asked yet » and hide the figure for a moment.
+            let _ = crate::store::write_atomic(&file, v.to_string().as_bytes());
             VIBE_FETCHING.store(false, Ordering::SeqCst);
         });
     }
     vibe_budget_state_of(&kept, now)
+}
+
+/// What to keep after asking Mistral: its answer; but a passing failure (network, server,
+/// timeout) doesn't wipe figures still fresh — they stay, with the time of the try, so the
+/// tile doesn't flicker between the % and « not read ». A refusal (sign-in, rights, no
+/// budget) is said at once.
+fn vibe_budget_merge(old: &Value, new: Value, now: u64) -> Value {
+    let passing = new["error"].is_string() && !new["lasting"].as_bool().unwrap_or(false);
+    let old_fresh = old["budget"].is_object()
+        && old["at"].as_u64().is_some_and(|at| at + VIBE_BUDGET_STALE_MS >= now);
+    if passing && old_fresh {
+        let mut kept = old.clone();
+        kept["tried"] = json!(now);
+        return kept;
+    }
+    let mut new = new;
+    if let Some(o) = new.as_object_mut() {
+        o.remove("lasting");
+    }
+    new
 }
 
 fn vibe_budget_state_of(kept: &Value, now: u64) -> (Option<Usage>, Option<String>) {
@@ -1495,6 +1526,22 @@ mod tests {
         assert_eq!(vibe_budget_state_of(&reset, now), (None, None));
         assert_eq!(vibe_budget_state_of(&Value::Null, now), (None, None));
         assert!(vibe_budget_status_problem(401).contains("vibe"));
+
+        // A passing failure keeps fresh figures (no flicker to « not read »), with the try's time.
+        let blip = json!({"at": now, "error": "Mistral a répondu 502."});
+        let merged = vibe_budget_merge(&kept, blip.clone(), now);
+        assert_eq!(vibe_budget_state_of(&merged, now).0.unwrap().windows[0].pct, 37.5);
+        assert_eq!(merged["tried"].as_u64(), Some(now));
+        // … but not figures too old to measure anything, nor before any figure.
+        assert!(vibe_budget_merge(&old, blip.clone(), now)["error"].is_string());
+        assert!(vibe_budget_merge(&Value::Null, blip, now)["error"].is_string());
+        // A refusal is said at once, and the mark doesn't stay in the file.
+        let refused = json!({"at": now, "error": vibe_budget_status_problem(401), "lasting": true});
+        let merged = vibe_budget_merge(&kept, refused, now);
+        assert!(merged["error"].is_string() && merged.get("lasting").is_none());
+        // A new answer replaces the old one.
+        let fresh = json!({"at": now, "budget": kept["budget"].clone()});
+        assert_eq!(vibe_budget_merge(&kept, fresh.clone(), now), fresh);
     }
 
     #[test]
