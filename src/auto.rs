@@ -235,6 +235,8 @@ impl Agent {
     fn session_depth(self) -> usize {
         match self {
             Agent::Codex => 4,
+            // unified/<session>/generations/<n>/projection-state.json (older versions: 1).
+            Agent::Vibe => 5,
             _ => 1,
         }
     }
@@ -1746,8 +1748,23 @@ impl Reader {
             self.path = match agent {
                 // One folder of sessions for every project: only one working in `cwd`.
                 Agent::Codex => files.into_iter().find(|p| codex_cwd(p).as_deref() == Some(cwd)),
+                // Vibe: the public state of a session (`vibe_state_file`), or the one document
+                // of its older versions; never its other files (journal, chunks, meta…).
+                Agent::Vibe => files.into_iter().find(|p| {
+                    p.file_name().is_some_and(|n| {
+                        n == VIBE_STATE || n.to_string_lossy().starts_with("session_")
+                    })
+                }),
                 _ => files.into_iter().next(),
             };
+        }
+        // Vibe writes each new state in a new generation folder: follow the newest.
+        if agent == Agent::Vibe
+            && let Some(p) = &self.path
+            && p.file_name().is_some_and(|n| n == VIBE_STATE)
+            && let Some(newest) = p.ancestors().nth(2).and_then(vibe_state_file)
+        {
+            self.path = Some(newest);
         }
         let Some(path) = self.path.clone() else { return };
         if !agent.appends() {
@@ -1934,6 +1951,9 @@ impl Reader {
                 }
                 self.tokens = self.tokens.max(tokens);
             }
+            Agent::Vibe if v["format"].as_str().is_some_and(|f| f.starts_with("harness.public-session-state/")) => {
+                self.vibe_state(&v);
+            }
             Agent::Vibe => {
                 // Messages {role: user|assistant|tool, content, tool_calls}; totals in metadata.
                 for m in messages {
@@ -1959,6 +1979,59 @@ impl Reader {
             Agent::ClaudeCode | Agent::Codex => {}
         }
     }
+
+    /// Mistral Vibe's public state of a session (`harness.public-session-state/v1`, as its
+    /// `session_protocol.py` defines it): `session.status.type` (idle, running, blocked,
+    /// failed), `session.tokenUsage`, `latestTurn` (completed, failed with its `error`,
+    /// interrupted, in_progress) and `history.entries`, oldest first, whose answers are
+    /// `{type: "message", role: "assistant", content: [{type: "text", text}]}`.
+    fn vibe_state(&mut self, v: &Value) {
+        let empty = Vec::new();
+        let entries = v["history"]["entries"].as_array().unwrap_or(&empty);
+        self.records = entries.len();
+        for e in entries {
+            if e["type"] == "message"
+                && e["role"] == "assistant"
+                && e["outcome"]["type"] != "discarded"
+            {
+                let text = content_text(&e["content"]);
+                if !text.trim().is_empty() {
+                    self.last_text = text;
+                }
+            }
+        }
+        let u = &v["session"]["tokenUsage"];
+        let n = |k: &str| u[k].as_u64().unwrap_or(0);
+        self.tokens = self
+            .tokens
+            .max(n("inputTokens").saturating_sub(n("cachedInputTokens")) + n("outputTokens"));
+        let turn = &v["latestTurn"];
+        if turn["status"] == "failed" {
+            let error = &turn["error"];
+            let text = error["message"].as_str().unwrap_or("").to_string();
+            let code = error["code"].as_str().unwrap_or("").to_lowercase();
+            // Mistral refuses past the plan's budget or rate: no more turn goes through.
+            if is_limit_message(&text)
+                || ["billing_denied", "rate_limited", "usage_limited", "budget"].iter().any(|c| code.contains(c))
+            {
+                self.limit_hit = Some(if text.is_empty() { code } else { text });
+            }
+        }
+        let idle = matches!(v["session"]["status"]["type"].as_str(), Some("idle" | "failed"));
+        let ended = matches!(turn["status"].as_str(), Some("completed" | "failed" | "interrupted"));
+        self.turn_over = (idle && ended) || self.limit_hit.is_some();
+    }
+}
+
+/// The file of Mistral Vibe's public state of a session, in each generation folder:
+/// `logs/session/unified/<session>/generations/<n>/projection-state.json`.
+const VIBE_STATE: &str = "projection-state.json";
+
+/// The newest state file under a session's `generations` folder.
+fn vibe_state_file(generations: &Path) -> Option<PathBuf> {
+    session_files(generations, 2, "json", std::time::UNIX_EPOCH)
+        .into_iter()
+        .find(|p| p.file_name().is_some_and(|n| n == VIBE_STATE))
 }
 
 // ------------------------------------------------------------------ what the AI is told
@@ -2717,6 +2790,57 @@ mod tests {
         assert!(r.turn_over);
         assert_eq!(r.tokens, 34);
         assert_eq!(signal(&r.last_text), Signal::Blocked);
+
+        // Vibe 3: the public state of the session, a new generation folder for each state.
+        let _ = std::fs::remove_file(vd.join("session_1.json"));
+        let sess = vd.join("unified/5894fe73");
+        let state = |n: u32, body: &str| {
+            let g = sess.join(format!("generations/{n:016}"));
+            std::fs::create_dir_all(&g).unwrap();
+            std::fs::write(g.join("manifest.json"), "{}").unwrap();
+            std::fs::write(g.join(VIBE_STATE), body).unwrap();
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        };
+        std::fs::create_dir_all(sess.join("chunks")).unwrap();
+        std::fs::write(sess.join("meta.json"), "{}").unwrap();
+        state(393, r#"{"format":"harness.public-session-state/v1",
+            "session":{"id":"5894fe73","status":{"type":"running","activeTurnId":"t1"},
+              "tokenUsage":{"inputTokens":900,"outputTokens":40,"totalTokens":940,"cachedInputTokens":400}},
+            "latestTurn":{"id":"t1","status":"in_progress","startedAt":1},
+            "history":{"entries":[{"type":"message","role":"user","content":[{"type":"text","text":"go"}]},
+              {"type":"message","role":"assistant","content":[{"type":"text","text":"je regarde"}]},
+              {"type":"effect","title":"bash"}]}}"#);
+        let mut r = Reader::default();
+        r.poll(Agent::Vibe, &cwd, since);
+        assert_eq!(r.path.as_ref().and_then(|p| p.file_name()).unwrap(), VIBE_STATE);
+        assert!(!r.turn_over);
+        assert_eq!((r.tokens, r.records), (540, 3));
+        assert_eq!(r.last_text, "je regarde");
+        state(531, r#"{"format":"harness.public-session-state/v1",
+            "session":{"id":"5894fe73","status":{"type":"idle"},
+              "tokenUsage":{"inputTokens":2000,"outputTokens":100,"totalTokens":2100,"cachedInputTokens":1000}},
+            "latestTurn":{"id":"t1","status":"completed","startedAt":1,"completedAt":2},
+            "history":{"entries":[{"type":"message","role":"assistant","content":[{"type":"text","text":"fait [[CONTINUER]]"}]},
+              {"type":"message","role":"assistant","outcome":{"type":"discarded","cause":"x"},"content":[{"type":"text","text":"jeté"}]}]}}"#);
+        r.poll(Agent::Vibe, &cwd, since);
+        assert!(r.path.as_ref().unwrap().to_string_lossy().contains("0000000000000531"));
+        assert!(r.turn_over && r.limit_hit.is_none());
+        assert_eq!(r.tokens, 1100);
+        assert_eq!(signal(&r.last_text), Signal::Continue);
+        // Mistral refuses past the plan's budget: the limit is seen, the turn is over.
+        state(600, r#"{"format":"harness.public-session-state/v1",
+            "session":{"id":"5894fe73","status":{"type":"idle"}},
+            "latestTurn":{"id":"t2","status":"failed","startedAt":3,"completedAt":4,
+              "error":{"message":"Vibe budget exhausted","code":"billing_denied"}},
+            "history":{"entries":[]}}"#);
+        r.poll(Agent::Vibe, &cwd, since);
+        assert!(r.turn_over);
+        assert_eq!(r.limit_hit.as_deref(), Some("Vibe budget exhausted"));
+        // Still running a turn, or waiting for an approval: not over.
+        let mut busy = Reader::default();
+        busy.vibe_state(&serde_json::json!({"session": {"status": {"type": "blocked"}},
+            "latestTurn": {"status": "completed"}}));
+        assert!(!busy.turn_over);
 
         unsafe {
             std::env::remove_var("CODEX_HOME");
