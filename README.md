@@ -89,7 +89,7 @@ cocher les étapes, poser une question dans la boîte de réception… Voir
 |---|---|
 | [docs/architecture.md](docs/architecture.md) | Les modules du code et comment ils s'articulent |
 | [docs/ia-et-mcp.md](docs/ia-et-mcp.md) | Les outils MCP, le branchement automatique, ce que les IA ont le droit de faire |
-| [docs/mode-autonome.md](docs/mode-autonome.md) | L'orchestration : étapes, limites, copies du dépôt, rapports |
+| [docs/mode-autonome.md](docs/mode-autonome.md) | L'orchestration : étapes, limites, copies du dépôt, rapports, veille des failles (CVE) |
 | [docs/notifications.md](docs/notifications.md) | Boîte de réception, fenêtres d'erreur, confirmations |
 | [MECHANICS.md](MECHANICS.md) | La fiche des règles : tailles, raccourcis, couleurs, données |
 | [examples/connecteur-exemple.sh](examples/connecteur-exemple.sh) | Un connecteur de synchronisation maison |
