@@ -203,6 +203,8 @@ struct Draft {
     /// Endless mode, and its end conditions as set in the launch card.
     endless: bool,
     end: crate::model::EndConditions,
+    /// The AI the session is started with.
+    agent: Agent,
 }
 
 impl Draft {
@@ -220,6 +222,7 @@ impl Draft {
             pick: false,
             endless: prefs.endless,
             end: prefs.end,
+            agent: prefs.agent.unwrap_or(Agent::ClaudeCode),
         }
     }
 
@@ -229,6 +232,8 @@ impl Draft {
             commits: self.commits,
             endless: self.endless,
             end: self.end.clone(),
+            // Claude Code, the default, isn't written.
+            agent: (self.agent != Agent::ClaudeCode).then_some(self.agent),
         }
     }
 }
@@ -243,6 +248,7 @@ fn default_prefs(commits: bool) -> crate::project::LaunchPrefs {
             hours: Some(4.0),
             ..Default::default()
         },
+        agent: None,
     }
 }
 
@@ -493,6 +499,7 @@ fn hash(s: &str) -> u64 {
 
 impl NotesApp {
     /// Start an autonomous session on a project.
+    #[allow(clippy::too_many_arguments)]
     fn launch_run(
         &mut self,
         ctx: &egui::Context,
@@ -501,6 +508,7 @@ impl NotesApp {
         ceiling: f32,
         commits: bool,
         endless: Option<crate::model::EndConditions>,
+        agent: Agent,
     ) -> Result<(), String> {
         if self.orch.runs.iter().any(|r| r.project == project) {
             return Err(crate::tr!(
@@ -540,12 +548,20 @@ impl NotesApp {
             )
             .into());
         }
-        if !self.ais.plugged().contains(&crate::setup::Ai::ClaudeCode) {
-            return Err(crate::tr!(
-                "Claude Code n'est pas branché (Réglages › IA)",
-                "Claude Code isn't plugged in (Settings › AI)"
-            )
-            .into());
+        // The AI chosen: wired for working alone, and plugged in.
+        if !agent.ready() {
+            return Err(crate::trf!(
+                "le travail autonome n'est pas encore possible avec {}",
+                "autonomous work isn't possible yet with {}",
+                agent.label()
+            ));
+        }
+        if !self.ais.plugged().contains(&agent.ai()) {
+            return Err(crate::trf!(
+                "{} n'est pas branché (Réglages › IA)",
+                "{} isn't plugged in (Settings › AI)",
+                agent.label()
+            ));
         }
         if let Some(f) = self.orch.five
             && f >= self.ws.settings.orch.global_limit
@@ -595,7 +611,7 @@ impl NotesApp {
         // The limits are checked with Claude Code's own figures: they come through the status line.
         // Not only in place: working (a status line left by an Orchestra since moved or
         // deleted measures nothing, and the session would stop as unmeasured).
-        if !crate::usage::tracking_works() {
+        if agent == Agent::ClaudeCode && !crate::usage::tracking_works() {
             crate::usage::start_tracking(&std::env::current_exe().unwrap_or_default())?;
             self.ais.tracking = true;
         }
@@ -609,14 +625,6 @@ impl NotesApp {
             .map(|s| (s.id.clone(), s.status == crate::project::StepStatus::Done))
             .collect();
         let steps_at_turn: Vec<String> = steps_at_start.iter().map(|(id, _)| id.clone()).collect();
-        let agent = Agent::ClaudeCode;
-        if !agent.ready() {
-            return Err(crate::trf!(
-                "le travail autonome n'est pas encore possible avec {}",
-                "autonomous work isn't possible yet with {}",
-                agent.label()
-            ));
-        }
         let code = crate::project::code_kind(&folder, pr.code);
         let copy = auto::make_copy(&folder, &title, !on_main(pr), code)?;
         // A project without code makes no commit (the switch isn't shown for it), and without
@@ -702,7 +710,7 @@ impl NotesApp {
             max_turns: o.max_turns.max(1),
             stop: None,
             summarizing: false,
-            last_line: crate::tr!("Démarrage de Claude Code…", "Starting Claude Code…").into(),
+            last_line: crate::trf!("Démarrage de {}…", "Starting {}…", agent.label()),
             steps_at_start,
             screen_hash: 0,
             screen_changed: Instant::now(),
@@ -806,7 +814,7 @@ impl NotesApp {
         {
             let o = &self.ws.settings.orch;
             let l = ceiling_choice(None, self.orch.five, o.default_limit, o.global_limit);
-            if let Err(e) = self.launch_run(ctx, &pid, "", l, true, None) {
+            if let Err(e) = self.launch_run(ctx, &pid, "", l, true, None, Agent::ClaudeCode) {
                 eprintln!("auto-run : {e}");
             }
         }
@@ -1191,7 +1199,12 @@ impl NotesApp {
                 let share = if rec.limit > 0.0 { rec.limit } else { o.default_limit };
                 ceiling_choice(None, self.orch.five, share, o.global_limit)
             };
-            match self.launch_run(ctx, &rec.project, &rec.mission, ceiling, rec.commits_allowed, rec.endless.clone()) {
+            // The same AI as before (named by its label in the record).
+            let agent = Agent::ALL
+                .into_iter()
+                .find(|a| a.label() == rec.tool)
+                .unwrap_or(Agent::ClaudeCode);
+            match self.launch_run(ctx, &rec.project, &rec.mission, ceiling, rec.commits_allowed, rec.endless.clone(), agent) {
                 Ok(()) => self.ws.notify(
                     "info",
                     &rec.project,
@@ -3151,7 +3164,7 @@ impl NotesApp {
             let want = draft_ceiling(&d, running_at);
             let ceiling = ceiling_choice(want, self.orch.five, o.default_limit, global);
             let endless = if d.endless { Some(d.end.clone()) } else { None };
-            match self.launch_run(ctx, &id, &d.mission, ceiling, d.commits, endless) {
+            match self.launch_run(ctx, &id, &d.mission, ceiling, d.commits, endless, d.agent) {
                 Ok(()) => {
                     if let Some(x) = self.orch.drafts.get_mut(&id) {
                         x.pick = false;
@@ -4852,6 +4865,8 @@ fn launch_controls(ui: &mut egui::Ui, c: LaunchCx<'_>) {
         }
     }
     ui.add_space(4.0);
+    agent_pick(ui, id, d, busy);
+    ui.add_space(6.0);
     // « commits » and « sur main » only for a code project (`to_main` holds only those): one
     // without code shows no git words, and its sessions make no commit.
     if to_main.contains_key(id) {
@@ -4903,6 +4918,53 @@ fn launch_controls(ui: &mut egui::Ui, c: LaunchCx<'_>) {
     if rtl {
         label(ui);
     }
+}
+
+/// Why an AI can't be chosen for a session started alone, if it can't (None: it can).
+fn agent_unavailable(agent: Agent) -> Option<&'static str> {
+    if agent.ready() {
+        None
+    } else if !crate::usage::reports_usage(agent) {
+        Some(crate::tr!(
+            "Pas encore possible : Orchestra ne peut pas lire l'usage de son abonnement, donc ne pourrait pas l'arrêter à son plafond.",
+            "Not possible yet: Orchestra can't read its subscription's use, so couldn't stop it at its ceiling."
+        ))
+    } else {
+        Some(crate::tr!(
+            "Pas encore possible : son travail autonome n'est pas encore vérifié sur cet ordinateur.",
+            "Not possible yet: its autonomous work isn't checked on this computer yet."
+        ))
+    }
+}
+
+/// The AI a project's sessions are started with: those wired for working alone can be
+/// picked, the others are listed greyed out with the reason. Kept for the next sessions.
+fn agent_pick(ui: &mut egui::Ui, id: &str, d: &mut Draft, busy: bool) {
+    ui.add_enabled_ui(!busy, |ui| {
+        egui::ComboBox::from_id_salt(("run-agent", id))
+            .selected_text(RichText::new(d.agent.label()).size(12.5))
+            .width(110.0)
+            .show_ui(ui, |ui| {
+                for a in Agent::ALL {
+                    let why = agent_unavailable(a);
+                    let r = ui.add_enabled(
+                        why.is_none(),
+                        egui::Button::selectable(d.agent == a, a.label()),
+                    );
+                    if r.clicked() {
+                        d.agent = a;
+                    }
+                    if let Some(w) = why {
+                        r.on_disabled_hover_text(w);
+                    }
+                }
+            })
+            .response
+            .on_hover_text(crate::tr!(
+                "L'IA qui travaille sur ce projet. Gardée pour les prochaines sessions de ce projet.",
+                "The AI working on this project. Kept for this project's next sessions."
+            ));
+    });
 }
 
 fn start_button(ui: &mut egui::Ui, enabled: bool, t: &Tone) -> egui::Response {
@@ -4977,6 +5039,7 @@ mod tests {
                 turns: Some(12),
                 ..Default::default()
             },
+            agent: None,
         };
         let p = Project {
             session_ceiling: Some(95.0),
@@ -5032,6 +5095,29 @@ mod tests {
     /// Every project of the launch card shows its share of the window: 0 % until its
     /// session starts, then that session's own use; none for an endless session suspended
     /// until the quota resets.
+    /// The AI of a project's sessions: Claude Code by default, kept in the project once
+    /// another is chosen; only those wired for working alone can be picked.
+    #[test]
+    fn a_session_starts_with_the_ai_chosen() {
+        use super::{Agent, Draft, agent_unavailable};
+        let d = Draft::new(None, true);
+        assert_eq!(d.agent, Agent::ClaudeCode);
+        // Claude Code, the default, isn't written in the project.
+        assert_eq!(d.prefs().agent, None);
+        let mut d2 = d.clone();
+        d2.agent = Agent::Codex;
+        let kept = crate::project::Project { launch: Some(d2.prefs()), ..Default::default() };
+        assert_eq!(Draft::new(Some(&kept), true).agent, Agent::Codex);
+        // Written and read back by name.
+        let json = serde_json::to_string(&d2.prefs()).unwrap();
+        assert!(json.contains("\"codex\""), "{json}");
+        // Claude Code can be picked; an AI not wired yet says why.
+        assert!(agent_unavailable(Agent::ClaudeCode).is_none());
+        for a in Agent::ALL {
+            assert_eq!(agent_unavailable(a).is_none(), a.ready(), "{a:?}");
+        }
+    }
+
     #[test]
     fn a_base_share_of_zero_is_always_shown() {
         use super::{row_share, share_text};
@@ -5426,6 +5512,7 @@ mod tests {
                     pick: false,
                     endless: false,
                     end: Default::default(),
+                    agent: super::Agent::ClaudeCode,
                 };
                 let mut to_main: super::HashMap<String, bool> =
                     [(id.clone(), false)].into_iter().collect();
@@ -5497,6 +5584,7 @@ mod tests {
                     pick: false,
                     endless: false,
                     end: Default::default(),
+                    agent: super::Agent::ClaudeCode,
                 };
                 let mut to_main: super::HashMap<String, bool> = super::HashMap::new();
                 if code {

@@ -332,6 +332,9 @@ pub struct LaunchPrefs {
     pub endless: bool,
     #[serde(default)]
     pub end: crate::model::EndConditions,
+    /// The AI the sessions are started with (None: Claude Code).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent: Option<crate::auto::Agent>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, Default)]
@@ -1213,6 +1216,7 @@ mod tests {
                 turns: Some(12),
                 ..Default::default()
             },
+            agent: None,
         };
         let p = Project {
             session_limit: Some(95.0),
@@ -1232,6 +1236,7 @@ mod tests {
                 commits: false,
                 endless: false,
                 end: Default::default(),
+                agent: None,
             }),
             ..Default::default()
         };
@@ -1495,6 +1500,7 @@ mod tests {
                 commits: true,
                 endless: true,
                 end: Default::default(),
+                agent: None,
             });
             p.sessions.push(SessionRef {
                 tool: "claude-code".into(),
