@@ -3414,6 +3414,12 @@ fn quick_question(ui: &mut egui::Ui, cx: &mut Cx) {
             });
         } else if let Some(a) = cx.ai.answers.get(page_id) {
             card_rule(ui, t);
+            // The app's labels can't be selected (a click on them does something else); the
+            // answer's can: drag over it to select, ⌘C to copy, or « Copier » for all of it.
+            ui.style_mut().interaction.selectable_labels = true;
+            let copied_key = egui::Id::unique(("quick-answer-copied", page_id));
+            let copied_at: Option<f64> = ui.ctx().data(|d| d.get_temp(copied_key));
+            let now_s = ui.input(|i| i.time);
             ui.horizontal(|ui| {
                 ui.add(
                     egui::Label::new(
@@ -3436,6 +3442,28 @@ fn quick_question(ui: &mut egui::Ui, cx: &mut Cx) {
                     .clicked()
                     {
                         close = true;
+                    }
+                    if let Ok(md) = &a.answer {
+                        let just = copied_at.is_some_and(|at| now_s - at < 1.5);
+                        let label = if just {
+                            crate::tr!("Copié", "Copied")
+                        } else {
+                            crate::tr!("Copier", "Copy")
+                        };
+                        if quiet_link(ui, label, t)
+                            .on_hover_text(crate::tr!(
+                                "Copier toute la réponse (Markdown)",
+                                "Copy the whole answer (Markdown)"
+                            ))
+                            .clicked()
+                        {
+                            // The answer as the AI wrote it (Markdown).
+                            ui.ctx().copy_text(md.trim().to_string());
+                            ui.ctx().data_mut(|d| d.insert_temp(copied_key, now_s));
+                        }
+                        if just {
+                            ui.ctx().request_repaint_after(std::time::Duration::from_millis(300));
+                        }
                     }
                 });
             });
