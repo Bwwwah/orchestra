@@ -689,6 +689,18 @@ pub struct RunRecord {
     /// only on one of these conditions (and always on the budgets and quotas).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub endless: Option<EndConditions>,
+    /// The model the AI works with (`--model`); empty: its own default. Kept to start the
+    /// session again with the same one.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub model: String,
+    /// How hard the work looked before the session started (`catalog::estimate_session`):
+    /// the tier label and its reason, e.g. « léger · travail court (« commit ») ».
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub difficulty: String,
+    /// Why that model (`model`, or the AI's default when empty), e.g. « le moins cher des
+    /// modèles léger ou plus » or « imposé pour l'étape ».
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub model_reason: String,
 }
 
 /// Days of reports kept as they are in "Rapports des IA"; the older ones are too many.

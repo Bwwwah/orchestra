@@ -12,6 +12,7 @@ mod app;
 mod audit;
 mod auto;
 mod awake;
+mod catalog;
 mod clip;
 mod collab;
 mod docs;

@@ -162,7 +162,7 @@ pub fn plug_json(file: &Path, exe: &Path) -> Outcome {
 
 /// Mistral Vibe's settings: `$VIBE_HOME/config.toml`, by default `~/.vibe/config.toml`. Its
 /// MCP servers are `[[mcp_servers]]` tables (name, transport, command, args).
-fn vibe_config() -> PathBuf {
+pub(crate) fn vibe_config() -> PathBuf {
     let home = std::env::var_os("VIBE_HOME")
         .map(PathBuf::from)
         .unwrap_or_else(|| dirs::home_dir().unwrap_or_default().join(".vibe"));

@@ -181,6 +181,11 @@ pub struct Step {
     pub held_by: String,
     #[serde(default, skip_serializing_if = "is_zero")]
     pub held_at: u64,
+    /// The model the person imposed for this step (empty: Orchestra chooses). Wins over the
+    /// project's (`LaunchPrefs::model`) when the step is the one a session takes first.
+    /// Decided on this computer only: the models offered depend on the AIs plugged in here.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub model: String,
 }
 
 /// `source` of a step typed by the person in the window.
@@ -343,6 +348,10 @@ pub struct LaunchPrefs {
     /// The AI the sessions are started with (None: Claude Code).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agent: Option<crate::auto::Agent>,
+    /// The model the person imposed for this project's sessions (empty: Orchestra chooses
+    /// the cheapest able to do the step). A step's own model wins over it.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub model: String,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, Default)]
@@ -373,6 +382,9 @@ impl Project {
         self.session_limit = None;
         self.session_ceiling = None;
         self.launch = None;
+        for s in &mut self.steps {
+            s.model.clear();
+        }
         self.sessions.clear();
         self.sessions_cleared = 0;
         self.cve_watch = false;
@@ -449,6 +461,8 @@ impl Project {
                     let mut s = ts.clone();
                     s.title = clean(ts);
                     s.received = true;
+                    // Decided on each computer: another's AIs and models aren't ours.
+                    s.model.clear();
                     self.steps.push(s);
                     changed = true;
                 }
@@ -498,6 +512,7 @@ impl Project {
             received: false,
             held_by: String::new(),
             held_at: 0,
+            model: String::new(),
         };
         let id = s.id.clone();
         self.steps.push(s);
@@ -517,6 +532,19 @@ impl Project {
                 s.held_by.clear();
                 s.held_at = 0;
             }
+        }
+        true
+    }
+
+    /// Impose `model` for step `id` (empty: Orchestra chooses again). False: no such step.
+    pub fn set_step_model(&mut self, id: &str, model: &str) -> bool {
+        let Some(s) = self.steps.iter_mut().find(|s| s.id == id) else {
+            return false;
+        };
+        let model = model.trim();
+        if s.model != model {
+            s.model = model.to_string();
+            self.touch();
         }
         true
     }
@@ -1256,7 +1284,7 @@ mod tests {
                 turns: Some(12),
                 ..Default::default()
             },
-            agent: None,
+            agent: None, model: "opus".into(),
         };
         let p = Project {
             session_limit: Some(95.0),
@@ -1276,7 +1304,7 @@ mod tests {
                 commits: false,
                 endless: false,
                 end: Default::default(),
-                agent: None,
+                agent: None, model: String::new(),
             }),
             ..Default::default()
         };
@@ -1597,7 +1625,7 @@ mod tests {
                 commits: true,
                 endless: true,
                 end: Default::default(),
-                agent: None,
+                agent: None, model: String::new(),
             });
             p.sessions.push(SessionRef {
                 tool: "claude-code".into(),

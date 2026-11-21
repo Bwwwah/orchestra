@@ -123,20 +123,29 @@ impl Agent {
         std::fs::write(d.join("fresh"), "").map_err(|e| e.to_string())
     }
 
-    /// The command started in the hidden terminal, in the copy `cwd`.
-    pub fn command(self, cwd: &Path, allow_commits: bool, extra: &str) -> String {
+    /// The command started in the hidden terminal, in the copy `cwd`, with `model` (empty:
+    /// the AI's own default; see `model_arg`).
+    pub fn command(self, cwd: &Path, allow_commits: bool, extra: &str, model: &str) -> String {
         match self {
             // Orchestra's MCP server, and only it, on the command line (`codex_command`).
             Agent::Codex => {
                 let git_dirs = if allow_commits { codex_git_dirs(cwd) } else { Vec::new() };
-                codex_command(&git_dirs)
+                codex_command(&git_dirs, model)
             }
             // Its settings of the session (`config_files`) as the « system » settings, which
             // win over the person's and the repository's; only Orchestra's MCP server.
-            Agent::Gemini => format!(
-                "GEMINI_CLI_SYSTEM_SETTINGS_PATH={} gemini --approval-mode default --allowed-mcp-server-names orchestra",
-                crate::sessions::shell_quote(&self.config_dir(cwd).join("settings.json").display().to_string())
-            ),
+            // With a model, `--model` rather than the person's default.
+            Agent::Gemini => {
+                let mut c = format!(
+                    "GEMINI_CLI_SYSTEM_SETTINGS_PATH={} gemini --approval-mode default --allowed-mcp-server-names orchestra",
+                    crate::sessions::shell_quote(&self.config_dir(cwd).join("settings.json").display().to_string())
+                );
+                if let Some(m) = model_arg(model) {
+                    c.push_str(" --model ");
+                    c.push_str(&crate::sessions::shell_quote(m));
+                }
+                c
+            }
             // A home of its own for the session (`config_files`): its settings, its sessions
             // and the loop running its turns in headless mode (`VIBE_TURNS`).
             Agent::Vibe => {
@@ -149,7 +158,7 @@ impl Agent {
             }
             Agent::ClaudeCode => {
                 let (allowed, denied) = permissions(allow_commits, extra);
-                claude_command(&allowed, &denied, rtk_binary().as_deref())
+                claude_command(&allowed, &denied, rtk_binary().as_deref(), model)
             }
         }
     }
@@ -214,8 +223,9 @@ impl Agent {
     ///   `tools` rules.
     /// - Mistral Vibe: `config.toml` of its own home: the rules and one `[[mcp_servers]]`
     ///   table. Its sign-in (`.env`) stays in the person's home, linked by `write_config`.
+    ///   With `model` (see `model_arg`), its `active_model` rather than the person's.
     /// - Claude Code and Codex: none, everything is on their command line.
-    pub fn config_files(self, cwd: &Path, allow_commits: bool, extra: &str) -> Vec<(PathBuf, String)> {
+    pub fn config_files(self, cwd: &Path, allow_commits: bool, extra: &str, model: &str) -> Vec<(PathBuf, String)> {
         let dir = self.config_dir(cwd);
         match self {
             // Claude Code: its settings on its command line; RTK's for its hook, if shipped.
@@ -243,7 +253,7 @@ impl Agent {
                 ours.push_str(&self.rules_config(allow_commits, extra));
                 let own = std::fs::read_to_string(vibe_own_home().join("config.toml")).unwrap_or_default();
                 vec![
-                    (dir.join("config.toml"), vibe_config(&own, &ours)),
+                    (dir.join("config.toml"), vibe_config(&own, &ours, model)),
                     (dir.join("turns.sh"), VIBE_TURNS.to_string()),
                 ]
             }
@@ -252,12 +262,12 @@ impl Agent {
 
     /// Write the files of `config_files` before the agent starts. For Mistral Vibe, its own
     /// home also gets a link to the person's sign-in (`~/.vibe/.env`), never a copy of it.
-    pub fn write_config(self, cwd: &Path, allow_commits: bool, extra: &str) -> Result<(), String> {
+    pub fn write_config(self, cwd: &Path, allow_commits: bool, extra: &str, model: &str) -> Result<(), String> {
         // A headless agent's turns of an earlier session in this copy: not this one's.
         if self.headless() {
             let _ = std::fs::remove_dir_all(self.config_dir(cwd).join("turn"));
         }
-        for (path, text) in self.config_files(cwd, allow_commits, extra) {
+        for (path, text) in self.config_files(cwd, allow_commits, extra, model) {
             if let Some(d) = path.parent() {
                 std::fs::create_dir_all(d).map_err(|e| e.to_string())?;
             }
@@ -330,9 +340,22 @@ fn vibe_own_home() -> PathBuf {
 /// Vibe's settings for the session: the person's own (model, providers…), less their MCP
 /// servers and their tool permissions, then Orchestra's (`ours`: its MCP server and the
 /// rules). Tables are dropped whole: TOML refuses a table defined twice, and the person's
-/// `[tools.bash]` must not loosen the session's rules.
-fn vibe_config(own: &str, ours: &str) -> String {
-    let kept: String = crate::setup::toml_tables(own)
+/// `[tools.bash]` must not loosen the session's rules. With `model` (see `model_arg`), the
+/// session's `active_model` is it, in place of the person's (a key before any table).
+fn vibe_config(own: &str, ours: &str, model: &str) -> String {
+    let mut tables = crate::setup::toml_tables(own);
+    if let Some(m) = model_arg(model) {
+        // The keys before the first table: the person's `active_model` gives way to ours.
+        let top = if tables[0].trim_start().starts_with('[') { String::new() } else { tables.remove(0) };
+        let top: String = top
+            .split_inclusive('\n')
+            .filter(|l| l.split('=').next().map(str::trim) != Some("active_model"))
+            .collect();
+        let top = top.trim_end();
+        let line = format!("active_model = {}\n", toml_string(m));
+        tables.insert(0, if top.is_empty() { format!("{line}\n") } else { format!("{top}\n{line}\n") });
+    }
+    let kept: String = tables
         .into_iter()
         .filter(|t| {
             let head = t.trim_start();
@@ -419,7 +442,9 @@ fn content_text(c: &Value) -> String {
 /// allowed (`cat`, `cp` ask first, and are refused). `git_dirs`: the folders git writes to
 /// for a commit, outside the copy (see `codex_git_dirs`); empty when commits are not allowed,
 /// so a `git commit` fails in the sandbox even if asked.
-fn codex_command(git_dirs: &[PathBuf]) -> String {
+///
+/// With `model`, Codex works with it (`--model`) rather than the person's default.
+fn codex_command(git_dirs: &[PathBuf], model: &str) -> String {
     let mut c = String::from(
         "codex --sandbox workspace-write --ask-for-approval untrusted \
          -c sandbox_workspace_write.network_access=false \
@@ -438,6 +463,10 @@ fn codex_command(git_dirs: &[PathBuf]) -> String {
             "sandbox_workspace_write.writable_roots=[{}]",
             roots.join(",")
         )));
+    }
+    if let Some(m) = model_arg(model) {
+        c.push_str(" --model ");
+        c.push_str(&crate::sessions::shell_quote(m));
     }
     c
 }
@@ -483,7 +512,9 @@ fn git_dirs_for(cwd: &Path, own: &Path, common: &Path) -> Vec<PathBuf> {
 /// own Claude Code. Claude Code checks its permissions on the rewritten command, and RTK never
 /// sees the rules given here: so every shell rule is given twice, as written and with `rtk`
 /// in front, or `git push` would become `rtk git push` and get round its refusal.
-fn claude_command(allowed: &[String], denied: &[String], rtk: Option<&Path>) -> String {
+///
+/// With `model`, Claude Code works with it (`--model`) rather than the person's default.
+fn claude_command(allowed: &[String], denied: &[String], rtk: Option<&Path>, model: &str) -> String {
     let q = crate::sessions::shell_quote;
     let (mut allowed, mut denied) = (allowed.to_vec(), denied.to_vec());
     denied.extend(UNUSED_TOOLS.iter().map(|t| t.to_string()));
@@ -514,12 +545,26 @@ fn claude_command(allowed: &[String], denied: &[String], rtk: Option<&Path>) -> 
         let dir = rtk.parent().map(|d| d.display().to_string()).unwrap_or_default();
         prefix = format!("PATH={}:\"$PATH\" RTK_TELEMETRY_DISABLED=1 ", q(&dir));
     }
+    let model = model_arg(model).map(|m| format!(" --model {}", q(m))).unwrap_or_default();
     format!(
-        "{prefix}claude --setting-sources user --strict-mcp-config --mcp-config {}{settings} --permission-mode acceptEdits --allowedTools {} --disallowedTools {}",
+        "{prefix}claude --setting-sources user --strict-mcp-config --mcp-config {}{settings}{model} --permission-mode acceptEdits --allowedTools {} --disallowedTools {}",
         q(&mcp_config()),
         q(&allowed.join(",")),
         q(&denied.join(","))
     )
+}
+
+/// A model name fit for `--model`: a word of letters, digits and `. _ : - [ ]` starting with
+/// a letter or a digit (`opus`, `claude-sonnet-5-5`, `claude-opus-5-5[1m]`). Anything else,
+/// such as a name starting with `-` (another option), is left out and the AI keeps its
+/// default. None: no model chosen.
+pub fn model_arg(model: &str) -> Option<&str> {
+    let m = model.trim();
+    let first = m.chars().next()?;
+    (first.is_ascii_alphanumeric()
+        && m.len() <= 80
+        && m.chars().all(|c| c.is_ascii_alphanumeric() || "._:-[]".contains(c)))
+    .then_some(m)
 }
 
 /// Allowed commands RTK would rewrite into another command rather than `rtk` + the same one
@@ -2698,6 +2743,48 @@ pub fn hm(ms: u64) -> String {
 }
 
 /// The report of one work session, in Markdown.
+/// Why no model was written for the session: none of the AI's list could be chosen.
+pub fn default_model_reason() -> &'static str {
+    crate::tr!(
+        "aucune liste de modèles pour cette IA : son réglage par défaut",
+        "no list of models for this AI: its own default"
+    )
+}
+
+/// Why a restarted session has the model it had: it keeps the one first chosen.
+pub fn restart_model_reason() -> &'static str {
+    crate::tr!(
+        "reprise : le modèle choisi au départ de la session",
+        "restart: the model chosen when the session first started"
+    )
+}
+
+/// The model of a session as shown to the person: its name (or « réglage par défaut de
+/// l'IA ») — why it was chosen (difficulty estimated : …). None for an older record that
+/// knows neither the model nor why.
+pub fn model_note(r: &crate::model::RunRecord) -> Option<String> {
+    if r.model.is_empty() && r.model_reason.is_empty() {
+        return None;
+    }
+    let mut s = if r.model.is_empty() {
+        crate::tr!("réglage par défaut de l'IA", "the AI's own default").to_string()
+    } else {
+        format!("`{}`", r.model)
+    };
+    if !r.model_reason.is_empty() {
+        s.push_str(" — ");
+        s.push_str(&r.model_reason);
+    }
+    if !r.difficulty.is_empty() {
+        s.push_str(&crate::trf!(
+            " (difficulté estimée : {})",
+            " (estimated difficulty: {})",
+            r.difficulty
+        ));
+    }
+    Some(s)
+}
+
 pub fn session_report(
     r: &crate::model::RunRecord,
     commits: &[String],
@@ -2716,6 +2803,9 @@ pub fn session_report(
         r.outcome,
         r.branch
     ));
+    if let Some(m) = model_note(r) {
+        s.push_str(&crate::trf!("- **Modèle** : {m}\n", "- **Model**: {m}\n"));
+    }
     s.push_str(crate::tr!(
         "\n## Étapes terminées\n\n",
         "\n## Steps finished\n\n"
@@ -2967,13 +3057,13 @@ mod tests {
         assert_eq!(slug("Démo — Été 2026!"), "demo-ete-2026");
         assert!(
             Agent::ClaudeCode
-                .command(Path::new("/x"), false, "")
+                .command(Path::new("/x"), false, "", "")
                 .contains("--permission-mode acceptEdits")
         );
-        assert!(!Agent::ClaudeCode.command(Path::new("/x"), false, "").contains("git commit"));
+        assert!(!Agent::ClaudeCode.command(Path::new("/x"), false, "", "").contains("git commit"));
         assert!(
             Agent::ClaudeCode
-                .command(Path::new("/x"), true, "Bash(just:*)")
+                .command(Path::new("/x"), true, "Bash(just:*)", "")
                 .contains("Bash(just:*)")
         );
     }
@@ -2993,7 +3083,7 @@ mod tests {
         for a in [Agent::Codex, Agent::Gemini, Agent::Vibe] {
             assert!(a == Agent::Vibe || !a.ready());
             // Its program, in its strictest mode.
-            let cmd = a.command(Path::new("/x"), true, "");
+            let cmd = a.command(Path::new("/x"), true, "", "");
             // Its program, after the variables pointing to its settings of the session.
             // (Vibe: the loop running its program turn by turn.)
             assert!(
@@ -3313,7 +3403,7 @@ mod tests {
             "{:?}",
             rejected_extra(fine)
         );
-        let cmd = Agent::ClaudeCode.command(Path::new("/x"), false, "");
+        let cmd = Agent::ClaudeCode.command(Path::new("/x"), false, "", "");
         assert!(cmd.contains("--disallowedTools") && cmd.contains("Bash(rm:*)"));
         // Neither the repository's hooks and settings nor its .mcp.json: only Orchestra's server.
         assert!(
@@ -3325,6 +3415,80 @@ mod tests {
         assert_eq!(v["mcpServers"]["orchestra"]["args"][0], "mcp");
     }
 
+    /// The model chosen for a session reaches Claude Code as `--model`, quoted; no model
+    /// adds nothing, and a name that isn't one (an option, shell signs) is left out.
+    #[test]
+    fn the_chosen_model_reaches_claude_code() {
+        let (allowed, denied) = permissions(false, "");
+        let plain = claude_command(&allowed, &denied, None, "");
+        assert!(!plain.contains("--model"), "{plain}");
+        let c = claude_command(&allowed, &denied, None, "claude-sonnet-5-5");
+        assert!(c.contains(" --model claude-sonnet-5-5 --permission-mode "), "{c}");
+        let c = Agent::ClaudeCode.command(Path::new("/x"), false, "", "opus");
+        assert!(c.contains(" --model opus "), "{c}");
+        assert_eq!(model_arg(" claude-opus-5-5[1m] "), Some("claude-opus-5-5[1m]"));
+        for bad in ["", "  ", "--dangerously-skip-permissions", "x; rm -rf ~", "a b", "$(id)"] {
+            assert_eq!(model_arg(bad), None, "{bad}");
+            let c = claude_command(&allowed, &denied, None, bad);
+            assert!(!c.contains("--model"), "{c}");
+        }
+    }
+
+    /// The model chosen for a session reaches Gemini CLI as `--model`, quoted; no model or a
+    /// name that isn't one adds nothing.
+    #[test]
+    fn the_chosen_model_reaches_gemini() {
+        let cwd = Path::new("/x");
+        let plain = Agent::Gemini.command(cwd, false, "", "");
+        assert!(!plain.contains("--model"), "{plain}");
+        let c = Agent::Gemini.command(cwd, false, "", "gemini-2.5-flash");
+        assert!(c.ends_with(" --allowed-mcp-server-names orchestra --model gemini-2.5-flash"), "{c}");
+        for bad in ["--yolo", "x; echo hi", "$(id)", "a b"] {
+            let c = Agent::Gemini.command(cwd, false, "", bad);
+            assert!(!c.contains("--model"), "{c}");
+        }
+    }
+
+    /// The model chosen for a session reaches Codex as `--model`, quoted; no model or a name
+    /// that isn't one adds nothing.
+    #[test]
+    fn the_model_and_its_reason_are_shown() {
+        use crate::model::RunRecord;
+        // An older record knows neither: nothing shown.
+        assert_eq!(model_note(&RunRecord::default()), None);
+        let r = RunRecord {
+            model: "haiku".into(),
+            model_reason: "le moins cher des modèles léger ou plus".into(),
+            difficulty: "léger · travail court (« commit »)".into(),
+            ..Default::default()
+        };
+        let note = model_note(&r).unwrap();
+        assert!(note.starts_with("`haiku` — le moins cher"), "{note}");
+        assert!(note.ends_with("(difficulté estimée : léger · travail court (« commit »))"));
+        assert!(session_report(&r, &[], 0, "").contains(&format!("- **Modèle** : {note}\n")));
+        // No model written: the AI's default, with why.
+        let d = RunRecord {
+            model_reason: default_model_reason().into(),
+            ..Default::default()
+        };
+        assert!(model_note(&d).unwrap().starts_with("réglage par défaut de l'IA — aucune liste"));
+        assert!(!session_report(&RunRecord::default(), &[], 0, "").contains("Modèle"));
+    }
+
+    #[test]
+    fn the_chosen_model_reaches_codex() {
+        let plain = codex_command(&[], "");
+        assert!(!plain.contains("--model"), "{plain}");
+        let c = codex_command(&[], "gpt-5.1-codex");
+        assert!(c.ends_with(" --model gpt-5.1-codex"), "{c}");
+        let c = Agent::Codex.command(Path::new("/x"), false, "", "o4-mini");
+        assert!(c.contains(" --model o4-mini"), "{c}");
+        for bad in ["--full-auto", "x; echo hi", "$(id)", "a b"] {
+            let c = codex_command(&[], bad);
+            assert!(!c.contains("--model"), "{c}");
+        }
+    }
+
     /// With RTK, Claude Code gets its hook on the command line only (not the person's own
     /// settings), finds `rtk` on its PATH, sends no usage report, and every shell rule is also
     /// given behind `rtk`: a rewritten `git push` stays refused, a rewritten `git status`
@@ -3332,7 +3496,7 @@ mod tests {
     #[test]
     fn rtk_shortens_outputs_without_widening_the_rules() {
         let (allowed, denied) = permissions(false, "");
-        let plain = claude_command(&allowed, &denied, None);
+        let plain = claude_command(&allowed, &denied, None, "");
         assert!(plain.starts_with("claude --setting-sources user "), "{plain}");
         assert!(!plain.contains("rtk") && !plain.contains("--settings "), "{plain}");
         // Tools of no use alone are refused, so their definitions don't weigh on each start;
@@ -3347,7 +3511,7 @@ mod tests {
 
         let q = crate::sessions::shell_quote;
         let rtk = "/Applications/Orchestra.app/Contents/MacOS/rtk";
-        let c = claude_command(&allowed, &denied, Some(Path::new(rtk)));
+        let c = claude_command(&allowed, &denied, Some(Path::new(rtk)), "");
         let prefix = format!(
             "PATH={}:\"$PATH\" RTK_TELEMETRY_DISABLED=1 claude --setting-sources user ",
             q("/Applications/Orchestra.app/Contents/MacOS")
@@ -3520,7 +3684,7 @@ mod tests {
     #[test]
     fn codex_stays_in_its_sandbox() {
         // Without commits: no folder outside the copy, whatever the copy.
-        let c = Agent::Codex.command(Path::new("/x"), false, "");
+        let c = Agent::Codex.command(Path::new("/x"), false, "", "");
         assert!(c.starts_with("codex --sandbox workspace-write --ask-for-approval untrusted "));
         assert!(c.contains("network_access=false") && c.contains("web_search=false"));
         assert!(c.contains("shell_environment_policy.inherit=core"));
@@ -3537,7 +3701,7 @@ mod tests {
         );
         let s: Vec<String> = dirs.iter().map(|d| d.display().to_string()).collect();
         assert_eq!(s, ["/r/.git/worktrees/copy", "/r/.git/objects", "/r/.git/refs", "/r/.git/logs"]);
-        let c = codex_command(&dirs);
+        let c = codex_command(&dirs, "");
         assert!(c.ends_with(
             " -c 'sandbox_workspace_write.writable_roots=[\"/r/.git/worktrees/copy\",\"/r/.git/objects\",\"/r/.git/refs\",\"/r/.git/logs\"]'"
         ), "{c}");
@@ -3555,16 +3719,16 @@ mod tests {
             assert_ne!(a.config_dir(cwd), a.config_dir(Path::new("/w/other")));
         }
         assert_ne!(Agent::Gemini.config_dir(cwd), Agent::Vibe.config_dir(cwd));
-        assert!(Agent::ClaudeCode.config_files(cwd, true, "").is_empty());
-        assert!(Agent::Codex.config_files(cwd, true, "").is_empty());
+        assert!(Agent::ClaudeCode.config_files(cwd, true, "", "").is_empty());
+        assert!(Agent::Codex.config_files(cwd, true, "", "").is_empty());
 
         // Codex: the whole table of MCP servers replaced on its command line.
-        let c = Agent::Codex.command(cwd, false, "");
+        let c = Agent::Codex.command(cwd, false, "", "");
         assert!(c.contains(" -c 'mcp_servers={orchestra={command=\""), "{c}");
         assert!(c.contains(",args=[\"mcp\"]}}'"), "{c}");
 
         // Gemini: its system settings, with Orchestra trusted and the rules.
-        let files = Agent::Gemini.config_files(cwd, false, "");
+        let files = Agent::Gemini.config_files(cwd, false, "", "");
         assert_eq!(files.len(), 1);
         let (path, text) = &files[0];
         let v: Value = serde_json::from_str(text).unwrap();
@@ -3573,13 +3737,13 @@ mod tests {
         assert_eq!(v["mcpServers"]["orchestra"]["args"][0], "mcp");
         assert_eq!(v["mcpServers"]["orchestra"]["trust"], true);
         assert!(v["tools"]["exclude"].as_array().unwrap().iter().any(|x| x == "run_shell_command(rm)"));
-        let g = Agent::Gemini.command(cwd, false, "");
+        let g = Agent::Gemini.command(cwd, false, "", "");
         assert!(g.starts_with("GEMINI_CLI_SYSTEM_SETTINGS_PATH="), "{g}");
         assert!(g.contains(&path.display().to_string()), "{g}");
         assert!(g.ends_with(" gemini --approval-mode default --allowed-mcp-server-names orchestra"));
 
         // Vibe: its own home, with one MCP table and the rules; its sessions are read there.
-        let files = Agent::Vibe.config_files(cwd, false, "");
+        let files = Agent::Vibe.config_files(cwd, false, "", "");
         let (path, text) = &files[0];
         assert_eq!(path, &Agent::Vibe.config_dir(cwd).join("config.toml"));
         assert_eq!(text.matches("[[mcp_servers]]").count(), 1);
@@ -3587,15 +3751,29 @@ mod tests {
         // The person's own settings come along, less their MCP servers and tool permissions.
         let own = "# mes réglages\nactive_model = \"devstral\"\n\n[[mcp_servers]]\nname = \"fetch\"\ntransport = \"stdio\"\ncommand = \"uvx\"\n\n[tools.bash]\npermission = \"always\"\n\n[[providers]]\nname = \"mistral\"\n";
         let ours = "[[mcp_servers]]\nname = \"orchestra\"\n\n[tools.bash]\nallowlist = [\"ls\"]\n";
-        let merged = vibe_config(own, ours);
+        let merged = vibe_config(own, ours, "");
         assert!(merged.starts_with("# mes réglages\nactive_model = \"devstral\"\n"), "{merged}");
         assert!(merged.contains("[[providers]]\nname = \"mistral\"\n"), "{merged}");
         assert!(!merged.contains("fetch") && !merged.contains("permission = \"always\""), "{merged}");
         assert_eq!(merged.matches("[tools.bash]").count(), 1);
         assert!(merged.ends_with(ours));
-        assert_eq!(vibe_config("", ours), ours);
+        assert_eq!(vibe_config("", ours, ""), ours);
+        // A model chosen: the session's `active_model`, in place of the person's, before any
+        // table; without settings of their own, alone before ours.
+        let chosen = vibe_config(own, ours, "codestral");
+        assert!(chosen.starts_with("# mes réglages\nactive_model = \"codestral\"\n\n[[providers]]"), "{chosen}");
+        assert_eq!(chosen.matches("active_model").count(), 1);
+        assert!(chosen.ends_with(ours));
+        assert_eq!(vibe_config("", ours, "local"), format!("active_model = \"local\"\n\n{ours}"));
+        let tables_only = "[[providers]]\nname = \"mistral\"\n";
+        let t = vibe_config(tables_only, ours, "local");
+        assert!(t.starts_with("active_model = \"local\"\n\n[[providers]]"), "{t}");
+        // A name unfit for a model leaves the person's.
+        assert!(vibe_config(own, ours, "x\"\nevil = 1").contains("active_model = \"devstral\"\n"));
+        let f = Agent::Vibe.config_files(cwd, false, "", "codestral");
+        assert!(f[0].1.contains("active_model = \"codestral\"\n"), "{}", f[0].1);
         assert!(text.contains("args = [\"mcp\"]\n") && text.contains("[tools.bash]\nallowlist = ["));
-        let v = Agent::Vibe.command(cwd, false, "");
+        let v = Agent::Vibe.command(cwd, false, "", "");
         assert!(v.starts_with("VIBE_HOME=") && v.trim_end_matches('\'').ends_with("/turns.sh"), "{v}");
         // The loop of its turns, written beside its settings: headless runs only (`-p`),
         // the prompt from a file, the same session from the second turn, cut at 25 min,

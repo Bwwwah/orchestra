@@ -294,6 +294,8 @@ struct Draft {
     end: crate::model::EndConditions,
     /// The AI the session is started with.
     agent: Agent,
+    /// The model imposed for the project's sessions (empty: Orchestra chooses).
+    model: String,
 }
 
 impl Draft {
@@ -312,6 +314,7 @@ impl Draft {
             endless: prefs.endless,
             end: prefs.end,
             agent: prefs.agent.unwrap_or(Agent::ClaudeCode),
+            model: prefs.model,
         }
     }
 
@@ -323,6 +326,7 @@ impl Draft {
             end: self.end.clone(),
             // Claude Code, the default, isn't written.
             agent: (self.agent != Agent::ClaudeCode).then_some(self.agent),
+            model: self.model.clone(),
         }
     }
 }
@@ -338,6 +342,7 @@ fn default_prefs(commits: bool) -> crate::project::LaunchPrefs {
             ..Default::default()
         },
         agent: None,
+        model: String::new(),
     }
 }
 
@@ -698,7 +703,7 @@ impl NotesApp {
         let five = self.agent_figures(d.agent).five;
         let ceiling = ceiling_choice(ceiling_kept, five, o.default_limit, o.global_limit);
         let mission = super::watch::fix_mission(&req.findings);
-        let n = match self.launch_run(ctx, &req.project, &mission, ceiling, true, None, d.agent, true) {
+        let n = match self.launch_run(ctx, &req.project, &mission, ceiling, true, None, d.agent, true, "") {
             Ok(()) => super::notices::Notice::Info(crate::tr!(
                 "Session de correction lancée sur une branche fix : fusionnez-la une fois vérifiée.",
                 "Fix session started on a fix branch: merge it once checked."
@@ -712,7 +717,8 @@ impl NotesApp {
     }
 
     /// Start an autonomous session on a project. `fix`: a security fix (CVE watch), always on
-    /// a branch of its own named `orchestra/auto-fix-…`, never on `dev`.
+    /// a branch of its own named `orchestra/auto-fix-…`, never on `dev`. `model`: the model
+    /// the AI works with (empty: its own default).
     #[allow(clippy::too_many_arguments)]
     fn launch_run(
         &mut self,
@@ -724,6 +730,7 @@ impl NotesApp {
         endless: Option<crate::model::EndConditions>,
         agent: Agent,
         fix: bool,
+        model: &str,
     ) -> Result<(), String> {
         if self.orch.runs.iter().any(|r| r.project == project) {
             return Err(crate::tr!(
@@ -843,6 +850,42 @@ impl NotesApp {
             .collect();
         let steps_at_turn: Vec<String> = steps_at_start.iter().map(|(id, _)| id.clone()).collect();
         let code = crate::project::code_kind(&folder, pr.code);
+        // Estimated before anything starts, from the step the AI will take first.
+        let difficulty = crate::catalog::estimate_session(
+            pr,
+            mission,
+            fix,
+            &crate::store::computer_id(),
+            crate::model::now_ms(),
+        );
+        // A restart keeps the model first chosen. Else the one the person imposed for the
+        // step taken first, or for the project. Else the cheapest able to do the step, among
+        // the models of the AI chosen in the card, whose limits were just checked. None found
+        // (Vibe without its own list): the AI's own default.
+        let imposed = if model.trim().is_empty() {
+            crate::catalog::imposed(
+                pr,
+                agent,
+                &crate::store::computer_id(),
+                crate::model::now_ms(),
+            )
+        } else {
+            None
+        };
+        let (picked, model_reason) = if let Some(i) = &imposed {
+            (Some(i.model.clone()), i.reason.clone())
+        } else if model.trim().is_empty() {
+            match crate::catalog::choose(
+                &[(agent, crate::catalog::choosable(agent))],
+                difficulty.tier,
+            ) {
+                Some(c) => (Some(c.model.id), c.reason),
+                None => (None, auto::default_model_reason().to_string()),
+            }
+        } else {
+            (None, auto::restart_model_reason().to_string())
+        };
+        let model = picked.as_deref().unwrap_or(model);
         let copy = if fix {
             auto::make_copy(&folder, &format!("fix {title}"), false, code)?
         } else {
@@ -853,8 +896,8 @@ impl NotesApp {
         let commits = commits && code && !copy.branch.is_empty();
         let o = &self.ws.settings.orch;
         let cwd = std::path::Path::new(&copy.worktree);
-        agent.write_config(cwd, commits, &o.extra_tools)?;
-        let cmd = agent.command(cwd, commits, &o.extra_tools);
+        agent.write_config(cwd, commits, &o.extra_tools, model)?;
+        let cmd = agent.command(cwd, commits, &o.extra_tools, model);
         let c2 = ctx.clone();
         let mut term = Term::spawn_once(
             &crate::trf!("Autonome · {title}", "Autonomous · {title}"),
@@ -897,6 +940,9 @@ impl NotesApp {
             limit,
             ceiling,
             endless: endless.clone(),
+            model: auto::model_arg(model).unwrap_or_default().to_string(),
+            difficulty: format!("{} · {}", difficulty.tier.label(), difficulty.reason),
+            model_reason,
             ..Default::default()
         };
         // A new session replaces any planned restart of this project.
@@ -1037,7 +1083,7 @@ impl NotesApp {
         {
             let o = &self.ws.settings.orch;
             let l = ceiling_choice(None, self.orch.five, o.default_limit, o.global_limit);
-            if let Err(e) = self.launch_run(ctx, &pid, "", l, true, None, Agent::ClaudeCode, false) {
+            if let Err(e) = self.launch_run(ctx, &pid, "", l, true, None, Agent::ClaudeCode, false, "") {
                 eprintln!("auto-run : {e}");
             }
         }
@@ -1474,7 +1520,7 @@ impl NotesApp {
                 let share = if rec.limit > 0.0 { rec.limit } else { o.default_limit };
                 ceiling_choice(None, five, share, o.global_limit)
             };
-            match self.launch_run(ctx, &rec.project, &rec.mission, ceiling, rec.commits_allowed, rec.endless.clone(), agent, rec.branch.contains("/auto-fix-")) {
+            match self.launch_run(ctx, &rec.project, &rec.mission, ceiling, rec.commits_allowed, rec.endless.clone(), agent, rec.branch.contains("/auto-fix-"), &rec.model) {
                 Ok(()) => self.ws.notify(
                     "info",
                     &rec.project,
@@ -2661,6 +2707,22 @@ impl NotesApp {
                 Some((r.id.clone(), current_step(steps, &me)?.to_string()))
             })
             .collect();
+        // Each session's model, and why it was chosen (its record, written at launch).
+        let models: HashMap<String, (String, String)> = self
+            .ws
+            .runs
+            .iter()
+            .filter(|x| self.orch.runs.iter().any(|r| r.id == x.id))
+            .filter_map(|x| {
+                let why = auto::model_note(x)?.replace('`', "");
+                let name = if x.model.is_empty() {
+                    crate::tr!("modèle par défaut", "default model").to_string()
+                } else {
+                    x.model.clone()
+                };
+                Some((x.id.clone(), (name, why)))
+            })
+            .collect();
         super::projects::card(ui, t, 0.0, |ui| {
             super::projects::card_title(ui, crate::tr!("EN COURS", "RUNNING"), &n.to_string(), t);
             if awake {
@@ -2754,6 +2816,13 @@ impl NotesApp {
                                 t.tertiary
                             };
                             ui.label(RichText::new(state).size(12.5).color(state_color));
+                            if let Some((name, why)) = models.get(&r.id) {
+                                ui.label(RichText::new(name).size(12.5).color(t.secondary))
+                                    .on_hover_text(crate::trf!(
+                                        "Modèle : {why}",
+                                        "Model: {why}"
+                                    ));
+                            }
                             if let Some(c) = &r.endless {
                                 ui.label(
                                     RichText::new(crate::tr!("∞ sans fin", "∞ endless"))
@@ -3255,7 +3324,12 @@ impl NotesApp {
                                 ui.ctx().data_mut(|m| m.insert_temp(opts_key, opened));
                             }
                             if !opened {
-                                let s = options_summary(d.agent, d.endless, !d.mission.trim().is_empty(), to_main.get(id).copied(), d.commits);
+                                let mut s = options_summary(d.agent, d.endless, !d.mission.trim().is_empty(), to_main.get(id).copied(), d.commits);
+                                // A model imposed: said beside its AI.
+                                if !d.model.is_empty() {
+                                    let at = usize::from(d.agent != Agent::ClaudeCode);
+                                    s.insert(at, d.model.clone());
+                                }
                                 if !s.is_empty() {
                                     ui.label(RichText::new(s.join(" · ")).size(12.0).color(t.tertiary));
                                 }
@@ -3461,7 +3535,7 @@ impl NotesApp {
             let want = draft_ceiling(&d, running_of(d.agent));
             let ceiling = ceiling_choice(want, five_of(d.agent), o.default_limit, global);
             let endless = if d.endless { Some(d.end.clone()) } else { None };
-            match self.launch_run(ctx, &id, &d.mission, ceiling, d.commits, endless, d.agent, false) {
+            match self.launch_run(ctx, &id, &d.mission, ceiling, d.commits, endless, d.agent, false, "") {
                 Ok(()) => {
                     if let Some(x) = self.orch.drafts.get_mut(&id) {
                         x.pick = false;
@@ -5311,6 +5385,7 @@ fn launch_options(
 ) {
     ui.label(RichText::new(crate::tr!("IA", "AI")).size(12.0).color(t.tertiary));
     agent_pick(ui, id, d, busy, connected);
+    model_pick(ui, id, d, busy);
     ui.add_space(8.0);
     if to_main.contains_key(id) {
         super::settings::switch(ui, &mut d.commits, lk).on_hover_text(crate::tr!("L'IA peut faire des commits sur sa branche (Orchestra l'envoie sur GitHub après chaque tour).\nGardé pour les prochaines sessions de ce projet.", "The AI may commit on its branch (Orchestra pushes it to GitHub after each turn).\nKept for this project's next sessions."));
@@ -5377,6 +5452,10 @@ fn agent_pick(ui: &mut egui::Ui, id: &str, d: &mut Draft, busy: bool, connected:
                         egui::Button::selectable(d.agent == a, a.label()),
                     );
                     if r.clicked() {
+                        // Another AI: its own models, so back to Orchestra's choice.
+                        if d.agent != a {
+                            d.model.clear();
+                        }
                         d.agent = a;
                     }
                     // Said under it, not only on hover: a greyed AI with no word looks broken.
@@ -5395,6 +5474,40 @@ fn agent_pick(ui: &mut egui::Ui, id: &str, d: &mut Draft, busy: bool, connected:
             .on_hover_text(crate::tr!(
                 "L'IA qui travaille sur ce projet. Gardée pour les prochaines sessions de ce projet.",
                 "The AI working on this project. Kept for this project's next sessions."
+            ));
+    });
+}
+
+/// The model of the project's sessions: « Automatique » (the cheapest able to do the step,
+/// see `catalog::choose`), or one the AI offers, imposed. A step's own model wins over it.
+fn model_pick(ui: &mut egui::Ui, id: &str, d: &mut Draft, busy: bool) {
+    ui.add_enabled_ui(!busy, |ui| {
+        egui::ComboBox::from_id_salt(("run-model", id))
+            .selected_text(RichText::new(if d.model.is_empty() {
+                crate::tr!("Modèle auto", "Auto model")
+            } else {
+                d.model.as_str()
+            }).size(12.5))
+            .width(130.0)
+            .show_ui(ui, |ui| {
+                ui.set_min_width(200.0);
+                ui.selectable_value(
+                    &mut d.model,
+                    String::new(),
+                    crate::tr!("Automatique", "Automatic"),
+                );
+                // Read only while open: the lists come from the AIs' files.
+                for m in crate::catalog::available(d.agent) {
+                    let text = format!("{} · {}", m.label, m.tier.label());
+                    ui.add_enabled_ui(!m.needs_higher_plan, |ui| {
+                        ui.selectable_value(&mut d.model, m.id.clone(), text);
+                    });
+                }
+            })
+            .response
+            .on_hover_text(crate::tr!(
+                "Le modèle des sessions de ce projet. « Automatique » : le moins cher capable de faire l'étape. Un modèle imposé sur une étape passe avant.\nGardé pour les prochaines sessions de ce projet.",
+                "The model of this project's sessions. « Automatic »: the cheapest able to do the step. A model imposed on a step comes first.\nKept for this project's next sessions."
             ));
     });
 }
@@ -5471,7 +5584,7 @@ mod tests {
                 turns: Some(12),
                 ..Default::default()
             },
-            agent: None,
+            agent: None, model: String::new(),
         };
         let p = Project {
             session_ceiling: Some(95.0),
@@ -6026,7 +6139,7 @@ mod tests {
                     pick: false,
                     endless: false,
                     end: Default::default(),
-                    agent: super::Agent::ClaudeCode,
+                    agent: super::Agent::ClaudeCode, model: String::new(),
                 };
                 let mut to_main: super::HashMap<String, bool> =
                     [(id.clone(), false)].into_iter().collect();
@@ -6097,7 +6210,7 @@ mod tests {
                     pick: false,
                     endless: false,
                     end: Default::default(),
-                    agent: super::Agent::ClaudeCode,
+                    agent: super::Agent::ClaudeCode, model: String::new(),
                 };
                 let mut to_main: super::HashMap<String, bool> = super::HashMap::new();
                 if code {
