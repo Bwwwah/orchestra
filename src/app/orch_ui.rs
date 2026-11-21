@@ -2895,7 +2895,7 @@ impl NotesApp {
         let mut msg = None;
         let projects: Vec<(String, String, String)> = self
             .ws
-            .projects()
+            .launch_projects()
             .iter()
             .filter_map(|p| {
                 p.project

@@ -833,6 +833,21 @@ impl Workspace {
         v
     }
 
+    /// Projects in « Lancer une session »: most recent real activity first (steps, sessions,
+    /// state of play), without the page's own edit time, which a change of their launch
+    /// controls (« arrêt à » %, commits, sans fin) bumps: the project being set would jump
+    /// to the top under the pointer and swap places with the others.
+    pub fn launch_projects(&self) -> Vec<&Page> {
+        let mut v: Vec<&Page> = self
+            .pages
+            .iter()
+            .filter(|p| !p.trashed && p.project.is_some())
+            .collect();
+        // Stable: equal activity keeps the pages' own order.
+        v.sort_by_key(|p| std::cmp::Reverse(p.project.as_ref().map_or(0, |x| x.last_activity)));
+        v
+    }
+
     /// Create a project page (top level) with an introduction block.
     pub fn create_project(&mut self, title: &str, folder: &str) -> String {
         let id = self.create_page(title, None);
@@ -1444,6 +1459,25 @@ mod tests {
         assert!(p.sessions.is_empty());
         assert!(!p.session_shown(1));
         assert!(p.session_shown(now_ms() + 1000));
+    }
+
+    #[test]
+    fn launch_list_keeps_its_order_when_a_ceiling_changes() {
+        let mut ws = Workspace::default();
+        let a = ws.create_project("A", "/a");
+        let b = ws.create_project("B", "/b");
+        ws.page_mut(&a).unwrap().project.as_mut().unwrap().last_activity = 200;
+        ws.page_mut(&b).unwrap().project.as_mut().unwrap().last_activity = 100;
+        let ids = |v: Vec<&Page>| v.iter().map(|p| p.id.clone()).collect::<Vec<_>>();
+        assert_eq!(ids(ws.launch_projects()), [a.clone(), b.clone()]);
+        // « arrêt à » changed on B: its page is edited (new `updated`), not its activity.
+        let pb = ws.page_mut(&b).unwrap();
+        pb.project.as_mut().unwrap().session_ceiling = Some(42.0);
+        pb.updated = u64::MAX;
+        assert_eq!(ids(ws.launch_projects()), [a.clone(), b.clone()]);
+        // Real activity (a step, a session) still brings a project up.
+        ws.page_mut(&b).unwrap().project.as_mut().unwrap().last_activity = 300;
+        assert_eq!(ids(ws.launch_projects()), [b, a]);
     }
 
     #[test]
