@@ -456,7 +456,7 @@ impl NotesApp {
         }
         let copy = auto::make_copy(&folder, &title, !pr.commit_to_main)?;
         let o = &self.ws.settings.orch;
-        let cmd = agent.command(commits, &o.extra_tools);
+        let cmd = agent.command(std::path::Path::new(&copy.worktree), commits, &o.extra_tools);
         let c2 = ctx.clone();
         let mut term = Term::spawn_once(
             &crate::trf!("Autonome · {title}", "Autonomous · {title}"),

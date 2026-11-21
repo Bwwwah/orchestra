@@ -71,14 +71,16 @@ impl Agent {
         matches!(self, Agent::ClaudeCode)
     }
 
-    /// The command started in the hidden terminal.
-    pub fn command(self, allow_commits: bool, extra: &str) -> String {
+    /// The command started in the hidden terminal, in the copy `cwd`.
+    pub fn command(self, cwd: &Path, allow_commits: bool, extra: &str) -> String {
         match self {
-            // The strictest mode of each: every command (Codex, Gemini) or every tool (Vibe)
-            // waits for a yes. Their rules are translated (`Agent::rules_config`) but not yet
-            // written where each one reads them, nor Codex's sandbox mapped, so they are not
-            // `ready` and never started alone.
-            Agent::Codex => "codex --sandbox workspace-write --ask-for-approval untrusted".into(),
+            Agent::Codex => {
+                let git_dirs = if allow_commits { codex_git_dirs(cwd) } else { Vec::new() };
+                codex_command(&git_dirs)
+            }
+            // The strictest mode of each: every command or every tool waits for a yes. Their
+            // rules are translated (`Agent::rules_config`) but not yet written where each one
+            // reads them, so they are not `ready` and never started alone.
             Agent::Gemini => "gemini --approval-mode default".into(),
             Agent::Vibe => "vibe".into(),
             Agent::ClaudeCode => {
@@ -203,6 +205,75 @@ fn content_text(c: &Value) -> String {
 }
 
 // ------------------------------------------------------------------ what the AI may do
+
+/// Codex's command, its permissions mapped on its sandbox and its approvals:
+///
+/// - `--sandbox workspace-write`: its commands write only in the copy (and the temporary
+///   folder), never elsewhere on the disk; never `danger-full-access`.
+/// - `--ask-for-approval untrusted`: every command outside Codex's short list of harmless
+///   ones (and the `allow` prefix rules of `rules_config`, once written) asks first, and
+///   Orchestra refuses what is not allowed. Never `on-failure` (a command the sandbox stopped
+///   is offered again *outside* the sandbox), `on-request` (the model decides alone when to
+///   leave it) nor `never`; never `--full-auto` nor `--dangerously-bypass-approvals-and-sandbox`.
+/// - no network for its commands (`curl`, `git push`, `npm install` are refused anyway), and
+///   no web search (`WebSearch` is refused to Claude Code too).
+/// - commands get only the core environment variables (`HOME`, `PATH`, `USER`…): no tokens
+///   or keys exported in the person's shell.
+///
+/// What the sandbox doesn't do: it lets commands *read* the whole disk, so the refused paths
+/// of `AgentRules::denied_paths` (`~/.ssh/**`…) rest on the refusal of every command not
+/// allowed (`cat`, `cp` ask first, and are refused). `git_dirs`: the folders git writes to
+/// for a commit, outside the copy (see `codex_git_dirs`); empty when commits are not allowed,
+/// so a `git commit` fails in the sandbox even if asked.
+fn codex_command(git_dirs: &[PathBuf]) -> String {
+    let mut c = String::from(
+        "codex --sandbox workspace-write --ask-for-approval untrusted \
+         -c sandbox_workspace_write.network_access=false \
+         -c tools.web_search=false \
+         -c shell_environment_policy.inherit=core",
+    );
+    if !git_dirs.is_empty() {
+        let roots: Vec<String> = git_dirs
+            .iter()
+            .map(|d| Value::String(d.display().to_string()).to_string())
+            .collect();
+        c.push_str(" -c ");
+        c.push_str(&crate::sessions::shell_quote(&format!(
+            "sandbox_workspace_write.writable_roots=[{}]",
+            roots.join(",")
+        )));
+    }
+    c
+}
+
+/// What a commit in the copy `cwd` writes outside it: a copy's git folder is in the main
+/// repository (`.git/worktrees/<name>`, its index and HEAD), and so are the objects and the
+/// branches (`objects`, `refs`, `logs`). Not the whole `.git`: its `hooks` and `config` would
+/// let the AI leave code that the person's own git runs later.
+fn codex_git_dirs(cwd: &Path) -> Vec<PathBuf> {
+    let ask = |what: &str| {
+        git(cwd, &["rev-parse", "--path-format=absolute", what])
+            .ok()
+            .map(|s| PathBuf::from(s.trim()))
+            .filter(|p| p.is_absolute())
+    };
+    let (Some(own), Some(common)) = (ask("--git-dir"), ask("--git-common-dir")) else {
+        return Vec::new();
+    };
+    git_dirs_for(cwd, &own, &common)
+}
+
+/// `codex_git_dirs` without git: the folders among `own` (the copy's git folder) and those of
+/// `common` (the repository's) that are not already inside the copy.
+fn git_dirs_for(cwd: &Path, own: &Path, common: &Path) -> Vec<PathBuf> {
+    let mut dirs = vec![own.to_path_buf()];
+    for d in ["objects", "refs", "logs"] {
+        dirs.push(common.join(d));
+    }
+    dirs.retain(|d| !d.starts_with(cwd));
+    dirs.dedup();
+    dirs
+}
 
 /// The only MCP server of an autonomous session: Orchestra itself (this program, `mcp`).
 fn mcp_config() -> String {
@@ -2079,13 +2150,13 @@ mod tests {
         assert_eq!(slug("Démo — Été 2026!"), "demo-ete-2026");
         assert!(
             Agent::ClaudeCode
-                .command(false, "")
+                .command(Path::new("/x"), false, "")
                 .contains("--permission-mode acceptEdits")
         );
-        assert!(!Agent::ClaudeCode.command(false, "").contains("git commit"));
+        assert!(!Agent::ClaudeCode.command(Path::new("/x"), false, "").contains("git commit"));
         assert!(
             Agent::ClaudeCode
-                .command(true, "Bash(just:*)")
+                .command(Path::new("/x"), true, "Bash(just:*)")
                 .contains("Bash(just:*)")
         );
     }
@@ -2101,8 +2172,8 @@ mod tests {
         assert!(Agent::ClaudeCode.ready());
         for a in [Agent::Codex, Agent::Gemini, Agent::Vibe] {
             assert!(!a.ready());
-            // Its program, in its strictest mode (no tool list translated yet).
-            let cmd = a.command(true, "");
+            // Its program, in its strictest mode.
+            let cmd = a.command(Path::new("/x"), true, "");
             assert!(cmd.starts_with(a.bin()), "{cmd}");
             assert!(!cmd.contains("yolo") && !cmd.contains("never") && !cmd.contains("danger"), "{cmd}");
             assert_ne!(a.session_dir(Path::new("/x")), Agent::ClaudeCode.session_dir(Path::new("/x")));
@@ -2308,7 +2379,7 @@ mod tests {
             "{:?}",
             rejected_extra(fine)
         );
-        let cmd = Agent::ClaudeCode.command(false, "");
+        let cmd = Agent::ClaudeCode.command(Path::new("/x"), false, "");
         assert!(cmd.contains("--disallowedTools") && cmd.contains("Bash(rm:*)"));
         // Neither the repository's hooks and settings nor its .mcp.json: only Orchestra's server.
         assert!(
@@ -2318,6 +2389,35 @@ mod tests {
         let v: Value = serde_json::from_str(&mcp_config()).unwrap();
         assert_eq!(v["mcpServers"].as_object().unwrap().len(), 1);
         assert_eq!(v["mcpServers"]["orchestra"]["args"][0], "mcp");
+    }
+
+    #[test]
+    fn codex_stays_in_its_sandbox() {
+        // Without commits: no folder outside the copy, whatever the copy.
+        let c = Agent::Codex.command(Path::new("/x"), false, "");
+        assert!(c.starts_with("codex --sandbox workspace-write --ask-for-approval untrusted "));
+        assert!(c.contains("network_access=false") && c.contains("web_search=false"));
+        assert!(c.contains("shell_environment_policy.inherit=core"));
+        assert!(!c.contains("writable_roots"));
+        for bad in ["danger", "full-auto", "on-failure", "on-request", "never", "yolo", "bypass"] {
+            assert!(!c.contains(bad), "{bad}");
+        }
+        // A copy of a repository (git worktree): its git folder and the repository's objects
+        // and branches, never the hooks or the config.
+        let dirs = git_dirs_for(
+            Path::new("/w/copy"),
+            Path::new("/r/.git/worktrees/copy"),
+            Path::new("/r/.git"),
+        );
+        let s: Vec<String> = dirs.iter().map(|d| d.display().to_string()).collect();
+        assert_eq!(s, ["/r/.git/worktrees/copy", "/r/.git/objects", "/r/.git/refs", "/r/.git/logs"]);
+        let c = codex_command(&dirs);
+        assert!(c.ends_with(
+            " -c 'sandbox_workspace_write.writable_roots=[\"/r/.git/worktrees/copy\",\"/r/.git/objects\",\"/r/.git/refs\",\"/r/.git/logs\"]'"
+        ), "{c}");
+        assert!(!c.contains("hooks") && !c.contains("/r/.git\""));
+        // A repository of its own: everything is already in the folder, nothing added.
+        assert!(git_dirs_for(Path::new("/r"), Path::new("/r/.git"), Path::new("/r/.git")).is_empty());
     }
 
     #[test]
@@ -2403,6 +2503,13 @@ mod tests {
         // First session: dev is made from main; its unsaved work is committed on dev, the copy goes.
         let c = dev_copy_in(&copies, &folder, "Essai").unwrap();
         assert_eq!(c.branch, DEV);
+        // What Codex may write for a commit: the copy's git folder and the repository's
+        // objects and branches, all outside the copy, none of them the hooks.
+        let dirs = codex_git_dirs(Path::new(&c.worktree));
+        assert_eq!(dirs.len(), 4, "{dirs:?}");
+        assert!(dirs.iter().all(|d| d.exists() && !d.starts_with(&c.worktree)), "{dirs:?}");
+        assert!(dirs[0].display().to_string().contains("worktrees"), "{dirs:?}");
+        assert!(dirs.iter().all(|d| !d.ends_with("hooks") && !d.ends_with("config")));
         std::fs::write(PathBuf::from(&c.worktree).join("b.txt"), "b").unwrap();
         let rec = crate::model::RunRecord {
             title: "Essai".into(),
