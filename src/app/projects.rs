@@ -2033,6 +2033,19 @@ mod session_pick_tests {
         // An AI unplugged since: the first one again.
         assert_eq!(new_session_pick(&l, "Codex", "gpt-5").label, "Claude Code");
         assert_eq!(new_session_pick(&[], "Codex", "").label, "Shell");
+        // The command: --model for a chosen model, nothing added for « par défaut ».
+        assert_eq!(new_session_pick(&l, "Claude Code", "").command().as_deref(), Some("claude"));
+        assert_eq!(
+            new_session_pick(&l, "Claude Code", "opus").command().as_deref(),
+            Some("claude --model opus")
+        );
+        // A model not offered never reaches the command line.
+        assert_eq!(
+            new_session_pick(&l, "Claude Code", "x; rm -rf ~").command().as_deref(),
+            Some("claude")
+        );
+        assert_eq!(new_session_pick(&l, "Mistral Vibe", "opus").command().as_deref(), Some("vibe"));
+        assert_eq!(new_session_pick(&l, "Shell", "opus").command(), None);
         // Every AI that opens in a terminal knows its models (possibly none).
         for a in crate::setup::Ai::ALL {
             assert_eq!(crate::setup::Ai::from_label(a.label()), Some(a));
@@ -2413,6 +2426,8 @@ fn sessions_card(ui: &mut egui::Ui, cx: &mut Cx, extra: f32) -> f32 {
                     d.insert_temp(ai_key, ai.clone());
                     d.insert_temp(model_key, model.clone());
                 });
+                // The model just chosen in the list, if any.
+                let pick = new_session_pick(&launchers, &ai, &model);
                 let label = pick.label;
                 let accent = if pick.cmd.is_none() { t.secondary } else { pick.accent };
                 if launch_pill(ui, crate::tr!("Ouvrir", "Open"), accent, t)
@@ -2422,12 +2437,12 @@ fn sessions_card(ui: &mut egui::Ui, cx: &mut Cx, extra: f32) -> f32 {
                     ))
                     .clicked()
                 {
-                    super::term_ui::request(
-                        ui.ctx(),
-                        &format!("{label} · {name}"),
-                        pr.folder.trim(),
-                        pick.cmd.map(String::from),
-                    );
+                    let title = if pick.model.is_empty() {
+                        format!("{label} · {name}")
+                    } else {
+                        format!("{label} ({}) · {name}", pick.model)
+                    };
+                    super::term_ui::request(ui.ctx(), &title, pr.folder.trim(), pick.command());
                 }
             });
             ui.add_space(8.0);
@@ -3111,6 +3126,20 @@ fn new_session_pick(
     let models = crate::setup::Ai::from_label(label).map(|a| a.models()).unwrap_or(&[]);
     let model = if models.contains(&model) { model.to_string() } else { String::new() };
     SessionPick { label, cmd, accent, models, model }
+}
+
+impl SessionPick {
+    /// The command opened in the terminal: the AI's program, with `--model <name>` (an option
+    /// Claude Code, Codex and Gemini CLI all take) for a chosen model, and nothing added for
+    /// « par défaut ». None: the shell.
+    fn command(&self) -> Option<String> {
+        let cmd = self.cmd?;
+        Some(if self.model.is_empty() {
+            cmd.to_string()
+        } else {
+            format!("{cmd} --model {}", crate::sessions::shell_quote(&self.model))
+        })
+    }
 }
 
 fn launch_pill(ui: &mut egui::Ui, label: &str, accent: Color32, t: &Tone) -> egui::Response {
