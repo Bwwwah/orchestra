@@ -109,7 +109,7 @@ jobs:
           sh packaging/build-rtk.sh x86_64-unknown-linux-gnu
           mkdir -p out/orchestra && cp target/release/orchestra out/orchestra/
           cp target/rtk/x86_64-unknown-linux-gnu/rtk out/orchestra/rtk
-          cp target/rtk/LICENSE out/orchestra/LICENSE-rtk.txt
+          cp packaging/licenses/LICENCES-TIERCES.txt packaging/licenses/rtk-LICENSE.txt out/orchestra/
           tar -C out -czf out/Orchestra-${GITHUB_REF_NAME}-Linux.tar.gz orchestra
           cargo install cargo-deb --locked
           cargo deb --no-build --output out/Orchestra-${GITHUB_REF_NAME}-Linux.deb || echo "paquet .deb non fabriqué"

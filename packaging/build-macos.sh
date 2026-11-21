@@ -29,7 +29,7 @@ if [ "${ORCHESTRA_NO_RTK:-0}" != "1" ]; then
   lipo -create -output "$APP/Contents/MacOS/rtk" \
     target/rtk/aarch64-apple-darwin/rtk \
     target/rtk/x86_64-apple-darwin/rtk
-  cp target/rtk/LICENSE "$APP/Contents/Resources/LICENSE-rtk.txt"
+  cp packaging/licenses/LICENCES-TIERCES.txt packaging/licenses/rtk-LICENSE.txt "$APP/Contents/Resources/"
 fi
 
 sed "s/__VERSION__/$VERSION/g" packaging/Info.plist > "$APP/Contents/Info.plist"

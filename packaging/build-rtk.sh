@@ -5,7 +5,8 @@
 #
 # Usage, from the app folder:  sh packaging/build-rtk.sh [target…]
 #   no target: this computer's; e.g. aarch64-apple-darwin x86_64-apple-darwin for a Mac app.
-# Result: target/rtk/<target>/rtk for each target, and target/rtk/LICENSE (Apache-2.0).
+# Result: target/rtk/<target>/rtk for each target. Its licence and attribution, shipped with
+# it, are in packaging/licenses (checked against RTK's own LICENSE below).
 # ORCHESTRA_NO_RTK=1 skips it (Orchestra then runs its sessions without RTK).
 set -e
 cd "$(dirname "$0")/.."
@@ -43,5 +44,10 @@ for t in "$@"; do
   mkdir -p "target/rtk/$t"
   cp "target/rtk/build/$t/release/rtk" "target/rtk/$t/rtk"
 done
-cp "$SRC/LICENSE" target/rtk/LICENSE
+# The licence shipped and shown in Settings › General is packaging/licenses/rtk-LICENSE.txt:
+# it must still be RTK's own.
+cmp -s "$SRC/LICENSE" packaging/licenses/rtk-LICENSE.txt || {
+  echo "build-rtk.sh : la licence de RTK a changé : mettez à jour packaging/licenses (rtk-LICENSE.txt, LICENCES-TIERCES.txt)." >&2
+  exit 1
+}
 echo "Prêt : target/rtk/<cible>/rtk (rtk-oss, Apache-2.0)"
