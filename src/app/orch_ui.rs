@@ -3092,7 +3092,7 @@ impl NotesApp {
                         });
                         if wide {
                             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                                launch_controls(ui, LaunchCx { id, d: &mut *d, busy, plugged, connected: &connected, open, five, running_at, default_share: dl, global, to_main: &mut to_main, start: &mut start, confirm_main: &mut confirm_main, ceilings: &mut ceilings, lk: &lk, t });
+                                launch_controls(ui, LaunchCx { id, d: &mut *d, busy, plugged, open, five, running_at, default_share: dl, global, to_main: &mut to_main, start: &mut start, confirm_main: &mut confirm_main, ceilings: &mut ceilings, t });
                             });
                         }
                     });
@@ -3100,14 +3100,45 @@ impl NotesApp {
                     if !wide {
                         ui.horizontal_wrapped(|ui| {
                             ui.add_space(70.0);
-                            launch_controls(ui, LaunchCx { id, d: &mut *d, busy, plugged, connected: &connected, open, five, running_at, default_share: dl, global, to_main: &mut to_main, start: &mut start, confirm_main: &mut confirm_main, ceilings: &mut ceilings, lk: &lk, t });
+                            launch_controls(ui, LaunchCx { id, d: &mut *d, busy, plugged, open, five, running_at, default_share: dl, global, to_main: &mut to_main, start: &mut start, confirm_main: &mut confirm_main, ceilings: &mut ceilings, t });
                         });
                     }
-                    ui.horizontal(|ui| {
-                        ui.add_space(70.0);
-                        ui.add(egui::TextEdit::singleline(&mut d.mission).hint_text(default_mission()).desired_width(f32::INFINITY).font(FontId::proportional(13.0)).margin(egui::Margin::symmetric(8, 5)));
-                    });
+                    // The rest, set once and kept for the project's next sessions, folded under
+                    // « Options »; what differs from the usual stays in sight beside it.
+                    let opts_key = egui::Id::unique(("launch-options", id));
+                    let mut opened = ui.ctx().data(|m| m.get_temp::<bool>(opts_key)).unwrap_or(false);
                     if !busy {
+                        ui.horizontal_wrapped(|ui| {
+                            ui.add_space(70.0);
+                            let arrow = if opened { "▴" } else { "▾" };
+                            if super::projects::quiet_link(ui, &crate::trf!("Options {arrow}", "Options {arrow}"), t)
+                                .on_hover_text(crate::tr!("L'IA, les commits, la fusion dans main, une consigne et le mode sans fin. Gardés pour les prochaines sessions de ce projet.", "The AI, commits, merging into main, a mission and endless mode. Kept for this project's next sessions."))
+                                .clicked()
+                            {
+                                opened = !opened;
+                                ui.ctx().data_mut(|m| m.insert_temp(opts_key, opened));
+                            }
+                            if !opened {
+                                let s = options_summary(d.agent, d.endless, !d.mission.trim().is_empty(), to_main.get(id).copied(), d.commits);
+                                if !s.is_empty() {
+                                    ui.label(RichText::new(s.join(" · ")).size(12.0).color(t.tertiary));
+                                }
+                            }
+                        });
+                    }
+                    if opened && !busy {
+                        ui.horizontal_wrapped(|ui| {
+                            ui.add_space(70.0);
+                            ui.spacing_mut().item_spacing.x = 6.0;
+                            launch_options(ui, id, d, busy, &connected, &mut to_main, &lk, t);
+                        });
+                        ui.horizontal(|ui| {
+                            ui.add_space(70.0);
+                            ui.add(egui::TextEdit::singleline(&mut d.mission).hint_text(default_mission()).desired_width(f32::INFINITY).font(FontId::proportional(13.0)).margin(egui::Margin::symmetric(8, 5)));
+                        });
+                    }
+                    if !busy {
+                        if opened {
                         ui.horizontal_wrapped(|ui| {
                             ui.add_space(70.0);
                             ui.spacing_mut().item_spacing.x = 6.0;
@@ -3121,7 +3152,8 @@ impl NotesApp {
                                 end_conditions(ui, &mut d.end, t);
                             }
                         });
-                        let risky = endless_on_main(d.endless, to_main.get(id).copied().unwrap_or(false));
+                        }
+                        let risky =endless_on_main(d.endless, to_main.get(id).copied().unwrap_or(false));
                         if !risky && confirm_main.as_deref() == Some(id.as_str()) {
                             confirm_main = None;
                         }
@@ -4933,8 +4965,6 @@ struct LaunchCx<'a> {
     d: &'a mut Draft,
     busy: bool,
     plugged: bool,
-    /// The AIs plugged into Orchestra on this machine (the choice of the AI lists only them).
-    connected: &'a [Agent],
     /// Its open steps: none (and not endless), nothing to start on.
     open: usize,
     /// The 5-hour window's figure, and the settings' default share above it.
@@ -4948,19 +4978,17 @@ struct LaunchCx<'a> {
     confirm_main: &'a mut Option<String>,
     /// Ceilings the person has just changed, to keep in their projects.
     ceilings: &'a mut Vec<(String, f32)>,
-    lk: &'a super::settings::Look,
     t: &'a Tone,
 }
 
-/// A project's controls: start, commits, « sur main », budget. In the order of a
-/// right-to-left layout (start at the far right); left to right, start comes first.
+/// A project's controls: start and its ceiling (the rest is under « Options »). In the order
+/// of a right-to-left layout (start at the far right); left to right, start comes first.
 fn launch_controls(ui: &mut egui::Ui, c: LaunchCx<'_>) {
     let LaunchCx {
         id,
         d,
         busy,
         plugged,
-        connected,
         open,
         five,
         running_at,
@@ -4970,7 +4998,6 @@ fn launch_controls(ui: &mut egui::Ui, c: LaunchCx<'_>) {
         start,
         confirm_main,
         ceilings,
-        lk,
         t,
     } = c;
     let room = room_left(five, global);
@@ -5001,8 +5028,8 @@ fn launch_controls(ui: &mut egui::Ui, c: LaunchCx<'_>) {
         ));
     } else if open == 0 && !d.endless {
         start_button(ui, false, t).on_disabled_hover_text(crate::tr!(
-            "Aucune étape ouverte : la session s'arrêterait tout de suite. Ajoutez des étapes au projet, ou activez « sans fin » pour que l'IA trouve elle-même les suivantes.",
-            "No open step: the session would stop at once. Add steps to the project, or turn on « endless » so the AI finds the next ones itself."
+            "Aucune étape ouverte : la session s'arrêterait tout de suite. Ajoutez des étapes au projet, ou activez « sans fin » (dans Options) pour que l'IA trouve elle-même les suivantes.",
+            "No open step: the session would stop at once. Add steps to the project, or turn on « endless » (in Options) so the AI finds the next ones itself."
         ));
     } else if !room {
         start_button(ui, false, t).on_disabled_hover_text(crate::trf!(
@@ -5017,23 +5044,7 @@ fn launch_controls(ui: &mut egui::Ui, c: LaunchCx<'_>) {
             start.push(id.clone());
         }
     }
-    ui.add_space(4.0);
-    agent_pick(ui, id, d, busy, connected);
-    ui.add_space(6.0);
-    // « commits » and « sur main » only for a code project (`to_main` holds only those): one
-    // without code shows no git words, and its sessions make no commit.
-    if to_main.contains_key(id) {
-        super::settings::switch(ui, &mut d.commits, lk).on_hover_text(crate::tr!("L'IA peut faire des commits sur sa branche (Orchestra l'envoie sur GitHub après chaque tour).\nGardé pour les prochaines sessions de ce projet.", "The AI may commit on its branch (Orchestra pushes it to GitHub after each turn).\nKept for this project's next sessions."));
-        ui.label(RichText::new("commits").size(12.0).color(t.tertiary));
-        ui.add_space(6.0);
-    }
-    if let Some(m) = to_main.get_mut(id) {
-        ui.checkbox(m, RichText::new(crate::tr!("sur main", "on main")).size(12.0).color(t.tertiary)).on_hover_text(crate::tr!(
-            "À la fin de chaque session, son travail est fusionné tout seul dans main (seulement si le dossier du projet est sur main ou master)",
-            "At the end of each session, its work is merged into main by itself (only when the project's folder is on main or master)"
-        ));
-        ui.add_space(6.0);
-    }
+    ui.add_space(8.0);
     // The ceiling chosen stays as it is: it is only shown raised above the window's figure
     // (and again at the start), so a window that rose meanwhile never changes it for good.
     let floor = ceiling_floor(five, global);
@@ -5103,6 +5114,65 @@ fn agent_choices(connected: &[Agent], current: Agent) -> Vec<Agent> {
 /// The AI a project's sessions are started with, among the plugged ones: those wired for
 /// working alone can be picked, the others are listed greyed out with the reason. Kept for
 /// the next sessions.
+/// The settings of a launch row one rarely changes, under « Options »: the AI, then for a
+/// code project « commits » and « sur main » (`to_main` holds only those: one without code
+/// shows no git words, and its sessions make no commit).
+#[allow(clippy::too_many_arguments)]
+fn launch_options(
+    ui: &mut egui::Ui,
+    id: &str,
+    d: &mut Draft,
+    busy: bool,
+    connected: &[Agent],
+    to_main: &mut HashMap<String, bool>,
+    lk: &super::settings::Look,
+    t: &Tone,
+) {
+    ui.label(RichText::new(crate::tr!("IA", "AI")).size(12.0).color(t.tertiary));
+    agent_pick(ui, id, d, busy, connected);
+    ui.add_space(8.0);
+    if to_main.contains_key(id) {
+        super::settings::switch(ui, &mut d.commits, lk).on_hover_text(crate::tr!("L'IA peut faire des commits sur sa branche (Orchestra l'envoie sur GitHub après chaque tour).\nGardé pour les prochaines sessions de ce projet.", "The AI may commit on its branch (Orchestra pushes it to GitHub after each turn).\nKept for this project's next sessions."));
+        ui.label(RichText::new("commits").size(12.0).color(t.tertiary));
+        ui.add_space(8.0);
+    }
+    if let Some(m) = to_main.get_mut(id) {
+        ui.checkbox(m, RichText::new(crate::tr!("sur main", "on main")).size(12.0).color(t.tertiary)).on_hover_text(crate::tr!(
+            "À la fin de chaque session, son travail est fusionné tout seul dans main (seulement si le dossier du projet est sur main ou master)",
+            "At the end of each session, its work is merged into main by itself (only when the project's folder is on main or master)"
+        ));
+    }
+}
+
+/// What « Options » holds that differs from the usual, shown beside it while folded so
+/// nothing set there is forgotten: another AI than Claude Code, endless, a mission of its
+/// own, « sur main », no commits.
+fn options_summary(
+    agent: Agent,
+    endless: bool,
+    mission: bool,
+    on_main: Option<bool>,
+    commits: bool,
+) -> Vec<String> {
+    let mut v = vec![];
+    if agent != Agent::ClaudeCode {
+        v.push(agent.label().to_string());
+    }
+    if endless {
+        v.push(crate::tr!("∞ sans fin", "∞ endless").to_string());
+    }
+    if mission {
+        v.push(crate::tr!("consigne", "mission").to_string());
+    }
+    if on_main == Some(true) {
+        v.push(crate::tr!("sur main", "on main").to_string());
+    }
+    if on_main.is_some() && !commits {
+        v.push(crate::tr!("sans commit", "no commits").to_string());
+    }
+    v
+}
+
 fn agent_pick(ui: &mut egui::Ui, id: &str, d: &mut Draft, busy: bool, connected: &[Agent]) {
     ui.add_enabled_ui(!busy, |ui| {
         egui::ComboBox::from_id_salt(("run-agent", id))
@@ -5721,7 +5791,6 @@ mod tests {
             let mut row = 0.0;
             column(width, |ui| {
                 let t = super::tone(false);
-                let lk = super::super::settings::look(false);
                 let id = "p".to_string();
                 let mut d = super::Draft {
                     mission: String::new(),
@@ -5746,7 +5815,6 @@ mod tests {
                                 d: &mut d,
                                 busy: false,
                                 plugged: true,
-                                connected: &[super::Agent::ClaudeCode],
                                 open: 3,
                                 five: Some(37.0),
                                 running_at: None,
@@ -5756,7 +5824,6 @@ mod tests {
                                 start: &mut start,
                                 confirm_main: &mut confirm,
                                 ceilings: &mut vec![],
-                                lk: &lk,
                                 t: &t,
                             },
                         );
@@ -5810,28 +5877,16 @@ mod tests {
                 if code {
                     to_main.insert(id.clone(), false);
                 }
-                let (mut start, mut confirm) = (vec![], None);
                 let r = ui.horizontal(|ui| {
-                    super::launch_controls(
+                    super::launch_options(
                         ui,
-                        super::LaunchCx {
-                            id: &id,
-                            d: &mut d,
-                            busy: false,
-                            plugged: true,
-                            connected: &[super::Agent::ClaudeCode],
-                            open: 3,
-                            five: Some(37.0),
-                            running_at: Some(50.0),
-                            default_share: 20.0,
-                            global: 60.0,
-                            to_main: &mut to_main,
-                            start: &mut start,
-                            confirm_main: &mut confirm,
-                            ceilings: &mut vec![],
-                            lk: &lk,
-                            t: &t,
-                        },
+                        &id,
+                        &mut d,
+                        false,
+                        &[super::Agent::ClaudeCode],
+                        &mut to_main,
+                        &lk,
+                        &t,
                     );
                 });
                 w = r.response.rect.width();
@@ -5841,6 +5896,18 @@ mod tests {
         let (code, nocode) = (width_of(true), width_of(false));
         // The switch, « commits », the box and « sur main »: well over 100 px.
         assert!(code - nocode > 100.0, "code {code} px, sans code {nocode} px");
+    }
+
+    #[test]
+    fn folded_options_still_show_what_differs() {
+        use super::{Agent, options_summary};
+        // All as usual: nothing beside « Options ».
+        assert!(options_summary(Agent::ClaudeCode, false, false, Some(false), true).is_empty());
+        assert!(options_summary(Agent::ClaudeCode, false, false, None, false).is_empty());
+        // Each choice that differs is named, so nothing set there is forgotten.
+        let s = options_summary(Agent::Codex, true, true, Some(true), false);
+        assert_eq!(s.len(), 5, "{s:?}");
+        assert_eq!(s[0], "Codex");
     }
 
     /// The case reported: the 5-hour window already at 75 % when a session starts with a
