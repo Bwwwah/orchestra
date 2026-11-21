@@ -352,6 +352,24 @@ fn share_text(p: f32) -> String {
     if p < 0.05 { "0 %".into() } else { format!("{} %", crate::i18n::dec1(p)) }
 }
 
+/// A launch row's figure, in words so it reads at a glance whatever the state: « pris 4,2 % »
+/// (what its session took) or « peut prendre 13 % » (what it may take once started). A bare
+/// « +13 % » or « 0 % » beside « arrêt à 50 % » left one guessing which was which.
+fn row_figure(taken: Option<f32>, may_take: Option<f32>) -> Option<String> {
+    match (may_take, taken) {
+        (Some(p), _) => Some(crate::trf!("peut prendre {p:.0} %", "may take {p:.0} %")),
+        (None, Some(p)) => Some(crate::trf!("pris {}", "took {}", share_text(p))),
+        (None, None) => None,
+    }
+}
+
+/// The launch card's subtitle: the 5-hour window all its percentages are about, rather than
+/// the name of one AI (each line picks its own).
+fn launch_subtitle(five: Option<f32>) -> String {
+    five.map(|f| crate::trf!("fenêtre de 5 h : {f:.0} %", "5-hour window: {f:.0} %"))
+        .unwrap_or_default()
+}
+
 /// Whether a session can start under the global limit: at least 1 % of the window is left.
 fn room_left(five: Option<f32>, global: f32) -> bool {
     five.is_none_or(|f| global - f >= 1.0)
@@ -2994,7 +3012,7 @@ impl NotesApp {
             super::projects::card_title(
                 ui,
                 crate::tr!("LANCER UNE SESSION", "START A SESSION"),
-                "Claude Code",
+                &launch_subtitle(five_of(Agent::ClaudeCode)),
                 t,
             );
             if !plugged {
@@ -3051,18 +3069,21 @@ impl NotesApp {
                             ui.spacing_mut().item_spacing.y = 1.0;
                             ui.horizontal(|ui| {
                                 ui.label(RichText::new(title).font(semibold(14.5)).color(t.text));
-                                let (txt, col) = if busy { (crate::tr!("au travail", "at work").to_string(), super::projects::GREEN) } else if open == 0 { (crate::tr!("aucune étape ouverte", "no open step").to_string(), t.tertiary) } else { ({ let s = crate::i18n::plural(open); crate::trf!("{open} étape{s} ouverte{s}", "{open} open step{s}") }, t.secondary) };
+                                // Its state; when « Lancer » is greyed for the window, why, in sight.
+                                let (txt, col) = if busy { (crate::tr!("au travail", "at work").to_string(), super::projects::GREEN) } else if open == 0 && !d.endless { (crate::tr!("aucune étape ouverte", "no open step").to_string(), t.tertiary) } else if !room_left(five, global) { (crate::tr!("limite de 5 h atteinte", "5-hour limit reached").to_string(), super::projects::ORANGE) } else if open == 0 { (crate::tr!("sans fin", "endless").to_string(), t.secondary) } else { ({ let s = crate::i18n::plural(open); crate::trf!("{open} étape{s} ouverte{s}", "{open} open step{s}") }, t.secondary) };
                                 ui.label(RichText::new(txt).size(12.0).color(col));
                                 // Picked, or its ceiling set by hand (and not running): what its
-                                // session may take, above what is already taken.
-                                if shows_picked_share(d.pick, d.touched, busy) {
+                                // session may take, above what is already taken; else what it took.
+                                let picked = shows_picked_share(d.pick, d.touched, busy).then(|| {
                                     let c = ceiling_choice(draft_ceiling(d, running_at), five, dl, global);
-                                    let p = picked_share(c, five, running_at);
-                                    ui.label(RichText::new(crate::trf!("jusqu'à +{p:.0} %", "up to +{p:.0} %")).size(12.0).color(super::projects::BLUE))
-                                        .on_hover_text(picked_share_text(c, five, running_at));
-                                } else if let Some(p) = row_share(run_pct.get(id).copied(), suspended_endless.contains(id)) {
-                                    ui.label(RichText::new(share_text(p)).size(12.0).color(if busy { super::projects::GREEN } else { t.tertiary }))
-                                        .on_hover_text(crate::tr!("Ce que la session de ce projet a pris de la fenêtre de 5 h depuis son lancement : 0 % tant qu'elle n'est pas lancée.", "What this project's session took from the 5-hour window since it started: 0 % until it is started."));
+                                    (picked_share(c, five, running_at), picked_share_text(c, five, running_at))
+                                });
+                                let taken = row_share(run_pct.get(id).copied(), suspended_endless.contains(id));
+                                if let Some(fig) = row_figure(taken, picked.as_ref().map(|(p, _)| *p)) {
+                                    let col = if picked.is_some() { super::projects::BLUE } else if busy { super::projects::GREEN } else { t.tertiary };
+                                    let hover = picked.map(|(_, h)| h).unwrap_or_else(|| crate::tr!("Ce que la session de ce projet a pris de la fenêtre de 5 h depuis son lancement : 0 % tant qu'elle n'est pas lancée.", "What this project's session took from the 5-hour window since it started: 0 % until it is started.").to_string());
+                                    ui.label(RichText::new("·").size(12.0).color(t.tertiary));
+                                    ui.label(RichText::new(fig).size(12.0).color(col)).on_hover_text(hover);
                                 }
                             });
                             let mut job = egui::text::LayoutJob::single_section(super::projects::tilde(folder), egui::TextFormat::simple(FontId::monospace(11.0), t.tertiary));
@@ -5311,6 +5332,22 @@ mod tests {
         assert_eq!(share_text(0.0), "0 %");
         assert_eq!(share_text(0.01), "0 %");
         assert!(share_text(2.5) == "2,5 %" || share_text(2.5) == "2.5 %");
+    }
+
+    #[test]
+    fn launch_figures_say_what_they_measure() {
+        use super::{launch_subtitle, row_figure};
+        let fr = |s: Option<String>| s.unwrap_or_default();
+        // What it took (0 % before it starts), or what it may take once picked: never a bare number.
+        let took = fr(row_figure(Some(0.0), None));
+        assert!(took == "pris 0 %" || took == "took 0 %", "{took}");
+        let may = fr(row_figure(Some(4.0), Some(13.0)));
+        assert!(may == "peut prendre 13 %" || may == "may take 13 %", "{may}");
+        assert_eq!(row_figure(None, None), None);
+        // The card's subtitle: the window its percentages are about, not an AI's name.
+        let s = launch_subtitle(Some(37.4));
+        assert!(s.contains("5 h") && s.contains("37 %"), "{s}");
+        assert_eq!(launch_subtitle(None), "");
     }
 
     /// Picked, a project shows what its session may take: its ceiling less what the window
