@@ -504,6 +504,58 @@ fn hash(s: &str) -> u64 {
 }
 
 impl NotesApp {
+    /// « Veille automatique » (Veille · CVE card): every watched code project is checked
+    /// once a day; a check that finds an important vulnerability no step names yet asks for
+    /// a fix session (`cve_fix_tick`), unless a session already runs on the project (the
+    /// result then waits for it to end). Looked at every 30 seconds.
+    fn cve_watch_tick(&mut self, ctx: &egui::Context) {
+        let key = egui::Id::unique("cve-watch-tick");
+        let t = ctx.input(|i| i.time);
+        if ctx.data(|d| d.get_temp::<f64>(key)).is_some_and(|at| t - at < 30.0) {
+            return;
+        }
+        ctx.data_mut(|d| d.insert_temp(key, t));
+        // One fix request at a time (the button's, or one already asked for).
+        if super::watch::fix_pending(ctx) {
+            return;
+        }
+        let now = crate::model::now_ms();
+        let busy: Vec<String> = self.orch.runs.iter().map(|r| r.project.clone()).collect();
+        let mut fix: Option<super::watch::FixRequest> = None;
+        for page in self.ws.pages.iter_mut().filter(|p| !p.trashed) {
+            let Some(pr) = page.project.as_mut() else { continue };
+            let folder = pr.folder.trim().to_string();
+            if !pr.cve_watch || folder.is_empty() || super::watch::checking(&folder) {
+                continue;
+            }
+            let last = super::watch::last_result(&folder);
+            if let Some((at, urgent)) = &last
+                && *at > pr.cve_seen
+            {
+                if busy.contains(&page.id) {
+                    continue;
+                }
+                pr.cve_seen = *at;
+                self.dirty_since.get_or_insert_with(Instant::now);
+                let titles: Vec<String> = pr.steps.iter().map(|s| s.title.clone()).collect();
+                let new = super::watch::untreated(urgent, &titles);
+                if !new.is_empty() && fix.is_none() {
+                    fix = Some(super::watch::FixRequest { project: page.id.clone(), findings: new });
+                }
+                continue;
+            }
+            if super::watch::check_due(pr.cve_seen, last.map(|(at, _)| at), now)
+                && crate::project::code_kind(&folder, pr.code)
+                && !crate::audit::ecosystems(std::path::Path::new(&folder)).is_empty()
+            {
+                super::watch::start_check(&folder, ctx);
+            }
+        }
+        if let Some(req) = fix {
+            super::watch::request_fix(ctx, req);
+        }
+    }
+
     /// « Corriger dans une branche fix » (Veille · CVE card): one « Veille CVE » step per
     /// important vulnerability not already listed, then a session on a fix branch, with the
     /// project's own ceiling and AI.
@@ -871,6 +923,7 @@ impl NotesApp {
                 eprintln!("auto-run : {e}");
             }
         }
+        self.cve_watch_tick(ctx);
         self.cve_fix_tick(ctx);
         let now = Instant::now();
         let global = self.ws.settings.orch.global_limit;

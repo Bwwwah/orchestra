@@ -34,6 +34,11 @@ fn fix_key() -> egui::Id {
     egui::Id::unique("cve-fix-request")
 }
 
+/// Whether a fix session was asked for and not taken yet.
+pub(super) fn fix_pending(ctx: &egui::Context) -> bool {
+    ctx.data(|d| d.get_temp::<FixRequest>(fix_key()).is_some())
+}
+
 pub(super) fn take_fix_request(ctx: &egui::Context) -> Option<FixRequest> {
     ctx.data_mut(|d| d.remove_temp::<FixRequest>(fix_key()))
 }
@@ -83,6 +88,57 @@ pub(super) fn fix_mission(findings: &[Finding]) -> String {
         "Fix the important security vulnerabilities found in the dependencies: {}. Update each dependency to a fixed version (changing as little as possible), then check that the project builds and its tests pass. Go through the « CVE watch » steps one by one.",
         list.join(", ")
     )
+}
+
+/// The automatic watch checks each watched project once a day.
+pub(super) const DAY_MS: u64 = 24 * 3600 * 1000;
+
+/// Automatic watch: whether a new check is due, given the last check taken into account
+/// (`seen`) and the last one made since Orchestra opened (`last`), both in ms.
+pub(super) fn check_due(seen: u64, last: Option<u64>, now: u64) -> bool {
+    let latest = last.map_or(seen, |l| l.max(seen));
+    now.saturating_sub(latest) >= DAY_MS
+}
+
+/// The last check of `folder` since Orchestra opened, when none is running: (when, findings
+/// important enough for a fix session).
+pub(super) fn last_result(folder: &str) -> Option<(u64, Vec<Finding>)> {
+    let b = book().lock_or_recover();
+    let e = b.get(folder)?;
+    if e.running {
+        return None;
+    }
+    let (at, reports) = e.last.as_ref()?;
+    Some((*at, important(&all_findings(reports))))
+}
+
+/// Whether a check of `folder` is running.
+pub(super) fn checking(folder: &str) -> bool {
+    book().lock_or_recover().get(folder).is_some_and(|e| e.running)
+}
+
+/// Start a check of `folder` (the automatic watch).
+pub(super) fn start_check(folder: &str, ctx: &egui::Context) {
+    start(folder, ctx);
+}
+
+/// The important findings that no step of the project names yet (whatever its status): a
+/// fix already started, done or abandoned isn't started again by the automatic watch.
+pub(super) fn untreated(findings: &[Finding], steps: &[String]) -> Vec<Finding> {
+    findings
+        .iter()
+        .filter(|f| {
+            fix_steps(std::slice::from_ref(*f))
+                .iter()
+                .any(|s| !steps.contains(s))
+        })
+        .cloned()
+        .collect()
+}
+
+/// Ask the orchestration for a fix session (button or automatic watch).
+pub(super) fn request_fix(ctx: &egui::Context, req: FixRequest) {
+    ctx.data_mut(|d| d.insert_temp(fix_key(), req));
 }
 
 const RED: Color32 = Color32::from_rgb(224, 62, 62);
@@ -161,6 +217,7 @@ pub(super) fn watch_card(
     ui: &mut egui::Ui,
     project: &str,
     folder: &str,
+    auto: &mut bool,
     t: &Tone,
     extra: f32,
 ) -> f32 {
@@ -262,7 +319,7 @@ pub(super) fn watch_card(
                         .clicked()
                     {
                         let req = FixRequest { project: project.to_string(), findings: urgent };
-                        ui.ctx().data_mut(|d| d.insert_temp(fix_key(), req));
+                        request_fix(ui.ctx(), req);
                     }
                 }
             }
@@ -302,6 +359,20 @@ pub(super) fn watch_card(
                 });
             }
         });
+        let color = if *auto { RED } else { t.tertiary };
+        ui.checkbox(
+            auto,
+            RichText::new(crate::tr!(
+                "Veille automatique (une fois par jour)",
+                "Automatic watch (once a day)"
+            ))
+            .size(12.5)
+            .color(color),
+        )
+        .on_hover_text(crate::tr!(
+            "Tant qu'Orchestra est ouvert, vérifie les dépendances une fois par jour. Dès qu'une faille importante (élevée ou critique) pas encore traitée apparaît, ajoute ses étapes « Veille CVE » et lance seule une session de correction sur une branche à part (orchestra/auto-fix-…). Rien n'arrive sur main sans votre fusion.",
+            "While Orchestra is open, checks the dependencies once a day. As soon as an important vulnerability (high or critical) not handled yet shows up, adds its « CVE watch » steps and starts a fix session by itself on a branch of its own (orchestra/auto-fix-…). Nothing reaches main without your merge."
+        ));
     })
 }
 
@@ -376,6 +447,30 @@ mod tests {
         let m = fix_mission(&urgent);
         assert!(m.contains("CVE-2024-1 (foo 1 → >=1.2.3)"), "{m}");
         assert!(!m.contains("RUSTSEC-9"));
+    }
+
+    /// The automatic watch: once a day, counted from the latest check (taken into account
+    /// or not), and never twice for a vulnerability a step already names.
+    #[test]
+    fn the_automatic_watch_checks_daily_and_fixes_once() {
+        let now = 10 * DAY_MS;
+        assert!(check_due(0, None, now));
+        assert!(!check_due(now - 1000, None, now));
+        assert!(check_due(now - DAY_MS, None, now));
+        // A check made by hand an hour ago counts too.
+        assert!(!check_due(now - 3 * DAY_MS, Some(now - 3_600_000), now));
+
+        let mut a = finding("CVE-2024-1", Severity::Critical);
+        a.package = "foo".into();
+        let mut b = finding("GHSA-x", Severity::High);
+        b.package = "bar".into();
+        let both = vec![a.clone(), b.clone()];
+        assert_eq!(untreated(&both, &[]).len(), 2);
+        let known = fix_steps(std::slice::from_ref(&a));
+        let left = untreated(&both, &known);
+        assert_eq!(left.len(), 1);
+        assert_eq!(left[0].id, "GHSA-x");
+        assert!(untreated(&both, &fix_steps(&both)).is_empty());
     }
 
     #[test]

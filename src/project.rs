@@ -321,6 +321,14 @@ pub struct Project {
     /// `shows_git_card`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub code: Option<bool>,
+    /// « Veille automatique » (Veille · CVE card): the dependencies are checked once a day
+    /// while Orchestra is open, and an important vulnerability not handled yet starts a fix
+    /// session by itself. Decided on this computer only.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub cve_watch: bool,
+    /// When the last check taken into account by the automatic watch was made (ms).
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub cve_seen: u64,
 }
 
 /// How the next autonomous session of a project starts, as last chosen by the person.
@@ -367,6 +375,8 @@ impl Project {
         self.launch = None;
         self.sessions.clear();
         self.sessions_cleared = 0;
+        self.cve_watch = false;
+        self.cve_seen = 0;
     }
 
     /// A project received from another person, with what only this computer decides put
@@ -391,6 +401,8 @@ impl Project {
                 self.read_only = o.read_only;
                 self.sessions = o.sessions.clone();
                 self.sessions_cleared = o.sessions_cleared;
+                self.cve_watch = o.cve_watch;
+                self.cve_seen = o.cve_seen;
             }
             None => {
                 let theirs = std::mem::take(&mut self.steps);
