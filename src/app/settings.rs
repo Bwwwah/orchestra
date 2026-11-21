@@ -1448,15 +1448,22 @@ impl NotesApp {
             for (agent, usage) in &others {
                 let title = super::ai_ui::quota_title(*agent);
                 match (usage, crate::usage::unreadable_reason(*agent)) {
-                    (Some(u), _) => super::ai_ui::usage_strip(ui, &title, u, t),
-                    (None, Some(why))
+                    (Some(u), _) => {
+                        super::ai_ui::usage_strip(ui, &title, u, t);
+                        if *agent == crate::auto::Agent::Vibe
+                            && let Some(v) = &self.ais.vibe
+                        {
+                            super::ai_ui::vibe_details(ui, v, t);
+                        }
+                    }
+                    (None, None)
                         if *agent == crate::auto::Agent::Vibe && self.ais.vibe.is_some() =>
                     {
                         ui.label(RichText::new(&title).size(13.0).color(t.tertiary));
                         if let Some(v) = &self.ais.vibe {
                             super::ai_ui::vibe_details(ui, v, t);
+                            super::ai_ui::vibe_budget_note(ui, v, t);
                         }
-                        ui.label(RichText::new(why).size(12.0).color(t.tertiary));
                     }
                     (None, why) => {
                         let why = why.map(str::to_string).unwrap_or_else(|| {
