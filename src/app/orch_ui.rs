@@ -2850,6 +2850,12 @@ impl NotesApp {
             .collect();
         let running: Vec<String> = self.orch.runs.iter().map(|r| r.project.clone()).collect();
         let plugged = self.ais.plugged().contains(&crate::setup::Ai::ClaudeCode);
+        let connected: Vec<Agent> = self
+            .ais
+            .plugged()
+            .into_iter()
+            .filter_map(Agent::from_ai)
+            .collect();
         let mut start: Vec<String> = vec![];
         let picked: Vec<String> = projects
             .iter()
@@ -2994,7 +3000,7 @@ impl NotesApp {
                         });
                         if wide {
                             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                                launch_controls(ui, LaunchCx { id, d: &mut *d, busy, plugged, open, five, running_at, default_share: dl, global, to_main: &mut to_main, start: &mut start, confirm_main: &mut confirm_main, ceilings: &mut ceilings, lk: &lk, t });
+                                launch_controls(ui, LaunchCx { id, d: &mut *d, busy, plugged, connected: &connected, open, five, running_at, default_share: dl, global, to_main: &mut to_main, start: &mut start, confirm_main: &mut confirm_main, ceilings: &mut ceilings, lk: &lk, t });
                             });
                         }
                     });
@@ -3002,7 +3008,7 @@ impl NotesApp {
                     if !wide {
                         ui.horizontal_wrapped(|ui| {
                             ui.add_space(70.0);
-                            launch_controls(ui, LaunchCx { id, d: &mut *d, busy, plugged, open, five, running_at, default_share: dl, global, to_main: &mut to_main, start: &mut start, confirm_main: &mut confirm_main, ceilings: &mut ceilings, lk: &lk, t });
+                            launch_controls(ui, LaunchCx { id, d: &mut *d, busy, plugged, connected: &connected, open, five, running_at, default_share: dl, global, to_main: &mut to_main, start: &mut start, confirm_main: &mut confirm_main, ceilings: &mut ceilings, lk: &lk, t });
                         });
                     }
                     ui.horizontal(|ui| {
@@ -4812,6 +4818,8 @@ struct LaunchCx<'a> {
     d: &'a mut Draft,
     busy: bool,
     plugged: bool,
+    /// The AIs plugged into Orchestra on this machine (the choice of the AI lists only them).
+    connected: &'a [Agent],
     /// Its open steps: none (and not endless), nothing to start on.
     open: usize,
     /// The 5-hour window's figure, and the settings' default share above it.
@@ -4837,6 +4845,7 @@ fn launch_controls(ui: &mut egui::Ui, c: LaunchCx<'_>) {
         d,
         busy,
         plugged,
+        connected,
         open,
         five,
         running_at,
@@ -4894,7 +4903,7 @@ fn launch_controls(ui: &mut egui::Ui, c: LaunchCx<'_>) {
         }
     }
     ui.add_space(4.0);
-    agent_pick(ui, id, d, busy);
+    agent_pick(ui, id, d, busy, connected);
     ui.add_space(6.0);
     // « commits » and « sur main » only for a code project (`to_main` holds only those): one
     // without code shows no git words, and its sessions make no commit.
@@ -4966,16 +4975,34 @@ fn agent_unavailable(agent: Agent) -> Option<&'static str> {
     }
 }
 
-/// The AI a project's sessions are started with: those wired for working alone can be
-/// picked, the others are listed greyed out with the reason. Kept for the next sessions.
-fn agent_pick(ui: &mut egui::Ui, id: &str, d: &mut Draft, busy: bool) {
+/// The AIs listed in a project's choice of the AI: those plugged into Orchestra, in the usual
+/// order, plus the one already chosen even if it's no longer plugged (so the choice shown is
+/// never hidden). AIs not installed or unplugged are left out.
+fn agent_choices(connected: &[Agent], current: Agent) -> Vec<Agent> {
+    Agent::ALL
+        .into_iter()
+        .filter(|a| *a == current || connected.contains(a))
+        .collect()
+}
+
+/// The AI a project's sessions are started with, among the plugged ones: those wired for
+/// working alone can be picked, the others are listed greyed out with the reason. Kept for
+/// the next sessions.
+fn agent_pick(ui: &mut egui::Ui, id: &str, d: &mut Draft, busy: bool, connected: &[Agent]) {
     ui.add_enabled_ui(!busy, |ui| {
         egui::ComboBox::from_id_salt(("run-agent", id))
             .selected_text(RichText::new(d.agent.label()).size(12.5))
             .width(110.0)
             .show_ui(ui, |ui| {
-                for a in Agent::ALL {
-                    let why = agent_unavailable(a);
+                for a in agent_choices(connected, d.agent) {
+                    let why = if connected.contains(&a) {
+                        agent_unavailable(a)
+                    } else {
+                        Some(crate::tr!(
+                            "Pas branchée à Orchestra sur cet ordinateur : branchez-la dans Réglages › IA.",
+                            "Not plugged into Orchestra on this computer: plug it in under Settings › AI."
+                        ))
+                    };
                     let r = ui.add_enabled(
                         why.is_none(),
                         egui::Button::selectable(d.agent == a, a.label()),
@@ -5145,6 +5172,15 @@ mod tests {
         for a in Agent::ALL {
             assert_eq!(agent_unavailable(a).is_none(), a.ready(), "{a:?}");
         }
+        // Only the plugged AIs are listed, in the usual order, plus the one already chosen.
+        use super::agent_choices;
+        let plugged = [Agent::Vibe, Agent::ClaudeCode];
+        assert_eq!(agent_choices(&plugged, Agent::ClaudeCode), [Agent::ClaudeCode, Agent::Vibe]);
+        assert_eq!(
+            agent_choices(&plugged, Agent::Codex),
+            [Agent::ClaudeCode, Agent::Codex, Agent::Vibe]
+        );
+        assert_eq!(agent_choices(&[], Agent::ClaudeCode), [Agent::ClaudeCode]);
     }
 
     /// A project's ceiling and share are worked out on the subscription of the AI chosen for
@@ -5579,6 +5615,7 @@ mod tests {
                                 d: &mut d,
                                 busy: false,
                                 plugged: true,
+                                connected: &[super::Agent::ClaudeCode],
                                 open: 3,
                                 five: Some(37.0),
                                 running_at: None,
@@ -5651,6 +5688,7 @@ mod tests {
                             d: &mut d,
                             busy: false,
                             plugged: true,
+                            connected: &[super::Agent::ClaudeCode],
                             open: 3,
                             five: Some(37.0),
                             running_at: Some(50.0),
