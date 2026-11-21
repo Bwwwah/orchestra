@@ -43,7 +43,17 @@ fn cli(bin: &Path, args: &[&str], path: &str) -> Result<String, String> {
     }
     let o = c.output().map_err(|e| e.to_string())?;
     let out = String::from_utf8_lossy(&o.stdout).to_string() + &String::from_utf8_lossy(&o.stderr);
-    if o.status.success() { Ok(out) } else { Err(out.lines().rev().find(|l| !l.trim().is_empty()).unwrap_or("échec").trim().to_string()) }
+    if o.status.success() {
+        Ok(out)
+    } else {
+        Err(out
+            .lines()
+            .rev()
+            .find(|l| !l.trim().is_empty())
+            .unwrap_or("échec")
+            .trim()
+            .to_string())
+    }
 }
 
 /// Claude Code or Codex: register `exe mcp` under NAME, or fix the path if it moved.
@@ -58,7 +68,9 @@ pub fn plug_cli(agent: &Agent, exe: &Path, path: &str) -> Outcome {
     }
     let existing = match agent.tool {
         Tool::ClaudeCode => cli(&agent.bin, &["mcp", "get", NAME], path).ok(),
-        Tool::Codex => cli(&agent.bin, &["mcp", "list"], path).ok().filter(|o| o.contains(NAME)),
+        Tool::Codex => cli(&agent.bin, &["mcp", "list"], path)
+            .ok()
+            .filter(|o| o.contains(NAME)),
     };
     if let Some(out) = &existing {
         if out.contains(&exe_s) {
@@ -90,12 +102,34 @@ pub fn plug_json(file: &Path, exe: &Path) -> Outcome {
     } else {
         match serde_json::from_str(&text) {
             Ok(v) => v,
-            Err(e) => return Outcome::Failed(crate::trf!("{} illisible ({e}), laissé tel quel", "{} unreadable ({e}), left as is", file.display())),
+            Err(e) => {
+                return Outcome::Failed(crate::trf!(
+                    "{} illisible ({e}), laissé tel quel",
+                    "{} unreadable ({e}), left as is",
+                    file.display()
+                ));
+            }
         }
     };
-    let Some(obj) = v.as_object_mut() else { return Outcome::Failed(crate::tr!("format inattendu, laissé tel quel", "unexpected format, left as is").into()) };
+    let Some(obj) = v.as_object_mut() else {
+        return Outcome::Failed(
+            crate::tr!(
+                "format inattendu, laissé tel quel",
+                "unexpected format, left as is"
+            )
+            .into(),
+        );
+    };
     let servers = obj.entry("mcpServers").or_insert_with(|| json!({}));
-    let Some(servers) = servers.as_object_mut() else { return Outcome::Failed(crate::tr!("« mcpServers » inattendu, laissé tel quel", "unexpected « mcpServers », left as is").into()) };
+    let Some(servers) = servers.as_object_mut() else {
+        return Outcome::Failed(
+            crate::tr!(
+                "« mcpServers » inattendu, laissé tel quel",
+                "unexpected « mcpServers », left as is"
+            )
+            .into(),
+        );
+    };
     let mut renamed = false;
     for old in OLD_NAMES {
         renamed |= servers.remove(old).is_some();
@@ -114,7 +148,10 @@ pub fn plug_json(file: &Path, exe: &Path) -> Outcome {
     if let Some(dir) = file.parent() {
         let _ = std::fs::create_dir_all(dir);
     }
-    match std::fs::write(file, serde_json::to_string_pretty(&v).unwrap_or_default() + "\n") {
+    match std::fs::write(
+        file,
+        serde_json::to_string_pretty(&v).unwrap_or_default() + "\n",
+    ) {
         Ok(()) if before.is_some() => Outcome::Updated,
         Ok(()) => Outcome::Added,
         Err(e) => Outcome::Failed(e.to_string()),
@@ -126,7 +163,9 @@ pub fn plug_json(file: &Path, exe: &Path) -> Outcome {
 /// Mistral Vibe's settings: `$VIBE_HOME/config.toml`, by default `~/.vibe/config.toml`. Its
 /// MCP servers are `[[mcp_servers]]` tables (name, transport, command, args).
 fn vibe_config() -> PathBuf {
-    let home = std::env::var_os("VIBE_HOME").map(PathBuf::from).unwrap_or_else(|| dirs::home_dir().unwrap_or_default().join(".vibe"));
+    let home = std::env::var_os("VIBE_HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| dirs::home_dir().unwrap_or_default().join(".vibe"));
     home.join("config.toml")
 }
 
@@ -146,12 +185,18 @@ fn toml_tables(text: &str) -> Vec<String> {
 /// One of our `[[mcp_servers]]` tables (under our name or an old one).
 fn toml_is_ours(table: &str) -> bool {
     let mut lines = table.lines();
-    if lines.next().map(|h| h.split('#').next().unwrap_or("").trim().replace(' ', "")) != Some("[[mcp_servers]]".into()) {
+    if lines
+        .next()
+        .map(|h| h.split('#').next().unwrap_or("").trim().replace(' ', ""))
+        != Some("[[mcp_servers]]".into())
+    {
         return false;
     }
     lines.any(|l| {
         let l = l.split('#').next().unwrap_or("").replace(' ', "");
-        std::iter::once(NAME).chain(OLD_NAMES).any(|n| l == format!("name=\"{n}\"") || l == format!("name='{n}'"))
+        std::iter::once(NAME)
+            .chain(OLD_NAMES)
+            .any(|n| l == format!("name=\"{n}\"") || l == format!("name='{n}'"))
     })
 }
 
@@ -160,7 +205,10 @@ fn toml_string(s: &str) -> String {
 }
 
 fn toml_entry(exe: &Path) -> String {
-    format!("[[mcp_servers]]\nname = \"{NAME}\"\ntransport = \"stdio\"\ncommand = {}\nargs = [\"mcp\"]\n", toml_string(&exe.display().to_string()))
+    format!(
+        "[[mcp_servers]]\nname = \"{NAME}\"\ntransport = \"stdio\"\ncommand = {}\nargs = [\"mcp\"]\n",
+        toml_string(&exe.display().to_string())
+    )
 }
 
 /// Mistral Vibe: put our `[[mcp_servers]]` table in its TOML settings, or fix the path if
@@ -174,7 +222,11 @@ pub fn plug_toml(file: &Path, exe: &Path) -> Outcome {
     if ours.len() == 1 && ours[0].trim_end() == entry.trim_end() {
         return Outcome::AlreadyThere;
     }
-    let mut kept: String = tables.iter().filter(|t| !toml_is_ours(t)).map(String::as_str).collect();
+    let mut kept: String = tables
+        .iter()
+        .filter(|t| !toml_is_ours(t))
+        .map(String::as_str)
+        .collect();
     if !kept.is_empty() && !kept.ends_with("\n\n") {
         kept.push_str(if kept.ends_with('\n') { "\n" } else { "\n\n" });
     }
@@ -200,21 +252,33 @@ fn toml_has(file: &Path) -> bool {
 }
 
 fn unplug_toml(file: &Path) -> Result<(), String> {
-    let Ok(text) = std::fs::read_to_string(file) else { return Ok(()) };
+    let Ok(text) = std::fs::read_to_string(file) else {
+        return Ok(());
+    };
     let tables = toml_tables(&text);
     if !tables.iter().any(|t| toml_is_ours(t)) {
         return Ok(());
     }
-    let kept: String = tables.iter().filter(|t| !toml_is_ours(t)).map(String::as_str).collect();
+    let kept: String = tables
+        .iter()
+        .filter(|t| !toml_is_ours(t))
+        .map(String::as_str)
+        .collect();
     std::fs::write(file, kept.trim_end().to_string() + "\n").map_err(|e| e.to_string())
 }
 
 fn gemini_settings() -> PathBuf {
-    dirs::home_dir().unwrap_or_default().join(".gemini").join("settings.json")
+    dirs::home_dir()
+        .unwrap_or_default()
+        .join(".gemini")
+        .join("settings.json")
 }
 
 fn cursor_settings() -> PathBuf {
-    dirs::home_dir().unwrap_or_default().join(".cursor").join("mcp.json")
+    dirs::home_dir()
+        .unwrap_or_default()
+        .join(".cursor")
+        .join("mcp.json")
 }
 
 fn claude_desktop_config() -> Option<PathBuf> {
@@ -236,7 +300,14 @@ pub enum Ai {
 }
 
 impl Ai {
-    pub const ALL: [Ai; 6] = [Ai::ClaudeCode, Ai::Codex, Ai::Gemini, Ai::Vibe, Ai::ClaudeDesktop, Ai::Cursor];
+    pub const ALL: [Ai; 6] = [
+        Ai::ClaudeCode,
+        Ai::Codex,
+        Ai::Gemini,
+        Ai::Vibe,
+        Ai::ClaudeDesktop,
+        Ai::Cursor,
+    ];
 
     /// Stable name, kept in the settings.
     pub fn key(self) -> &'static str {
@@ -261,12 +332,30 @@ impl Ai {
     }
     pub fn what(self) -> &'static str {
         match self {
-            Ai::ClaudeCode => crate::tr!("Agent de code d'Anthropic, sur votre abonnement Claude", "Anthropic's coding agent, on your Claude subscription"),
-            Ai::Codex => crate::tr!("Agent de code d'OpenAI, sur votre abonnement ChatGPT", "OpenAI's coding agent, on your ChatGPT subscription"),
-            Ai::Gemini => crate::tr!("Agent de code de Google, sur votre compte Google", "Google's coding agent, on your Google account"),
-            Ai::ClaudeDesktop => crate::tr!("L'app Claude : ses conversations lisent et écrivent vos projets", "The Claude app: its conversations read and write your projects"),
-            Ai::Cursor => crate::tr!("L'éditeur Cursor : son agent lit et écrit vos projets", "The Cursor editor: its agent reads and writes your projects"),
-            Ai::Vibe => crate::tr!("Agent de code de Mistral, sur votre compte Mistral", "Mistral's coding agent, on your Mistral account"),
+            Ai::ClaudeCode => crate::tr!(
+                "Agent de code d'Anthropic, sur votre abonnement Claude",
+                "Anthropic's coding agent, on your Claude subscription"
+            ),
+            Ai::Codex => crate::tr!(
+                "Agent de code d'OpenAI, sur votre abonnement ChatGPT",
+                "OpenAI's coding agent, on your ChatGPT subscription"
+            ),
+            Ai::Gemini => crate::tr!(
+                "Agent de code de Google, sur votre compte Google",
+                "Google's coding agent, on your Google account"
+            ),
+            Ai::ClaudeDesktop => crate::tr!(
+                "L'app Claude : ses conversations lisent et écrivent vos projets",
+                "The Claude app: its conversations read and write your projects"
+            ),
+            Ai::Cursor => crate::tr!(
+                "L'éditeur Cursor : son agent lit et écrit vos projets",
+                "The Cursor editor: its agent reads and writes your projects"
+            ),
+            Ai::Vibe => crate::tr!(
+                "Agent de code de Mistral, sur votre compte Mistral",
+                "Mistral's coding agent, on your Mistral account"
+            ),
         }
     }
     /// Command to start it in a terminal, for the agents that run in one.
@@ -360,11 +449,26 @@ const NODE_PAGE: &str = "https://nodejs.org/en/download";
 pub fn install_plan(ai: Ai, has: impl Fn(&str) -> bool) -> Option<Install> {
     let npm = |pkg: &str| {
         if has("npm") {
-            Some(Install::Run(format!("npm install -g {pkg}"), crate::tr!("avec npm (Node.js)", "with npm (Node.js)")))
+            Some(Install::Run(
+                format!("npm install -g {pkg}"),
+                crate::tr!("avec npm (Node.js)", "with npm (Node.js)"),
+            ))
         } else if has("brew") {
-            Some(Install::Run(format!("brew install node && npm install -g {pkg}"), crate::tr!("installe d'abord Node.js avec Homebrew", "installs Node.js first, with Homebrew")))
+            Some(Install::Run(
+                format!("brew install node && npm install -g {pkg}"),
+                crate::tr!(
+                    "installe d'abord Node.js avec Homebrew",
+                    "installs Node.js first, with Homebrew"
+                ),
+            ))
         } else {
-            Some(Install::Download(NODE_PAGE, crate::tr!("Node.js requis : installez-le, puis revenez ici", "Node.js needed: install it, then come back here")))
+            Some(Install::Download(
+                NODE_PAGE,
+                crate::tr!(
+                    "Node.js requis : installez-le, puis revenez ici",
+                    "Node.js needed: install it, then come back here"
+                ),
+            ))
         }
     };
     match ai {
@@ -395,7 +499,10 @@ fn installed(ai: Ai, path: &str) -> bool {
 }
 
 fn json_has(file: &Path) -> bool {
-    std::fs::read_to_string(file).ok().and_then(|t| serde_json::from_str::<Value>(&t).ok()).is_some_and(|v| v["mcpServers"].get(NAME).is_some())
+    std::fs::read_to_string(file)
+        .ok()
+        .and_then(|t| serde_json::from_str::<Value>(&t).ok())
+        .is_some_and(|v| v["mcpServers"].get(NAME).is_some())
 }
 
 fn plugged(ai: Ai, path: &str) -> bool {
@@ -418,8 +525,17 @@ pub fn states() -> Vec<AiState> {
         .into_iter()
         .map(|ai| {
             let installed = installed(ai, &path);
-            let install = if installed { None } else { install_plan(ai, |c| crate::sync::which(c, &path).is_some()) };
-            AiState { ai, installed, plugged: installed && plugged(ai, &path), install }
+            let install = if installed {
+                None
+            } else {
+                install_plan(ai, |c| crate::sync::which(c, &path).is_some())
+            };
+            AiState {
+                ai,
+                installed,
+                plugged: installed && plugged(ai, &path),
+                install,
+            }
         })
         .collect()
 }
@@ -431,11 +547,23 @@ pub fn plug(ai: Ai, exe: &Path) -> Outcome {
         return plug_cli(&a, exe, &path);
     }
     if let Some(f) = ai.toml_file() {
-        return if installed(ai, &path) { plug_toml(&f, exe) } else { Outcome::Failed(crate::trf!("{} n'est pas installé", "{} isn't installed", ai.label())) };
+        return if installed(ai, &path) {
+            plug_toml(&f, exe)
+        } else {
+            Outcome::Failed(crate::trf!(
+                "{} n'est pas installé",
+                "{} isn't installed",
+                ai.label()
+            ))
+        };
     }
     match ai.json_file() {
         Some(f) if installed(ai, &path) => plug_json(&f, exe),
-        _ => Outcome::Failed(crate::trf!("{} n'est pas installé", "{} isn't installed", ai.label())),
+        _ => Outcome::Failed(crate::trf!(
+            "{} n'est pas installé",
+            "{} isn't installed",
+            ai.label()
+        )),
     }
 }
 
@@ -452,11 +580,24 @@ pub fn unplug(ai: Ai) -> Result<(), String> {
     if let Some(f) = ai.toml_file() {
         return unplug_toml(&f);
     }
-    let Some(f) = ai.json_file() else { return Ok(()) };
-    let Ok(text) = std::fs::read_to_string(&f) else { return Ok(()) };
-    let mut v: Value = serde_json::from_str(&text).map_err(|e| format!("{} illisible ({e})", f.display()))?;
-    if v["mcpServers"].as_object_mut().and_then(|o| o.remove(NAME)).is_some() {
-        std::fs::write(&f, serde_json::to_string_pretty(&v).unwrap_or_default() + "\n").map_err(|e| e.to_string())?;
+    let Some(f) = ai.json_file() else {
+        return Ok(());
+    };
+    let Ok(text) = std::fs::read_to_string(&f) else {
+        return Ok(());
+    };
+    let mut v: Value =
+        serde_json::from_str(&text).map_err(|e| format!("{} illisible ({e})", f.display()))?;
+    if v["mcpServers"]
+        .as_object_mut()
+        .and_then(|o| o.remove(NAME))
+        .is_some()
+    {
+        std::fs::write(
+            &f,
+            serde_json::to_string_pretty(&v).unwrap_or_default() + "\n",
+        )
+        .map_err(|e| e.to_string())?;
     }
     Ok(())
 }
@@ -465,7 +606,11 @@ pub fn unplug(ai: Ai) -> Result<(), String> {
 /// keeps trying to start `orchestra mcp`, which is gone.
 pub fn unplug_all() -> Vec<(String, Result<(), String>)> {
     let path = shell_path();
-    Ai::ALL.into_iter().filter(|&ai| installed(ai, &path)).map(|ai| (ai.label().to_string(), unplug(ai))).collect()
+    Ai::ALL
+        .into_iter()
+        .filter(|&ai| installed(ai, &path))
+        .map(|ai| (ai.label().to_string(), unplug(ai)))
+        .collect()
 }
 
 /// Everything Orchestra set up outside its own folder, undone: Claude Code's status line
@@ -474,8 +619,17 @@ pub fn unplug_all() -> Vec<(String, Result<(), String>)> {
 pub fn clean_up_for_uninstall() -> Vec<String> {
     let mut out = vec![];
     match crate::usage::stop_tracking() {
-        Ok(()) => out.push(crate::tr!("Ligne d'état de Claude Code : remise comme avant.", "Claude Code's status line: put back as before.").to_string()),
-        Err(e) => out.push(crate::trf!("Ligne d'état de Claude Code : {e}", "Claude Code's status line: {e}")),
+        Ok(()) => out.push(
+            crate::tr!(
+                "Ligne d'état de Claude Code : remise comme avant.",
+                "Claude Code's status line: put back as before."
+            )
+            .to_string(),
+        ),
+        Err(e) => out.push(crate::trf!(
+            "Ligne d'état de Claude Code : {e}",
+            "Claude Code's status line: {e}"
+        )),
     }
     for (name, r) in unplug_all() {
         out.push(match r {
@@ -510,18 +664,42 @@ pub fn plug_all(exe: &Path, off: &[String]) -> Report {
 
 /// One line for the status bar, only when something changed or failed.
 pub fn summary(r: &Report) -> Option<String> {
-    let changed: Vec<&str> = r.iter().filter(|(_, o)| o.changed()).map(|(n, _)| n.as_str()).collect();
-    let failed: Vec<String> = r.iter().filter_map(|(n, o)| if let Outcome::Failed(e) = o { Some(format!("{n} ({e})")) } else { None }).collect();
+    let changed: Vec<&str> = r
+        .iter()
+        .filter(|(_, o)| o.changed())
+        .map(|(n, _)| n.as_str())
+        .collect();
+    let failed: Vec<String> = r
+        .iter()
+        .filter_map(|(n, o)| {
+            if let Outcome::Failed(e) = o {
+                Some(format!("{n} ({e})"))
+            } else {
+                None
+            }
+        })
+        .collect();
     let mut parts = vec![];
     if !changed.is_empty() {
-        let mut s = crate::trf!("Branché au tableau de bord : {}", "Plugged into the dashboard: {}", changed.join(", "));
+        let mut s = crate::trf!(
+            "Branché au tableau de bord : {}",
+            "Plugged into the dashboard: {}",
+            changed.join(", ")
+        );
         if changed.iter().any(|n| n.starts_with("Claude (app")) {
-            s.push_str(crate::tr!(" — redémarrez l'app Claude pour qu'elle le voie", " — restart the Claude app so it sees it"));
+            s.push_str(crate::tr!(
+                " — redémarrez l'app Claude pour qu'elle le voie",
+                " — restart the Claude app so it sees it"
+            ));
         }
         parts.push(s);
     }
     if !failed.is_empty() {
-        parts.push(crate::trf!("Échec du branchement : {}", "Plugging in failed: {}", failed.join(", ")));
+        parts.push(crate::trf!(
+            "Échec du branchement : {}",
+            "Plugging in failed: {}",
+            failed.join(", ")
+        ));
     }
     (!parts.is_empty()).then(|| parts.join(". ") + ".")
 }
@@ -540,17 +718,36 @@ mod tests {
             None => "rien".into(),
         };
         assert_eq!(run(Ai::Codex, &["npm"]), "npm install -g @openai/codex");
-        assert_eq!(run(Ai::Codex, &["brew"]), "brew install node && npm install -g @openai/codex");
+        assert_eq!(
+            run(Ai::Codex, &["brew"]),
+            "brew install node && npm install -g @openai/codex"
+        );
         assert_eq!(run(Ai::Gemini, &[]), format!("page {NODE_PAGE}"));
         // Claude Code needs no Node.js: Anthropic's installer when npm is missing.
-        assert_eq!(run(Ai::ClaudeCode, &["npm"]), "npm install -g @anthropic-ai/claude-code");
+        assert_eq!(
+            run(Ai::ClaudeCode, &["npm"]),
+            "npm install -g @anthropic-ai/claude-code"
+        );
         assert!(run(Ai::ClaudeCode, &[]).contains("https://claude.ai/install.sh"));
-        assert_eq!(run(Ai::Vibe, &["uv", "brew"]), "uv tool install mistral-vibe");
-        assert_eq!(run(Ai::Vibe, &["brew"]), "brew install uv && uv tool install mistral-vibe");
+        assert_eq!(
+            run(Ai::Vibe, &["uv", "brew"]),
+            "uv tool install mistral-vibe"
+        );
+        assert_eq!(
+            run(Ai::Vibe, &["brew"]),
+            "brew install uv && uv tool install mistral-vibe"
+        );
         assert!(run(Ai::Vibe, &[]).starts_with("curl -LsSf https://astral.sh/uv/install.sh"));
-        assert_eq!(run(Ai::Cursor, &["npm"]), "page https://cursor.com/download");
+        assert_eq!(
+            run(Ai::Cursor, &["npm"]),
+            "page https://cursor.com/download"
+        );
         // Every AI gets something to click.
-        assert!(Ai::ALL.iter().all(|a| install_plan(*a, |_| false).is_some()));
+        assert!(
+            Ai::ALL
+                .iter()
+                .all(|a| install_plan(*a, |_| false).is_some())
+        );
     }
 
     #[test]
@@ -558,7 +755,11 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("tia-setup-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let f = dir.join("settings.json");
-        std::fs::write(&f, r#"{"theme":"dark","mcpServers":{"other":{"command":"x"}}}"#).unwrap();
+        std::fs::write(
+            &f,
+            r#"{"theme":"dark","mcpServers":{"other":{"command":"x"}}}"#,
+        )
+        .unwrap();
         let exe = Path::new("/apps/orchestra");
         assert_eq!(plug_json(&f, exe), Outcome::Added);
         let v: Value = serde_json::from_str(&std::fs::read_to_string(&f).unwrap()).unwrap();
@@ -567,7 +768,10 @@ mod tests {
         assert_eq!(v["mcpServers"][NAME]["command"], "/apps/orchestra");
         assert!(dir.join("settings.json.bak").exists());
         assert_eq!(plug_json(&f, exe), Outcome::AlreadyThere);
-        assert_eq!(plug_json(&f, Path::new("/moved/orchestra")), Outcome::Updated);
+        assert_eq!(
+            plug_json(&f, Path::new("/moved/orchestra")),
+            Outcome::Updated
+        );
         std::fs::write(&f, "{ broken").unwrap();
         assert!(matches!(plug_json(&f, exe), Outcome::Failed(_)));
         assert_eq!(std::fs::read_to_string(&f).unwrap(), "{ broken");
@@ -586,25 +790,50 @@ mod tests {
         let exe = Path::new("/Applications/Orchestra.app/Contents/MacOS/orchestra");
         assert_eq!(plug_toml(&f, exe), Outcome::Added);
         let text = std::fs::read_to_string(&f).unwrap();
-        assert!(text.starts_with(mine), "the file as it was, then our table:\n{text}");
-        assert!(text.contains("name = \"orchestra\"") && text.contains("command = \"/Applications/Orchestra.app/Contents/MacOS/orchestra\"") && text.contains("args = [\"mcp\"]"));
+        assert!(
+            text.starts_with(mine),
+            "the file as it was, then our table:\n{text}"
+        );
+        assert!(
+            text.contains("name = \"orchestra\"")
+                && text
+                    .contains("command = \"/Applications/Orchestra.app/Contents/MacOS/orchestra\"")
+                && text.contains("args = [\"mcp\"]")
+        );
         assert!(toml_has(&f));
         assert!(dir.join("config.toml.bak").exists());
         assert_eq!(plug_toml(&f, exe), Outcome::AlreadyThere);
         // Moved: one table, the new path.
-        assert_eq!(plug_toml(&f, Path::new("/moved/orchestra")), Outcome::Updated);
+        assert_eq!(
+            plug_toml(&f, Path::new("/moved/orchestra")),
+            Outcome::Updated
+        );
         let text = std::fs::read_to_string(&f).unwrap();
         assert_eq!(text.matches("name = \"orchestra\"").count(), 1);
         assert!(text.contains("/moved/orchestra") && !text.contains("/Applications/Orchestra.app"));
-        assert!(text.contains("name = \"fetch\"") && text.contains("[tools.bash]") && text.contains("# mes réglages"));
+        assert!(
+            text.contains("name = \"fetch\"")
+                && text.contains("[tools.bash]")
+                && text.contains("# mes réglages")
+        );
         // Unplugged: back to the person's settings only.
         unplug_toml(&f).unwrap();
         assert!(!toml_has(&f));
-        assert_eq!(std::fs::read_to_string(&f).unwrap().trim_end(), mine.trim_end());
+        assert_eq!(
+            std::fs::read_to_string(&f).unwrap().trim_end(),
+            mine.trim_end()
+        );
         // No file yet: one is made. A path with quotes stays valid TOML.
         let new = dir.join("neuf").join("config.toml");
-        assert_eq!(plug_toml(&new, Path::new("/a \"b\"/orchestra")), Outcome::Added);
-        assert!(std::fs::read_to_string(&new).unwrap().contains(r#"command = "/a \"b\"/orchestra""#));
+        assert_eq!(
+            plug_toml(&new, Path::new("/a \"b\"/orchestra")),
+            Outcome::Added
+        );
+        assert!(
+            std::fs::read_to_string(&new)
+                .unwrap()
+                .contains(r#"command = "/a \"b\"/orchestra""#)
+        );
         let _ = std::fs::remove_dir_all(dir);
     }
 
@@ -625,8 +854,14 @@ mod tests {
             use std::os::unix::fs::PermissionsExt;
             std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
         }
-        let agent = Agent { tool: Tool::ClaudeCode, bin };
-        assert_eq!(plug_cli(&agent, Path::new("/new/orchestra"), "/usr/bin:/bin"), Outcome::Updated);
+        let agent = Agent {
+            tool: Tool::ClaudeCode,
+            bin,
+        };
+        assert_eq!(
+            plug_cli(&agent, Path::new("/new/orchestra"), "/usr/bin:/bin"),
+            Outcome::Updated
+        );
         let calls = std::fs::read_to_string(&log).unwrap();
         assert!(calls.contains("mcp remove orchestra -s user"));
         assert!(calls.contains("mcp add --scope user orchestra -- /new/orchestra mcp"));
@@ -635,8 +870,15 @@ mod tests {
 
     #[test]
     fn summary_only_when_useful() {
-        assert_eq!(summary(&vec![("Claude Code".into(), Outcome::AlreadyThere)]), None);
-        let s = summary(&vec![("Codex".into(), Outcome::Added), ("Gemini CLI".into(), Outcome::Failed("x".into()))]).unwrap();
+        assert_eq!(
+            summary(&vec![("Claude Code".into(), Outcome::AlreadyThere)]),
+            None
+        );
+        let s = summary(&vec![
+            ("Codex".into(), Outcome::Added),
+            ("Gemini CLI".into(), Outcome::Failed("x".into())),
+        ])
+        .unwrap();
         assert!(s.contains("Codex") && s.contains("Gemini CLI (x)"));
     }
 }

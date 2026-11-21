@@ -23,8 +23,24 @@ pub fn request(ctx: &egui::Context, title: &str, cwd: &str, cmd: Option<String>)
     request_with_input(ctx, title, cwd, cmd, None);
 }
 
-pub fn request_with_input(ctx: &egui::Context, title: &str, cwd: &str, cmd: Option<String>, input: Option<String>) {
-    ctx.data_mut(|d| d.insert_temp(request_key(), TermRequest { title: title.into(), cwd: cwd.into(), cmd, input }));
+pub fn request_with_input(
+    ctx: &egui::Context,
+    title: &str,
+    cwd: &str,
+    cmd: Option<String>,
+    input: Option<String>,
+) {
+    ctx.data_mut(|d| {
+        d.insert_temp(
+            request_key(),
+            TermRequest {
+                title: title.into(),
+                cwd: cwd.into(),
+                cmd,
+                input,
+            },
+        )
+    });
 }
 
 const FONT: f32 = 13.0;
@@ -56,9 +72,13 @@ impl NotesApp {
                 }
             }
         }
-        let Some(r) = ctx.data_mut(|d| d.remove_temp::<TermRequest>(request_key())) else { return };
+        let Some(r) = ctx.data_mut(|d| d.remove_temp::<TermRequest>(request_key())) else {
+            return;
+        };
         let c2 = ctx.clone();
-        match Term::spawn(&r.title, &r.cwd, r.cmd.as_deref(), move || c2.request_repaint()) {
+        match Term::spawn(&r.title, &r.cwd, r.cmd.as_deref(), move || {
+            c2.request_repaint()
+        }) {
             Ok(mut t) => {
                 if let Some(text) = r.input.clone() {
                     t.pending = Some((std::time::Instant::now(), text));
@@ -69,7 +89,10 @@ impl NotesApp {
                 self.term_open = true;
                 self.term_focus = true;
             }
-            Err(e) => self.fail(crate::trf!("Impossible d'ouvrir le terminal : {e}", "Couldn't open the terminal: {e}")),
+            Err(e) => self.fail(crate::trf!(
+                "Impossible d'ouvrir le terminal : {e}",
+                "Couldn't open the terminal: {e}"
+            )),
         }
     }
 
@@ -78,7 +101,9 @@ impl NotesApp {
         for saved in self.ws.settings.open_terms.clone() {
             let c2 = ctx.clone();
             let cmd = crate::terminal::restore_cmd(saved.cmd.as_deref());
-            if let Ok(mut t) = Term::spawn(&saved.title, &saved.cwd, cmd.as_deref(), move || c2.request_repaint()) {
+            if let Ok(mut t) = Term::spawn(&saved.title, &saved.cwd, cmd.as_deref(), move || {
+                c2.request_repaint()
+            }) {
                 // Remember what it was first started with, not the resume command.
                 t.cmd = saved.cmd.clone();
                 self.terms.push(t);
@@ -88,8 +113,15 @@ impl NotesApp {
 
     /// Keep the list of open terminals in the settings, so they come back next time.
     pub(super) fn remember_terminals(&mut self) {
-        let now: Vec<crate::model::SavedTerm> =
-            self.terms.iter().map(|t| crate::model::SavedTerm { title: t.title.clone(), cwd: t.cwd.clone(), cmd: t.cmd.clone() }).collect();
+        let now: Vec<crate::model::SavedTerm> = self
+            .terms
+            .iter()
+            .map(|t| crate::model::SavedTerm {
+                title: t.title.clone(),
+                cwd: t.cwd.clone(),
+                cmd: t.cmd.clone(),
+            })
+            .collect();
         if now != self.ws.settings.open_terms {
             self.ws.settings.open_terms = now;
         }
@@ -102,49 +134,132 @@ impl NotesApp {
         }
         let dark = ui.visuals().dark_mode;
         let t = tone(dark);
-        let bg = if dark { Color32::from_rgb(24, 24, 24) } else { Color32::from_rgb(252, 252, 251) };
+        let bg = if dark {
+            Color32::from_rgb(24, 24, 24)
+        } else {
+            Color32::from_rgb(252, 252, 251)
+        };
         let dock = egui::Panel::bottom("terminal-dock")
             .resizable(true)
             .default_size(340.0)
             .size_range(140.0..=900.0)
-            .frame(egui::Frame::new().fill(bg).stroke(egui::Stroke::new(1.0, t.border)))
+            .frame(
+                egui::Frame::new()
+                    .fill(bg)
+                    .stroke(egui::Stroke::new(1.0, t.border)),
+            )
             .show(ui, |ui| {
                 // Tabs.
                 let mut close = None;
-                egui::Frame::new().fill(page_fill).inner_margin(egui::Margin::symmetric(8, 4)).show(ui, |ui| {
-                    ui.horizontal(|ui| {
-                        for (i, term) in self.terms.iter().enumerate() {
-                            let sel = i == self.term_active;
-                            let label = if term.exited() { crate::trf!("{} (terminé)", "{} (ended)", term.title) } else { term.title.clone() };
-                            let r = ui.add(egui::Button::new(RichText::new(label).size(12.5)).selected(sel).frame(sel));
-                            if r.clicked() {
-                                self.term_active = i;
-                                self.term_focus = true;
-                            }
-                            r.on_hover_text(&term.cwd);
-                            if super::icons::delete_cross(ui, 18.0, t.tertiary, t.text, t.selected, crate::tr!("Fermer ce terminal", "Close this terminal")).clicked() {
-                                close = Some(i);
-                            }
-                            ui.add_space(6.0);
-                        }
-                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            if ui.add(egui::Button::new(RichText::new(crate::tr!("▾ Réduire", "▾ Collapse")).size(12.0)).frame(false)).clicked() {
-                                self.term_open = false;
-                            }
-                            let has_sel = self.terms.get(self.term_active).is_some_and(|t| t.selected_text().is_some());
-                            let label = if has_sel { crate::tr!("Copier la sélection", "Copy the selection") } else { crate::tr!("Copier l'écran", "Copy the screen") };
-                            if ui.add(egui::Button::new(RichText::new(label).size(12.0)).frame(false)).on_hover_text(crate::tr!("Ou sélectionnez à la souris puis Cmd+C", "Or select with the mouse then Cmd+C")).clicked()
-                                && let Some(term) = self.terms.get(self.term_active) {
-                                    ui.ctx().copy_text(term.selected_text().unwrap_or_else(|| term.text()));
-                                    self.ack(if has_sel { crate::tr!("Sélection copiée.", "Selection copied.") } else { crate::tr!("Contenu du terminal copié.", "Terminal content copied.") });
+                egui::Frame::new()
+                    .fill(page_fill)
+                    .inner_margin(egui::Margin::symmetric(8, 4))
+                    .show(ui, |ui| {
+                        ui.horizontal(|ui| {
+                            for (i, term) in self.terms.iter().enumerate() {
+                                let sel = i == self.term_active;
+                                let label = if term.exited() {
+                                    crate::trf!("{} (terminé)", "{} (ended)", term.title)
+                                } else {
+                                    term.title.clone()
+                                };
+                                let r = ui.add(
+                                    egui::Button::new(RichText::new(label).size(12.5))
+                                        .selected(sel)
+                                        .frame(sel),
+                                );
+                                if r.clicked() {
+                                    self.term_active = i;
+                                    self.term_focus = true;
                                 }
-                            if ui.add(egui::Button::new(RichText::new("+ Shell").size(12.0)).frame(false)).on_hover_text(crate::tr!("Nouveau terminal", "New terminal")).clicked() {
-                                let cwd = self.terms.get(self.term_active).map(|t| t.cwd.clone()).unwrap_or_default();
-                                request(ui.ctx(), "Shell", &cwd, None);
+                                r.on_hover_text(&term.cwd);
+                                if super::icons::delete_cross(
+                                    ui,
+                                    18.0,
+                                    t.tertiary,
+                                    t.text,
+                                    t.selected,
+                                    crate::tr!("Fermer ce terminal", "Close this terminal"),
+                                )
+                                .clicked()
+                                {
+                                    close = Some(i);
+                                }
+                                ui.add_space(6.0);
                             }
+                            ui.with_layout(
+                                egui::Layout::right_to_left(egui::Align::Center),
+                                |ui| {
+                                    if ui
+                                        .add(
+                                            egui::Button::new(
+                                                RichText::new(crate::tr!(
+                                                    "▾ Réduire",
+                                                    "▾ Collapse"
+                                                ))
+                                                .size(12.0),
+                                            )
+                                            .frame(false),
+                                        )
+                                        .clicked()
+                                    {
+                                        self.term_open = false;
+                                    }
+                                    let has_sel = self
+                                        .terms
+                                        .get(self.term_active)
+                                        .is_some_and(|t| t.selected_text().is_some());
+                                    let label = if has_sel {
+                                        crate::tr!("Copier la sélection", "Copy the selection")
+                                    } else {
+                                        crate::tr!("Copier l'écran", "Copy the screen")
+                                    };
+                                    if ui
+                                        .add(
+                                            egui::Button::new(RichText::new(label).size(12.0))
+                                                .frame(false),
+                                        )
+                                        .on_hover_text(crate::tr!(
+                                            "Ou sélectionnez à la souris puis Cmd+C",
+                                            "Or select with the mouse then Cmd+C"
+                                        ))
+                                        .clicked()
+                                        && let Some(term) = self.terms.get(self.term_active)
+                                    {
+                                        ui.ctx().copy_text(
+                                            term.selected_text().unwrap_or_else(|| term.text()),
+                                        );
+                                        self.ack(if has_sel {
+                                            crate::tr!("Sélection copiée.", "Selection copied.")
+                                        } else {
+                                            crate::tr!(
+                                                "Contenu du terminal copié.",
+                                                "Terminal content copied."
+                                            )
+                                        });
+                                    }
+                                    if ui
+                                        .add(
+                                            egui::Button::new(RichText::new("+ Shell").size(12.0))
+                                                .frame(false),
+                                        )
+                                        .on_hover_text(crate::tr!(
+                                            "Nouveau terminal",
+                                            "New terminal"
+                                        ))
+                                        .clicked()
+                                    {
+                                        let cwd = self
+                                            .terms
+                                            .get(self.term_active)
+                                            .map(|t| t.cwd.clone())
+                                            .unwrap_or_default();
+                                        request(ui.ctx(), "Shell", &cwd, None);
+                                    }
+                                },
+                            );
                         });
                     });
-                });
                 if let Some(i) = close {
                     self.terms.remove(i);
                     if self.term_active >= self.terms.len() {
@@ -154,7 +269,9 @@ impl NotesApp {
                 }
                 let focus = std::mem::take(&mut self.term_focus);
                 if let Some(term) = self.terms.get_mut(self.term_active) {
-                    egui::Frame::new().inner_margin(egui::Margin::symmetric(10, 6)).show(ui, |ui| terminal_view(ui, term, bg, dark, focus));
+                    egui::Frame::new()
+                        .inner_margin(egui::Margin::symmetric(10, 6))
+                        .show(ui, |ui| terminal_view(ui, term, bg, dark, focus));
                 }
             });
         self.dock_h = dock.response.rect.height();
@@ -162,7 +279,13 @@ impl NotesApp {
 }
 
 /// Draw one terminal and feed it the keyboard while it has focus.
-pub(super) fn terminal_view(ui: &mut egui::Ui, term: &mut Term, bg: Color32, dark: bool, focus: bool) {
+pub(super) fn terminal_view(
+    ui: &mut egui::Ui,
+    term: &mut Term,
+    bg: Color32,
+    dark: bool,
+    focus: bool,
+) {
     let font = FontId::monospace(FONT);
     let cw = ui.fonts_mut(|f| f.glyph_width(&font, 'M')).max(1.0);
     let rh = (FONT * 1.32).ceil();
@@ -170,11 +293,18 @@ pub(super) fn terminal_view(ui: &mut egui::Ui, term: &mut Term, bg: Color32, dar
     let cols = (avail.x / cw).floor().max(10.0) as u16;
     let rows = (avail.y / rh).floor().max(2.0) as u16;
     term.resize(rows, cols);
-    let (rect, resp) = ui.allocate_exact_size(egui::vec2(cols as f32 * cw, rows as f32 * rh), egui::Sense::click_and_drag());
+    let (rect, resp) = ui.allocate_exact_size(
+        egui::vec2(cols as f32 * cw, rows as f32 * rh),
+        egui::Sense::click_and_drag(),
+    );
     // Mouse selection: drag over the cells, Cmd+C (or "Copier") copies it.
     let cell_at = |p: egui::Pos2| -> (u16, u16) {
-        let c = ((p.x - rect.left()) / cw).floor().clamp(0.0, cols as f32 - 1.0) as u16;
-        let r = ((p.y - rect.top()) / rh).floor().clamp(0.0, rows as f32 - 1.0) as u16;
+        let c = ((p.x - rect.left()) / cw)
+            .floor()
+            .clamp(0.0, cols as f32 - 1.0) as u16;
+        let r = ((p.y - rect.top()) / rh)
+            .floor()
+            .clamp(0.0, rows as f32 - 1.0) as u16;
         (r, c)
     };
     if resp.drag_started() {
@@ -193,7 +323,13 @@ pub(super) fn terminal_view(ui: &mut egui::Ui, term: &mut Term, bg: Color32, dar
         // Double click: the word under the pointer.
         if let Some(p) = resp.interact_pointer_pos() {
             let (r, c) = cell_at(p);
-            let word = |col: u16| term.with_screen(|s| s.cell(r, col).map(|x| x.contents().chars().any(|ch| !ch.is_whitespace())).unwrap_or(false));
+            let word = |col: u16| {
+                term.with_screen(|s| {
+                    s.cell(r, col)
+                        .map(|x| x.contents().chars().any(|ch| !ch.is_whitespace()))
+                        .unwrap_or(false)
+                })
+            };
             if word(c) {
                 let (mut a, mut b) = (c, c);
                 while a > 0 && word(a - 1) {
@@ -211,7 +347,17 @@ pub(super) fn terminal_view(ui: &mut egui::Ui, term: &mut Term, bg: Color32, dar
         resp.request_focus();
     }
     let has_focus = resp.has_focus();
-    ui.memory_mut(|m| m.set_focus_lock_filter(id, egui::EventFilter { tab: true, horizontal_arrows: true, vertical_arrows: true, escape: true }));
+    ui.memory_mut(|m| {
+        m.set_focus_lock_filter(
+            id,
+            egui::EventFilter {
+                tab: true,
+                horizontal_arrows: true,
+                vertical_arrows: true,
+                escape: true,
+            },
+        )
+    });
 
     // Keyboard.
     if has_focus {
@@ -226,11 +372,22 @@ pub(super) fn terminal_view(ui: &mut egui::Ui, term: &mut Term, bg: Color32, dar
                 }
                 egui::Event::Text(s) => term.write(s.as_bytes()),
                 egui::Event::Paste(s) => term.paste(&s),
-                egui::Event::Key { key, pressed: true, modifiers, .. } => {
+                egui::Event::Key {
+                    key,
+                    pressed: true,
+                    modifiers,
+                    ..
+                } => {
                     if modifiers.mac_cmd || modifiers.command && !modifiers.ctrl {
                         continue; // Cmd+… stays the app's (copy, paste, tabs…).
                     }
-                    if let Some(b) = key_bytes(key, modifiers.ctrl, modifiers.alt, modifiers.shift, app_cursor) {
+                    if let Some(b) = key_bytes(
+                        key,
+                        modifiers.ctrl,
+                        modifiers.alt,
+                        modifiers.shift,
+                        app_cursor,
+                    ) {
                         term.write(&b);
                     }
                 }
@@ -247,7 +404,10 @@ pub(super) fn terminal_view(ui: &mut egui::Ui, term: &mut Term, bg: Color32, dar
             let lines = (acc / rh).trunc();
             ui.ctx().data_mut(|d| d.insert_temp(id, acc - lines * rh));
             if lines != 0.0 {
-                let (r, c) = ui.input(|i| i.pointer.hover_pos()).map(cell_at).unwrap_or((0, 0));
+                let (r, c) = ui
+                    .input(|i| i.pointer.hover_pos())
+                    .map(cell_at)
+                    .unwrap_or((0, 0));
                 term.wheel(lines as i32, r, c);
             }
         }
@@ -256,8 +416,15 @@ pub(super) fn terminal_view(ui: &mut egui::Ui, term: &mut Term, bg: Color32, dar
     // Grid.
     let painter = ui.painter_at(rect);
     painter.rect_filled(rect, 0.0, bg);
-    let fg_default = if dark { Color32::from_rgb(222, 222, 220) } else { Color32::from_rgb(40, 40, 38) };
-    let sel = term.selection.map(crate::terminal::ordered).filter(|(a, b)| a != b);
+    let fg_default = if dark {
+        Color32::from_rgb(222, 222, 220)
+    } else {
+        Color32::from_rgb(40, 40, 38)
+    };
+    let sel = term
+        .selection
+        .map(crate::terminal::ordered)
+        .filter(|(a, b)| a != b);
     let in_sel = |r: u16, c: u16| sel.is_some_and(|(a, b)| (r, c) >= a && (r, c) <= b);
     let sel_color = Color32::from_rgba_unmultiplied(35, 131, 226, 90);
     term.with_screen(|s| {
@@ -268,26 +435,29 @@ pub(super) fn terminal_view(ui: &mut egui::Ui, term: &mut Term, bg: Color32, dar
         let mut run = String::new();
         let mut run_start = 0u16;
         let mut run_style: Option<(Color32, bool, bool, bool)> = None;
-        let flush = |run: &mut String, start: u16, style: Option<(Color32, bool, bool, bool)>, y: f32| {
-            if run.trim().is_empty() {
-                run.clear();
-                return;
-            }
-            let Some((fg, bold, italic, underline)) = style else { return };
-            let mut fmt = egui::TextFormat::simple(font.clone(), fg);
-            fmt.italics = italic;
-            if underline {
-                fmt.underline = egui::Stroke::new(1.0, fg);
-            }
-            let mut job = egui::text::LayoutJob::single_section(std::mem::take(run), fmt);
-            job.wrap.max_width = f32::INFINITY;
-            let g = ui.fonts_mut(|f| f.layout_job(job));
-            let pos = egui::pos2(rect.left() + start as f32 * cw, y + (rh - g.size().y) / 2.0);
-            painter.galley(pos, g.clone(), fg);
-            if bold {
-                painter.galley(pos + egui::vec2(0.6, 0.0), g, fg);
-            }
-        };
+        let flush =
+            |run: &mut String, start: u16, style: Option<(Color32, bool, bool, bool)>, y: f32| {
+                if run.trim().is_empty() {
+                    run.clear();
+                    return;
+                }
+                let Some((fg, bold, italic, underline)) = style else {
+                    return;
+                };
+                let mut fmt = egui::TextFormat::simple(font.clone(), fg);
+                fmt.italics = italic;
+                if underline {
+                    fmt.underline = egui::Stroke::new(1.0, fg);
+                }
+                let mut job = egui::text::LayoutJob::single_section(std::mem::take(run), fmt);
+                job.wrap.max_width = f32::INFINITY;
+                let g = ui.fonts_mut(|f| f.layout_job(job));
+                let pos = egui::pos2(rect.left() + start as f32 * cw, y + (rh - g.size().y) / 2.0);
+                painter.galley(pos, g.clone(), fg);
+                if bold {
+                    painter.galley(pos + egui::vec2(0.6, 0.0), g, fg);
+                }
+            };
         for r in 0..srows.min(rows) {
             let y = rect.top() + r as f32 * rh;
             let mut c = 0u16;
@@ -314,7 +484,10 @@ pub(super) fn terminal_view(ui: &mut egui::Ui, term: &mut Term, bg: Color32, dar
                 }
                 let txt = cell.contents();
                 let style = (fg, cell.bold(), cell.italic(), cell.underline());
-                let ascii = !cell.is_wide() && (txt.is_empty() || (txt.len() == 1 && txt.as_bytes()[0].is_ascii_graphic()) || txt == " ");
+                let ascii = !cell.is_wide()
+                    && (txt.is_empty()
+                        || (txt.len() == 1 && txt.as_bytes()[0].is_ascii_graphic())
+                        || txt == " ");
                 if ascii {
                     if run_style != Some(style) {
                         flush(&mut run, run_start, run_style, y);
@@ -327,7 +500,8 @@ pub(super) fn terminal_view(ui: &mut egui::Ui, term: &mut Term, bg: Color32, dar
                     run_style = None;
                     run_start = c + 1;
                     let one = txt.chars().count() == 1;
-                    if one && draw_block_char(&painter, cell_rect, txt.chars().next().unwrap(), fg) {
+                    if one && draw_block_char(&painter, cell_rect, txt.chars().next().unwrap(), fg)
+                    {
                         // Box-drawing and block characters are drawn as shapes: the font may
                         // lack them, and drawn they join up exactly from one cell to the next.
                     } else if !txt.is_empty() && !cell.is_wide_continuation() {
@@ -344,21 +518,43 @@ pub(super) fn terminal_view(ui: &mut egui::Ui, term: &mut Term, bg: Color32, dar
         if s.scrollback() == 0 && !s.hide_cursor() {
             let (cr, cc) = s.cursor_position();
             if cr < rows && cc < cols {
-                let r = egui::Rect::from_min_size(egui::pos2(rect.left() + cc as f32 * cw, rect.top() + cr as f32 * rh), egui::vec2(cw, rh));
+                let r = egui::Rect::from_min_size(
+                    egui::pos2(rect.left() + cc as f32 * cw, rect.top() + cr as f32 * rh),
+                    egui::vec2(cw, rh),
+                );
                 if has_focus {
                     painter.rect_filled(r, 1.0, fg_default.gamma_multiply(0.75));
                 } else {
-                    painter.rect_stroke(r, 1.0, egui::Stroke::new(1.0, fg_default.gamma_multiply(0.6)), egui::StrokeKind::Inside);
+                    painter.rect_stroke(
+                        r,
+                        1.0,
+                        egui::Stroke::new(1.0, fg_default.gamma_multiply(0.6)),
+                        egui::StrokeKind::Inside,
+                    );
                 }
             }
         }
         if s.scrollback() > 0 {
-            let label = crate::trf!("historique : {} ligne{p} plus haut", "history: {} line{p} up", s.scrollback(), p = crate::i18n::plural(s.scrollback()));
-            painter.text(rect.right_top() + egui::vec2(-8.0, 4.0), egui::Align2::RIGHT_TOP, label, FontId::proportional(11.5), Color32::from_rgb(35, 131, 226));
+            let label = crate::trf!(
+                "historique : {} ligne{p} plus haut",
+                "history: {} line{p} up",
+                s.scrollback(),
+                p = crate::i18n::plural(s.scrollback())
+            );
+            painter.text(
+                rect.right_top() + egui::vec2(-8.0, 4.0),
+                egui::Align2::RIGHT_TOP,
+                label,
+                FontId::proportional(11.5),
+                Color32::from_rgb(35, 131, 226),
+            );
         }
     });
     if !has_focus {
-        resp.on_hover_text(crate::tr!("Cliquer pour écrire dans le terminal", "Click to type in the terminal"));
+        resp.on_hover_text(crate::tr!(
+            "Cliquer pour écrire dans le terminal",
+            "Click to type in the terminal"
+        ));
     }
 }
 
@@ -396,23 +592,39 @@ fn draw_block_char(p: &egui::Painter, r: egui::Rect, ch: char, color: Color32) -
         let c = egui::pos2(r.center().x.round() + 0.5, r.center().y.round() + 0.5);
         let w = |k: u8| if k == 2 { 2.0 } else { 1.0 };
         if l > 0 {
-            p.line_segment([egui::pos2(r.left(), c.y), c], egui::Stroke::new(w(l), color));
+            p.line_segment(
+                [egui::pos2(r.left(), c.y), c],
+                egui::Stroke::new(w(l), color),
+            );
         }
         if rr > 0 {
-            p.line_segment([c, egui::pos2(r.right(), c.y)], egui::Stroke::new(w(rr), color));
+            p.line_segment(
+                [c, egui::pos2(r.right(), c.y)],
+                egui::Stroke::new(w(rr), color),
+            );
         }
         if u > 0 {
-            p.line_segment([egui::pos2(c.x, r.top()), c], egui::Stroke::new(w(u), color));
+            p.line_segment(
+                [egui::pos2(c.x, r.top()), c],
+                egui::Stroke::new(w(u), color),
+            );
         }
         if d > 0 {
-            p.line_segment([c, egui::pos2(c.x, r.bottom())], egui::Stroke::new(w(d), color));
+            p.line_segment(
+                [c, egui::pos2(c.x, r.bottom())],
+                egui::Stroke::new(w(d), color),
+            );
         }
         return true;
     }
     let (x0, x1, y0, y1) = (r.left(), r.right(), r.top(), r.bottom());
     let (xm, ym) = (r.center().x, r.center().y);
     let rect = |a: f32, b: f32, c2: f32, d2: f32, col: Color32| {
-        p.rect_filled(egui::Rect::from_min_max(egui::pos2(a, c2), egui::pos2(b, d2)), 0.0, col);
+        p.rect_filled(
+            egui::Rect::from_min_max(egui::pos2(a, c2), egui::pos2(b, d2)),
+            0.0,
+            col,
+        );
     };
     match ch {
         '█' => rect(x0, x1, y0, y1, color),

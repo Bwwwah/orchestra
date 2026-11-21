@@ -39,7 +39,9 @@ fn read_store() -> String {
             .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
             .unwrap_or_default()
     } else {
-        std::fs::read_to_string(file()).map(|s| s.trim().to_string()).unwrap_or_default()
+        std::fs::read_to_string(file())
+            .map(|s| s.trim().to_string())
+            .unwrap_or_default()
     }
 }
 
@@ -49,10 +51,25 @@ fn write_store(code: &str) -> Result<(), String> {
     }
     if use_keychain() {
         let o = security()
-            .args(["add-generic-password", "-U", "-s", SERVICE, "-a", ACCOUNT, "-l", "Orchestra · code d'accès en direct", "-w", code])
+            .args([
+                "add-generic-password",
+                "-U",
+                "-s",
+                SERVICE,
+                "-a",
+                ACCOUNT,
+                "-l",
+                "Orchestra · code d'accès en direct",
+                "-w",
+                code,
+            ])
             .output()
             .map_err(|e| e.to_string())?;
-        if o.status.success() { Ok(()) } else { Err(String::from_utf8_lossy(&o.stderr).trim().to_string()) }
+        if o.status.success() {
+            Ok(())
+        } else {
+            Err(String::from_utf8_lossy(&o.stderr).trim().to_string())
+        }
     } else {
         let f = file();
         if let Some(d) = f.parent() {

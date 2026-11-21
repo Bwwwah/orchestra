@@ -26,7 +26,11 @@ pub fn set(choice: &str) {
 
 /// The system's language, as "fr-FR", "en-US"…
 pub fn system_locale() -> String {
-    std::env::var("ORCHESTRA_LANG").ok().filter(|s| !s.is_empty()).or_else(sys_locale::get_locale).unwrap_or_else(|| "fr".into())
+    std::env::var("ORCHESTRA_LANG")
+        .ok()
+        .filter(|s| !s.is_empty())
+        .or_else(sys_locale::get_locale)
+        .unwrap_or_else(|| "fr".into())
 }
 
 /// English for every language but French (the app speaks these two).
@@ -56,7 +60,11 @@ pub fn plural(n: usize) -> &'static str {
 }
 
 fn plural_in(n: usize, en: bool) -> &'static str {
-    if (en && n != 1) || (!en && n > 1) { "s" } else { "" }
+    if (en && n != 1) || (!en && n > 1) {
+        "s"
+    } else {
+        ""
+    }
 }
 
 /// A number with one decimal, with a decimal comma in French (« 14,3 ») and a point in
@@ -87,6 +95,9 @@ mod tests {
         assert_eq!(dec1_in(14.2857, false), "14,3");
         assert_eq!(dec1_in(14.2857, true), "14.3");
         let s = super::plural(3);
-        assert_eq!(crate::trf!("{} projet{s} prêt{s}", "{} project{s} ready", 3), "3 projets prêts");
+        assert_eq!(
+            crate::trf!("{} projet{s} prêt{s}", "{} project{s} ready", 3),
+            "3 projets prêts"
+        );
     }
 }

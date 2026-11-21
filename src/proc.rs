@@ -34,7 +34,10 @@ mod tests {
     fn runs_like_command_new() {
         let prog = if cfg!(windows) { "cmd" } else { "sh" };
         let arg = if cfg!(windows) { "/C" } else { "-c" };
-        let out = super::command(prog).args([arg, "echo orchestra"]).output().unwrap();
+        let out = super::command(prog)
+            .args([arg, "echo orchestra"])
+            .output()
+            .unwrap();
         assert!(out.status.success());
         assert!(String::from_utf8_lossy(&out.stdout).contains("orchestra"));
     }

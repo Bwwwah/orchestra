@@ -16,9 +16,18 @@ pub const STEP_MAX: usize = 2000;
 
 /// A state of play built from lists, so every AI's summary has the same shape:
 /// "Fait", "En cours", "Bloquants", then free notes.
-pub fn summary_from_parts(done: &[String], doing: &[String], blockers: &[String], notes: &str) -> String {
+pub fn summary_from_parts(
+    done: &[String],
+    doing: &[String],
+    blockers: &[String],
+    notes: &str,
+) -> String {
     let mut out = String::new();
-    for (title, items) in [(crate::tr!("Fait", "Done"), done), (crate::tr!("En cours", "In progress"), doing), (crate::tr!("Bloquants", "Blockers"), blockers)] {
+    for (title, items) in [
+        (crate::tr!("Fait", "Done"), done),
+        (crate::tr!("En cours", "In progress"), doing),
+        (crate::tr!("Bloquants", "Blockers"), blockers),
+    ] {
         if items.is_empty() {
             continue;
         }
@@ -45,7 +54,12 @@ pub enum ProjectStatus {
 }
 
 impl ProjectStatus {
-    pub const ALL: [ProjectStatus; 4] = [ProjectStatus::Idea, ProjectStatus::Active, ProjectStatus::Paused, ProjectStatus::Done];
+    pub const ALL: [ProjectStatus; 4] = [
+        ProjectStatus::Idea,
+        ProjectStatus::Active,
+        ProjectStatus::Paused,
+        ProjectStatus::Done,
+    ];
 
     pub fn label(self) -> &'static str {
         match self {
@@ -60,7 +74,11 @@ impl ProjectStatus {
     pub fn from_name(s: &str) -> Option<Self> {
         let s = s.trim().to_lowercase();
         Self::ALL.into_iter().find(|k| {
-            k.label().to_lowercase() == s || serde_json::to_value(k).ok().and_then(|v| v.as_str().map(|x| x == s)) == Some(true)
+            k.label().to_lowercase() == s
+                || serde_json::to_value(k)
+                    .ok()
+                    .and_then(|v| v.as_str().map(|x| x == s))
+                    == Some(true)
         })
     }
 }
@@ -88,7 +106,11 @@ impl StepStatus {
     pub fn from_name(s: &str) -> Option<Self> {
         let s = s.trim().to_lowercase();
         Self::ALL.into_iter().find(|k| {
-            k.label().to_lowercase() == s || serde_json::to_value(k).ok().and_then(|v| v.as_str().map(|x| x == s)) == Some(true)
+            k.label().to_lowercase() == s
+                || serde_json::to_value(k)
+                    .ok()
+                    .and_then(|v| v.as_str().map(|x| x == s))
+                    == Some(true)
         })
     }
 }
@@ -147,7 +169,11 @@ pub const RECEIVED_AUTHOR_MAX: usize = 60;
 /// both sides, and the other AI sees it lost at its next get_project_state.
 fn takes_theirs(ours: &Step, theirs: &Step) -> bool {
     let now = now_ms();
-    let live = |s: &Step| s.status == StepStatus::Doing && !s.held_by.is_empty() && now < s.held_at.saturating_add(HOLD_MS);
+    let live = |s: &Step| {
+        s.status == StepStatus::Doing
+            && !s.held_by.is_empty()
+            && now < s.held_at.saturating_add(HOLD_MS)
+    };
     if live(ours) && live(theirs) && ours.held_by != theirs.held_by {
         return theirs.hold_key() < ours.hold_key();
     }
@@ -161,7 +187,10 @@ pub const HOLD_MS: u64 = 3 * 3600 * 1000;
 impl Step {
     /// Reserved by an AI on another computer, and still within `HOLD_MS` at `now`.
     pub fn held_elsewhere(&self, me: &str, now: u64) -> bool {
-        self.status == StepStatus::Doing && !self.held_by.is_empty() && self.held_by != me && now < self.held_at.saturating_add(HOLD_MS)
+        self.status == StepStatus::Doing
+            && !self.held_by.is_empty()
+            && self.held_by != me
+            && now < self.held_at.saturating_add(HOLD_MS)
     }
 
     /// Order of two reservations of one step: the earlier wins, the computer id breaks a tie,
@@ -326,7 +355,11 @@ impl Project {
     /// What comes in is cleaned (one line, `RECEIVED_STEP_MAX` characters at most) and
     /// marked `received`; a step already here keeps its own mark. Returns true when ours
     /// changed.
-    pub fn merge_steps(&mut self, theirs: &[Step], their_deleted: &std::collections::BTreeMap<String, u64>) -> bool {
+    pub fn merge_steps(
+        &mut self,
+        theirs: &[Step],
+        their_deleted: &std::collections::BTreeMap<String, u64>,
+    ) -> bool {
         let mut changed = false;
         for (id, t) in their_deleted {
             let e = self.deleted_steps.entry(id.clone()).or_insert(*t);
@@ -360,7 +393,8 @@ impl Project {
         }
         let tombs = &self.deleted_steps;
         let before = self.steps.len();
-        self.steps.retain(|s| tombs.get(&s.id).is_none_or(|t| s.updated > *t));
+        self.steps
+            .retain(|s| tombs.get(&s.id).is_none_or(|t| s.updated > *t));
         changed | (before != self.steps.len())
     }
 
@@ -377,7 +411,12 @@ impl Project {
     }
 
     pub fn new(folder: impl Into<String>) -> Self {
-        Project { folder: folder.into(), status: ProjectStatus::Active, last_activity: now_ms(), ..Default::default() }
+        Project {
+            folder: folder.into(),
+            status: ProjectStatus::Active,
+            last_activity: now_ms(),
+            ..Default::default()
+        }
     }
 
     pub fn touch(&mut self) {
@@ -404,7 +443,9 @@ impl Project {
     }
 
     pub fn set_step_status(&mut self, id: &str, status: StepStatus) -> bool {
-        let Some(s) = self.steps.iter_mut().find(|s| s.id == id) else { return false };
+        let Some(s) = self.steps.iter_mut().find(|s| s.id == id) else {
+            return false;
+        };
         if s.status != status {
             s.status = status;
             s.updated = now_ms();
@@ -422,7 +463,9 @@ impl Project {
     /// the reservation. Err holds who has it, for the AI.
     pub fn claim_step(&mut self, id: &str, me: &str) -> Result<(), String> {
         let now = now_ms();
-        let Some(s) = self.steps.iter_mut().find(|s| s.id == id) else { return Err(format!("no step {id}")) };
+        let Some(s) = self.steps.iter_mut().find(|s| s.id == id) else {
+            return Err(format!("no step {id}"));
+        };
         if s.held_elsewhere(me, now) {
             let mins = (now - s.held_at) / 60_000;
             return Err(crate::trf!(
@@ -467,18 +510,32 @@ impl Project {
         if before == Some(id) {
             return false;
         }
-        let Some(from) = self.steps.iter().position(|s| s.id == id) else { return false };
+        let Some(from) = self.steps.iter().position(|s| s.id == id) else {
+            return false;
+        };
         if before.is_some_and(|b| !self.steps.iter().any(|s| s.id == b)) {
             return false;
         }
         let old: Vec<String> = self.steps.iter().map(|s| s.id.clone()).collect();
         let s = self.steps.remove(from);
         let to = match before {
-            Some(b) => self.steps.iter().position(|s| s.id == b).unwrap_or(self.steps.len()),
-            None => self.steps.iter().rposition(|s| s.status != StepStatus::Done).map_or(0, |i| i + 1),
+            Some(b) => self
+                .steps
+                .iter()
+                .position(|s| s.id == b)
+                .unwrap_or(self.steps.len()),
+            None => self
+                .steps
+                .iter()
+                .rposition(|s| s.status != StepStatus::Done)
+                .map_or(0, |i| i + 1),
         };
         self.steps.insert(to, s);
-        let moved = self.steps.iter().map(|s| s.id.as_str()).ne(old.iter().map(String::as_str));
+        let moved = self
+            .steps
+            .iter()
+            .map(|s| s.id.as_str())
+            .ne(old.iter().map(String::as_str));
         if moved {
             self.touch();
         }
@@ -500,7 +557,13 @@ impl Project {
     }
 
     pub fn progress(&self) -> (usize, usize) {
-        (self.steps.iter().filter(|s| s.status == StepStatus::Done).count(), self.steps.len())
+        (
+            self.steps
+                .iter()
+                .filter(|s| s.status == StepStatus::Done)
+                .count(),
+            self.steps.len(),
+        )
     }
 
     /// The step in progress, else the first one still to do.
@@ -516,13 +579,22 @@ impl Project {
             .iter()
             .filter(free)
             .find(|s| s.status == StepStatus::Doing)
-            .or_else(|| self.steps.iter().filter(free).find(|s| s.status == StepStatus::Todo))
+            .or_else(|| {
+                self.steps
+                    .iter()
+                    .filter(free)
+                    .find(|s| s.status == StepStatus::Todo)
+            })
     }
 
     /// Add a session, or refresh it if already known (same tool and id).
     pub fn link_session(&mut self, mut s: SessionRef) {
         s.title = crate::richtext::one_line(&s.title, 120);
-        match self.sessions.iter_mut().find(|x| x.tool == s.tool && x.id == s.id) {
+        match self
+            .sessions
+            .iter_mut()
+            .find(|x| x.tool == s.tool && x.id == s.id)
+        {
             Some(old) => {
                 if !s.title.is_empty() {
                     old.title = s.title;
@@ -530,12 +602,17 @@ impl Project {
                 if !s.location.is_empty() {
                     old.location = s.location;
                 }
-                old.started = if old.started == 0 { s.started } else { old.started.min(s.started.max(1)) };
+                old.started = if old.started == 0 {
+                    s.started
+                } else {
+                    old.started.min(s.started.max(1))
+                };
                 old.last_activity = old.last_activity.max(s.last_activity);
             }
             None => self.sessions.push(s),
         }
-        self.sessions.sort_by_key(|s| std::cmp::Reverse(s.last_activity));
+        self.sessions
+            .sort_by_key(|s| std::cmp::Reverse(s.last_activity));
         let latest = self.sessions.first().map(|s| s.last_activity).unwrap_or(0);
         self.last_activity = self.last_activity.max(latest);
     }
@@ -545,9 +622,9 @@ impl Project {
 pub fn normalize_folder(folder: &str) -> PathBuf {
     let f = folder.trim();
     let raw = match f.strip_prefix("~") {
-        Some(rest) if rest.is_empty() || rest.starts_with('/') => {
-            dirs::home_dir().unwrap_or_default().join(rest.trim_start_matches('/'))
-        }
+        Some(rest) if rest.is_empty() || rest.starts_with('/') => dirs::home_dir()
+            .unwrap_or_default()
+            .join(rest.trim_start_matches('/')),
         _ => PathBuf::from(f),
     };
     let mut out = PathBuf::new();
@@ -565,9 +642,26 @@ pub fn normalize_folder(folder: &str) -> PathBuf {
 
 /// Files whose presence at the root of a folder marks a code project.
 const CODE_MARKERS: &[&str] = &[
-    ".git", "Cargo.toml", "package.json", "pyproject.toml", "setup.py", "requirements.txt", "go.mod", "pom.xml",
-    "build.gradle", "build.gradle.kts", "Gemfile", "composer.json", "Makefile", "CMakeLists.txt", "Package.swift",
-    "pubspec.yaml", "mix.exs", "deno.json", "tsconfig.json", "Dockerfile",
+    ".git",
+    "Cargo.toml",
+    "package.json",
+    "pyproject.toml",
+    "setup.py",
+    "requirements.txt",
+    "go.mod",
+    "pom.xml",
+    "build.gradle",
+    "build.gradle.kts",
+    "Gemfile",
+    "composer.json",
+    "Makefile",
+    "CMakeLists.txt",
+    "Package.swift",
+    "pubspec.yaml",
+    "mix.exs",
+    "deno.json",
+    "tsconfig.json",
+    "Dockerfile",
 ];
 
 /// Whether a project with this folder gets the git (Versions) card: code projects, and
@@ -589,8 +683,9 @@ pub fn code_kind(folder: &str, forced: Option<bool>) -> bool {
 
 /// Source file extensions counted when no marker is found.
 const CODE_EXTS: &[&str] = &[
-    "rs", "py", "js", "jsx", "ts", "tsx", "go", "java", "kt", "swift", "c", "h", "cpp", "hpp", "cc", "cs", "rb", "php",
-    "dart", "ex", "exs", "scala", "lua", "sh", "vue", "svelte", "m", "mm", "zig",
+    "rs", "py", "js", "jsx", "ts", "tsx", "go", "java", "kt", "swift", "c", "h", "cpp", "hpp",
+    "cc", "cs", "rb", "php", "dart", "ex", "exs", "scala", "lua", "sh", "vue", "svelte", "m", "mm",
+    "zig",
 ];
 
 /// Whether `dir` looks like a code project: a known marker at its root (`.git`, `Cargo.toml`,
@@ -603,7 +698,11 @@ pub fn is_code_folder(dir: &Path) -> bool {
     if CODE_MARKERS.iter().any(|m| dir.join(m).exists()) {
         return true;
     }
-    let is_src = |p: &Path| p.extension().and_then(|e| e.to_str()).is_some_and(|e| CODE_EXTS.contains(&e.to_ascii_lowercase().as_str()));
+    let is_src = |p: &Path| {
+        p.extension()
+            .and_then(|e| e.to_str())
+            .is_some_and(|e| CODE_EXTS.contains(&e.to_ascii_lowercase().as_str()))
+    };
     let mut found = 0;
     let mut seen = 0;
     let mut subdirs = vec![];
@@ -615,7 +714,12 @@ pub fn is_code_folder(dir: &Path) -> bool {
         let p = e.path();
         let name = e.file_name().to_string_lossy().to_string();
         if p.is_dir() {
-            if !name.starts_with('.') && !matches!(name.as_str(), "node_modules" | "target" | "vendor" | "venv" | "__pycache__") {
+            if !name.starts_with('.')
+                && !matches!(
+                    name.as_str(),
+                    "node_modules" | "target" | "vendor" | "venv" | "__pycache__"
+                )
+            {
                 subdirs.push(p);
             }
         } else if is_src(&p) {
@@ -626,7 +730,12 @@ pub fn is_code_folder(dir: &Path) -> bool {
         if found >= 3 {
             break;
         }
-        for e in std::fs::read_dir(&sub).into_iter().flatten().flatten().take(200) {
+        for e in std::fs::read_dir(&sub)
+            .into_iter()
+            .flatten()
+            .flatten()
+            .take(200)
+        {
             if e.path().is_file() && is_src(&e.path()) {
                 found += 1;
             }
@@ -638,10 +747,24 @@ pub fn is_code_folder(dir: &Path) -> bool {
 impl Workspace {
     /// Pages that are projects (not in the trash), most recent activity first.
     pub fn projects(&self) -> Vec<&Page> {
-        let mut v: Vec<&Page> = self.pages.iter().filter(|p| !p.trashed && p.project.is_some()).collect();
+        let mut v: Vec<&Page> = self
+            .pages
+            .iter()
+            .filter(|p| !p.trashed && p.project.is_some())
+            .collect();
         v.sort_by(|a, b| {
-            let la = a.project.as_ref().map(|x| x.last_activity).unwrap_or(0).max(a.updated);
-            let lb = b.project.as_ref().map(|x| x.last_activity).unwrap_or(0).max(b.updated);
+            let la = a
+                .project
+                .as_ref()
+                .map(|x| x.last_activity)
+                .unwrap_or(0)
+                .max(a.updated);
+            let lb = b
+                .project
+                .as_ref()
+                .map(|x| x.last_activity)
+                .unwrap_or(0)
+                .max(b.updated);
             lb.cmp(&la)
         });
         v
@@ -653,7 +776,10 @@ impl Workspace {
         if let Some(p) = self.page_mut(&id) {
             p.icon = "🚀".into();
             p.project = Some(Project::new(folder.trim()));
-            p.blocks = vec![crate::model::Block::new(crate::model::BlockKind::Paragraph, "")];
+            p.blocks = vec![crate::model::Block::new(
+                crate::model::BlockKind::Paragraph,
+                "",
+            )];
         }
         id
     }
@@ -674,7 +800,11 @@ impl Workspace {
     /// Ids of every page that belongs to a shared project (the project page and below).
     pub fn shared_ids(&self) -> std::collections::HashSet<String> {
         let mut out = std::collections::HashSet::new();
-        for p in self.pages.iter().filter(|p| p.project.as_ref().is_some_and(|x| x.shared)) {
+        for p in self
+            .pages
+            .iter()
+            .filter(|p| p.project.as_ref().is_some_and(|x| x.shared))
+        {
             out.insert(p.id.clone());
             out.extend(self.descendants(&p.id));
         }
@@ -708,7 +838,11 @@ impl Workspace {
     /// - a new page: only under a shared page (ours, or one accepted in the same batch).
     pub fn accept_remote(&self, pages: Vec<Page>) -> Vec<Page> {
         let shared = self.shared_ids();
-        let known: std::collections::HashMap<&str, &Option<String>> = self.pages.iter().map(|p| (p.id.as_str(), &p.parent)).collect();
+        let known: std::collections::HashMap<&str, &Option<String>> = self
+            .pages
+            .iter()
+            .map(|p| (p.id.as_str(), &p.parent))
+            .collect();
         let mut allowed = shared.clone();
         let mut rest = pages;
         let mut out = vec![];
@@ -749,9 +883,15 @@ impl Workspace {
     /// Of the deletions another person sent, those that may apply here: pages of shared
     /// projects, and ids we don't have (a page they deleted before it reached us). Never
     /// one of our private pages, even if its id is known to them.
-    pub fn accept_remote_deletions(&self, deleted: std::collections::BTreeMap<String, u64>) -> std::collections::BTreeMap<String, u64> {
+    pub fn accept_remote_deletions(
+        &self,
+        deleted: std::collections::BTreeMap<String, u64>,
+    ) -> std::collections::BTreeMap<String, u64> {
         let shared = self.shared_ids();
-        deleted.into_iter().filter(|(id, _)| shared.contains(id) || self.page(id).is_none()).collect()
+        deleted
+            .into_iter()
+            .filter(|(id, _)| shared.contains(id) || self.page(id).is_none())
+            .collect()
     }
 
     /// What may leave this computer: the shared projects, their pages and discussions,
@@ -759,9 +899,19 @@ impl Workspace {
     pub fn shared_copy(&self) -> Workspace {
         let ids = self.shared_ids();
         Workspace {
-            pages: self.pages.iter().filter(|p| ids.contains(&p.id)).map(shareable).collect(),
+            pages: self
+                .pages
+                .iter()
+                .filter(|p| ids.contains(&p.id))
+                .map(shareable)
+                .collect(),
             deleted: self.deleted.clone(),
-            chat: self.chat.iter().filter(|(_, m)| ids.contains(&m.project)).map(|(k, v)| (k.clone(), v.clone())).collect(),
+            chat: self
+                .chat
+                .iter()
+                .filter(|(_, m)| ids.contains(&m.project))
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect(),
             ..Default::default()
         }
     }
@@ -848,33 +998,72 @@ impl Workspace {
 
 /// The project as Markdown, for the AIs: status, folder, summary, steps, sessions.
 pub fn project_to_markdown(page: &Page) -> String {
-    let Some(pr) = &page.project else { return String::new() };
+    let Some(pr) = &page.project else {
+        return String::new();
+    };
     let mut out = format!("# {}\n\n", page.display_title());
-    out.push_str(&crate::trf!("- id : {}\n- statut : {}\n", "- id: {}\n- status: {}\n", page.id, pr.status.label()));
+    out.push_str(&crate::trf!(
+        "- id : {}\n- statut : {}\n",
+        "- id: {}\n- status: {}\n",
+        page.id,
+        pr.status.label()
+    ));
     if !pr.folder.is_empty() {
-        out.push_str(&crate::trf!("- dossier : {}\n", "- folder: {}\n", pr.folder));
+        out.push_str(&crate::trf!(
+            "- dossier : {}\n",
+            "- folder: {}\n",
+            pr.folder
+        ));
     }
     // Code or not, so that the AIs adapt (forced by the person, or detected).
     if pr.code.is_some() || !pr.folder.trim().is_empty() {
         let code = code_kind(&pr.folder, pr.code);
-        let kind = if code { crate::tr!("projet de code", "code project") } else { crate::tr!("projet sans code (documents, cours, démarches…)", "project without code (documents, school, paperwork…)") };
-        let how = if pr.code.is_some() { crate::tr!("choisi par la personne", "chosen by the person") } else { crate::tr!("détecté", "detected") };
-        out.push_str(&crate::trf!("- type : {kind} ({how})\n", "- kind: {kind} ({how})\n"));
+        let kind = if code {
+            crate::tr!("projet de code", "code project")
+        } else {
+            crate::tr!(
+                "projet sans code (documents, cours, démarches…)",
+                "project without code (documents, school, paperwork…)"
+            )
+        };
+        let how = if pr.code.is_some() {
+            crate::tr!("choisi par la personne", "chosen by the person")
+        } else {
+            crate::tr!("détecté", "detected")
+        };
+        out.push_str(&crate::trf!(
+            "- type : {kind} ({how})\n",
+            "- kind: {kind} ({how})\n"
+        ));
     }
     let (done, total) = pr.progress();
-    out.push_str(&crate::trf!("- étapes : {done}/{total} terminées\n", "- steps: {done}/{total} done\n"));
+    out.push_str(&crate::trf!(
+        "- étapes : {done}/{total} terminées\n",
+        "- steps: {done}/{total} done\n"
+    ));
     let (me, now) = (crate::store::computer_id(), now_ms());
     if let Some(n) = pr.next_step_for(&me, now) {
-        out.push_str(&crate::trf!("- prochaine étape : {}\n", "- next step: {}\n", n.title));
+        out.push_str(&crate::trf!(
+            "- prochaine étape : {}\n",
+            "- next step: {}\n",
+            n.title
+        ));
     }
-    out.push_str(crate::tr!("\n## État des lieux\n\n", "\n## Current state\n\n"));
+    out.push_str(crate::tr!(
+        "\n## État des lieux\n\n",
+        "\n## Current state\n\n"
+    ));
     if pr.summary.trim().is_empty() {
         out.push_str(crate::tr!("(pas encore écrit)\n", "(not written yet)\n"));
     } else {
         out.push_str(&pr.summary);
         out.push('\n');
         if !pr.summary_by.is_empty() {
-            out.push_str(&crate::trf!("\n_écrit par {}_\n", "\n_written by {}_\n", pr.summary_by));
+            out.push_str(&crate::trf!(
+                "\n_écrit par {}_\n",
+                "\n_written by {}_\n",
+                pr.summary_by
+            ));
         }
     }
     out.push_str(crate::tr!("\n## Étapes\n\n", "\n## Steps\n\n"));
@@ -887,23 +1076,44 @@ pub fn project_to_markdown(page: &Page) -> String {
             StepStatus::Doing => "~",
             StepStatus::Todo => " ",
         };
-        let src = if s.source.is_empty() { String::new() } else { format!(" — {}", s.source) };
+        let src = if s.source.is_empty() {
+            String::new()
+        } else {
+            format!(" — {}", s.source)
+        };
         // Written on another computer of the shared project: the AI weighs it as a request.
-        let from = if s.received { crate::tr!(" — reçue d'un autre membre du projet partagé", " — received from another member of the shared project") } else { "" };
-        // Another computer's AI is on it: never take it as well.
-        let held = if s.held_elsewhere(&me, now) {
-            crate::tr!(" — réservée par une IA d'un autre ordinateur, ne la prends pas", " — reserved by an AI on another computer, don't take it")
+        let from = if s.received {
+            crate::tr!(
+                " — reçue d'un autre membre du projet partagé",
+                " — received from another member of the shared project"
+            )
         } else {
             ""
         };
-        out.push_str(&format!("- [{mark}] {} (step_id: {}){src}{from}{held}\n", s.title, s.id));
+        // Another computer's AI is on it: never take it as well.
+        let held = if s.held_elsewhere(&me, now) {
+            crate::tr!(
+                " — réservée par une IA d'un autre ordinateur, ne la prends pas",
+                " — reserved by an AI on another computer, don't take it"
+            )
+        } else {
+            ""
+        };
+        out.push_str(&format!(
+            "- [{mark}] {} (step_id: {}){src}{from}{held}\n",
+            s.title, s.id
+        ));
     }
     out.push_str(crate::tr!("\n## Sessions IA\n\n", "\n## AI sessions\n\n"));
     if pr.sessions.is_empty() {
         out.push_str(crate::tr!("(aucune)\n", "(none)\n"));
     }
     for s in &pr.sessions {
-        let t = if s.title.is_empty() { crate::tr!("(sans titre)", "(untitled)") } else { &s.title };
+        let t = if s.title.is_empty() {
+            crate::tr!("(sans titre)", "(untitled)")
+        } else {
+            &s.title
+        };
         out.push_str(&format!("- {} · {} (session {})\n", s.tool, t, s.id));
     }
     out
@@ -918,8 +1128,20 @@ mod tests {
     /// this computer's own when a shared copy comes in.
     #[test]
     fn the_session_budget_is_kept() {
-        let prefs = LaunchPrefs { commits: true, endless: true, end: crate::model::EndConditions { hours: Some(6.0), turns: Some(12), ..Default::default() } };
-        let p = Project { session_limit: Some(95.0), launch: Some(prefs.clone()), ..Default::default() };
+        let prefs = LaunchPrefs {
+            commits: true,
+            endless: true,
+            end: crate::model::EndConditions {
+                hours: Some(6.0),
+                turns: Some(12),
+                ..Default::default()
+            },
+        };
+        let p = Project {
+            session_limit: Some(95.0),
+            launch: Some(prefs.clone()),
+            ..Default::default()
+        };
         let back: Project = serde_json::from_str(&serde_json::to_string(&p).unwrap()).unwrap();
         assert_eq!(back.session_limit, Some(95.0));
         assert_eq!(back.launch, Some(prefs.clone()));
@@ -927,11 +1149,23 @@ mod tests {
         let old: Project = serde_json::from_str("{}").unwrap();
         assert_eq!(old.session_limit, None);
         assert_eq!(old.launch, None);
-        let mut theirs = Project { session_limit: Some(10.0), launch: Some(LaunchPrefs { commits: false, endless: false, end: Default::default() }), ..Default::default() };
+        let mut theirs = Project {
+            session_limit: Some(10.0),
+            launch: Some(LaunchPrefs {
+                commits: false,
+                endless: false,
+                end: Default::default(),
+            }),
+            ..Default::default()
+        };
         theirs.keep_local(Some(&p));
         assert_eq!(theirs.session_limit, Some(95.0));
         assert_eq!(theirs.launch, Some(prefs));
-        let mut new_here = Project { session_limit: Some(10.0), launch: p.launch.clone(), ..Default::default() };
+        let mut new_here = Project {
+            session_limit: Some(10.0),
+            launch: p.launch.clone(),
+            ..Default::default()
+        };
         new_here.keep_local(None);
         assert_eq!(new_here.session_limit, None);
         assert_eq!(new_here.launch, None);
@@ -939,7 +1173,8 @@ mod tests {
 
     #[test]
     fn code_folder_detection() {
-        let base = std::env::temp_dir().join(format!("orch-codecheck-{}", uuid::Uuid::new_v4().simple()));
+        let base =
+            std::env::temp_dir().join(format!("orch-codecheck-{}", uuid::Uuid::new_v4().simple()));
         let w = |p: &str| {
             let f = base.join(p);
             std::fs::create_dir_all(f.parent().unwrap()).unwrap();
@@ -978,7 +1213,10 @@ mod tests {
         assert!(!code_kind(&s("rust"), Some(false)));
         assert!(code_kind(&s("rust"), None) && !code_kind(&s("ecole"), None));
         let mut p = Project::new("/tmp/x");
-        assert!(!serde_json::to_string(&p).unwrap().contains("\"code\""), "auto is not written");
+        assert!(
+            !serde_json::to_string(&p).unwrap().contains("\"code\""),
+            "auto is not written"
+        );
         p.code = Some(false);
         let back: Project = serde_json::from_str(&serde_json::to_string(&p).unwrap()).unwrap();
         assert_eq!(back.code, Some(false));
@@ -990,9 +1228,16 @@ mod tests {
         assert!(md.contains("détecté") || md.contains("detected"));
         page.project.as_mut().unwrap().code = Some(true);
         let md = project_to_markdown(&page);
-        assert!((md.contains("projet de code") || md.contains("code project")) && (md.contains("choisi") || md.contains("chosen")));
+        assert!(
+            (md.contains("projet de code") || md.contains("code project"))
+                && (md.contains("choisi") || md.contains("chosen"))
+        );
         page.project = Some(Project::new(""));
-        assert!(!project_to_markdown(&page).contains("type :") && !project_to_markdown(&page).contains("kind:"), "no folder, nothing forced: no kind");
+        assert!(
+            !project_to_markdown(&page).contains("type :")
+                && !project_to_markdown(&page).contains("kind:"),
+            "no folder, nothing forced: no kind"
+        );
         let _ = std::fs::remove_dir_all(&base);
     }
 
@@ -1017,7 +1262,10 @@ mod tests {
     #[test]
     fn steps_are_reordered() {
         let mut p = Project::new("");
-        let ids: Vec<String> = ["A", "B", "C", "D"].iter().map(|t| p.add_step(t, "moi")).collect();
+        let ids: Vec<String> = ["A", "B", "C", "D"]
+            .iter()
+            .map(|t| p.add_step(t, "moi"))
+            .collect();
         let order = |p: &Project| p.steps.iter().map(|s| s.title.as_str()).collect::<String>();
         p.set_step_status(&ids[3], StepStatus::Done); // D done: shown apart, after the open ones
         assert!(p.move_step(&ids[2], Some(&ids[0])));
@@ -1038,7 +1286,14 @@ mod tests {
     #[test]
     fn clearing_sessions_hides_the_past_ones() {
         let mut p = Project::new("/tmp/x");
-        p.link_session(SessionRef { tool: "claude-code".into(), id: "s1".into(), title: String::new(), location: String::new(), started: 1, last_activity: 1 });
+        p.link_session(SessionRef {
+            tool: "claude-code".into(),
+            id: "s1".into(),
+            title: String::new(),
+            location: String::new(),
+            started: 1,
+            last_activity: 1,
+        });
         assert!(p.session_shown(1));
         p.clear_sessions();
         assert!(p.sessions.is_empty());
@@ -1051,19 +1306,55 @@ mod tests {
         let mut ws = Workspace::default();
         let outer = ws.create_project("Code", "/home/me/Code");
         let inner = ws.create_project("Tableau", "/home/me/Code/orchestra/");
-        assert_eq!(ws.project_for_path(Path::new("/home/me/Code/orchestra/src")).unwrap().id, inner);
-        assert_eq!(ws.project_for_path(Path::new("/home/me/Code/autre")).unwrap().id, outer);
+        assert_eq!(
+            ws.project_for_path(Path::new("/home/me/Code/orchestra/src"))
+                .unwrap()
+                .id,
+            inner
+        );
+        assert_eq!(
+            ws.project_for_path(Path::new("/home/me/Code/autre"))
+                .unwrap()
+                .id,
+            outer
+        );
         assert!(ws.project_for_path(Path::new("/home/me/Docs")).is_none());
         // A sibling whose name only starts the same doesn't match.
-        assert_eq!(ws.project_for_path(Path::new("/home/me/Code/orchestra-2")).unwrap().id, outer);
+        assert_eq!(
+            ws.project_for_path(Path::new("/home/me/Code/orchestra-2"))
+                .unwrap()
+                .id,
+            outer
+        );
     }
 
     #[test]
     fn sessions_are_merged_by_tool_and_id() {
         let mut p = Project::new("");
-        p.link_session(SessionRef { tool: "claude-code".into(), id: "s1".into(), title: "".into(), location: "".into(), started: 10, last_activity: 20 });
-        p.link_session(SessionRef { tool: "claude-code".into(), id: "s1".into(), title: "Refonte".into(), location: "".into(), started: 10, last_activity: 50 });
-        p.link_session(SessionRef { tool: "codex".into(), id: "s1".into(), title: "".into(), location: "".into(), started: 5, last_activity: 30 });
+        p.link_session(SessionRef {
+            tool: "claude-code".into(),
+            id: "s1".into(),
+            title: "".into(),
+            location: "".into(),
+            started: 10,
+            last_activity: 20,
+        });
+        p.link_session(SessionRef {
+            tool: "claude-code".into(),
+            id: "s1".into(),
+            title: "Refonte".into(),
+            location: "".into(),
+            started: 10,
+            last_activity: 50,
+        });
+        p.link_session(SessionRef {
+            tool: "codex".into(),
+            id: "s1".into(),
+            title: "".into(),
+            location: "".into(),
+            started: 5,
+            last_activity: 30,
+        });
         assert_eq!(p.sessions.len(), 2);
         assert_eq!(p.sessions[0].title, "Refonte");
         assert_eq!(p.sessions[0].last_activity, 50);
@@ -1084,7 +1375,16 @@ mod tests {
         ws.create_page("Notes perso", None);
         ws.page_mut(&a).unwrap().project.as_mut().unwrap().shared = true;
         for (pid, txt) in [(&a, "salut"), (&b, "secret")] {
-            ws.chat.insert(txt.into(), crate::model::ChatMsg { id: txt.into(), project: pid.clone(), author: "moi".into(), text: txt.into(), at: 1 });
+            ws.chat.insert(
+                txt.into(),
+                crate::model::ChatMsg {
+                    id: txt.into(),
+                    project: pid.clone(),
+                    author: "moi".into(),
+                    text: txt.into(),
+                    at: 1,
+                },
+            );
         }
         let out = ws.shared_copy();
         let ids: Vec<&str> = out.pages.iter().map(|p| p.id.as_str()).collect();
@@ -1114,15 +1414,41 @@ mod tests {
             p.folder = "/Users/moi/code/app".into();
             p.commit_to_main = true;
             p.session_limit = Some(95.0);
-            p.launch = Some(LaunchPrefs { commits: true, endless: true, end: Default::default() });
-            p.sessions.push(SessionRef { tool: "claude-code".into(), id: "abc".into(), title: String::new(), location: "/Users/moi/.claude/x.jsonl".into(), started: 1, last_activity: 2 });
+            p.launch = Some(LaunchPrefs {
+                commits: true,
+                endless: true,
+                end: Default::default(),
+            });
+            p.sessions.push(SessionRef {
+                tool: "claude-code".into(),
+                id: "abc".into(),
+                title: String::new(),
+                location: "/Users/moi/.claude/x.jsonl".into(),
+                started: 1,
+                last_activity: 2,
+            });
             p.sessions_cleared = 5;
             p.summary = "État partagé".into();
         }
         let out = ws.shared_copy();
-        let sent = out.pages.iter().find(|p| p.id == a).unwrap().project.as_ref().unwrap();
+        let sent = out
+            .pages
+            .iter()
+            .find(|p| p.id == a)
+            .unwrap()
+            .project
+            .as_ref()
+            .unwrap();
         assert!(sent.folder.is_empty() && !sent.commit_to_main);
-        assert_eq!((sent.session_limit, sent.launch.clone(), sent.sessions.len(), sent.sessions_cleared), (None, None, 0, 0));
+        assert_eq!(
+            (
+                sent.session_limit,
+                sent.launch.clone(),
+                sent.sessions.len(),
+                sent.sessions_cleared
+            ),
+            (None, None, 0, 0)
+        );
         assert!(sent.shared);
         assert_eq!(sent.summary, "État partagé");
         assert!(out.pages.iter().any(|p| p.id == sub));
@@ -1141,9 +1467,20 @@ mod tests {
         use crate::model::ChatMsg;
         let mut ws = Workspace::default();
         let shared = ws.create_project("Partagé", "");
-        ws.page_mut(&shared).unwrap().project.as_mut().unwrap().shared = true;
+        ws.page_mut(&shared)
+            .unwrap()
+            .project
+            .as_mut()
+            .unwrap()
+            .shared = true;
         let private = ws.create_project("Privé", "");
-        let msg = |id: &str, project: &str, text: String| ChatMsg { id: id.into(), project: project.into(), author: "Camille\nseconde ligne".into(), text, at: 1 };
+        let msg = |id: &str, project: &str, text: String| ChatMsg {
+            id: id.into(),
+            project: project.into(),
+            author: "Camille\nseconde ligne".into(),
+            text,
+            at: 1,
+        };
         let n = ws.accept_chat(vec![
             msg("a", &shared, "salut".into()),
             msg("b", &private, "intrus".into()),
@@ -1176,33 +1513,74 @@ mod tests {
             p.title = "changé".into();
             p
         };
-        let (pa, pdoc, pb, pnotes, pfolder) = (edited(&a), edited(&doc), edited(&b), edited(&notes), edited(&folder));
+        let (pa, pdoc, pb, pnotes, pfolder) = (
+            edited(&a),
+            edited(&doc),
+            edited(&b),
+            edited(&notes),
+            edited(&folder),
+        );
         // A shared page moved under a private one.
         let mut moved = pdoc.clone();
         moved.parent = Some(b.clone());
         // New pages: under a shared page (even one arriving later in the batch), under a
         // private page, at the top level, a private project, a shared project.
-        let child = |id: &str, parent: &str| Page { id: id.into(), parent: Some(parent.into()), ..Page::new("x", None) };
+        let child = |id: &str, parent: &str| Page {
+            id: id.into(),
+            parent: Some(parent.into()),
+            ..Page::new("x", None)
+        };
         let mut new_shared = Page::new("Autre projet", None);
         new_shared.id = "np".into();
-        new_shared.project = Some(Project { shared: true, ..Project::new("") });
+        new_shared.project = Some(Project {
+            shared: true,
+            ..Project::new("")
+        });
         let mut new_private = new_shared.clone();
         new_private.id = "npp".into();
         new_private.project.as_mut().unwrap().shared = false;
         let incoming = vec![
-            child("n2", "n1"), child("n1", &doc), child("evil", &b), Page { id: "top".into(), ..Page::new("x", None) },
-            child("under-np", "np"), new_shared, new_private, pa, pdoc, pb, pnotes, pfolder,
+            child("n2", "n1"),
+            child("n1", &doc),
+            child("evil", &b),
+            Page {
+                id: "top".into(),
+                ..Page::new("x", None)
+            },
+            child("under-np", "np"),
+            new_shared,
+            new_private,
+            pa,
+            pdoc,
+            pb,
+            pnotes,
+            pfolder,
         ];
-        let got: Vec<String> = ws.accept_remote(incoming).into_iter().map(|p| p.id).collect();
+        let got: Vec<String> = ws
+            .accept_remote(incoming)
+            .into_iter()
+            .map(|p| p.id)
+            .collect();
         for id in [a.as_str(), doc.as_str(), "n1", "n2", "np", "under-np"] {
             assert!(got.iter().any(|g| g == id), "{id} refusée");
         }
-        for id in [b.as_str(), notes.as_str(), folder.as_str(), "evil", "top", "npp"] {
+        for id in [
+            b.as_str(),
+            notes.as_str(),
+            folder.as_str(),
+            "evil",
+            "top",
+            "npp",
+        ] {
             assert!(!got.iter().any(|g| g == id), "{id} acceptée");
         }
         assert!(ws.accept_remote(vec![moved]).is_empty());
         // Deletions: shared pages and unknown ids, never a private page whose id they know.
-        let del: std::collections::BTreeMap<String, u64> = [&doc, &b, &notes, &folder].iter().map(|i| (i.to_string(), 5)).chain([("inconnue".to_string(), 5)]).collect();
+        let del: std::collections::BTreeMap<String, u64> = [&doc, &b, &notes, &folder]
+            .iter()
+            .map(|i| (i.to_string(), 5))
+            .chain([("inconnue".to_string(), 5)])
+            .collect();
         let kept: Vec<String> = ws.accept_remote_deletions(del).into_keys().collect();
         assert!(kept.contains(&doc) && kept.contains(&"inconnue".to_string()));
         assert!(!kept.contains(&b) && !kept.contains(&notes) && !kept.contains(&folder));
@@ -1210,7 +1588,10 @@ mod tests {
 
     #[test]
     fn status_names() {
-        assert_eq!(ProjectStatus::from_name("en pause"), Some(ProjectStatus::Paused));
+        assert_eq!(
+            ProjectStatus::from_name("en pause"),
+            Some(ProjectStatus::Paused)
+        );
         assert_eq!(ProjectStatus::from_name("done"), Some(ProjectStatus::Done));
         assert_eq!(StepStatus::from_name("doing"), Some(StepStatus::Doing));
     }
@@ -1218,7 +1599,9 @@ mod tests {
     #[test]
     fn old_files_still_load() {
         // A workspace written by Notes libres (no `project` field) loads unchanged.
-        let ws: Workspace = serde_json::from_str(r#"{"pages":[{"id":"a","title":"T","created":1,"updated":1}]}"#).unwrap();
+        let ws: Workspace =
+            serde_json::from_str(r#"{"pages":[{"id":"a","title":"T","created":1,"updated":1}]}"#)
+                .unwrap();
         assert!(ws.pages[0].project.is_none());
         assert!(ws.projects().is_empty());
     }

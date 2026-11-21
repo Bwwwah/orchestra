@@ -12,6 +12,7 @@
 //! reachable: same private network (Tailscale, ZeroTier, WireGuard…), an open port, or a
 //! tunnel of your choice.
 
+use crate::LockOrRecover;
 use crate::model::{Page, observe_clock};
 use crate::secure;
 use serde::{Deserialize, Serialize};
@@ -19,7 +20,6 @@ use std::collections::{BTreeMap, HashMap};
 use std::net::{IpAddr, Shutdown, TcpListener, TcpStream, ToSocketAddrs};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{Receiver, Sender, channel};
-use crate::LockOrRecover;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -29,7 +29,10 @@ pub const DEFAULT_PORT: u16 = 7878;
 #[serde(tag = "t", rename_all = "snake_case")]
 pub enum LiveMsg {
     /// First message of a peer.
-    Hello { name: String, code: String },
+    Hello {
+        name: String,
+        code: String,
+    },
     /// Changed pages and the ids deleted for good.
     Pages {
         pages: Vec<Page>,
@@ -48,12 +51,18 @@ pub enum LiveMsg {
         ai: bool,
     },
     /// New messages of the projects' team discussions.
-    Chat { msgs: Vec<crate::model::ChatMsg> },
-    Bye { name: String },
+    Chat {
+        msgs: Vec<crate::model::ChatMsg>,
+    },
+    Bye {
+        name: String,
+    },
     /// Local only: the connection is (re)established; send everything.
     Connected,
     /// Local only: the connection dropped (the joiner retries on its own).
-    Disconnected { reason: String },
+    Disconnected {
+        reason: String,
+    },
 }
 
 #[derive(Clone, Debug, Default)]
@@ -100,7 +109,10 @@ impl Drop for Live {
         self.stop.store(true, Ordering::SeqCst);
         // Wake the accept loop so the listening port is released.
         if let Some(a) = self.listener_addr {
-            let _ = TcpStream::connect_timeout(&std::net::SocketAddr::new([127, 0, 0, 1].into(), a.port()), Duration::from_millis(200));
+            let _ = TcpStream::connect_timeout(
+                &std::net::SocketAddr::new([127, 0, 0, 1].into(), a.port()),
+                Duration::from_millis(200),
+            );
         }
     }
 }
@@ -152,7 +164,12 @@ struct Deadline<'a> {
 
 impl<'a> Deadline<'a> {
     fn new(stream: &'a TcpStream, len: usize) -> Self {
-        Deadline { stream, until: Instant::now() + PEER_WRITE_TIMEOUT + Duration::from_secs(len as u64 / PEER_MIN_RATE) }
+        Deadline {
+            stream,
+            until: Instant::now()
+                + PEER_WRITE_TIMEOUT
+                + Duration::from_secs(len as u64 / PEER_MIN_RATE),
+        }
     }
 }
 
@@ -167,9 +184,17 @@ impl std::io::Write for Deadline<'_> {
             if left.is_zero() {
                 return Err(std::io::ErrorKind::TimedOut.into());
             }
-            self.stream.set_write_timeout(Some(left.min(Duration::from_secs(1))))?;
+            self.stream
+                .set_write_timeout(Some(left.min(Duration::from_secs(1))))?;
             match s.write(piece) {
-                Err(e) if matches!(e.kind(), std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut) => continue,
+                Err(e)
+                    if matches!(
+                        e.kind(),
+                        std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                    ) =>
+                {
+                    continue;
+                }
                 r => return r,
             }
         }
@@ -187,7 +212,11 @@ impl std::io::Write for Deadline<'_> {
 fn send_to_all(clients: &Mutex<Vec<Client>>, bytes: &[u8], skip: Option<u64>) {
     if let Ok(mut list) = clients.lock() {
         list.retain_mut(|c| {
-            if Some(c.id) == skip || c.tx.send(&mut Deadline::new(&c.stream, bytes.len()), bytes).is_ok() {
+            if Some(c.id) == skip
+                || c.tx
+                    .send(&mut Deadline::new(&c.stream, bytes.len()), bytes)
+                    .is_ok()
+            {
                 return true;
             }
             let _ = c.stream.shutdown(Shutdown::Both);
@@ -215,8 +244,14 @@ struct Guard {
 impl Guard {
     /// Take a connection slot for `ip`, or refuse it.
     fn admit(&mut self, ip: IpAddr, now: Instant) -> bool {
-        self.failures.retain(|_, (_, since)| now.duration_since(*since) < FAILURE_WINDOW);
-        if self.failures.get(&ip).is_some_and(|(n, _)| *n >= MAX_FAILURES) || self.active >= MAX_CONNECTIONS {
+        self.failures
+            .retain(|_, (_, since)| now.duration_since(*since) < FAILURE_WINDOW);
+        if self
+            .failures
+            .get(&ip)
+            .is_some_and(|(n, _)| *n >= MAX_FAILURES)
+            || self.active >= MAX_CONNECTIONS
+        {
             return false;
         }
         self.active += 1;
@@ -259,18 +294,32 @@ pub fn host(port: u16, code: &str, wake: Wake) -> std::io::Result<Live> {
     let (tx, rx) = channel::<LiveMsg>();
     let clients: Arc<Mutex<Vec<Client>>> = Arc::new(Mutex::new(vec![]));
     let stop = Arc::new(AtomicBool::new(false));
-    let status = Arc::new(Mutex::new(Status { hosting: true, connected: true, address: format!("{}:{}", local_ip(), addr.port()), ..Default::default() }));
+    let status = Arc::new(Mutex::new(Status {
+        hosting: true,
+        connected: true,
+        address: format!("{}:{}", local_ip(), addr.port()),
+        ..Default::default()
+    }));
     let next_id = Arc::new(AtomicU64::new(1));
     let guard = Arc::new(Mutex::new(Guard::default()));
     {
-        let (clients, stop, status, code, wake, tx) = (clients.clone(), stop.clone(), status.clone(), code.to_string(), wake.clone(), tx.clone());
+        let (clients, stop, status, code, wake, tx) = (
+            clients.clone(),
+            stop.clone(),
+            status.clone(),
+            code.to_string(),
+            wake.clone(),
+            tx.clone(),
+        );
         std::thread::spawn(move || {
             for conn in listener.incoming() {
                 if stop.load(Ordering::SeqCst) {
                     break;
                 }
                 let Ok(stream) = conn else { continue };
-                let Ok(ip) = stream.peer_addr().map(|a| a.ip()) else { continue };
+                let Ok(ip) = stream.peer_addr().map(|a| a.ip()) else {
+                    continue;
+                };
                 if !guard.lock().is_ok_and(|mut g| g.admit(ip, Instant::now())) {
                     let _ = stream.shutdown(Shutdown::Both);
                     continue;
@@ -278,14 +327,30 @@ pub fn host(port: u16, code: &str, wake: Wake) -> std::io::Result<Live> {
                 let slot = Slot(guard.clone());
                 let _ = stream.set_nodelay(true);
                 let id = next_id.fetch_add(1, Ordering::SeqCst);
-                let (clients, status, code, wake, tx, stop) = (clients.clone(), status.clone(), code.clone(), wake.clone(), tx.clone(), stop.clone());
-                std::thread::spawn(move || serve_peer(id, ip, stream, slot, clients, status, code, wake, tx, stop));
+                let (clients, status, code, wake, tx, stop) = (
+                    clients.clone(),
+                    status.clone(),
+                    code.clone(),
+                    wake.clone(),
+                    tx.clone(),
+                    stop.clone(),
+                );
+                std::thread::spawn(move || {
+                    serve_peer(id, ip, stream, slot, clients, status, code, wake, tx, stop)
+                });
             }
         });
     }
     let out_clients = clients.clone();
-    let out: Arc<dyn Fn(&LiveMsg) + Send + Sync> = Arc::new(move |msg: &LiveMsg| send_to_all(&out_clients, &bytes_of(msg), None));
-    Ok(Live { inbox: rx, out, status, stop, listener_addr: Some(addr) })
+    let out: Arc<dyn Fn(&LiveMsg) + Send + Sync> =
+        Arc::new(move |msg: &LiveMsg| send_to_all(&out_clients, &bytes_of(msg), None));
+    Ok(Live {
+        inbox: rx,
+        out,
+        status,
+        stop,
+        listener_addr: Some(addr),
+    })
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -315,12 +380,23 @@ fn serve_peer(
         fail(&stream);
         return;
     };
-    let Ok(mut reader) = stream.try_clone() else { return };
-    let name = match opener.recv(&mut reader).ok().and_then(|b| serde_json::from_slice::<LiveMsg>(&b).ok()) {
+    let Ok(mut reader) = stream.try_clone() else {
+        return;
+    };
+    let name = match opener
+        .recv(&mut reader)
+        .ok()
+        .and_then(|b| serde_json::from_slice::<LiveMsg>(&b).ok())
+    {
         Some(LiveMsg::Hello { name, .. }) => name,
         _ => {
             // Sealed with our key: a peer with another code can't open it, and knows why.
-            let _ = sealer.send(&mut stream, &bytes_of(&LiveMsg::Disconnected { reason: crate::tr!("code incorrect", "wrong code").into() }));
+            let _ = sealer.send(
+                &mut stream,
+                &bytes_of(&LiveMsg::Disconnected {
+                    reason: crate::tr!("code incorrect", "wrong code").into(),
+                }),
+            );
             fail(&stream);
             return;
         }
@@ -331,22 +407,37 @@ fn serve_peer(
     let _ = stream.set_read_timeout(None);
     if let Ok(mut list) = clients.lock() {
         if let Ok(s) = stream.try_clone() {
-            list.push(Client { id, stream: s, tx: sealer });
+            list.push(Client {
+                id,
+                stream: s,
+                tx: sealer,
+            });
         }
         if let Ok(mut st) = status.lock() {
             st.peers = list.len();
         }
     }
     // Each peer has its own keys: what one sends is opened here and sealed again for each other.
-    let relay = |bytes: &[u8], clients: &Arc<Mutex<Vec<Client>>>| send_to_all(clients, bytes, Some(id));
-    let hello = LiveMsg::Hello { name: name.clone(), code: String::new() };
+    let relay =
+        |bytes: &[u8], clients: &Arc<Mutex<Vec<Client>>>| send_to_all(clients, bytes, Some(id));
+    let hello = LiveMsg::Hello {
+        name: name.clone(),
+        code: String::new(),
+    };
     relay(&bytes_of(&hello), &clients);
     let _ = tx.send(hello);
     wake();
     while !stop.load(Ordering::SeqCst) {
-        let Ok(bytes) = opener.recv(&mut reader) else { break };
-        let Ok(msg) = serde_json::from_slice::<LiveMsg>(&bytes) else { continue };
-        if matches!(msg, LiveMsg::Connected | LiveMsg::Disconnected { .. } | LiveMsg::Hello { .. }) {
+        let Ok(bytes) = opener.recv(&mut reader) else {
+            break;
+        };
+        let Ok(msg) = serde_json::from_slice::<LiveMsg>(&bytes) else {
+            continue;
+        };
+        if matches!(
+            msg,
+            LiveMsg::Connected | LiveMsg::Disconnected { .. } | LiveMsg::Hello { .. }
+        ) {
             continue;
         }
         note_clock(&msg);
@@ -371,10 +462,20 @@ fn serve_peer(
 pub fn join(address: &str, name: &str, code: &str, wake: Wake) -> Live {
     let (tx, rx) = channel::<LiveMsg>();
     let stop = Arc::new(AtomicBool::new(false));
-    let status = Arc::new(Mutex::new(Status { address: address.to_string(), ..Default::default() }));
+    let status = Arc::new(Mutex::new(Status {
+        address: address.to_string(),
+        ..Default::default()
+    }));
     let writer: Arc<Mutex<Option<(TcpStream, secure::Sender)>>> = Arc::new(Mutex::new(None));
     {
-        let (stop, status, writer, address, name, code) = (stop.clone(), status.clone(), writer.clone(), address.to_string(), name.to_string(), code.to_string());
+        let (stop, status, writer, address, name, code) = (
+            stop.clone(),
+            status.clone(),
+            writer.clone(),
+            address.to_string(),
+            name.to_string(),
+            code.to_string(),
+        );
         std::thread::spawn(move || {
             while !stop.load(Ordering::SeqCst) {
                 let target = with_port(&address);
@@ -382,7 +483,12 @@ pub fn join(address: &str, name: &str, code: &str, wake: Wake) -> Live {
                     .to_socket_addrs()
                     .ok()
                     .and_then(|mut a| a.next())
-                    .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::NotFound, crate::tr!("adresse introuvable", "address not found")))
+                    .ok_or_else(|| {
+                        std::io::Error::new(
+                            std::io::ErrorKind::NotFound,
+                            crate::tr!("adresse introuvable", "address not found"),
+                        )
+                    })
                     .and_then(|a| TcpStream::connect_timeout(&a, Duration::from_secs(5)))
                     .and_then(|mut stream| {
                         let _ = stream.set_nodelay(true);
@@ -393,8 +499,13 @@ pub fn join(address: &str, name: &str, code: &str, wake: Wake) -> Live {
                     });
                 match conn {
                     Ok((stream, (mut sealer, mut opener))) => {
-                        let hello = LiveMsg::Hello { name: name.clone(), code: String::new() };
-                        let Ok(mut w) = stream.try_clone() else { continue };
+                        let hello = LiveMsg::Hello {
+                            name: name.clone(),
+                            code: String::new(),
+                        };
+                        let Ok(mut w) = stream.try_clone() else {
+                            continue;
+                        };
                         if sealer.send(&mut w, &bytes_of(&hello)).is_err() {
                             continue;
                         }
@@ -406,7 +517,8 @@ pub fn join(address: &str, name: &str, code: &str, wake: Wake) -> Live {
                         let _ = tx.send(LiveMsg::Connected);
                         wake();
                         let mut reader = stream;
-                        let mut reason = crate::tr!("connexion perdue", "connection lost").to_string();
+                        let mut reason =
+                            crate::tr!("connexion perdue", "connection lost").to_string();
                         while !stop.load(Ordering::SeqCst) {
                             match opener.recv(&mut reader) {
                                 Err(secure::RecvError::Closed) => break,
@@ -415,7 +527,9 @@ pub fn join(address: &str, name: &str, code: &str, wake: Wake) -> Live {
                                     break;
                                 }
                                 Ok(bytes) => {
-                                    let Ok(msg) = serde_json::from_slice::<LiveMsg>(&bytes) else { continue };
+                                    let Ok(msg) = serde_json::from_slice::<LiveMsg>(&bytes) else {
+                                        continue;
+                                    };
                                     if let LiveMsg::Disconnected { reason: r } = &msg {
                                         reason = r.clone();
                                         break;
@@ -437,7 +551,10 @@ pub fn join(address: &str, name: &str, code: &str, wake: Wake) -> Live {
                     Err(e) => {
                         if let Ok(mut st) = status.lock() {
                             st.connected = false;
-                            st.error = Some(crate::trf!("connexion impossible : {e}", "connection failed: {e}"));
+                            st.error = Some(crate::trf!(
+                                "connexion impossible : {e}",
+                                "connection failed: {e}"
+                            ));
                         }
                         wake();
                     }
@@ -459,17 +576,31 @@ pub fn join(address: &str, name: &str, code: &str, wake: Wake) -> Live {
         let bytes = bytes_of(msg);
         let mut w = out_writer.lock_or_recover();
         if let Some((s, sealer)) = w.as_mut()
-            && sealer.send(s, &bytes).is_err() {
-                *w = None;
-            }
+            && sealer.send(s, &bytes).is_err()
+        {
+            *w = None;
+        }
     });
-    Live { inbox: rx, out, status, stop, listener_addr: None }
+    Live {
+        inbox: rx,
+        out,
+        status,
+        stop,
+        listener_addr: None,
+    }
 }
 
 /// "machine" → "machine:7878".
 pub fn with_port(address: &str) -> String {
     let a = address.trim();
-    if a.rsplit_once(':').map(|(_, p)| p.parse::<u16>().is_ok()).unwrap_or(false) { a.to_string() } else { format!("{a}:{DEFAULT_PORT}") }
+    if a.rsplit_once(':')
+        .map(|(_, p)| p.parse::<u16>().is_ok())
+        .unwrap_or(false)
+    {
+        a.to_string()
+    } else {
+        format!("{a}:{DEFAULT_PORT}")
+    }
 }
 
 #[cfg(test)]
@@ -504,7 +635,10 @@ mod tests {
         assert!(!g.admit(bad, t0), "too many failures: shut out");
         assert!(g.admit(good, t0), "another address is not affected");
         g.release();
-        assert!(g.admit(bad, t0 + FAILURE_WINDOW), "forgiven after the window");
+        assert!(
+            g.admit(bad, t0 + FAILURE_WINDOW),
+            "forgiven after the window"
+        );
         g.release();
         // A success wipes the failures of that address.
         g.failed(good, t0);
@@ -555,10 +689,21 @@ mod tests {
         // A peer that says hello, then never reads again.
         let mut stuck = TcpStream::connect(&addr).unwrap();
         let (mut sealer, _) = secure::handshake(&mut stuck, "secret", false).unwrap();
-        sealer.send(&mut stuck, &bytes_of(&LiveMsg::Hello { name: "Endormi".into(), code: String::new() })).unwrap();
+        sealer
+            .send(
+                &mut stuck,
+                &bytes_of(&LiveMsg::Hello {
+                    name: "Endormi".into(),
+                    code: String::new(),
+                }),
+            )
+            .unwrap();
         let start = Instant::now();
         while h.status().peers < 1 {
-            assert!(start.elapsed() < Duration::from_secs(5), "stuck peer never joined");
+            assert!(
+                start.elapsed() < Duration::from_secs(5),
+                "stuck peer never joined"
+            );
             std::thread::sleep(Duration::from_millis(20));
         }
         // Big pages until the stuck peer's buffers are full and it is dropped. Each send is
@@ -568,7 +713,10 @@ mod tests {
         // slowly and would make the timing about it.)
         let mut p = Page::new("Grosse page", None);
         p.blocks = vec![Block::new(BlockKind::Paragraph, "x".repeat(128 * 1024))];
-        let msg = LiveMsg::Pages { pages: vec![p], deleted: Default::default() };
+        let msg = LiveMsg::Pages {
+            pages: vec![p],
+            deleted: Default::default(),
+        };
         let big = msg.clone();
         let (done_tx, done_rx) = channel();
         std::thread::spawn(move || {
@@ -584,22 +732,35 @@ mod tests {
             }
             let _ = done_tx.send((h, slowest));
         });
-        let (h, slowest) = done_rx.recv_timeout(Duration::from_secs(60)).expect("sending is stuck");
+        let (h, slowest) = done_rx
+            .recv_timeout(Duration::from_secs(60))
+            .expect("sending is stuck");
         // At most the deadline of one message, plus sealing it (measured here) and some slack.
         let len = bytes_of(&big).len();
         let t = Instant::now();
         sealer.send(&mut Vec::new(), &bytes_of(&big)).unwrap();
         let seal = t.elapsed();
         let deadline = PEER_WRITE_TIMEOUT + Duration::from_secs(len as u64 / PEER_MIN_RATE);
-        assert!(slowest < deadline + seal * 4 + Duration::from_secs(2), "one send took {slowest:?} (deadline {deadline:?}, sealing {seal:?})");
+        assert!(
+            slowest < deadline + seal * 4 + Duration::from_secs(2),
+            "one send took {slowest:?} (deadline {deadline:?}, sealing {seal:?})"
+        );
         // The stuck peer was dropped and its connection closed; the host still serves others.
         assert_eq!(h.status().peers, 0, "stuck peer still counted");
         let _ = stuck.set_read_timeout(Some(Duration::from_secs(5)));
         let mut sink = vec![];
-        assert!(std::io::Read::read_to_end(&mut stuck, &mut sink).is_ok(), "host closed the stuck connection");
+        assert!(
+            std::io::Read::read_to_end(&mut stuck, &mut sink).is_ok(),
+            "host closed the stuck connection"
+        );
         let good = join(&addr, "Camille", "secret", wake);
         assert!(wait_for(&good, |m| matches!(m, LiveMsg::Connected)).is_some());
-        h.send(&LiveMsg::Presence { name: "Hôte".into(), page: None, project: None, ai: false });
+        h.send(&LiveMsg::Presence {
+            name: "Hôte".into(),
+            page: None,
+            project: None,
+            ai: false,
+        });
         assert!(wait_for(&good, |m| matches!(m, LiveMsg::Presence { .. })).is_some());
         drop(stuck);
     }
@@ -611,18 +772,39 @@ mod tests {
         let addr = format!("127.0.0.1:{}", h.port().unwrap());
         let j = join(&addr, "Camille", "secret", wake.clone());
         assert!(wait_for(&j, |m| matches!(m, LiveMsg::Connected)).is_some());
-        assert!(wait_for(&h, |m| matches!(m, LiveMsg::Hello { name, .. } if name == "Camille")).is_some());
+        assert!(
+            wait_for(
+                &h,
+                |m| matches!(m, LiveMsg::Hello { name, .. } if name == "Camille")
+            )
+            .is_some()
+        );
         // Joiner → host.
         let p = Page::new("Depuis Camille", None);
-        j.send(&LiveMsg::Pages { pages: vec![p.clone()], deleted: Default::default() });
-        let got = wait_for(&h, |m| matches!(m, LiveMsg::Pages { .. })).expect("host receives pages");
+        j.send(&LiveMsg::Pages {
+            pages: vec![p.clone()],
+            deleted: Default::default(),
+        });
+        let got =
+            wait_for(&h, |m| matches!(m, LiveMsg::Pages { .. })).expect("host receives pages");
         assert!(matches!(got, LiveMsg::Pages { pages, .. } if pages[0].title == "Depuis Camille"));
         // Host → joiner.
-        h.send(&LiveMsg::Presence { name: "Hôte".into(), page: Some(p.id.clone()), project: None, ai: false });
+        h.send(&LiveMsg::Presence {
+            name: "Hôte".into(),
+            page: Some(p.id.clone()),
+            project: None,
+            ai: false,
+        });
         assert!(wait_for(&j, |m| matches!(m, LiveMsg::Presence { .. })).is_some());
         // A peer with the wrong code is turned away.
         let bad = join(&addr, "Intrus", "faux", wake);
-        assert!(wait_for(&bad, |m| matches!(m, LiveMsg::Disconnected { reason } if reason.contains("code"))).is_some());
+        assert!(
+            wait_for(
+                &bad,
+                |m| matches!(m, LiveMsg::Disconnected { reason } if reason.contains("code"))
+            )
+            .is_some()
+        );
         assert_eq!(h.status().peers, 1);
     }
 }

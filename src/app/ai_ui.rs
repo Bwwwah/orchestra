@@ -24,11 +24,18 @@ pub struct Ais {
 impl Ais {
     /// True once the check is done and no AI is plugged in: the round AI button shows then.
     pub fn none_plugged(&self) -> bool {
-        self.states.lock_or_recover().as_ref().is_some_and(|s| !s.iter().any(|x| x.plugged))
+        self.states
+            .lock_or_recover()
+            .as_ref()
+            .is_some_and(|s| !s.iter().any(|x| x.plugged))
     }
 
     pub fn plugged(&self) -> Vec<Ai> {
-        self.states.lock_or_recover().as_ref().map(|s| s.iter().filter(|x| x.plugged).map(|x| x.ai).collect()).unwrap_or_default()
+        self.states
+            .lock_or_recover()
+            .as_ref()
+            .map(|s| s.iter().filter(|x| x.plugged).map(|x| x.ai).collect())
+            .unwrap_or_default()
     }
 
     /// Buttons for "Nouvelle session": the plugged agents that run in a terminal, then the shell.
@@ -38,7 +45,8 @@ impl Ais {
             .into_iter()
             .filter_map(|a| {
                 let (r, g, b) = a.accent();
-                a.launch().map(|c| (a.label(), Some(c), Color32::from_rgb(r, g, b)))
+                a.launch()
+                    .map(|c| (a.label(), Some(c), Color32::from_rgb(r, g, b)))
             })
             .collect();
         out.push(("Shell", None, Color32::GRAY));
@@ -81,12 +89,23 @@ impl NotesApp {
         use std::time::Duration;
         const EVERY: Duration = Duration::from_secs(5);
         const GIVE_UP: Duration = Duration::from_secs(20 * 60);
-        let Some((ai, started, last)) = self.ais.installing else { return };
-        let there = self.ais.states.lock_or_recover().as_ref().and_then(|s| s.iter().find(|x| x.ai == ai).map(|x| x.installed));
+        let Some((ai, started, last)) = self.ais.installing else {
+            return;
+        };
+        let there = self
+            .ais
+            .states
+            .lock_or_recover()
+            .as_ref()
+            .and_then(|s| s.iter().find(|x| x.ai == ai).map(|x| x.installed));
         if there == Some(true) {
             self.ais.installing = None;
             self.set_ai(ctx, ai, true);
-            self.info(crate::trf!("{} est installée et branchée à Orchestra.", "{} is installed and plugged into Orchestra.", ai.label()));
+            self.info(crate::trf!(
+                "{} est installée et branchée à Orchestra.",
+                "{} is installed and plugged into Orchestra.",
+                ai.label()
+            ));
             return;
         }
         if started.elapsed() > GIVE_UP {
@@ -109,21 +128,45 @@ impl NotesApp {
             self.ws.settings.ai_off.push(ai.key().to_string());
         }
         self.dirty_since.get_or_insert_with(Instant::now);
-        let (states, busy, msg) = (self.ais.states.clone(), self.ais.busy.clone(), self.ais.done_msg.clone());
+        let (states, busy, msg) = (
+            self.ais.states.clone(),
+            self.ais.busy.clone(),
+            self.ais.done_msg.clone(),
+        );
         *busy.lock_or_recover() = Some(ai.key().to_string());
         let ctx = ctx.clone();
         std::thread::spawn(move || {
             let text = if on {
                 let exe = std::env::current_exe().unwrap_or_default();
                 match crate::setup::plug(ai, &exe) {
-                    crate::setup::Outcome::Failed(e) => Err(crate::trf!("{} : branchement impossible ({e}).", "{}: couldn't plug it in ({e}).", ai.label())),
-                    _ if ai == Ai::ClaudeDesktop => Ok(crate::trf!("{} est branchée : redémarrez l'app Claude pour qu'elle le voie.", "{} is plugged in: restart the Claude app so it sees it.", ai.label())),
-                    _ => Ok(crate::trf!("{} est branché au tableau de bord.", "{} is plugged into the dashboard.", ai.label())),
+                    crate::setup::Outcome::Failed(e) => Err(crate::trf!(
+                        "{} : branchement impossible ({e}).",
+                        "{}: couldn't plug it in ({e}).",
+                        ai.label()
+                    )),
+                    _ if ai == Ai::ClaudeDesktop => Ok(crate::trf!(
+                        "{} est branchée : redémarrez l'app Claude pour qu'elle le voie.",
+                        "{} is plugged in: restart the Claude app so it sees it.",
+                        ai.label()
+                    )),
+                    _ => Ok(crate::trf!(
+                        "{} est branché au tableau de bord.",
+                        "{} is plugged into the dashboard.",
+                        ai.label()
+                    )),
                 }
             } else {
                 match crate::setup::unplug(ai) {
-                    Ok(()) => Ok(crate::trf!("{} est débranché.", "{} is unplugged.", ai.label())),
-                    Err(e) => Err(crate::trf!("{} : impossible de débrancher ({e}).", "{}: couldn't unplug it ({e}).", ai.label())),
+                    Ok(()) => Ok(crate::trf!(
+                        "{} est débranché.",
+                        "{} is unplugged.",
+                        ai.label()
+                    )),
+                    Err(e) => Err(crate::trf!(
+                        "{} : impossible de débrancher ({e}).",
+                        "{}: couldn't unplug it ({e}).",
+                        ai.label()
+                    )),
                 }
             };
             *states.lock_or_recover() = Some(crate::setup::states());
@@ -139,7 +182,11 @@ impl NotesApp {
         if let Some(m) = done {
             self.notice(super::notices::Notice::from_result(m));
         }
-        if self.ais.usage_read.is_none_or(|t| t.elapsed().as_secs() >= 20) {
+        if self
+            .ais
+            .usage_read
+            .is_none_or(|t| t.elapsed().as_secs() >= 20)
+        {
             self.ais.usage_read = Some(Instant::now());
             self.ais.usage = crate::usage::read();
             self.ais.tracking = crate::usage::tracking_on();
@@ -178,7 +225,11 @@ const CLAUDE: Color32 = Color32::from_rgb(204, 120, 92);
 /// the subscription tile. None when that time isn't known or has passed.
 fn five_reset_in(u: &crate::usage::Usage, now: u64) -> Option<String> {
     let left = crate::usage::until(u.five()?.resets_at?, now)?;
-    Some(crate::trf!("repart dans {}", "resets in {}", crate::usage::left_text(left)))
+    Some(crate::trf!(
+        "repart dans {}",
+        "resets in {}",
+        crate::usage::left_text(left)
+    ))
 }
 
 #[cfg(test)]
@@ -188,15 +239,31 @@ mod reset_tests {
     #[test]
     fn header_shows_time_left_before_the_five_hour_reset() {
         let now = 1_000_000_000u64;
-        let win = |label: &str, resets_at: Option<u64>| Window { label: label.into(), pct: 40.0, resets_at };
-        let u = Usage { windows: vec![win("Session (5 h)", Some(now + (2 * 60 + 14) * 60_000)), win("Semaine", Some(now + 3 * 86_400_000))], at: now };
+        let win = |label: &str, resets_at: Option<u64>| Window {
+            label: label.into(),
+            pct: 40.0,
+            resets_at,
+        };
+        let u = Usage {
+            windows: vec![
+                win("Session (5 h)", Some(now + (2 * 60 + 14) * 60_000)),
+                win("Semaine", Some(now + 3 * 86_400_000)),
+            ],
+            at: now,
+        };
         let s = super::five_reset_in(&u, now).unwrap();
         assert!(s.ends_with("2 h 14"), "{s}");
         // Passed, unknown, or no 5-hour window: nothing (the reading's age is shown instead).
         assert!(super::five_reset_in(&u, now + 3 * 3_600_000).is_none());
-        let u = Usage { windows: vec![win("Session (5 h)", None)], at: now };
+        let u = Usage {
+            windows: vec![win("Session (5 h)", None)],
+            at: now,
+        };
         assert!(super::five_reset_in(&u, now).is_none());
-        let u = Usage { windows: vec![win("Semaine", Some(now + 1))], at: now };
+        let u = Usage {
+            windows: vec![win("Semaine", Some(now + 1))],
+            at: now,
+        };
         assert!(super::five_reset_in(&u, now).is_none());
     }
 }
@@ -211,38 +278,101 @@ impl NotesApp {
         }
         ui.add_space(6.0);
         let w = ui.available_width();
-        let shown: Vec<crate::usage::Window> = usage.as_ref().map(|u| u.windows.iter().take(2).cloned().collect()).unwrap_or_default();
-        let h = if shown.is_empty() { 34.0 } else { 26.0 + 20.0 * shown.len() as f32 };
+        let shown: Vec<crate::usage::Window> = usage
+            .as_ref()
+            .map(|u| u.windows.iter().take(2).cloned().collect())
+            .unwrap_or_default();
+        let h = if shown.is_empty() {
+            34.0
+        } else {
+            26.0 + 20.0 * shown.len() as f32
+        };
         let (rect, resp) = ui.allocate_exact_size(egui::vec2(w, h), egui::Sense::click());
-        let hov = ui.ctx().animate_bool_with_time(resp.id.with("hov"), resp.hovered(), 0.15);
+        let hov = ui
+            .ctx()
+            .animate_bool_with_time(resp.id.with("hov"), resp.hovered(), 0.15);
         let p = ui.painter();
         p.rect_filled(rect, 10.0, t.hover.gamma_multiply(0.4 + 0.6 * hov));
-        p.rect_stroke(rect, 10.0, egui::Stroke::new(1.0, t.border.lerp_to_gamma(CLAUDE, 0.35 * hov)), egui::StrokeKind::Inside);
+        p.rect_stroke(
+            rect,
+            10.0,
+            egui::Stroke::new(1.0, t.border.lerp_to_gamma(CLAUDE, 0.35 * hov)),
+            egui::StrokeKind::Inside,
+        );
         // Header: a small mark, "Claude", and the time since the last reading.
         let top = rect.top() + 14.0;
         p.circle_filled(egui::pos2(rect.left() + 16.0, top), 4.0, CLAUDE);
-        p.text(egui::pos2(rect.left() + 28.0, top), egui::Align2::LEFT_CENTER, crate::tr!("Abonnement Claude", "Claude subscription"), semibold(12.5), t.text);
+        p.text(
+            egui::pos2(rect.left() + 28.0, top),
+            egui::Align2::LEFT_CENTER,
+            crate::tr!("Abonnement Claude", "Claude subscription"),
+            semibold(12.5),
+            t.text,
+        );
         if shown.is_empty() {
-            let (text, color) = if self.ais.tracking { (crate::tr!("en attente…", "waiting…"), t.tertiary) } else { (crate::tr!("Afficher", "Show"), super::projects::BLUE) };
-            p.text(egui::pos2(rect.right() - 12.0, top), egui::Align2::RIGHT_CENTER, text, FontId::proportional(12.0), color);
+            let (text, color) = if self.ais.tracking {
+                (crate::tr!("en attente…", "waiting…"), t.tertiary)
+            } else {
+                (crate::tr!("Afficher", "Show"), super::projects::BLUE)
+            };
+            p.text(
+                egui::pos2(rect.right() - 12.0, top),
+                egui::Align2::RIGHT_CENTER,
+                text,
+                FontId::proportional(12.0),
+                color,
+            );
         } else if let Some(u) = &usage {
             // The time left before the 5-hour window starts again; the reading's age when
             // that time isn't known (or has passed: the next reading brings the new one).
-            let head = five_reset_in(u, crate::model::now_ms()).unwrap_or_else(|| super::chrome::relative_time(u.at));
-            p.text(egui::pos2(rect.right() - 12.0, top), egui::Align2::RIGHT_CENTER, head, FontId::proportional(11.0), t.tertiary);
-            ui.ctx().request_repaint_after(std::time::Duration::from_secs(30));
+            let head = five_reset_in(u, crate::model::now_ms())
+                .unwrap_or_else(|| super::chrome::relative_time(u.at));
+            p.text(
+                egui::pos2(rect.right() - 12.0, top),
+                egui::Align2::RIGHT_CENTER,
+                head,
+                FontId::proportional(11.0),
+                t.tertiary,
+            );
+            ui.ctx()
+                .request_repaint_after(std::time::Duration::from_secs(30));
         }
         for (i, win) in shown.iter().enumerate() {
             let y = rect.top() + 34.0 + 20.0 * i as f32;
-            let short = if win.label.starts_with("Session") { "5 h".to_string() } else { win.label.replace("Semaine", crate::tr!("Sem.", "Wk")) };
-            p.text(egui::pos2(rect.left() + 12.0, y), egui::Align2::LEFT_CENTER, short, FontId::proportional(11.5), t.secondary);
+            let short = if win.label.starts_with("Session") {
+                "5 h".to_string()
+            } else {
+                win.label.replace("Semaine", crate::tr!("Sem.", "Wk"))
+            };
+            p.text(
+                egui::pos2(rect.left() + 12.0, y),
+                egui::Align2::LEFT_CENTER,
+                short,
+                FontId::proportional(11.5),
+                t.secondary,
+            );
             let pct_x = rect.right() - 12.0;
             let color = level_color(win.pct);
-            p.text(egui::pos2(pct_x, y), egui::Align2::RIGHT_CENTER, format!("{:.0} %", win.pct), semibold(11.5), color);
-            let bar = egui::Rect::from_min_max(egui::pos2(rect.left() + 58.0, y - 2.5), egui::pos2(pct_x - 40.0, y + 2.5));
-            let frac = ui.ctx().animate_value_with_time(resp.id.with(("bar", i)), win.pct / 100.0, 0.8);
+            p.text(
+                egui::pos2(pct_x, y),
+                egui::Align2::RIGHT_CENTER,
+                format!("{:.0} %", win.pct),
+                semibold(11.5),
+                color,
+            );
+            let bar = egui::Rect::from_min_max(
+                egui::pos2(rect.left() + 58.0, y - 2.5),
+                egui::pos2(pct_x - 40.0, y + 2.5),
+            );
+            let frac =
+                ui.ctx()
+                    .animate_value_with_time(resp.id.with(("bar", i)), win.pct / 100.0, 0.8);
             p.rect_filled(bar, 2.5, t.fill);
-            p.rect_filled(egui::Rect::from_min_size(bar.min, egui::vec2(bar.width() * frac, bar.height())), 2.5, color);
+            p.rect_filled(
+                egui::Rect::from_min_size(bar.min, egui::vec2(bar.width() * frac, bar.height())),
+                2.5,
+                color,
+            );
         }
         let resp = resp.on_hover_ui(|ui| {
             ui.set_min_width(240.0);
@@ -291,7 +421,11 @@ impl NotesApp {
 pub(super) fn usage_strip(ui: &mut egui::Ui, u: &crate::usage::Usage, t: &Tone) {
     ui.horizontal_wrapped(|ui| {
         ui.spacing_mut().item_spacing.x = 8.0;
-        ui.label(RichText::new(crate::tr!("Abonnement Claude", "Claude subscription")).size(12.5).color(t.tertiary));
+        ui.label(
+            RichText::new(crate::tr!("Abonnement Claude", "Claude subscription"))
+                .size(12.5)
+                .color(t.tertiary),
+        );
         for w in &u.windows {
             let color = if w.pct >= 90.0 {
                 Color32::from_rgb(224, 62, 62)
@@ -302,14 +436,36 @@ pub(super) fn usage_strip(ui: &mut egui::Ui, u: &crate::usage::Usage, t: &Tone) 
             };
             let resp = ui.horizontal(|ui| {
                 ui.spacing_mut().item_spacing.x = 5.0;
-                ui.label(RichText::new(crate::usage::shown(&w.label)).size(12.5).color(t.secondary));
+                ui.label(
+                    RichText::new(crate::usage::shown(&w.label))
+                        .size(12.5)
+                        .color(t.secondary),
+                );
                 let (bar, _) = ui.allocate_exact_size(egui::vec2(56.0, 6.0), egui::Sense::hover());
                 ui.painter().rect_filled(bar, 3.0, t.fill);
-                ui.painter().rect_filled(egui::Rect::from_min_size(bar.min, egui::vec2(bar.width() * w.pct / 100.0, 6.0)), 3.0, color);
-                ui.label(RichText::new(format!("{:.0} %", w.pct)).size(12.5).color(color));
+                ui.painter().rect_filled(
+                    egui::Rect::from_min_size(
+                        bar.min,
+                        egui::vec2(bar.width() * w.pct / 100.0, 6.0),
+                    ),
+                    3.0,
+                    color,
+                );
+                ui.label(
+                    RichText::new(format!("{:.0} %", w.pct))
+                        .size(12.5)
+                        .color(color),
+                );
             });
-            let reset = w.resets_at.map(|r| crate::trf!("Repart à zéro {}", "Resets {}", when(r))).unwrap_or_default();
-            resp.response.on_hover_text(crate::trf!("{reset}\nChiffres de Claude Code, relevés {}", "{reset}\nClaude Code's figures, read {}", super::chrome::relative_time(u.at)));
+            let reset = w
+                .resets_at
+                .map(|r| crate::trf!("Repart à zéro {}", "Resets {}", when(r)))
+                .unwrap_or_default();
+            resp.response.on_hover_text(crate::trf!(
+                "{reset}\nChiffres de Claude Code, relevés {}",
+                "{reset}\nClaude Code's figures, read {}",
+                super::chrome::relative_time(u.at)
+            ));
         }
     });
 }
@@ -339,8 +495,34 @@ pub(super) fn today_label() -> String {
 fn date_label(days: i64) -> String {
     let (y, m, d) = civil(days);
     let i = (m as usize).clamp(1, 12) - 1;
-    const FR: [&str; 12] = ["janvier", "février", "mars", "avril", "mai", "juin", "juillet", "août", "septembre", "octobre", "novembre", "décembre"];
-    const EN: [&str; 12] = ["January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"];
+    const FR: [&str; 12] = [
+        "janvier",
+        "février",
+        "mars",
+        "avril",
+        "mai",
+        "juin",
+        "juillet",
+        "août",
+        "septembre",
+        "octobre",
+        "novembre",
+        "décembre",
+    ];
+    const EN: [&str; 12] = [
+        "January",
+        "February",
+        "March",
+        "April",
+        "May",
+        "June",
+        "July",
+        "August",
+        "September",
+        "October",
+        "November",
+        "December",
+    ];
     let (fr, en) = (FR[i], EN[i]);
     crate::trf!("{d} {fr} {y}", "{en} {d}, {y}")
 }
@@ -369,7 +551,12 @@ fn civil(z: i64) -> (i64, u32, u32) {
 fn local_offset_ms() -> i64 {
     static OFF: std::sync::OnceLock<i64> = std::sync::OnceLock::new();
     *OFF.get_or_init(|| {
-        let out = std::process::Command::new("date").arg("+%z").output().ok().map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string()).unwrap_or_default();
+        let out = std::process::Command::new("date")
+            .arg("+%z")
+            .output()
+            .ok()
+            .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+            .unwrap_or_default();
         let b = out.as_bytes();
         if b.len() == 5 && (b[0] == b'+' || b[0] == b'-') {
             let h: i64 = out[1..3].parse().unwrap_or(0);

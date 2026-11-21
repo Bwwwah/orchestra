@@ -34,10 +34,16 @@ pub fn run() -> i32 {
         let reply = match serde_json::from_str::<Value>(&line) {
             Ok(Value::Array(batch)) => {
                 let replies: Vec<Value> = batch.iter().filter_map(handle).collect();
-                if replies.is_empty() { None } else { Some(Value::Array(replies)) }
+                if replies.is_empty() {
+                    None
+                } else {
+                    Some(Value::Array(replies))
+                }
             }
             Ok(msg) => handle(&msg),
-            Err(e) => Some(json!({"jsonrpc":"2.0","id":null,"error":{"code":-32700,"message":format!("Parse error: {e}")}})),
+            Err(e) => Some(
+                json!({"jsonrpc":"2.0","id":null,"error":{"code":-32700,"message":format!("Parse error: {e}")}}),
+            ),
         };
         if let Some(r) = reply {
             let _ = writeln!(stdout, "{}", r);
@@ -55,7 +61,10 @@ fn handle(msg: &Value) -> Option<Value> {
     let id = id?;
     let result: Result<Value, (i64, String)> = match method {
         "initialize" => {
-            let asked = params.get("protocolVersion").and_then(Value::as_str).unwrap_or(PROTOCOL_VERSION);
+            let asked = params
+                .get("protocolVersion")
+                .and_then(Value::as_str)
+                .unwrap_or(PROTOCOL_VERSION);
             Ok(json!({
                 "protocolVersion": asked,
                 "capabilities": {"tools": {"listChanged": false}, "resources": {"listChanged": false}},
@@ -66,7 +75,11 @@ fn handle(msg: &Value) -> Option<Value> {
         "ping" => Ok(json!({})),
         "tools/list" => Ok(json!({"tools": tools()})),
         "tools/call" => {
-            let name = params.get("name").and_then(Value::as_str).unwrap_or("").to_string();
+            let name = params
+                .get("name")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_string();
             let args = params.get("arguments").cloned().unwrap_or(json!({}));
             if name == "take_screenshot" {
                 return Some(json!({"jsonrpc":"2.0","id":id,"result":screenshot(&args)}));
@@ -74,7 +87,9 @@ fn handle(msg: &Value) -> Option<Value> {
             match call_tool(&name, &args) {
                 Ok(text) => Ok(json!({"content":[{"type":"text","text":text}],"isError":false})),
                 Err(ToolError::Unknown) => Err((-32602, format!("Unknown tool: {name}"))),
-                Err(ToolError::Failed(e)) => Ok(json!({"content":[{"type":"text","text":e}],"isError":true})),
+                Err(ToolError::Failed(e)) => {
+                    Ok(json!({"content":[{"type":"text","text":e}],"isError":true}))
+                }
             }
         }
         "resources/list" => {
@@ -91,7 +106,9 @@ fn handle(msg: &Value) -> Option<Value> {
             let uri = params.get("uri").and_then(Value::as_str).unwrap_or("");
             let ws = store::load();
             match uri.strip_prefix("page://").and_then(|id| ws.page(id)) {
-                Some(p) => Ok(json!({"contents":[{"uri":uri,"mimeType":"text/markdown","text":store::page_to_markdown(&ws, p)}]})),
+                Some(p) => Ok(
+                    json!({"contents":[{"uri":uri,"mimeType":"text/markdown","text":store::page_to_markdown(&ws, p)}]}),
+                ),
                 None => Err((-32002, format!("Resource not found: {uri}"))),
             }
         }
@@ -101,7 +118,9 @@ fn handle(msg: &Value) -> Option<Value> {
     };
     Some(match result {
         Ok(r) => json!({"jsonrpc":"2.0","id":id,"result":r}),
-        Err((code, message)) => json!({"jsonrpc":"2.0","id":id,"error":{"code":code,"message":message}}),
+        Err((code, message)) => {
+            json!({"jsonrpc":"2.0","id":id,"error":{"code":code,"message":message}})
+        }
     })
 }
 
@@ -112,28 +131,64 @@ fn tool(name: &str, description: &str, props: Value, required: &[&str]) -> Value
 fn tools() -> Vec<Value> {
     let page = json!({"type":"string","description":"Page id or title"});
     let project = json!({"type":"string","description":"Project id or title"});
-    let source = json!({"type":"string","description":"Who writes: claude-code, codex, claude-web, moi…"});
+    let source =
+        json!({"type":"string","description":"Who writes: claude-code, codex, claude-web, moi…"});
     let list = json!({"type":"array","items":{"type":"string"},"description":"One short sentence per item"});
     vec![
-        tool("list_pages", "List every page (id, title, parent, whether it holds a database).", json!({"include_trash":{"type":"boolean"}}), &[]),
-        tool("search_pages", "Search titles, text and database cells.", json!({"query":{"type":"string"}}), &["query"]),
-        tool("read_page", "Read a page as Markdown, with its block ids.", json!({"page": page}), &["page"]),
+        tool(
+            "list_pages",
+            "List every page (id, title, parent, whether it holds a database).",
+            json!({"include_trash":{"type":"boolean"}}),
+            &[],
+        ),
+        tool(
+            "search_pages",
+            "Search titles, text and database cells.",
+            json!({"query":{"type":"string"}}),
+            &["query"],
+        ),
+        tool(
+            "read_page",
+            "Read a page as Markdown, with its block ids.",
+            json!({"page": page}),
+            &["page"],
+        ),
         tool(
             "create_page",
             "Create a page, optionally inside another page, with Markdown content.",
             json!({"title":{"type":"string"},"parent":{"type":"string","description":"Parent page id or title"},"markdown":{"type":"string"},"icon":{"type":"string"}}),
             &["title"],
         ),
-        tool("append_to_page", "Add Markdown content at the end of a page.", json!({"page": page, "markdown":{"type":"string"}}), &["page","markdown"]),
-        tool("replace_page_content", "Replace all blocks of a page with Markdown content.", json!({"page": page, "markdown":{"type":"string"}}), &["page","markdown"]),
+        tool(
+            "append_to_page",
+            "Add Markdown content at the end of a page.",
+            json!({"page": page, "markdown":{"type":"string"}}),
+            &["page", "markdown"],
+        ),
+        tool(
+            "replace_page_content",
+            "Replace all blocks of a page with Markdown content.",
+            json!({"page": page, "markdown":{"type":"string"}}),
+            &["page", "markdown"],
+        ),
         tool(
             "update_block",
             "Change one block's text, type or checkbox.",
             json!({"page": page, "block_id":{"type":"string"},"text":{"type":"string"},"type":{"type":"string","description":"paragraph, heading1, heading2, heading3, todo, bullet, numbered, toggle, quote, callout, code, divider"},"checked":{"type":"boolean"}}),
-            &["page","block_id"],
+            &["page", "block_id"],
         ),
-        tool("update_page", "Rename a page, change its icon, favourite it or move it.", json!({"page": page, "title":{"type":"string"},"icon":{"type":"string"},"favorite":{"type":"boolean"},"parent":{"type":"string","description":"New parent page, or empty for top level"}}), &["page"]),
-        tool("trash_page", "Move a page and its sub-pages to the trash.", json!({"page": page}), &["page"]),
+        tool(
+            "update_page",
+            "Rename a page, change its icon, favourite it or move it.",
+            json!({"page": page, "title":{"type":"string"},"icon":{"type":"string"},"favorite":{"type":"boolean"},"parent":{"type":"string","description":"New parent page, or empty for top level"}}),
+            &["page"],
+        ),
+        tool(
+            "trash_page",
+            "Move a page and its sub-pages to the trash.",
+            json!({"page": page}),
+            &["page"],
+        ),
         tool(
             "restore_page",
             "Bring a page and its sub-pages back from the trash. A page whose parent is still in the trash comes back at the top level.",
@@ -146,12 +201,37 @@ fn tools() -> Vec<Value> {
             json!({"title":{"type":"string"},"parent":{"type":"string"},"columns":{"type":"array","items":{"type":"object","properties":{"name":{"type":"string"},"kind":{"type":"string","enum":["text","number","select","checkbox","date"]},"options":{"type":"array","items":{"type":"string"}}},"required":["name"]}}}),
             &["title"],
         ),
-        tool("query_database", "Read a database's columns and rows as JSON, optionally filtered by text.", json!({"page": page, "filter":{"type":"string"}}), &["page"]),
-        tool("add_database_row", "Add a row. values maps column names to values.", json!({"page": page, "values":{"type":"object"}}), &["page","values"]),
-        tool("update_database_row", "Change cells of a row.", json!({"page": page, "row_id":{"type":"string"},"values":{"type":"object"}}), &["page","row_id","values"]),
-        tool("delete_database_row", "Remove a row.", json!({"page": page, "row_id":{"type":"string"}}), &["page","row_id"]),
+        tool(
+            "query_database",
+            "Read a database's columns and rows as JSON, optionally filtered by text.",
+            json!({"page": page, "filter":{"type":"string"}}),
+            &["page"],
+        ),
+        tool(
+            "add_database_row",
+            "Add a row. values maps column names to values.",
+            json!({"page": page, "values":{"type":"object"}}),
+            &["page", "values"],
+        ),
+        tool(
+            "update_database_row",
+            "Change cells of a row.",
+            json!({"page": page, "row_id":{"type":"string"},"values":{"type":"object"}}),
+            &["page", "row_id", "values"],
+        ),
+        tool(
+            "delete_database_row",
+            "Remove a row.",
+            json!({"page": page, "row_id":{"type":"string"}}),
+            &["page", "row_id"],
+        ),
         // ---- AI projects
-        tool("list_projects", "List the AI projects: id, title, status, folder, progress, next step, last activity.", json!({}), &[]),
+        tool(
+            "list_projects",
+            "List the AI projects: id, title, status, folder, progress, next step, last activity.",
+            json!({}),
+            &[],
+        ),
         tool(
             "get_project_state",
             "Read a project's state of play as Markdown: status, folder, summary, steps (with step ids), AI sessions, and its page notes. Name it by id or title, or give `folder` (the current working directory) to find the project that holds it.",
@@ -178,19 +258,19 @@ fn tools() -> Vec<Value> {
             "add_steps",
             "Add steps to follow to a project, in order. One short action per item (under ~100 characters, no Markdown, no numbering).",
             json!({"project": project, "steps":{"type":"array","items":{"type":"string"}},"source":source}),
-            &["project","steps"],
+            &["project", "steps"],
         ),
         tool(
             "update_step",
             "Change a step's status (todo, doing, done) or title. Steps are named by step_id (from get_project_state) or by their title.",
             json!({"project": project, "step":{"type":"string","description":"step_id or title"},"status":{"type":"string","enum":["todo","doing","done"]},"title":{"type":"string"}}),
-            &["project","step"],
+            &["project", "step"],
         ),
         tool(
             "link_session",
             "Record that an AI session worked on the project, so it can be found and resumed from the dashboard.",
             json!({"project": project, "tool":{"type":"string","description":"claude-code, codex, gemini-cli, claude-web, chatgpt…"},"session_id":{"type":"string"},"title":{"type":"string"},"location":{"type":"string","description":"Session file path or web address"}}),
-            &["project","tool","session_id"],
+            &["project", "tool", "session_id"],
         ),
         tool(
             "ask_human",
@@ -211,7 +291,11 @@ fn tools() -> Vec<Value> {
 fn screenshot(args: &Value) -> Value {
     match crate::screen::take(s(args, "app")) {
         Ok(shot) => {
-            let text = format!("Screenshot of {}, saved at {}", shot.note, shot.path.display());
+            let text = format!(
+                "Screenshot of {}, saved at {}",
+                shot.note,
+                shot.path.display()
+            );
             let mut content = vec![json!({"type":"text","text":text})];
             match shot.inline() {
                 Some((data, mime)) => content.push(json!({"type":"image","data":data,"mimeType":mime})),
@@ -243,13 +327,22 @@ fn need<'a>(args: &'a Value, key: &str) -> Result<&'a str, String> {
 }
 
 fn page_id(ws: &Workspace, key: &str) -> Result<String, String> {
-    ws.find_page(key).map(|p| p.id.clone()).ok_or_else(|| format!("no page matches \"{key}\""))
+    ws.find_page(key)
+        .map(|p| p.id.clone())
+        .ok_or_else(|| format!("no page matches \"{key}\""))
 }
 
 /// A page in the trash, by id, exact title, or a piece of title found in no other trashed page.
 fn trashed_page_id(ws: &Workspace, key: &str) -> Result<String, String> {
     if let Some(p) = ws.page(key.trim()) {
-        return if p.trashed { Ok(p.id.clone()) } else { Err(format!("page \"{}\" is not in the trash", p.display_title())) };
+        return if p.trashed {
+            Ok(p.id.clone())
+        } else {
+            Err(format!(
+                "page \"{}\" is not in the trash",
+                p.display_title()
+            ))
+        };
     }
     let k = key.trim().to_lowercase();
     if k.is_empty() {
@@ -259,13 +352,22 @@ fn trashed_page_id(ws: &Workspace, key: &str) -> Result<String, String> {
     if let Some(p) = trashed().find(|p| p.title.to_lowercase() == k) {
         return Ok(p.id.clone());
     }
-    let hits: Vec<_> = trashed().filter(|p| p.title.to_lowercase().contains(&k)).collect();
+    let hits: Vec<_> = trashed()
+        .filter(|p| p.title.to_lowercase().contains(&k))
+        .collect();
     match hits.as_slice() {
         [] => Err(format!("no page in the trash matches \"{key}\"")),
         [p] => Ok(p.id.clone()),
         many => {
-            let list: Vec<String> = many.iter().map(|p| format!("- {} (id: {})", p.display_title(), p.id)).collect();
-            Err(format!("\"{key}\" matches {} pages in the trash; name one by its id:\n{}", many.len(), list.join("\n")))
+            let list: Vec<String> = many
+                .iter()
+                .map(|p| format!("- {} (id: {})", p.display_title(), p.id))
+                .collect();
+            Err(format!(
+                "\"{key}\" matches {} pages in the trash; name one by its id:\n{}",
+                many.len(),
+                list.join("\n")
+            ))
         }
     }
 }
@@ -284,12 +386,16 @@ fn check_folder(folder: &str) -> Result<String, String> {
         return Ok(String::new());
     }
     if !(f.starts_with('/') || f == "~" || f.starts_with("~/")) {
-        return Err(format!("folder must be a full path (/… or ~/…), not « {f} »"));
+        return Err(format!(
+            "folder must be a full path (/… or ~/…), not « {f} »"
+        ));
     }
     let path = project::normalize_folder(f);
     let home = dirs::home_dir().unwrap_or_default();
     if path.parent().is_none() || path == home {
-        return Err(format!("folder « {f} » is too wide: give the project's own folder"));
+        return Err(format!(
+            "folder « {f} » is too wide: give the project's own folder"
+        ));
     }
     if !path.is_dir() {
         return Err(format!("no folder at « {f} »"));
@@ -299,7 +405,8 @@ fn check_folder(folder: &str) -> Result<String, String> {
 
 fn md_blocks(md: &str) -> Vec<Block> {
     let mut p = store::page_from_markdown(&format!("# _\n{md}"), "_");
-    p.blocks.retain(|b| !(b.kind == BlockKind::Paragraph && b.text.is_empty()));
+    p.blocks
+        .retain(|b| !(b.kind == BlockKind::Paragraph && b.text.is_empty()));
     p.blocks
 }
 
@@ -309,7 +416,10 @@ fn call_tool(name: &str, args: &Value) -> Result<String, ToolError> {
     let mut ws = store::load();
     match name {
         "list_pages" => {
-            let all = args.get("include_trash").and_then(Value::as_bool).unwrap_or(false);
+            let all = args
+                .get("include_trash")
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
             let list: Vec<Value> = ws
                 .pages
                 .iter()
@@ -333,7 +443,14 @@ fn call_tool(name: &str, args: &Value) -> Result<String, ToolError> {
             let mut out = store::page_to_markdown(&ws, p);
             out.push_str("\n<!-- blocks -->\n");
             for b in &p.blocks {
-                out.push_str(&format!("{} {}\n", b.id, serde_json::to_value(b.kind).unwrap_or_default().as_str().unwrap_or("")));
+                out.push_str(&format!(
+                    "{} {}\n",
+                    b.id,
+                    serde_json::to_value(b.kind)
+                        .unwrap_or_default()
+                        .as_str()
+                        .unwrap_or("")
+                ));
             }
             Ok(format!("page id: {}\n\n{}", p.id, out))
         }
@@ -368,7 +485,10 @@ fn call_tool(name: &str, args: &Value) -> Result<String, ToolError> {
                 }
                 p.blocks = blocks;
             } else {
-                if p.blocks.len() == 1 && p.blocks[0].text.is_empty() && p.blocks[0].kind == BlockKind::Paragraph {
+                if p.blocks.len() == 1
+                    && p.blocks[0].text.is_empty()
+                    && p.blocks[0].kind == BlockKind::Paragraph
+                {
                     p.blocks.clear();
                 }
                 p.blocks.extend(blocks);
@@ -381,12 +501,17 @@ fn call_tool(name: &str, args: &Value) -> Result<String, ToolError> {
             let id = page_id(&ws, need(args, "page")?)?;
             let bid = need(args, "block_id")?.to_string();
             let p = ws.page_mut(&id).unwrap();
-            let b = p.blocks.iter_mut().find(|b| b.id == bid).ok_or_else(|| format!("no block {bid}"))?;
+            let b = p
+                .blocks
+                .iter_mut()
+                .find(|b| b.id == bid)
+                .ok_or_else(|| format!("no block {bid}"))?;
             if let Some(t) = s(args, "text") {
                 b.text = t.to_string();
             }
             if let Some(k) = s(args, "type") {
-                b.kind = BlockKind::from_name(k).ok_or_else(|| format!("unknown block type {k}"))?;
+                b.kind =
+                    BlockKind::from_name(k).ok_or_else(|| format!("unknown block type {k}"))?;
             }
             if let Some(c) = args.get("checked").and_then(Value::as_bool) {
                 b.checked = c;
@@ -436,7 +561,10 @@ fn call_tool(name: &str, args: &Value) -> Result<String, ToolError> {
             ws.set_trashed(&id, false);
             save(&ws)?;
             let top = ws.page(&id).is_some_and(|p| p.parent.is_none());
-            Ok(format!("page {id} restored{}", if top { " (at the top level)" } else { "" }))
+            Ok(format!(
+                "page {id} restored{}",
+                if top { " (at the top level)" } else { "" }
+            ))
         }
         "create_database" => {
             let title = need(args, "title")?;
@@ -446,24 +574,33 @@ fn call_tool(name: &str, args: &Value) -> Result<String, ToolError> {
             };
             let mut db = Database::new_default();
             if let Some(cols) = args.get("columns").and_then(Value::as_array)
-                && !cols.is_empty() {
-                    db.columns = cols
-                        .iter()
-                        .map(|c| Column {
-                            id: new_id(),
-                            name: s(c, "name").unwrap_or("Colonne").to_string(),
-                            kind: match s(c, "kind").unwrap_or("text") {
-                                "number" => ColumnKind::Number,
-                                "select" => ColumnKind::Select,
-                                "checkbox" => ColumnKind::Checkbox,
-                                "date" => ColumnKind::Date,
-                                _ => ColumnKind::Text,
-                            },
-                            options: c.get("options").and_then(Value::as_array).map(|o| o.iter().filter_map(|x| x.as_str().map(String::from)).collect()).unwrap_or_default(),
-                        })
-                        .collect();
-                    db.rows.clear();
-                }
+                && !cols.is_empty()
+            {
+                db.columns = cols
+                    .iter()
+                    .map(|c| Column {
+                        id: new_id(),
+                        name: s(c, "name").unwrap_or("Colonne").to_string(),
+                        kind: match s(c, "kind").unwrap_or("text") {
+                            "number" => ColumnKind::Number,
+                            "select" => ColumnKind::Select,
+                            "checkbox" => ColumnKind::Checkbox,
+                            "date" => ColumnKind::Date,
+                            _ => ColumnKind::Text,
+                        },
+                        options: c
+                            .get("options")
+                            .and_then(Value::as_array)
+                            .map(|o| {
+                                o.iter()
+                                    .filter_map(|x| x.as_str().map(String::from))
+                                    .collect()
+                            })
+                            .unwrap_or_default(),
+                    })
+                    .collect();
+                db.rows.clear();
+            }
             let id = ws.create_page(title, parent);
             let p = ws.page_mut(&id).unwrap();
             p.blocks.clear();
@@ -474,7 +611,10 @@ fn call_tool(name: &str, args: &Value) -> Result<String, ToolError> {
         "query_database" => {
             let id = page_id(&ws, need(args, "page")?)?;
             let p = ws.page(&id).unwrap();
-            let mut db = p.database.clone().ok_or_else(|| "this page holds no database".to_string())?;
+            let mut db = p
+                .database
+                .clone()
+                .ok_or_else(|| "this page holds no database".to_string())?;
             db.filter = s(args, "filter").unwrap_or("").to_string();
             let rows: Vec<Value> = db
                 .visible_rows()
@@ -484,18 +624,31 @@ fn call_tool(name: &str, args: &Value) -> Result<String, ToolError> {
                     let mut m = serde_json::Map::new();
                     m.insert("row_id".into(), json!(r.id));
                     for c in &db.columns {
-                        m.insert(c.name.clone(), json!(r.cells.get(&c.id).cloned().unwrap_or_default()));
+                        m.insert(
+                            c.name.clone(),
+                            json!(r.cells.get(&c.id).cloned().unwrap_or_default()),
+                        );
                     }
                     Value::Object(m)
                 })
                 .collect();
-            let cols: Vec<Value> = db.columns.iter().map(|c| json!({"name":c.name,"kind":c.kind,"options":c.options})).collect();
-            Ok(serde_json::to_string_pretty(&json!({"columns":cols,"rows":rows})).unwrap_or_default())
+            let cols: Vec<Value> = db
+                .columns
+                .iter()
+                .map(|c| json!({"name":c.name,"kind":c.kind,"options":c.options}))
+                .collect();
+            Ok(
+                serde_json::to_string_pretty(&json!({"columns":cols,"rows":rows}))
+                    .unwrap_or_default(),
+            )
         }
         "add_database_row" | "update_database_row" | "delete_database_row" => {
             let id = page_id(&ws, need(args, "page")?)?;
             let p = ws.page_mut(&id).unwrap();
-            let db = p.database.as_mut().ok_or_else(|| "this page holds no database".to_string())?;
+            let db = p
+                .database
+                .as_mut()
+                .ok_or_else(|| "this page holds no database".to_string())?;
             let row_id = if name == "add_database_row" {
                 let rid = db.add_row("");
                 if let Some(c) = db.columns.first() {
@@ -515,7 +668,9 @@ fn call_tool(name: &str, args: &Value) -> Result<String, ToolError> {
             } else if let Some(vals) = args.get("values").and_then(Value::as_object) {
                 let mut sets = vec![];
                 for (k, v) in vals {
-                    let col = db.column_by_name(k).ok_or_else(|| format!("no column \"{k}\""))?;
+                    let col = db
+                        .column_by_name(k)
+                        .ok_or_else(|| format!("no column \"{k}\""))?;
                     let text = match v {
                         Value::String(t) => t.clone(),
                         Value::Bool(b) => b.to_string(),
@@ -524,7 +679,11 @@ fn call_tool(name: &str, args: &Value) -> Result<String, ToolError> {
                     };
                     sets.push((col.id.clone(), text));
                 }
-                let row = db.rows.iter_mut().find(|r| r.id == row_id).ok_or_else(|| format!("no row {row_id}"))?;
+                let row = db
+                    .rows
+                    .iter_mut()
+                    .find(|r| r.id == row_id)
+                    .ok_or_else(|| format!("no row {row_id}"))?;
                 for (cid, t) in sets {
                     row.cells.insert(cid, t);
                 }
@@ -553,10 +712,14 @@ fn call_tool(name: &str, args: &Value) -> Result<String, ToolError> {
         }
         "get_project_state" => {
             let p = match (s(args, "project"), s(args, "folder")) {
-                (Some(k), _) if !k.is_empty() => ws.find_project(k).ok_or_else(|| format!("no project matches \"{k}\""))?,
+                (Some(k), _) if !k.is_empty() => ws
+                    .find_project(k)
+                    .ok_or_else(|| format!("no project matches \"{k}\""))?,
                 (_, Some(f)) if !f.is_empty() => ws
                     .project_for_path(std::path::Path::new(f))
-                    .ok_or_else(|| format!("no project holds the folder {f}; create one with create_project"))?,
+                    .ok_or_else(|| {
+                        format!("no project holds the folder {f}; create one with create_project")
+                    })?,
                 _ => return Err(ToolError::Failed("give `project` or `folder`".into())),
             };
             // The answers this state of play hands the AI: noted as received, and the
@@ -583,8 +746,15 @@ fn call_tool(name: &str, args: &Value) -> Result<String, ToolError> {
                 out.push_str(&q);
             }
             // Claude Code / Codex sessions found on this machine in the project's folder.
-            let folder = p.project.as_ref().map(|x| x.folder.trim().to_string()).unwrap_or_default();
-            if let Some(g) = (!folder.is_empty()).then(|| crate::git::for_ai(&folder)).flatten() {
+            let folder = p
+                .project
+                .as_ref()
+                .map(|x| x.folder.trim().to_string())
+                .unwrap_or_default();
+            if let Some(g) = (!folder.is_empty())
+                .then(|| crate::git::for_ai(&folder))
+                .flatten()
+            {
                 out.push_str("\n## Versions (git)\n\n");
                 out.push_str(&g);
                 out.push('\n');
@@ -600,14 +770,19 @@ fn call_tool(name: &str, args: &Value) -> Result<String, ToolError> {
                 if !found.is_empty() {
                     out.push_str("\n## Sessions détectées sur cette machine\n\n");
                     for se in found.iter().take(10) {
-                        let reply = if se.last_reply.is_empty() { String::new() } else { format!("\n  dernière réponse : {}", se.last_reply) };
+                        let reply = if se.last_reply.is_empty() {
+                            String::new()
+                        } else {
+                            format!("\n  dernière réponse : {}", se.last_reply)
+                        };
                         out.push_str(&format!(
                             "- {} · {} · {} message(s) · fichier {}\n  reprendre : `{}`{reply}\n",
                             se.tool.name(),
                             se.display_title(),
                             se.user_messages + se.agent_messages,
                             se.path.display(),
-                            se.resume_command().unwrap_or_else(|| "(id de session invalide)".into())
+                            se.resume_command()
+                                .unwrap_or_else(|| "(id de session invalide)".into())
                         ));
                     }
                 }
@@ -653,7 +828,8 @@ fn call_tool(name: &str, args: &Value) -> Result<String, ToolError> {
             }
             let pr = p.project.as_mut().unwrap();
             if let Some(st) = s(args, "status") {
-                pr.status = project::ProjectStatus::from_name(st).ok_or_else(|| format!("unknown status {st}"))?;
+                pr.status = project::ProjectStatus::from_name(st)
+                    .ok_or_else(|| format!("unknown status {st}"))?;
             }
             if let Some(f) = s(args, "folder") {
                 pr.folder = check_folder(f)?;
@@ -687,7 +863,8 @@ fn call_tool(name: &str, args: &Value) -> Result<String, ToolError> {
             let pr = p.project.as_mut().unwrap();
             let sid = find_step(pr, need(args, "step")?)?;
             if let Some(st) = s(args, "status") {
-                let st = project::StepStatus::from_name(st).ok_or_else(|| format!("unknown step status {st}"))?;
+                let st = project::StepStatus::from_name(st)
+                    .ok_or_else(|| format!("unknown step status {st}"))?;
                 if st == project::StepStatus::Doing {
                     // Reserved for this computer's AI; refused if another computer's AI has it.
                     pr.claim_step(&sid, &crate::store::computer_id())?;
@@ -733,8 +910,18 @@ fn call_tool(name: &str, args: &Value) -> Result<String, ToolError> {
                 }
                 None => (String::new(), String::new()),
             };
-            let head = if title.is_empty() { "Question d'une IA".to_string() } else { format!("Question sur {title}") };
-            ws.notify("question", &pid, &head, &crate::richtext::clean(&q, 1500), None);
+            let head = if title.is_empty() {
+                "Question d'une IA".to_string()
+            } else {
+                format!("Question sur {title}")
+            };
+            ws.notify(
+                "question",
+                &pid,
+                &head,
+                &crate::richtext::clean(&q, 1500),
+                None,
+            );
             save(&ws)?;
             Ok("question posted in the inbox; go on with something else meanwhile".into())
         }
@@ -745,9 +932,17 @@ fn call_tool(name: &str, args: &Value) -> Result<String, ToolError> {
 /// The inbox notice when an AI receives answers: (title, text listing the questions).
 fn answers_seen_notice(questions: &[String]) -> (String, String) {
     let title = if questions.len() == 1 {
-        crate::tr!("Réponse prise en compte par l'IA", "Answer taken in by the AI").to_string()
+        crate::tr!(
+            "Réponse prise en compte par l'IA",
+            "Answer taken in by the AI"
+        )
+        .to_string()
     } else {
-        crate::trf!("{} réponses prises en compte par l'IA", "{} answers taken in by the AI", questions.len())
+        crate::trf!(
+            "{} réponses prises en compte par l'IA",
+            "{} answers taken in by the AI",
+            questions.len()
+        )
     };
     let list: Vec<String> = questions.iter().map(|q| format!("- {q}")).collect();
     let text = crate::trf!(
@@ -761,7 +956,11 @@ fn answers_seen_notice(questions: &[String]) -> (String, String) {
 /// The state of play from `done` / `in_progress` / `blockers` (+ `summary` as notes),
 /// or from `summary` alone. None when nothing was given.
 fn summary_arg(args: &Value) -> Option<String> {
-    let (done, doing, blockers) = (str_list(args, "done"), str_list(args, "in_progress"), str_list(args, "blockers"));
+    let (done, doing, blockers) = (
+        str_list(args, "done"),
+        str_list(args, "in_progress"),
+        str_list(args, "blockers"),
+    );
     let notes = s(args, "summary").unwrap_or("");
     if done.is_empty() && doing.is_empty() && blockers.is_empty() {
         return s(args, "summary").map(String::from);
@@ -777,28 +976,53 @@ fn find_step(pr: &project::Project, key: &str) -> Result<String, String> {
     if key.is_empty() {
         return Err("missing argument: step".into());
     }
-    if let Some(x) = pr.steps.iter().find(|x| x.id == key).or_else(|| pr.steps.iter().find(|x| x.title.to_lowercase() == key)) {
+    if let Some(x) = pr
+        .steps
+        .iter()
+        .find(|x| x.id == key)
+        .or_else(|| pr.steps.iter().find(|x| x.title.to_lowercase() == key))
+    {
         return Ok(x.id.clone());
     }
-    let hits: Vec<_> = pr.steps.iter().filter(|x| x.title.to_lowercase().contains(&key)).collect();
+    let hits: Vec<_> = pr
+        .steps
+        .iter()
+        .filter(|x| x.title.to_lowercase().contains(&key))
+        .collect();
     match hits.as_slice() {
         [] => Err(format!("no step matches \"{key}\"")),
         [x] => Ok(x.id.clone()),
         many => {
-            let list: Vec<String> = many.iter().map(|x| format!("- {} (step_id: {})", x.title, x.id)).collect();
-            Err(format!("\"{key}\" matches {} steps; name one by its step_id:\n{}", many.len(), list.join("\n")))
+            let list: Vec<String> = many
+                .iter()
+                .map(|x| format!("- {} (step_id: {})", x.title, x.id))
+                .collect();
+            Err(format!(
+                "\"{key}\" matches {} steps; name one by its step_id:\n{}",
+                many.len(),
+                list.join("\n")
+            ))
         }
     }
 }
 
 fn project_id(ws: &Workspace, key: &str) -> Result<String, String> {
-    ws.find_project(key).map(|p| p.id.clone()).ok_or_else(|| format!("no project matches \"{key}\""))
+    ws.find_project(key)
+        .map(|p| p.id.clone())
+        .ok_or_else(|| format!("no project matches \"{key}\""))
 }
 
 fn str_list(args: &Value, key: &str) -> Vec<String> {
     args.get(key)
         .and_then(Value::as_array)
-        .map(|a| a.iter().filter_map(Value::as_str).map(str::trim).filter(|x| !x.is_empty()).map(String::from).collect())
+        .map(|a| {
+            a.iter()
+                .filter_map(Value::as_str)
+                .map(str::trim)
+                .filter(|x| !x.is_empty())
+                .map(String::from)
+                .collect()
+        })
         .unwrap_or_default()
 }
 
@@ -807,7 +1031,9 @@ fn str_list(args: &Value, key: &str) -> Vec<String> {
 fn branch_rule(on_main: bool) -> String {
     let dev = crate::auto::DEV;
     if on_main {
-        format!("\nBranches : ce projet autorise le travail directement sur main. N'ouvre pas de branche par session ; s'il faut isoler un travail risqué, utilise la branche `{dev}`.\n")
+        format!(
+            "\nBranches : ce projet autorise le travail directement sur main. N'ouvre pas de branche par session ; s'il faut isoler un travail risqué, utilise la branche `{dev}`.\n"
+        )
     } else {
         format!(
             "\nBranches : sauf si la personne te demande de travailler sur main, travaille sur la branche `{dev}` \
@@ -830,14 +1056,22 @@ mod tests {
         static DIR: OnceLock<std::path::PathBuf> = OnceLock::new();
         let guard = LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let dir = DIR.get_or_init(|| {
-            let d = std::env::temp_dir().join(format!("orchestra-mcp-{}", uuid::Uuid::new_v4().simple()));
+            let d = std::env::temp_dir()
+                .join(format!("orchestra-mcp-{}", uuid::Uuid::new_v4().simple()));
             // SAFETY: set once, before any test of this module touches the workspace.
             unsafe { std::env::set_var("ORCHESTRA_DIR", &d) };
             d
         });
-        assert!(store::workspace_path().starts_with(dir), "tests must not touch the real workspace");
+        assert!(
+            store::workspace_path().starts_with(dir),
+            "tests must not touch the real workspace"
+        );
         // Nor anything else of the real data folder (the tests write next to the workspace).
-        assert_eq!(&store::data_dir(), dir, "tests must not touch the real data folder");
+        assert_eq!(
+            &store::data_dir(),
+            dir,
+            "tests must not touch the real data folder"
+        );
         store::save(&Workspace::default()).unwrap();
         guard
     }
@@ -870,12 +1104,22 @@ mod tests {
     }
 
     fn project_with_steps(steps: &[&str]) -> String {
-        let out = call("create_project", json!({"title": "Projet test", "steps": steps})).unwrap();
+        let out = call(
+            "create_project",
+            json!({"title": "Projet test", "steps": steps}),
+        )
+        .unwrap();
         out.strip_prefix("created project ").unwrap().to_string()
     }
 
     fn steps(pid: &str) -> Vec<project::Step> {
-        store::load().page(pid).unwrap().project.clone().unwrap().steps
+        store::load()
+            .page(pid)
+            .unwrap()
+            .project
+            .clone()
+            .unwrap()
+            .steps
     }
 
     /// Several MCP servers writing at once (one per Claude Code session): each call reads,
@@ -897,7 +1141,10 @@ mod tests {
         });
         let titles: Vec<String> = steps(&pid).into_iter().map(|s| s.title).collect();
         for i in 0..n {
-            assert!(titles.contains(&format!("Étape parallèle {i}")), "étape {i} perdue : {titles:?}");
+            assert!(
+                titles.contains(&format!("Étape parallèle {i}")),
+                "étape {i} perdue : {titles:?}"
+            );
         }
     }
 
@@ -911,30 +1158,77 @@ mod tests {
         std::fs::create_dir_all(&real).unwrap();
         let real = real.display().to_string();
         call("update_project", json!({"project": pid, "folder": real})).unwrap();
-        let folder = || store::load().page(&pid).unwrap().project.clone().unwrap().folder;
+        let folder = || {
+            store::load()
+                .page(&pid)
+                .unwrap()
+                .project
+                .clone()
+                .unwrap()
+                .folder
+        };
         assert_eq!(folder(), real);
-        for bad in ["src", "./x", "../../etc", "/", "~", "/nulle/part/ici", "~/ce-dossier-n-existe-pas-42"] {
-            let err = call("update_project", json!({"project": pid, "folder": bad, "title": "Renommé"})).unwrap_err();
+        for bad in [
+            "src",
+            "./x",
+            "../../etc",
+            "/",
+            "~",
+            "/nulle/part/ici",
+            "~/ce-dossier-n-existe-pas-42",
+        ] {
+            let err = call(
+                "update_project",
+                json!({"project": pid, "folder": bad, "title": "Renommé"}),
+            )
+            .unwrap_err();
             assert!(err.contains("folder"), "{bad} : {err}");
             assert_eq!(folder(), real, "{bad}");
         }
-        assert_ne!(store::load().page(&pid).unwrap().title, "Renommé", "nothing saved on a refusal");
+        assert_ne!(
+            store::load().page(&pid).unwrap().title,
+            "Renommé",
+            "nothing saved on a refusal"
+        );
         // An empty folder clears it; create_project checks it the same way.
         call("update_project", json!({"project": pid, "folder": ""})).unwrap();
         assert_eq!(folder(), "");
-        assert!(call("create_project", json!({"title": "Autre", "folder": "relatif/dossier"})).is_err());
+        assert!(
+            call(
+                "create_project",
+                json!({"title": "Autre", "folder": "relatif/dossier"})
+            )
+            .is_err()
+        );
         assert!(call("create_project", json!({"title": "Sans dossier"})).is_ok());
     }
 
     #[test]
     fn update_step_refuses_an_ambiguous_piece_of_title() {
         let _g = fresh_workspace();
-        let pid = project_with_steps(&["Sécurité : limiter le handshake", "Sécurité : assainir le tag", "Écrire la doc"]);
-        let err = call("update_step", json!({"project": pid, "step": "sécurité", "status": "done"})).unwrap_err();
+        let pid = project_with_steps(&[
+            "Sécurité : limiter le handshake",
+            "Sécurité : assainir le tag",
+            "Écrire la doc",
+        ]);
+        let err = call(
+            "update_step",
+            json!({"project": pid, "step": "sécurité", "status": "done"}),
+        )
+        .unwrap_err();
         assert!(err.contains("matches 2 steps"), "{err}");
-        assert!(steps(&pid).iter().all(|s| s.status == project::StepStatus::Todo), "nothing changed");
+        assert!(
+            steps(&pid)
+                .iter()
+                .all(|s| s.status == project::StepStatus::Todo),
+            "nothing changed"
+        );
         // A piece found in one step only is fine, whatever its case.
-        call("update_step", json!({"project": pid, "step": "ASSAINIR", "status": "doing"})).unwrap();
+        call(
+            "update_step",
+            json!({"project": pid, "step": "ASSAINIR", "status": "doing"}),
+        )
+        .unwrap();
         let st = steps(&pid);
         assert_eq!(st[1].status, project::StepStatus::Doing);
         assert_eq!(st[0].status, project::StepStatus::Todo);
@@ -954,21 +1248,54 @@ mod tests {
             store::save(&ws).unwrap();
         };
         reserve("autre-ordinateur", crate::model::now_ms());
-        let err = call("update_step", json!({"project": pid, "step": "Une", "status": "doing"})).unwrap_err();
-        assert!(err.contains("autre ordinateur") || err.contains("another computer"), "{err}");
-        assert_eq!(steps(&pid)[0].held_by, "autre-ordinateur", "nothing changed");
+        let err = call(
+            "update_step",
+            json!({"project": pid, "step": "Une", "status": "doing"}),
+        )
+        .unwrap_err();
+        assert!(
+            err.contains("autre ordinateur") || err.contains("another computer"),
+            "{err}"
+        );
+        assert_eq!(
+            steps(&pid)[0].held_by,
+            "autre-ordinateur",
+            "nothing changed"
+        );
         // The state of play says so, and points to the next free step.
         let state = call("get_project_state", json!({"project": pid})).unwrap();
-        assert!(state.contains("Deux") && (state.contains("réservée par une IA") || state.contains("reserved by an AI")), "{state}");
-        assert!(state.contains("prochaine étape : Deux") || state.contains("next step: Deux"), "{state}");
+        assert!(
+            state.contains("Deux")
+                && (state.contains("réservée par une IA") || state.contains("reserved by an AI")),
+            "{state}"
+        );
+        assert!(
+            state.contains("prochaine étape : Deux") || state.contains("next step: Deux"),
+            "{state}"
+        );
         // The other step is free; done releases the reservation.
-        call("update_step", json!({"project": pid, "step": "Deux", "status": "doing"})).unwrap();
+        call(
+            "update_step",
+            json!({"project": pid, "step": "Deux", "status": "doing"}),
+        )
+        .unwrap();
         assert_eq!(steps(&pid)[1].held_by, store::computer_id());
-        call("update_step", json!({"project": pid, "step": "Deux", "status": "done"})).unwrap();
+        call(
+            "update_step",
+            json!({"project": pid, "step": "Deux", "status": "done"}),
+        )
+        .unwrap();
         assert!(steps(&pid)[1].held_by.is_empty());
         // A reservation left too long (AI gone) no longer stops anyone.
-        reserve("autre-ordinateur", crate::model::now_ms() - project::HOLD_MS - 1);
-        call("update_step", json!({"project": pid, "step": "Une", "status": "doing"})).unwrap();
+        reserve(
+            "autre-ordinateur",
+            crate::model::now_ms() - project::HOLD_MS - 1,
+        );
+        call(
+            "update_step",
+            json!({"project": pid, "step": "Une", "status": "doing"}),
+        )
+        .unwrap();
         assert_eq!(steps(&pid)[0].held_by, store::computer_id());
     }
 
@@ -977,13 +1304,25 @@ mod tests {
         let _g = fresh_workspace();
         // The exact title wins even though it is also a piece of another title.
         let pid = project_with_steps(&["Tests", "Tests de bout en bout"]);
-        call("update_step", json!({"project": pid, "step": "tests", "status": "done"})).unwrap();
+        call(
+            "update_step",
+            json!({"project": pid, "step": "tests", "status": "done"}),
+        )
+        .unwrap();
         let st = steps(&pid);
         assert_eq!(st[0].status, project::StepStatus::Done);
         assert_eq!(st[1].status, project::StepStatus::Todo);
-        call("update_step", json!({"project": pid, "step": st[1].id, "title": "Tests E2E"})).unwrap();
+        call(
+            "update_step",
+            json!({"project": pid, "step": st[1].id, "title": "Tests E2E"}),
+        )
+        .unwrap();
         assert_eq!(steps(&pid)[1].title, "Tests E2E");
-        let err = call("update_step", json!({"project": pid, "step": "inexistante"})).unwrap_err();
+        let err = call(
+            "update_step",
+            json!({"project": pid, "step": "inexistante"}),
+        )
+        .unwrap_err();
         assert!(err.contains("no step matches"), "{err}");
         assert!(call("update_step", json!({"project": pid, "step": "  "})).is_err());
     }
@@ -994,8 +1333,18 @@ mod tests {
     fn project_state_notes_the_answers_it_hands_over() {
         let _g = fresh_workspace();
         let pid = project_with_steps(&["Une"]);
-        call("ask_human", json!({"project": pid, "question": "Garder l'ancienne API ?"})).unwrap();
-        let notices = || store::load().inbox.iter().filter(|m| m.kind == "info" && m.project == pid).count();
+        call(
+            "ask_human",
+            json!({"project": pid, "question": "Garder l'ancienne API ?"}),
+        )
+        .unwrap();
+        let notices = || {
+            store::load()
+                .inbox
+                .iter()
+                .filter(|m| m.kind == "info" && m.project == pid)
+                .count()
+        };
         call("get_project_state", json!({"project": pid})).unwrap();
         assert_eq!(notices(), 0, "no answer yet");
         let mut ws = store::load();
@@ -1014,7 +1363,11 @@ mod tests {
     fn add_steps_and_project_state() {
         let _g = fresh_workspace();
         let pid = project_with_steps(&[]);
-        let out = call("add_steps", json!({"project": "Projet test", "steps": ["Un", " ", "Deux"]})).unwrap();
+        let out = call(
+            "add_steps",
+            json!({"project": "Projet test", "steps": ["Un", " ", "Deux"]}),
+        )
+        .unwrap();
         assert!(out.starts_with("2 step(s) added"), "{out}");
         assert!(call("add_steps", json!({"project": pid, "steps": []})).is_err());
         let state = call("get_project_state", json!({"project": pid})).unwrap();
@@ -1031,34 +1384,87 @@ mod tests {
     #[test]
     fn pages_round_trip_and_errors() {
         let _g = fresh_workspace();
-        call("create_page", json!({"title": "Notes", "markdown": "Premier paragraphe"})).unwrap();
-        call("append_to_page", json!({"page": "Notes", "markdown": "- un point"})).unwrap();
+        call(
+            "create_page",
+            json!({"title": "Notes", "markdown": "Premier paragraphe"}),
+        )
+        .unwrap();
+        call(
+            "append_to_page",
+            json!({"page": "Notes", "markdown": "- un point"}),
+        )
+        .unwrap();
         let md = call("read_page", json!({"page": "Notes"})).unwrap();
-        assert!(md.contains("Premier paragraphe") && md.contains("un point"), "{md}");
-        assert!(call("read_page", json!({"page": "Absente"})).unwrap_err().contains("no page matches"));
-        assert!(call("read_page", json!({})).unwrap_err().contains("missing argument: page"));
-        assert_eq!(call("outil_inconnu", json!({})).unwrap_err(), "unknown tool");
+        assert!(
+            md.contains("Premier paragraphe") && md.contains("un point"),
+            "{md}"
+        );
+        assert!(
+            call("read_page", json!({"page": "Absente"}))
+                .unwrap_err()
+                .contains("no page matches")
+        );
+        assert!(
+            call("read_page", json!({}))
+                .unwrap_err()
+                .contains("missing argument: page")
+        );
+        assert_eq!(
+            call("outil_inconnu", json!({})).unwrap_err(),
+            "unknown tool"
+        );
     }
 
     #[test]
     fn restore_page_brings_a_page_and_its_children_back() {
         let _g = fresh_workspace();
-        let parent = call("create_page", json!({"title": "Archives"})).unwrap().strip_prefix("created page ").unwrap().to_string();
-        let child = call("create_page", json!({"title": "Compte rendu", "parent": parent})).unwrap().strip_prefix("created page ").unwrap().to_string();
+        let parent = call("create_page", json!({"title": "Archives"}))
+            .unwrap()
+            .strip_prefix("created page ")
+            .unwrap()
+            .to_string();
+        let child = call(
+            "create_page",
+            json!({"title": "Compte rendu", "parent": parent}),
+        )
+        .unwrap()
+        .strip_prefix("created page ")
+        .unwrap()
+        .to_string();
         call("create_page", json!({"title": "Compte rendu bis"})).unwrap();
         call("trash_page", json!({"page": "Archives"})).unwrap();
-        assert!(store::load().page(&child).unwrap().trashed, "children go to the trash too");
+        assert!(
+            store::load().page(&child).unwrap().trashed,
+            "children go to the trash too"
+        );
         // Not in the trash, unknown, or ambiguous: refused.
-        assert!(call("restore_page", json!({"page": "Compte rendu bis"})).unwrap_err().contains("no page in the trash"));
+        assert!(
+            call("restore_page", json!({"page": "Compte rendu bis"}))
+                .unwrap_err()
+                .contains("no page in the trash")
+        );
         assert!(call("restore_page", json!({"page": "Absente"})).is_err());
-        let live = store::load().pages.iter().find(|p| p.title == "Compte rendu bis").unwrap().id.clone();
-        assert!(call("restore_page", json!({"page": live})).unwrap_err().contains("not in the trash"));
+        let live = store::load()
+            .pages
+            .iter()
+            .find(|p| p.title == "Compte rendu bis")
+            .unwrap()
+            .id
+            .clone();
+        assert!(
+            call("restore_page", json!({"page": live}))
+                .unwrap_err()
+                .contains("not in the trash")
+        );
         // By title (trashed pages are not found by find_page): page and child come back.
         call("restore_page", json!({"page": "archives"})).unwrap();
         let ws = store::load();
         assert!(!ws.page(&parent).unwrap().trashed);
         assert!(!ws.page(&child).unwrap().trashed);
-        assert_eq!(ws.page(&child).unwrap().parent.as_deref(), Some(parent.as_str()));
+        assert_eq!(
+            ws.page(&child).unwrap().parent.as_deref(),
+            Some(parent.as_str())
+        );
         // A child restored alone, its parent still trashed, comes back at the top level.
         call("trash_page", json!({"page": parent})).unwrap();
         let out = call("restore_page", json!({"page": child})).unwrap();
@@ -1073,10 +1479,12 @@ mod tests {
     fn live_code_never_lands_in_the_workspace_file() {
         let _g = fresh_workspace();
         // An older version wrote it in clear: it moves out at the first load.
-        let mut v: Value = serde_json::from_str(&std::fs::read_to_string(store::workspace_path()).unwrap_or_else(|_| {
-            save(&store::load()).unwrap();
-            std::fs::read_to_string(store::workspace_path()).unwrap()
-        }))
+        let mut v: Value = serde_json::from_str(
+            &std::fs::read_to_string(store::workspace_path()).unwrap_or_else(|_| {
+                save(&store::load()).unwrap();
+                std::fs::read_to_string(store::workspace_path()).unwrap()
+            }),
+        )
         .unwrap();
         v["settings"]["collab"]["live_code"] = json!("ancien-code-42");
         std::fs::write(store::workspace_path(), v.to_string()).unwrap();
@@ -1084,7 +1492,10 @@ mod tests {
         assert_eq!(ws.settings.collab.live_code, "ancien-code-42");
         save(&ws).unwrap();
         let text = std::fs::read_to_string(store::workspace_path()).unwrap();
-        assert!(!text.contains("ancien-code-42") && !text.contains("live_code"), "{text}");
+        assert!(
+            !text.contains("ancien-code-42") && !text.contains("live_code"),
+            "{text}"
+        );
         assert_eq!(store::load().settings.collab.live_code, "ancien-code-42");
         // A new code replaces it; an empty one leaves it alone.
         let mut ws = store::load();
@@ -1097,18 +1508,33 @@ mod tests {
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            assert_eq!(std::fs::metadata(&f).unwrap().permissions().mode() & 0o777, 0o600);
+            assert_eq!(
+                std::fs::metadata(&f).unwrap().permissions().mode() & 0o777,
+                0o600
+            );
         }
-        assert!(!std::fs::read_to_string(store::workspace_path()).unwrap().contains("nouveau-7"));
+        assert!(
+            !std::fs::read_to_string(store::workspace_path())
+                .unwrap()
+                .contains("nouveau-7")
+        );
     }
 
     #[test]
     fn ask_human_lands_in_the_inbox() {
         let _g = fresh_workspace();
         let pid = project_with_steps(&[]);
-        call("ask_human", json!({"project": pid, "question": "On garde le port 7878 ?"})).unwrap();
+        call(
+            "ask_human",
+            json!({"project": pid, "question": "On garde le port 7878 ?"}),
+        )
+        .unwrap();
         let ws = store::load();
-        let m = ws.inbox.iter().find(|m| m.kind == "question").expect("question in the inbox");
+        let m = ws
+            .inbox
+            .iter()
+            .find(|m| m.kind == "question")
+            .expect("question in the inbox");
         assert_eq!(m.project, pid);
         assert!(m.title.contains("Projet test"));
     }

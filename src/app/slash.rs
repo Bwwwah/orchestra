@@ -56,9 +56,13 @@ impl Item {
     pub fn label(self) -> &'static str {
         match self {
             Item::Block(k) => k.label(),
-            Item::Database(DbView::Table) => crate::tr!("Base de données - Tableau", "Database - Table"),
+            Item::Database(DbView::Table) => {
+                crate::tr!("Base de données - Tableau", "Database - Table")
+            }
             Item::Database(DbView::Board) => crate::tr!("Kanban", "Kanban"),
-            Item::Database(DbView::List) => crate::tr!("Base de données - Liste", "Database - List"),
+            Item::Database(DbView::List) => {
+                crate::tr!("Base de données - Liste", "Database - List")
+            }
             Item::Today => crate::tr!("Date du jour", "Today's date"),
         }
     }
@@ -74,10 +78,21 @@ impl Item {
     fn keywords(self) -> &'static [&'static str] {
         match self {
             Item::Block(k) => k.keywords(),
-            Item::Database(DbView::Table) => &["base", "database", "bdd", "table", "tableau", "grille"],
-            Item::Database(DbView::Board) => &["kanban", "tableau", "board", "colonnes", "base", "database", "tâches", "taches"],
+            Item::Database(DbView::Table) => {
+                &["base", "database", "bdd", "table", "tableau", "grille"]
+            }
+            Item::Database(DbView::Board) => &[
+                "kanban", "tableau", "board", "colonnes", "base", "database", "tâches", "taches",
+            ],
             Item::Database(DbView::List) => &["base", "database", "liste", "list"],
-            Item::Today => &["date", "aujourd'hui", "aujourdhui", "today", "jour", "@today"],
+            Item::Today => &[
+                "date",
+                "aujourd'hui",
+                "aujourdhui",
+                "today",
+                "jour",
+                "@today",
+            ],
         }
     }
 }
@@ -97,7 +112,11 @@ pub fn matches(text: &str) -> Vec<(Item, &'static str)> {
         .into_iter()
         .map(|(k, h)| (Item::Block(k), h))
         .chain(VIEWS)
-        .filter(|(k, _)| q.is_empty() || k.label().to_lowercase().contains(&q) || k.keywords().iter().any(|w| w.starts_with(&q)))
+        .filter(|(k, _)| {
+            q.is_empty()
+                || k.label().to_lowercase().contains(&q)
+                || k.keywords().iter().any(|w| w.starts_with(&q))
+        })
         .collect()
 }
 
@@ -114,16 +133,35 @@ const FOOT: f32 = 41.0;
 const MAX_ROWS: f32 = 8.0;
 
 /// Show the menu next to `anchor` (the block's text). Below it when there is room, above otherwise.
-pub fn popup(ctx: &egui::Context, id: egui::Id, anchor: egui::Rect, text: &str, selected: usize, scroll_to_selected: bool) -> Option<SlashEvent> {
+pub fn popup(
+    ctx: &egui::Context,
+    id: egui::Id,
+    anchor: egui::Rect,
+    text: &str,
+    selected: usize,
+    scroll_to_selected: bool,
+) -> Option<SlashEvent> {
     let dark = ctx.global_style().visuals.dark_mode;
     let t = tone(dark);
-    let (bg, sel_bg) = if dark { (Color32::from_rgb(37, 37, 37), Color32::from_rgb(49, 49, 49)) } else { (Color32::WHITE, Color32::from_rgb(239, 238, 236)) };
+    let (bg, sel_bg) = if dark {
+        (Color32::from_rgb(37, 37, 37), Color32::from_rgb(49, 49, 49))
+    } else {
+        (Color32::WHITE, Color32::from_rgb(239, 238, 236))
+    };
     let list = matches(text);
-    let rows_h = if list.is_empty() { ROW } else { (list.len() as f32).min(MAX_ROWS + 0.5) * ROW };
+    let rows_h = if list.is_empty() {
+        ROW
+    } else {
+        (list.len() as f32).min(MAX_ROWS + 0.5) * ROW
+    };
     let height = HEAD + rows_h + 8.0 + FOOT;
     let screen = ctx.content_rect();
     let below = anchor.bottom() + 6.0 + height <= screen.bottom() - 8.0;
-    let y = if below { anchor.bottom() + 6.0 } else { (anchor.top() - 6.0 - height).max(screen.top() + 8.0) };
+    let y = if below {
+        anchor.bottom() + 6.0
+    } else {
+        (anchor.top() - 6.0 - height).max(screen.top() + 8.0)
+    };
     let x = (anchor.left() - 4.0).min(screen.right() - WIDTH - 8.0);
     let mut event = None;
     egui::Area::new(id)
@@ -139,45 +177,108 @@ pub fn popup(ctx: &egui::Context, id: egui::Id, anchor: egui::Rect, text: &str, 
                     ui.set_width(WIDTH);
                     ui.spacing_mut().item_spacing = egui::vec2(0.0, 0.0);
                     let q = text.trim_start_matches('/').trim();
-                    let head = if q.is_empty() { crate::tr!("Blocs de base", "Basic blocks") } else { crate::tr!("Résultats filtrés", "Filtered results") };
-                    let (hr, _) = ui.allocate_exact_size(egui::vec2(WIDTH, HEAD), egui::Sense::hover());
-                    ui.painter().text(egui::pos2(hr.left() + 12.0, hr.center().y + 2.0), egui::Align2::LEFT_CENTER, head, semibold(14.0), t.secondary);
-                    egui::ScrollArea::vertical().id_salt(id.with("scroll")).max_height(MAX_ROWS * ROW + ROW / 2.0).show(ui, |ui| {
-                        ui.spacing_mut().item_spacing = egui::vec2(0.0, 0.0);
-                        if list.is_empty() {
-                            let (r, _) = ui.allocate_exact_size(egui::vec2(WIDTH, ROW), egui::Sense::hover());
-                            ui.painter().text(egui::pos2(r.left() + 12.0, r.center().y), egui::Align2::LEFT_CENTER, crate::tr!("Aucun résultat", "No results"), FontId::proportional(16.0), t.tertiary);
-                        }
-                        for (i, (kind, hint)) in list.iter().enumerate() {
-                            let (r, resp) = ui.allocate_exact_size(egui::vec2(WIDTH, ROW), egui::Sense::click());
-                            let inner = r.shrink2(egui::vec2(4.0, 0.0));
-                            if i == selected {
-                                ui.painter().rect_filled(inner, 8.0, sel_bg);
-                                if scroll_to_selected {
-                                    resp.scroll_to_me(None);
+                    let head = if q.is_empty() {
+                        crate::tr!("Blocs de base", "Basic blocks")
+                    } else {
+                        crate::tr!("Résultats filtrés", "Filtered results")
+                    };
+                    let (hr, _) =
+                        ui.allocate_exact_size(egui::vec2(WIDTH, HEAD), egui::Sense::hover());
+                    ui.painter().text(
+                        egui::pos2(hr.left() + 12.0, hr.center().y + 2.0),
+                        egui::Align2::LEFT_CENTER,
+                        head,
+                        semibold(14.0),
+                        t.secondary,
+                    );
+                    egui::ScrollArea::vertical()
+                        .id_salt(id.with("scroll"))
+                        .max_height(MAX_ROWS * ROW + ROW / 2.0)
+                        .show(ui, |ui| {
+                            ui.spacing_mut().item_spacing = egui::vec2(0.0, 0.0);
+                            if list.is_empty() {
+                                let (r, _) = ui.allocate_exact_size(
+                                    egui::vec2(WIDTH, ROW),
+                                    egui::Sense::hover(),
+                                );
+                                ui.painter().text(
+                                    egui::pos2(r.left() + 12.0, r.center().y),
+                                    egui::Align2::LEFT_CENTER,
+                                    crate::tr!("Aucun résultat", "No results"),
+                                    FontId::proportional(16.0),
+                                    t.tertiary,
+                                );
+                            }
+                            for (i, (kind, hint)) in list.iter().enumerate() {
+                                let (r, resp) = ui.allocate_exact_size(
+                                    egui::vec2(WIDTH, ROW),
+                                    egui::Sense::click(),
+                                );
+                                let inner = r.shrink2(egui::vec2(4.0, 0.0));
+                                if i == selected {
+                                    ui.painter().rect_filled(inner, 8.0, sel_bg);
+                                    if scroll_to_selected {
+                                        resp.scroll_to_me(None);
+                                    }
+                                }
+                                icons::paint(
+                                    ui.painter(),
+                                    egui::Rect::from_center_size(
+                                        egui::pos2(r.left() + 21.0, r.center().y),
+                                        egui::vec2(18.0, 18.0),
+                                    ),
+                                    kind.icon(),
+                                    t.text,
+                                );
+                                ui.painter().text(
+                                    egui::pos2(r.left() + 40.0, r.center().y),
+                                    egui::Align2::LEFT_CENTER,
+                                    kind.label(),
+                                    FontId::proportional(16.0),
+                                    t.text,
+                                );
+                                if !hint.is_empty() {
+                                    ui.painter().text(
+                                        egui::pos2(r.right() - 30.0, r.center().y),
+                                        egui::Align2::RIGHT_CENTER,
+                                        *hint,
+                                        FontId::proportional(14.0),
+                                        t.tertiary,
+                                    );
+                                }
+                                if resp.hovered()
+                                    && i != selected
+                                    && ui.input(|inp| inp.pointer.delta() != egui::Vec2::ZERO)
+                                {
+                                    event = Some(SlashEvent::Hover(i));
+                                }
+                                if resp.clicked() {
+                                    event = Some(SlashEvent::Pick(*kind));
                                 }
                             }
-                            icons::paint(ui.painter(), egui::Rect::from_center_size(egui::pos2(r.left() + 21.0, r.center().y), egui::vec2(18.0, 18.0)), kind.icon(), t.text);
-                            ui.painter().text(egui::pos2(r.left() + 40.0, r.center().y), egui::Align2::LEFT_CENTER, kind.label(), FontId::proportional(16.0), t.text);
-                            if !hint.is_empty() {
-                                ui.painter().text(egui::pos2(r.right() - 30.0, r.center().y), egui::Align2::RIGHT_CENTER, *hint, FontId::proportional(14.0), t.tertiary);
-                            }
-                            if resp.hovered() && i != selected && ui.input(|inp| inp.pointer.delta() != egui::Vec2::ZERO) {
-                                event = Some(SlashEvent::Hover(i));
-                            }
-                            if resp.clicked() {
-                                event = Some(SlashEvent::Pick(*kind));
-                            }
-                        }
-                    });
+                        });
                     ui.add_space(8.0);
-                    let (fr, fresp) = ui.allocate_exact_size(egui::vec2(WIDTH, FOOT), egui::Sense::click());
-                    ui.painter().hline(fr.x_range(), fr.top(), egui::Stroke::new(1.0, t.border));
+                    let (fr, fresp) =
+                        ui.allocate_exact_size(egui::vec2(WIDTH, FOOT), egui::Sense::click());
+                    ui.painter()
+                        .hline(fr.x_range(), fr.top(), egui::Stroke::new(1.0, t.border));
                     if fresp.hovered() {
                         ui.painter().rect_filled(fr.shrink(4.0), 8.0, t.hover);
                     }
-                    ui.painter().text(egui::pos2(fr.left() + 12.0, fr.center().y), egui::Align2::LEFT_CENTER, crate::tr!("Fermer le menu", "Close the menu"), FontId::proportional(16.0), t.text);
-                    ui.painter().text(egui::pos2(fr.right() - 12.0, fr.center().y), egui::Align2::RIGHT_CENTER, "esc", FontId::proportional(14.0), t.tertiary);
+                    ui.painter().text(
+                        egui::pos2(fr.left() + 12.0, fr.center().y),
+                        egui::Align2::LEFT_CENTER,
+                        crate::tr!("Fermer le menu", "Close the menu"),
+                        FontId::proportional(16.0),
+                        t.text,
+                    );
+                    ui.painter().text(
+                        egui::pos2(fr.right() - 12.0, fr.center().y),
+                        egui::Align2::RIGHT_CENTER,
+                        "esc",
+                        FontId::proportional(14.0),
+                        t.tertiary,
+                    );
                     if fresp.clicked() {
                         event = Some(SlashEvent::Close);
                     }

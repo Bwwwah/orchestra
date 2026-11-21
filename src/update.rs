@@ -45,7 +45,10 @@ fn run(bin: &str, args: &[&str], dir: Option<&Path>) -> Result<String, String> {
     let p = crate::sync::shell_path();
     let exe = crate::sync::which(bin, &p).ok_or_else(|| format!("« {bin} » introuvable"))?;
     let mut c = crate::proc::command(exe);
-    c.args(args).env("PATH", &p).env("GH_PROMPT_DISABLED", "1").stdin(Stdio::null());
+    c.args(args)
+        .env("PATH", &p)
+        .env("GH_PROMPT_DISABLED", "1")
+        .stdin(Stdio::null());
     if let Some(d) = dir {
         c.current_dir(d);
     }
@@ -53,7 +56,14 @@ fn run(bin: &str, args: &[&str], dir: Option<&Path>) -> Result<String, String> {
     if o.status.success() {
         Ok(String::from_utf8_lossy(&o.stdout).to_string())
     } else {
-        Err(String::from_utf8_lossy(&o.stderr).lines().find(|l| !l.trim().is_empty()).unwrap_or("échec").trim().chars().take(200).collect())
+        Err(String::from_utf8_lossy(&o.stderr)
+            .lines()
+            .find(|l| !l.trim().is_empty())
+            .unwrap_or("échec")
+            .trim()
+            .chars()
+            .take(200)
+            .collect())
     }
 }
 
@@ -65,16 +75,36 @@ fn parse(v: &Value) -> Option<Release> {
     let tag = v["tag_name"].as_str()?.to_string();
     let assets = v["assets"]
         .as_array()
-        .map(|a| a.iter().filter_map(|x| Some((x["name"].as_str()?.to_string(), x["browser_download_url"].as_str()?.to_string()))).collect())
+        .map(|a| {
+            a.iter()
+                .filter_map(|x| {
+                    Some((
+                        x["name"].as_str()?.to_string(),
+                        x["browser_download_url"].as_str()?.to_string(),
+                    ))
+                })
+                .collect()
+        })
         .unwrap_or_default();
-    Some(Release { tag, notes: v["body"].as_str().unwrap_or("").trim().to_string(), assets })
+    Some(Release {
+        tag,
+        notes: v["body"].as_str().unwrap_or("").trim().to_string(),
+        assets,
+    })
 }
 
 /// The newest release of `repo` (owner/name).
 pub fn latest(repo: &str) -> Result<Release, String> {
-    let repo = repo.trim().trim_start_matches("https://github.com/").trim_end_matches('/').trim_end_matches(".git");
+    let repo = repo
+        .trim()
+        .trim_start_matches("https://github.com/")
+        .trim_end_matches('/')
+        .trim_end_matches(".git");
     if repo.split('/').count() != 2 {
-        return Err(crate::trf!("« {repo} » : attendu propriétaire/dépôt", "« {repo} »: expected owner/repository"));
+        return Err(crate::trf!(
+            "« {repo} » : attendu propriétaire/dépôt",
+            "« {repo} »: expected owner/repository"
+        ));
     }
     let path = format!("repos/{repo}/releases/latest");
     let text = if gh_ready() {
@@ -84,26 +114,48 @@ pub fn latest(repo: &str) -> Result<Release, String> {
             .map_err(|e| crate::trf!("dépôt introuvable ou privé ({e}) ; pour un dépôt privé, connectez « gh »", "repository not found or private ({e}); for a private repository, sign in with « gh »"))?
     };
     let v: Value = serde_json::from_str(&text).map_err(|e| e.to_string())?;
-    parse(&v).ok_or_else(|| crate::tr!("aucune version publiée", "no version published").to_string())
+    parse(&v)
+        .ok_or_else(|| crate::tr!("aucune version publiée", "no version published").to_string())
 }
 
 /// `tag` (v1.2.3) is newer than `current` (1.2.0).
 pub fn newer(tag: &str, current: &str) -> bool {
-    let n = |s: &str| -> Vec<u64> { s.trim_start_matches('v').split(['-', '+']).next().unwrap_or("").split('.').map(|x| x.parse().unwrap_or(0)).collect() };
+    let n = |s: &str| -> Vec<u64> {
+        s.trim_start_matches('v')
+            .split(['-', '+'])
+            .next()
+            .unwrap_or("")
+            .split('.')
+            .map(|x| x.parse().unwrap_or(0))
+            .collect()
+    };
     let (a, b) = (n(tag), n(current));
-    (0..3).map(|i| (a.get(i).copied().unwrap_or(0), b.get(i).copied().unwrap_or(0))).find(|(x, y)| x != y).is_some_and(|(x, y)| x > y)
+    (0..3)
+        .map(|i| {
+            (
+                a.get(i).copied().unwrap_or(0),
+                b.get(i).copied().unwrap_or(0),
+            )
+        })
+        .find(|(x, y)| x != y)
+        .is_some_and(|(x, y)| x > y)
 }
 
 /// What gets replaced: the .app bundle on macOS, the program elsewhere. None when running
 /// from the source (cargo), which updates with git pull + cargo build instead.
 pub fn target() -> Option<PathBuf> {
     let exe = std::env::current_exe().ok()?.canonicalize().ok()?;
-    if exe.components().any(|c| c.as_os_str() == "target") && exe.ancestors().any(|a| a.join("Cargo.toml").is_file()) {
+    if exe.components().any(|c| c.as_os_str() == "target")
+        && exe.ancestors().any(|a| a.join("Cargo.toml").is_file())
+    {
         return None;
     }
     if cfg!(target_os = "macos") {
         let bundle = exe.parent()?.parent()?.parent()?.to_path_buf();
-        return bundle.extension().is_some_and(|e| e == "app").then_some(bundle);
+        return bundle
+            .extension()
+            .is_some_and(|e| e == "app")
+            .then_some(bundle);
     }
     Some(exe)
 }
@@ -125,15 +177,28 @@ fn install_to(target: &Path, repo: &str, rel: &Release) -> Result<PathBuf, Strin
         return Err(crate::trf!(
             "l'app est installée dans un dossier protégé ({}) : téléchargez la nouvelle version depuis la page GitHub du projet (.deb, installateur…)",
             "the app is installed in a protected folder ({}): download the new version from the project's GitHub page (.deb, installer…)",
-            target.parent().map(|p| p.display().to_string()).unwrap_or_default()
+            target
+                .parent()
+                .map(|p| p.display().to_string())
+                .unwrap_or_default()
         ));
     }
     let _ = std::fs::remove_file(&probe);
-    let (name, url) = rel.asset().ok_or(crate::tr!("cette version n'a pas de fichier pour ce système", "this version has no file for this system"))?.clone();
+    let (name, url) = rel
+        .asset()
+        .ok_or(crate::tr!(
+            "cette version n'a pas de fichier pour ce système",
+            "this version has no file for this system"
+        ))?
+        .clone();
     // The tag and the file name come from the network and become paths and command
     // arguments: only plain names are accepted.
     if !safe_name(&rel.tag) || !safe_name(&name) {
-        return Err(crate::tr!("nom de version ou de fichier invalide : mise à jour refusée", "invalid version or file name: update refused").to_string());
+        return Err(crate::tr!(
+            "nom de version ou de fichier invalide : mise à jour refusée",
+            "invalid version or file name: update refused"
+        )
+        .to_string());
     }
     let tmp = std::env::temp_dir().join(format!("orchestra-maj-{}", rel.tag));
     let _ = std::fs::remove_dir_all(&tmp);
@@ -147,7 +212,13 @@ fn install_to(target: &Path, repo: &str, rel: &Release) -> Result<PathBuf, Strin
         "this version publishes no SHA-256 checksum: update refused, download it from the project's GitHub page"
     ))?;
     let sum_file = fetch(repo, rel, &sum_name, &sum_url, &tmp)?;
-    let expected = std::fs::read_to_string(&sum_file).ok().and_then(|t| expected_sha256(&t)).ok_or(crate::tr!("empreinte SHA-256 illisible", "unreadable SHA-256 checksum"))?;
+    let expected = std::fs::read_to_string(&sum_file)
+        .ok()
+        .and_then(|t| expected_sha256(&t))
+        .ok_or(crate::tr!(
+            "empreinte SHA-256 illisible",
+            "unreadable SHA-256 checksum"
+        ))?;
     let got = sha256_file(&file)?;
     if got != expected {
         let _ = std::fs::remove_dir_all(&tmp);
@@ -167,12 +238,23 @@ fn install_to(target: &Path, repo: &str, rel: &Release) -> Result<PathBuf, Strin
         run("ditto", &["-x", "-k", &f, &o], None)?;
     } else if cfg!(windows) {
         let (f, o) = (ps_quote(&f), ps_quote(&o));
-        run("powershell", &["-NoProfile", "-Command", &format!("Expand-Archive -Force -LiteralPath {f} -DestinationPath {o}")], None)?;
+        run(
+            "powershell",
+            &[
+                "-NoProfile",
+                "-Command",
+                &format!("Expand-Archive -Force -LiteralPath {f} -DestinationPath {o}"),
+            ],
+            None,
+        )?;
     } else {
         run("unzip", &["-q", "-o", &f, "-d", &o], None)?;
     }
     let new = find(&out, |p| {
-        let n = p.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+        let n = p
+            .file_name()
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_default();
         if cfg!(target_os = "macos") {
             n.ends_with(".app") && p.is_dir()
         } else if cfg!(windows) {
@@ -181,12 +263,19 @@ fn install_to(target: &Path, repo: &str, rel: &Release) -> Result<PathBuf, Strin
             n == "orchestra" && p.is_file()
         }
     })
-    .ok_or(crate::tr!("le fichier téléchargé ne contient pas l'app", "the downloaded file doesn't contain the app"))?;
+    .ok_or(crate::tr!(
+        "le fichier téléchargé ne contient pas l'app",
+        "the downloaded file doesn't contain the app"
+    ))?;
     // Signature: once the installed app is signed with a Developer ID, the new one must be
     // validly signed by the same Apple team (docs/permissions-macos.md).
     if cfg!(target_os = "macos") {
         let current = signing_team(&target);
-        let got = if current.is_some() { verified_team(&new) } else { None };
+        let got = if current.is_some() {
+            verified_team(&new)
+        } else {
+            None
+        };
         if !signature_allows(current.as_deref(), got.as_deref()) {
             let _ = std::fs::remove_dir_all(&tmp);
             return Err(crate::tr!(
@@ -197,19 +286,41 @@ fn install_to(target: &Path, repo: &str, rel: &Release) -> Result<PathBuf, Strin
         }
     }
     // Swap: the old one is renamed first (a running program can be renamed everywhere).
-    let old = target.with_file_name(format!("{}.ancienne", target.file_name().unwrap().to_string_lossy()));
+    let old = target.with_file_name(format!(
+        "{}.ancienne",
+        target.file_name().unwrap().to_string_lossy()
+    ));
     if old.exists() {
-        let _ = if old.is_dir() { std::fs::remove_dir_all(&old) } else { std::fs::remove_file(&old) };
+        let _ = if old.is_dir() {
+            std::fs::remove_dir_all(&old)
+        } else {
+            std::fs::remove_file(&old)
+        };
     }
-    std::fs::rename(&target, &old).map_err(|e| crate::trf!("impossible de remplacer l'app ({e})", "couldn't replace the app ({e})"))?;
+    std::fs::rename(&target, &old).map_err(|e| {
+        crate::trf!(
+            "impossible de remplacer l'app ({e})",
+            "couldn't replace the app ({e})"
+        )
+    })?;
     let placed = if cfg!(target_os = "macos") {
-        run("ditto", &[&new.display().to_string(), &target.display().to_string()], None).map(|_| ())
+        run(
+            "ditto",
+            &[&new.display().to_string(), &target.display().to_string()],
+            None,
+        )
+        .map(|_| ())
     } else {
-        std::fs::copy(&new, &target).map(|_| ()).map_err(|e| e.to_string())
+        std::fs::copy(&new, &target)
+            .map(|_| ())
+            .map_err(|e| e.to_string())
     };
     if let Err(e) = placed {
         let _ = std::fs::rename(&old, &target);
-        return Err(crate::trf!("impossible d'installer la nouvelle version ({e}) ; l'ancienne est remise", "couldn't install the new version ({e}); the old one is back"));
+        return Err(crate::trf!(
+            "impossible d'installer la nouvelle version ({e}) ; l'ancienne est remise",
+            "couldn't install the new version ({e}); the old one is back"
+        ));
     }
     #[cfg(unix)]
     if !cfg!(target_os = "macos") {
@@ -217,9 +328,17 @@ fn install_to(target: &Path, repo: &str, rel: &Release) -> Result<PathBuf, Strin
         let _ = std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o755));
     }
     if cfg!(target_os = "macos") {
-        let _ = run("xattr", &["-dr", "com.apple.quarantine", &target.display().to_string()], None);
+        let _ = run(
+            "xattr",
+            &["-dr", "com.apple.quarantine", &target.display().to_string()],
+            None,
+        );
     }
-    let _ = if old.is_dir() { std::fs::remove_dir_all(&old) } else { std::fs::remove_file(&old) };
+    let _ = if old.is_dir() {
+        std::fs::remove_dir_all(&old)
+    } else {
+        std::fs::remove_file(&old)
+    };
     let _ = std::fs::remove_dir_all(&tmp);
     Ok(target)
 }
@@ -228,12 +347,33 @@ fn install_to(target: &Path, repo: &str, rel: &Release) -> Result<PathBuf, Strin
 fn fetch(repo: &str, rel: &Release, name: &str, url: &str, dir: &Path) -> Result<PathBuf, String> {
     let file = dir.join(name);
     let got = if gh_ready() {
-        run("gh", &["release", "download", &rel.tag, "-R", repo.trim(), "-p", name, "-D", &dir.display().to_string(), "--clobber"], None).map(|_| ())
+        run(
+            "gh",
+            &[
+                "release",
+                "download",
+                &rel.tag,
+                "-R",
+                repo.trim(),
+                "-p",
+                name,
+                "-D",
+                &dir.display().to_string(),
+                "--clobber",
+            ],
+            None,
+        )
+        .map(|_| ())
     } else {
         Err(String::new())
     };
     if got.is_err() || !file.is_file() {
-        run("curl", &["-fsSL", "-o", &file.display().to_string(), "--url", url], None).map_err(|e| crate::trf!("téléchargement impossible : {e}", "download failed: {e}"))?;
+        run(
+            "curl",
+            &["-fsSL", "-o", &file.display().to_string(), "--url", url],
+            None,
+        )
+        .map_err(|e| crate::trf!("téléchargement impossible : {e}", "download failed: {e}"))?;
     }
     Ok(file)
 }
@@ -244,7 +384,8 @@ fn safe_name(s: &str) -> bool {
     !s.is_empty()
         && s.len() <= 128
         && !s.starts_with(['-', '.'])
-        && s.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-'))
+        && s.bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-'))
 }
 
 /// A PowerShell single-quoted literal ('' stands for a quote inside).
@@ -276,7 +417,12 @@ fn sha256_file(path: &Path) -> Result<String, String> {
 
 /// The Apple team that signed `app` (codesign's TeamIdentifier), None when ad hoc or unsigned.
 fn signing_team(app: &Path) -> Option<String> {
-    let o = crate::proc::command("/usr/bin/codesign").arg("-dv").arg(app).stdin(Stdio::null()).output().ok()?;
+    let o = crate::proc::command("/usr/bin/codesign")
+        .arg("-dv")
+        .arg(app)
+        .stdin(Stdio::null())
+        .output()
+        .ok()?;
     if !o.status.success() {
         return None;
     }
@@ -286,13 +432,23 @@ fn signing_team(app: &Path) -> Option<String> {
 
 /// The signing team of `app`, only when its signature is valid for the whole bundle.
 fn verified_team(app: &Path) -> Option<String> {
-    let ok = crate::proc::command("/usr/bin/codesign").args(["--verify", "--deep", "--strict"]).arg(app).stdin(Stdio::null()).output().ok()?.status.success();
+    let ok = crate::proc::command("/usr/bin/codesign")
+        .args(["--verify", "--deep", "--strict"])
+        .arg(app)
+        .stdin(Stdio::null())
+        .output()
+        .ok()?
+        .status
+        .success();
     if ok { signing_team(app) } else { None }
 }
 
 /// "TeamIdentifier=ABCDE12345" in codesign -dv's output; None for "not set" or missing.
 fn team_id(text: &str) -> Option<String> {
-    let v = text.lines().find_map(|l| l.trim().strip_prefix("TeamIdentifier="))?.trim();
+    let v = text
+        .lines()
+        .find_map(|l| l.trim().strip_prefix("TeamIdentifier="))?
+        .trim();
     (!v.is_empty() && v.bytes().all(|b| b.is_ascii_alphanumeric())).then(|| v.to_string())
 }
 
@@ -311,10 +467,12 @@ fn find(dir: &Path, ok: impl Fn(&Path) -> bool + Copy) -> Option<PathBuf> {
         if ok(&p) {
             return Some(p);
         }
-        if p.is_dir() && p.extension().is_none_or(|x| x != "app")
-            && let Some(f) = find(&p, ok) {
-                return Some(f);
-            }
+        if p.is_dir()
+            && p.extension().is_none_or(|x| x != "app")
+            && let Some(f) = find(&p, ok)
+        {
+            return Some(f);
+        }
     }
     None
 }
@@ -338,18 +496,44 @@ mod tests {
         let base = std::env::temp_dir().join(format!("orch-upd-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&base);
         std::fs::create_dir_all(base.join("pack/orchestra")).unwrap();
-        std::fs::write(base.join("pack/orchestra/orchestra"), "#!/bin/sh\necho nouvelle\n").unwrap();
+        std::fs::write(
+            base.join("pack/orchestra/orchestra"),
+            "#!/bin/sh\necho nouvelle\n",
+        )
+        .unwrap();
         let tar = base.join("Orchestra-v9.0.0-Linux.tar.gz");
-        assert!(crate::proc::command("tar").args(["-czf", &tar.display().to_string(), "-C", &base.join("pack").display().to_string(), "orchestra"]).status().unwrap().success());
+        assert!(
+            crate::proc::command("tar")
+                .args([
+                    "-czf",
+                    &tar.display().to_string(),
+                    "-C",
+                    &base.join("pack").display().to_string(),
+                    "orchestra"
+                ])
+                .status()
+                .unwrap()
+                .success()
+        );
         let app = base.join("installed/orchestra");
         std::fs::create_dir_all(app.parent().unwrap()).unwrap();
         std::fs::write(&app, "ancienne").unwrap();
         let sum = base.join("Orchestra-v9.0.0-Linux.tar.gz.sha256");
-        std::fs::write(&sum, format!("{}  Orchestra-v9.0.0-Linux.tar.gz\n", sha256_file(&tar).unwrap())).unwrap();
+        std::fs::write(
+            &sum,
+            format!(
+                "{}  Orchestra-v9.0.0-Linux.tar.gz\n",
+                sha256_file(&tar).unwrap()
+            ),
+        )
+        .unwrap();
         let mut rel = Release {
             tag: "v9.0.0".into(),
             notes: String::new(),
-            assets: vec![("Orchestra-v9.0.0-Linux.tar.gz".into(), format!("file://{}", tar.display()))],
+            assets: vec![(
+                "Orchestra-v9.0.0-Linux.tar.gz".into(),
+                format!("file://{}", tar.display()),
+            )],
         };
         // No checksum published: refused.
         assert!(install_to(&app, "moi/orchestra", &rel).is_err());
@@ -357,7 +541,10 @@ mod tests {
         // Wrong checksum: refused.
         let bad = base.join("bad.sha256");
         std::fs::write(&bad, format!("{}  x\n", "0".repeat(64))).unwrap();
-        rel.assets.push(("Orchestra-v9.0.0-Linux.tar.gz.sha256".into(), format!("file://{}", bad.display())));
+        rel.assets.push((
+            "Orchestra-v9.0.0-Linux.tar.gz.sha256".into(),
+            format!("file://{}", bad.display()),
+        ));
         assert!(install_to(&app, "moi/orchestra", &rel).is_err());
         assert_eq!(std::fs::read_to_string(&app).unwrap(), "ancienne");
         rel.assets[1].1 = format!("file://{}", sum.display());
@@ -375,18 +562,26 @@ mod tests {
         assert!(safe_name("v0.6.0"));
         assert!(safe_name("Orchestra-v0.6.0-Linux.tar.gz"));
         assert!(safe_name("Orchestra-v0.6.0-macOS.zip.sha256"));
-        for bad in ["", "..", "../x", "a/b", "a\\b", "-x", ".hidden", "v1'; rm", "v1 x", "v1$(x)", "é"] {
+        for bad in [
+            "", "..", "../x", "a/b", "a\\b", "-x", ".hidden", "v1'; rm", "v1 x", "v1$(x)", "é",
+        ] {
             assert!(!safe_name(bad), "{bad}");
         }
         assert!(!safe_name(&"a".repeat(129)));
         assert_eq!(ps_quote("C:\\a'b"), "'C:\\a''b'");
-        let rel = Release { tag: "../../x".into(), notes: String::new(), assets: vec![] };
+        let rel = Release {
+            tag: "../../x".into(),
+            notes: String::new(),
+            assets: vec![],
+        };
         let dir = std::env::temp_dir().join(format!("orch-upd-bad-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let mut r = rel.clone();
         r.assets.push(("Orchestra-x-macOS.zip".into(), "u".into()));
-        r.assets.push(("Orchestra-x-Linux.tar.gz".into(), "u".into()));
-        r.assets.push(("Orchestra-x-Windows.zip".into(), "u".into()));
+        r.assets
+            .push(("Orchestra-x-Linux.tar.gz".into(), "u".into()));
+        r.assets
+            .push(("Orchestra-x-Windows.zip".into(), "u".into()));
         let e = install_to(&dir.join("orchestra"), "moi/orchestra", &r).unwrap_err();
         assert!(e.contains("invalid") || e.contains("invalide"), "{e}");
         let _ = std::fs::remove_dir_all(dir);
@@ -396,7 +591,10 @@ mod tests {
     fn signing_team_rules() {
         let out = "Executable=/A/Orchestra.app/Contents/MacOS/orchestra\nIdentifier=app.orchestra.desktop\nTeamIdentifier=ABCDE12345\nSealed Resources version=2\n";
         assert_eq!(team_id(out).as_deref(), Some("ABCDE12345"));
-        assert_eq!(team_id("Identifier=app.orchestra.desktop\nTeamIdentifier=not set\n"), None);
+        assert_eq!(
+            team_id("Identifier=app.orchestra.desktop\nTeamIdentifier=not set\n"),
+            None
+        );
         assert_eq!(team_id("Signature=adhoc\n"), None);
         assert_eq!(team_id("TeamIdentifier=\n"), None);
         // Ad hoc installed: anything goes, so the first Developer ID version can come in.
@@ -413,13 +611,19 @@ mod tests {
     #[test]
     fn checksums() {
         let h = "AB".repeat(32);
-        assert_eq!(expected_sha256(&format!("{h}  Orchestra-v1-macOS.zip\n")), Some("ab".repeat(32)));
+        assert_eq!(
+            expected_sha256(&format!("{h}  Orchestra-v1-macOS.zip\n")),
+            Some("ab".repeat(32))
+        );
         assert_eq!(expected_sha256("abc  x"), None);
         assert_eq!(expected_sha256(&format!("{}  x", "g".repeat(64))), None);
         assert_eq!(expected_sha256(""), None);
         let f = std::env::temp_dir().join(format!("orch-sha-{}", std::process::id()));
         std::fs::write(&f, b"abc").unwrap();
-        assert_eq!(sha256_file(&f).unwrap(), "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad");
+        assert_eq!(
+            sha256_file(&f).unwrap(),
+            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+        );
         let _ = std::fs::remove_file(f);
     }
 

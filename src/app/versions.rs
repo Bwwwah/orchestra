@@ -2,8 +2,8 @@
 //! Enregistrer, Envoyer, Publier une version. Everything runs in the background with the
 //! person's own git and gh; nothing leaves without a click.
 
-use super::*;
 use super::projects::{BLUE, GREEN, ORANGE};
+use super::*;
 use crate::git::GitState;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -67,18 +67,21 @@ pub struct Versions {
 impl Versions {
     /// The last known state of the folder's repository, fetched again when older than 15 s.
     fn state(&mut self, folder: &str, ctx: &egui::Context) -> Option<Result<GitState, String>> {
-        let e = self.repos.entry(folder.to_string()).or_insert_with(|| Entry {
-            state: Arc::default(),
-            last: None,
-            fetched: Instant::now() - std::time::Duration::from_secs(60),
-            generation: 0,
-            stale: false,
-            checked: false,
-            runs: Arc::default(),
-            runs_last: vec![],
-            runs_at: None,
-            hot: None,
-        });
+        let e = self
+            .repos
+            .entry(folder.to_string())
+            .or_insert_with(|| Entry {
+                state: Arc::default(),
+                last: None,
+                fetched: Instant::now() - std::time::Duration::from_secs(60),
+                generation: 0,
+                stale: false,
+                checked: false,
+                runs: Arc::default(),
+                runs_last: vec![],
+                runs_at: None,
+                hot: None,
+            });
         if let Some((g, r)) = e.state.lock_or_recover().take()
             && g == e.generation
         {
@@ -87,7 +90,12 @@ impl Versions {
         }
         if e.fetched.elapsed().as_secs() >= 15 {
             e.fetched = Instant::now();
-            let (slot, f, c, g) = (e.state.clone(), folder.to_string(), ctx.clone(), e.generation);
+            let (slot, f, c, g) = (
+                e.state.clone(),
+                folder.to_string(),
+                ctx.clone(),
+                e.generation,
+            );
             std::thread::spawn(move || {
                 let r = crate::git::state(&f);
                 *slot.lock_or_recover() = Some((g, r));
@@ -115,11 +123,19 @@ impl Versions {
     /// The GitHub Actions runs of the repository, asked again every 20 s while one runs,
     /// every 3 min otherwise.
     fn runs(&mut self, folder: &str, root: &str, ctx: &egui::Context) -> Vec<crate::git::Run> {
-        let Some(e) = self.repos.get_mut(folder) else { return vec![] };
+        let Some(e) = self.repos.get_mut(folder) else {
+            return vec![];
+        };
         if let Some(r) = e.runs.lock_or_recover().take() {
             e.runs_last = r;
         }
-        let every = if e.runs_last.iter().any(|r| r.running()) || e.hot.is_some_and(|h| h.elapsed().as_secs() < 120) { 15 } else { 180 };
+        let every = if e.runs_last.iter().any(|r| r.running())
+            || e.hot.is_some_and(|h| h.elapsed().as_secs() < 120)
+        {
+            15
+        } else {
+            180
+        };
         if e.runs_at.is_none_or(|t| t.elapsed().as_secs() >= every) {
             e.runs_at = Some(Instant::now());
             let (slot, r, c) = (e.runs.clone(), root.to_string(), ctx.clone());
@@ -136,7 +152,14 @@ impl Versions {
         e.runs_last.clone()
     }
 
-    fn start(&mut self, page_id: &str, folder: &str, what: &'static str, ctx: &egui::Context, work: impl FnOnce() -> Outcome + Send + 'static) {
+    fn start(
+        &mut self,
+        page_id: &str,
+        folder: &str,
+        what: &'static str,
+        ctx: &egui::Context,
+        work: impl FnOnce() -> Outcome + Send + 'static,
+    ) {
         let out: Slot<Outcome> = Arc::default();
         let (o, c) = (out.clone(), ctx.clone());
         std::thread::spawn(move || {
@@ -144,12 +167,24 @@ impl Versions {
             *o.lock_or_recover() = Some(r);
             c.request_repaint();
         });
-        self.jobs.insert(page_id.to_string(), Job { folder: folder.to_string(), what, out });
+        self.jobs.insert(
+            page_id.to_string(),
+            Job {
+                folder: folder.to_string(),
+                what,
+                out,
+            },
+        );
     }
 
     /// Collect finished jobs (call once per frame).
     pub fn tick(&mut self, ctx: &egui::Context) {
-        let done: Vec<String> = self.jobs.iter().filter(|(_, j)| j.out.lock_or_recover().is_some()).map(|(k, _)| k.clone()).collect();
+        let done: Vec<String> = self
+            .jobs
+            .iter()
+            .filter(|(_, j)| j.out.lock_or_recover().is_some())
+            .map(|(k, _)| k.clone())
+            .collect();
         for id in done {
             let job = self.jobs.remove(&id).unwrap();
             let out = job.out.lock_or_recover().take().unwrap();
@@ -159,7 +194,9 @@ impl Versions {
                     self.drafts.remove(&id);
                 }
                 Outcome::Quiet => {}
-                Outcome::Failed(e) => self.status = Some(super::notices::Notice::Error(format!("{} : {e}", job.what))),
+                Outcome::Failed(e) => {
+                    self.status = Some(super::notices::Notice::Error(format!("{} : {e}", job.what)))
+                }
                 Outcome::Message(m) => {
                     if let Some(Draft::Commit { msg }) = self.drafts.get_mut(&id) {
                         *msg = m;
@@ -199,7 +236,15 @@ impl Versions {
 
 /// "Mettre le projet sur GitHub": name, private or public, one button; or what to do first
 /// (install gh, sign in), each in the built-in terminal.
-fn github_panel(ui: &mut egui::Ui, v: &mut Versions, page_id: &str, folder: &str, title: &str, idle: bool, t: &Tone) {
+fn github_panel(
+    ui: &mut egui::Ui,
+    v: &mut Versions,
+    page_id: &str,
+    folder: &str,
+    title: &str,
+    idle: bool,
+    t: &Tone,
+) {
     let ctx = ui.ctx().clone();
     let gh = v.gh(&ctx);
     egui::Frame::new()
@@ -283,46 +328,114 @@ fn small(text: impl Into<String>, color: Color32) -> RichText {
 
 /// A sub-heading inside the card ("DERNIERS COMMITS"): small caps, like the card titles.
 fn sub_heading(ui: &mut egui::Ui, text: &str, t: &Tone) {
-    ui.label(RichText::new(text.to_uppercase()).font(semibold(11.0)).color(t.tertiary));
+    ui.label(
+        RichText::new(text.to_uppercase())
+            .font(semibold(11.0))
+            .color(t.tertiary),
+    );
     ui.add_space(4.0);
 }
 
 /// The card. `prefer`: the agent that worked on the project last.
 #[allow(clippy::too_many_arguments)]
-pub(super) fn versions_card(ui: &mut egui::Ui, v: &mut Versions, page_id: &str, folder: &str, title: &str, prefer: Option<crate::sessions::Tool>, t: &Tone, extra: f32) -> f32 {
+pub(super) fn versions_card(
+    ui: &mut egui::Ui,
+    v: &mut Versions,
+    page_id: &str,
+    folder: &str,
+    title: &str,
+    prefer: Option<crate::sessions::Tool>,
+    t: &Tone,
+    extra: f32,
+) -> f32 {
     let ctx = ui.ctx().clone();
-    let st = if folder.is_empty() { None } else { v.state(folder, &ctx) };
+    let st = if folder.is_empty() {
+        None
+    } else {
+        v.state(folder, &ctx)
+    };
     let stale = !folder.is_empty() && v.stale(folder);
-    let busy = v.jobs.get(page_id).map(|j| j.what).or(if stale { Some(crate::tr!("Mise à jour de l'état", "Updating the state")) } else { None });
+    let busy = v.jobs.get(page_id).map(|j| j.what).or(if stale {
+        Some(crate::tr!("Mise à jour de l'état", "Updating the state"))
+    } else {
+        None
+    });
     let head = match &st {
-        Some(Ok(s)) => format!("{}{}", s.branch, s.last_tag.as_ref().map(|t| format!(" · {t}")).unwrap_or_default()),
+        Some(Ok(s)) => format!(
+            "{}{}",
+            s.branch,
+            s.last_tag
+                .as_ref()
+                .map(|t| format!(" · {t}"))
+                .unwrap_or_default()
+        ),
         _ => String::new(),
     };
     super::projects::card(ui, t, extra, |ui| {
         super::projects::card_title(ui, "VERSIONS", &head, t);
         let s = match st {
             _ if folder.is_empty() => {
-                ui.label(small(crate::tr!("Indiquez le dossier du projet pour suivre ses versions.", "Set the project's folder to follow its versions."), t.tertiary));
+                ui.label(small(
+                    crate::tr!(
+                        "Indiquez le dossier du projet pour suivre ses versions.",
+                        "Set the project's folder to follow its versions."
+                    ),
+                    t.tertiary,
+                ));
                 return;
             }
             None => {
                 ui.horizontal(|ui| {
                     ui.add(egui::Spinner::new().size(12.0));
-                    ui.label(small(crate::tr!("Lecture du dépôt…", "Reading the repository…"), t.tertiary));
+                    ui.label(small(
+                        crate::tr!("Lecture du dépôt…", "Reading the repository…"),
+                        t.tertiary,
+                    ));
                 });
                 return;
             }
             Some(Err(e)) => {
-                ui.label(small(crate::trf!("Ce dossier n'est {}.", "This folder is {}.", if e.contains("dépôt") || e.contains("repository") { crate::tr!("pas encore suivi par git", "not tracked by git yet") } else { crate::tr!("pas lisible", "not readable") }), t.secondary));
+                ui.label(small(
+                    crate::trf!(
+                        "Ce dossier n'est {}.",
+                        "This folder is {}.",
+                        if e.contains("dépôt") || e.contains("repository") {
+                            crate::tr!("pas encore suivi par git", "not tracked by git yet")
+                        } else {
+                            crate::tr!("pas lisible", "not readable")
+                        }
+                    ),
+                    t.secondary,
+                ));
                 if e.contains("dépôt") || e.contains("repository") {
                     ui.add_space(6.0);
-                    let r = ui.add_enabled(busy.is_none(), egui::Button::new(RichText::new(crate::tr!("Créer le dépôt git", "Create the git repository")).size(13.0)));
-                    if r.on_hover_text(crate::tr!("git init, puis un premier enregistrement de tous les fichiers", "git init, then a first commit of all the files")).clicked() {
+                    let r = ui.add_enabled(
+                        busy.is_none(),
+                        egui::Button::new(
+                            RichText::new(crate::tr!(
+                                "Créer le dépôt git",
+                                "Create the git repository"
+                            ))
+                            .size(13.0),
+                        ),
+                    );
+                    if r.on_hover_text(crate::tr!(
+                        "git init, puis un premier enregistrement de tous les fichiers",
+                        "git init, then a first commit of all the files"
+                    ))
+                    .clicked()
+                    {
                         let f = folder.to_string();
-                        v.start(page_id, folder, crate::tr!("Création du dépôt", "Creating the repository"), &ctx, move || match crate::git::init(&f) {
-                            Ok(m) => Outcome::Done(m),
-                            Err(e) => Outcome::Failed(e),
-                        });
+                        v.start(
+                            page_id,
+                            folder,
+                            crate::tr!("Création du dépôt", "Creating the repository"),
+                            &ctx,
+                            move || match crate::git::init(&f) {
+                                Ok(m) => Outcome::Done(m),
+                                Err(e) => Outcome::Failed(e),
+                            },
+                        );
                     }
                     ui.add_space(8.0);
                     github_panel(ui, v, page_id, folder, title, busy.is_none(), t);
@@ -339,12 +452,27 @@ pub(super) fn versions_card(ui: &mut egui::Ui, v: &mut Versions, page_id: &str, 
                 e.checked = true;
             }
             let root = s.root.clone();
-            v.start(page_id, folder, crate::tr!("Vérification auprès de GitHub", "Checking with GitHub"), &ctx, move || match crate::git::check(&root) {
-                Ok(_) => Outcome::Quiet,
-                Err(e) => Outcome::Failed(e),
-            });
+            v.start(
+                page_id,
+                folder,
+                crate::tr!("Vérification auprès de GitHub", "Checking with GitHub"),
+                &ctx,
+                move || match crate::git::check(&root) {
+                    Ok(_) => Outcome::Quiet,
+                    Err(e) => Outcome::Failed(e),
+                },
+            );
         }
-        let runs = if s.gh && s.github.is_some() && std::path::Path::new(&s.root).join(".github/workflows").is_dir() { crate::git::runs_to_show(&v.runs(folder, &s.root, &ctx), &s) } else { vec![] };
+        let runs = if s.gh
+            && s.github.is_some()
+            && std::path::Path::new(&s.root)
+                .join(".github/workflows")
+                .is_dir()
+        {
+            crate::git::runs_to_show(&v.runs(folder, &s.root, &ctx), &s)
+        } else {
+            vec![]
+        };
         // Wide enough: state and actions on the left, the commits on the right.
         let w = ui.available_width();
         let wide = w >= 620.0 && !s.commits.is_empty();
@@ -505,30 +633,90 @@ pub(super) fn versions_card(ui: &mut egui::Ui, v: &mut Versions, page_id: &str, 
                     } else if !s.gh && s.github.is_some() {
                         ui.add_space(4.0);
                         ui.horizontal_wrapped(|ui| {
-                            ui.label(small(crate::tr!("Pour les pages de version :", "For the release pages:"), t.tertiary));
-                            if super::projects::action_link(ui, crate::tr!("se connecter avec gh", "sign in with gh")).clicked() {
-                                super::term_ui::request(ui.ctx(), "GitHub", folder, Some("gh auth login".into()));
+                            ui.label(small(
+                                crate::tr!("Pour les pages de version :", "For the release pages:"),
+                                t.tertiary,
+                            ));
+                            if super::projects::action_link(
+                                ui,
+                                crate::tr!("se connecter avec gh", "sign in with gh"),
+                            )
+                            .clicked()
+                            {
+                                super::term_ui::request(
+                                    ui.ctx(),
+                                    "GitHub",
+                                    folder,
+                                    Some("gh auth login".into()),
+                                );
                             }
                         });
                     }
                 }
                 Some(Draft::Commit { mut msg }) => {
-                    ui.label(small(crate::tr!("Message de l'enregistrement", "Commit message"), t.secondary));
-                    let hint = if busy.is_some() { crate::tr!("L'IA lit les modifications…", "The AI is reading the changes…") } else { crate::tr!("Ce qui change, en une ligne", "What changes, in one line") };
-                    ui.add_enabled(idle, egui::TextEdit::multiline(&mut msg).hint_text(hint).desired_rows(3).desired_width(f32::INFINITY).font(FontId::proportional(13.0)));
+                    ui.label(small(
+                        crate::tr!("Message de l'enregistrement", "Commit message"),
+                        t.secondary,
+                    ));
+                    let hint = if busy.is_some() {
+                        crate::tr!(
+                            "L'IA lit les modifications…",
+                            "The AI is reading the changes…"
+                        )
+                    } else {
+                        crate::tr!("Ce qui change, en une ligne", "What changes, in one line")
+                    };
+                    ui.add_enabled(
+                        idle,
+                        egui::TextEdit::multiline(&mut msg)
+                            .hint_text(hint)
+                            .desired_rows(3)
+                            .desired_width(f32::INFINITY)
+                            .font(FontId::proportional(13.0)),
+                    );
                     let mut close = false;
                     ui.horizontal(|ui| {
-                        if ui.add_enabled(idle && !msg.trim().is_empty(), egui::Button::new(RichText::new(crate::tr!("Enregistrer", "Save")).size(13.0))).clicked() {
+                        if ui
+                            .add_enabled(
+                                idle && !msg.trim().is_empty(),
+                                egui::Button::new(
+                                    RichText::new(crate::tr!("Enregistrer", "Save")).size(13.0),
+                                ),
+                            )
+                            .clicked()
+                        {
                             let (root, m) = (s.root.clone(), msg.clone());
-                            v.start(page_id, folder, crate::tr!("Enregistrement", "Saving"), &ctx, move || match crate::git::commit(&root, &m) {
-                                Ok(m) => Outcome::Done(m),
-                                Err(e) => Outcome::Failed(e),
-                            });
+                            v.start(
+                                page_id,
+                                folder,
+                                crate::tr!("Enregistrement", "Saving"),
+                                &ctx,
+                                move || match crate::git::commit(&root, &m) {
+                                    Ok(m) => Outcome::Done(m),
+                                    Err(e) => Outcome::Failed(e),
+                                },
+                            );
                         }
-                        if idle && super::projects::action_link(ui, crate::tr!("Reproposer", "Propose again")).clicked() {
+                        if idle
+                            && super::projects::action_link(
+                                ui,
+                                crate::tr!("Reproposer", "Propose again"),
+                            )
+                            .clicked()
+                        {
                             suggest_commit(v, page_id, &s, prefer, &ctx);
                         }
-                        if ui.add_enabled(idle, egui::Button::new(small(crate::tr!("Annuler", "Cancel"), t.tertiary)).frame(false)).clicked() {
+                        if ui
+                            .add_enabled(
+                                idle,
+                                egui::Button::new(small(
+                                    crate::tr!("Annuler", "Cancel"),
+                                    t.tertiary,
+                                ))
+                                .frame(false),
+                            )
+                            .clicked()
+                        {
                             close = true;
                         }
                     });
@@ -538,22 +726,64 @@ pub(super) fn versions_card(ui: &mut egui::Ui, v: &mut Versions, page_id: &str, 
                         v.drafts.insert(page_id.to_string(), Draft::Commit { msg });
                     }
                 }
-                Some(Draft::Release { mut version, mut notes }) => {
+                Some(Draft::Release {
+                    mut version,
+                    mut notes,
+                }) => {
                     let [patch, minor, major] = crate::git::next_versions(s.last_tag.as_deref());
                     ui.horizontal_wrapped(|ui| {
                         ui.label(small(crate::tr!("Version", "Version"), t.secondary));
-                        ui.add(egui::TextEdit::singleline(&mut version).desired_width(90.0).font(FontId::monospace(13.0)));
-                        for (label, val) in [("correctif", &patch), (crate::tr!("nouveautés", "new features"), &minor), ("majeure", &major)] {
-                            if ui.add(egui::Button::new(small(format!("{label} {val}"), if version == *val { BLUE } else { t.tertiary })).frame(false)).clicked() {
+                        ui.add(
+                            egui::TextEdit::singleline(&mut version)
+                                .desired_width(90.0)
+                                .font(FontId::monospace(13.0)),
+                        );
+                        for (label, val) in [
+                            ("correctif", &patch),
+                            (crate::tr!("nouveautés", "new features"), &minor),
+                            ("majeure", &major),
+                        ] {
+                            if ui
+                                .add(
+                                    egui::Button::new(small(
+                                        format!("{label} {val}"),
+                                        if version == *val { BLUE } else { t.tertiary },
+                                    ))
+                                    .frame(false),
+                                )
+                                .clicked()
+                            {
                                 version = val.clone();
                             }
                         }
                     });
                     ui.add_space(4.0);
-                    ui.label(small(crate::tr!("Notes de version", "Release notes"), t.secondary));
-                    let hint = if busy.is_some() { crate::tr!("L'IA lit les commits depuis la dernière version…", "The AI is reading the commits since the last version…") } else { crate::tr!("Ce qui change pour les utilisateurs", "What changes for the users") };
-                    ui.add_enabled(idle, egui::TextEdit::multiline(&mut notes).hint_text(hint).desired_rows(6).desired_width(f32::INFINITY).font(FontId::proportional(13.0)));
-                    let builds = std::path::Path::new(&s.root).join(".github/workflows").is_dir();
+                    ui.label(small(
+                        crate::tr!("Notes de version", "Release notes"),
+                        t.secondary,
+                    ));
+                    let hint = if busy.is_some() {
+                        crate::tr!(
+                            "L'IA lit les commits depuis la dernière version…",
+                            "The AI is reading the commits since the last version…"
+                        )
+                    } else {
+                        crate::tr!(
+                            "Ce qui change pour les utilisateurs",
+                            "What changes for the users"
+                        )
+                    };
+                    ui.add_enabled(
+                        idle,
+                        egui::TextEdit::multiline(&mut notes)
+                            .hint_text(hint)
+                            .desired_rows(6)
+                            .desired_width(f32::INFINITY)
+                            .font(FontId::proportional(13.0)),
+                    );
+                    let builds = std::path::Path::new(&s.root)
+                        .join(".github/workflows")
+                        .is_dir();
                     ui.label(small(
                         match (s.gh, builds) {
                             (true, true) => crate::tr!("Publier : étiquette envoyée, page de version créée ; GitHub fabrique ensuite les apps (quelques minutes).", "Publish: tag pushed, release page created; GitHub then builds the apps (a few minutes)."),
@@ -564,26 +794,74 @@ pub(super) fn versions_card(ui: &mut egui::Ui, v: &mut Versions, page_id: &str, 
                     ));
                     let mut close = false;
                     ui.horizontal(|ui| {
-                        let ok = idle && crate::git::valid_version(version.trim()) && s.remote.is_some();
-                        let r = ui.add_enabled(ok, egui::Button::new(RichText::new(crate::trf!("Publier {}", "Publish {}", version.trim())).size(13.0)));
-                        if r.on_disabled_hover_text(if s.remote.is_none() { crate::tr!("Pas encore de dépôt distant", "No remote repository yet") } else { crate::tr!("Numéro de version attendu, ex. v1.2.0", "Version number expected, e.g. v1.2.0") }).clicked() {
-                            let (root, ver, n, gh) = (s.root.clone(), version.trim().to_string(), notes.clone(), s.gh);
-                            v.start(page_id, folder, crate::tr!("Publication", "Publishing"), &ctx, move || match crate::git::release(&root, &ver, &n, gh) {
-                                Ok(m) => Outcome::Done(m),
-                                Err(e) => Outcome::Failed(e),
-                            });
+                        let ok =
+                            idle && crate::git::valid_version(version.trim()) && s.remote.is_some();
+                        let r = ui.add_enabled(
+                            ok,
+                            egui::Button::new(
+                                RichText::new(crate::trf!(
+                                    "Publier {}",
+                                    "Publish {}",
+                                    version.trim()
+                                ))
+                                .size(13.0),
+                            ),
+                        );
+                        if r.on_disabled_hover_text(if s.remote.is_none() {
+                            crate::tr!("Pas encore de dépôt distant", "No remote repository yet")
+                        } else {
+                            crate::tr!(
+                                "Numéro de version attendu, ex. v1.2.0",
+                                "Version number expected, e.g. v1.2.0"
+                            )
+                        })
+                        .clicked()
+                        {
+                            let (root, ver, n, gh) = (
+                                s.root.clone(),
+                                version.trim().to_string(),
+                                notes.clone(),
+                                s.gh,
+                            );
+                            v.start(
+                                page_id,
+                                folder,
+                                crate::tr!("Publication", "Publishing"),
+                                &ctx,
+                                move || match crate::git::release(&root, &ver, &n, gh) {
+                                    Ok(m) => Outcome::Done(m),
+                                    Err(e) => Outcome::Failed(e),
+                                },
+                            );
                         }
-                        if idle && super::projects::action_link(ui, crate::tr!("Reproposer", "Propose again")).clicked() {
+                        if idle
+                            && super::projects::action_link(
+                                ui,
+                                crate::tr!("Reproposer", "Propose again"),
+                            )
+                            .clicked()
+                        {
                             suggest_release(v, page_id, &s, prefer, &ctx);
                         }
-                        if ui.add_enabled(idle, egui::Button::new(small(crate::tr!("Annuler", "Cancel"), t.tertiary)).frame(false)).clicked() {
+                        if ui
+                            .add_enabled(
+                                idle,
+                                egui::Button::new(small(
+                                    crate::tr!("Annuler", "Cancel"),
+                                    t.tertiary,
+                                ))
+                                .frame(false),
+                            )
+                            .clicked()
+                        {
                             close = true;
                         }
                     });
                     if close {
                         v.drafts.remove(page_id);
                     } else if v.drafts.contains_key(page_id) {
-                        v.drafts.insert(page_id.to_string(), Draft::Release { version, notes });
+                        v.drafts
+                            .insert(page_id.to_string(), Draft::Release { version, notes });
                     }
                 }
             }
@@ -594,20 +872,45 @@ pub(super) fn versions_card(ui: &mut egui::Ui, v: &mut Versions, page_id: &str, 
             let left_w = ((w - gap) * 0.56).floor();
             let right_w = w - gap - left_w;
             let top = ui.cursor().min;
-            let mut left = ui.new_child(egui::UiBuilder::new().max_rect(egui::Rect::from_min_size(top, egui::vec2(left_w, 10_000.0))).layout(egui::Layout::top_down(egui::Align::Min)));
+            let mut left = ui.new_child(
+                egui::UiBuilder::new()
+                    .max_rect(egui::Rect::from_min_size(top, egui::vec2(left_w, 10_000.0)))
+                    .layout(egui::Layout::top_down(egui::Align::Min)),
+            );
             left.set_width(left_w);
-            left.set_clip_rect(egui::Rect::from_min_size(top, egui::vec2(left_w + 2.0, 10_000.0)).intersect(ui.clip_rect()));
+            left.set_clip_rect(
+                egui::Rect::from_min_size(top, egui::vec2(left_w + 2.0, 10_000.0))
+                    .intersect(ui.clip_rect()),
+            );
             main(&mut left);
             let h_left = left.min_rect().height();
             let rx = top.x + left_w + gap;
-            let mut right = ui.new_child(egui::UiBuilder::new().max_rect(egui::Rect::from_min_size(egui::pos2(rx, top.y), egui::vec2(right_w, 10_000.0))).layout(egui::Layout::top_down(egui::Align::Min)));
+            let mut right = ui.new_child(
+                egui::UiBuilder::new()
+                    .max_rect(egui::Rect::from_min_size(
+                        egui::pos2(rx, top.y),
+                        egui::vec2(right_w, 10_000.0),
+                    ))
+                    .layout(egui::Layout::top_down(egui::Align::Min)),
+            );
             right.set_width(right_w);
-            right.set_clip_rect(egui::Rect::from_min_size(egui::pos2(rx, top.y), egui::vec2(right_w, 10_000.0)).intersect(ui.clip_rect()));
-            sub_heading(&mut right, crate::tr!("Derniers commits", "Latest commits"), t);
+            right.set_clip_rect(
+                egui::Rect::from_min_size(egui::pos2(rx, top.y), egui::vec2(right_w, 10_000.0))
+                    .intersect(ui.clip_rect()),
+            );
+            sub_heading(
+                &mut right,
+                crate::tr!("Derniers commits", "Latest commits"),
+                t,
+            );
             commit_list(&mut right, &s, t);
             let h = h_left.max(right.min_rect().height());
             let sx = top.x + left_w + gap / 2.0;
-            ui.painter().vline(sx, egui::Rangef::new(top.y, top.y + h), egui::Stroke::new(1.0, t.border));
+            ui.painter().vline(
+                sx,
+                egui::Rangef::new(top.y, top.y + h),
+                egui::Stroke::new(1.0, t.border),
+            );
             ui.allocate_exact_size(egui::vec2(w, h), egui::Sense::hover());
         } else {
             main(ui);
@@ -623,9 +926,23 @@ pub(super) fn versions_card(ui: &mut egui::Ui, v: &mut Versions, page_id: &str, 
 /// The name of a row ("Branche", "Actions") in a fixed-width column: the pills on the
 /// right of the rows start at the same place.
 fn row_label(ui: &mut egui::Ui, text: &str, t: &Tone) {
-    let w = ["Branche", "Branch", "Actions"].iter().map(|x| ui.painter().layout_no_wrap(x.to_string(), FontId::proportional(12.5), t.tertiary).size().x).fold(0.0, f32::max);
+    let w = ["Branche", "Branch", "Actions"]
+        .iter()
+        .map(|x| {
+            ui.painter()
+                .layout_no_wrap(x.to_string(), FontId::proportional(12.5), t.tertiary)
+                .size()
+                .x
+        })
+        .fold(0.0, f32::max);
     let (rect, _) = ui.allocate_exact_size(egui::vec2(w + 4.0, 20.0), egui::Sense::hover());
-    ui.painter().text(egui::pos2(rect.left(), rect.center().y), egui::Align2::LEFT_CENTER, text, FontId::proportional(12.5), t.tertiary);
+    ui.painter().text(
+        egui::pos2(rect.left(), rect.center().y),
+        egui::Align2::LEFT_CENTER,
+        text,
+        FontId::proportional(12.5),
+        t.tertiary,
+    );
 }
 
 /// The last commits as a small timeline; the time sits on the right.
@@ -640,30 +957,67 @@ fn commit_list(ui: &mut egui::Ui, s: &GitState, t: &Tone) {
             let (r, _) = ui.allocate_exact_size(egui::vec2(12.0, 20.0), egui::Sense::hover());
             let c0 = r.center();
             if i + 1 < n {
-                ui.painter().line_segment([c0 + egui::vec2(0.0, 4.0), egui::pos2(c0.x, r.bottom() + 6.0)], egui::Stroke::new(1.2, t.border));
+                ui.painter().line_segment(
+                    [
+                        c0 + egui::vec2(0.0, 4.0),
+                        egui::pos2(c0.x, r.bottom() + 6.0),
+                    ],
+                    egui::Stroke::new(1.2, t.border),
+                );
             }
             if i == 0 {
                 ui.painter().circle_filled(c0, 4.0, BLUE);
             } else {
-                ui.painter().circle_stroke(c0, 3.5, egui::Stroke::new(1.3, t.tertiary));
+                ui.painter()
+                    .circle_stroke(c0, 3.5, egui::Stroke::new(1.3, t.tertiary));
             }
             let when = super::chrome::relative_time(c.at);
-            let when_w = ui.painter().layout_no_wrap(when.clone(), FontId::proportional(12.5), t.tertiary).size().x;
+            let when_w = ui
+                .painter()
+                .layout_no_wrap(when.clone(), FontId::proportional(12.5), t.tertiary)
+                .size()
+                .x;
             let show_hash = w >= 300.0;
-            let hash_w = if show_hash { ui.painter().layout_no_wrap(c.hash.clone(), FontId::monospace(11.5), t.tertiary).size().x + 8.0 } else { 0.0 };
+            let hash_w = if show_hash {
+                ui.painter()
+                    .layout_no_wrap(c.hash.clone(), FontId::monospace(11.5), t.tertiary)
+                    .size()
+                    .x
+                    + 8.0
+            } else {
+                0.0
+            };
             if show_hash {
-                ui.label(RichText::new(&c.hash).font(FontId::monospace(11.5)).color(t.tertiary));
+                ui.label(
+                    RichText::new(&c.hash)
+                        .font(FontId::monospace(11.5))
+                        .color(t.tertiary),
+                );
             }
             let room = (w - 20.0 - hash_w - when_w - 16.0).max(40.0);
-            let mut job = egui::text::LayoutJob::single_section(c.subject.clone(), egui::TextFormat::simple(FontId::proportional(12.5), t.secondary));
+            let mut job = egui::text::LayoutJob::single_section(
+                c.subject.clone(),
+                egui::TextFormat::simple(FontId::proportional(12.5), t.secondary),
+            );
             job.wrap = egui::text::TextWrapping::truncate_at_width(room);
-            ui.allocate_ui_with_layout(egui::vec2(room, 20.0), egui::Layout::left_to_right(egui::Align::Center), |ui| {
-                ui.set_width(room);
-                super::projects::cut_label(ui, job).on_hover_text(format!("{} · {} · {}", c.hash, c.author, c.subject));
-            });
+            ui.allocate_ui_with_layout(
+                egui::vec2(room, 20.0),
+                egui::Layout::left_to_right(egui::Align::Center),
+                |ui| {
+                    ui.set_width(room);
+                    super::projects::cut_label(ui, job)
+                        .on_hover_text(format!("{} · {} · {}", c.hash, c.author, c.subject));
+                },
+            );
             ui.label(small(when, t.tertiary));
         });
-        super::projects::hover_end(ui, bg, row.response.rect, egui::Id::unique(("commit", &c.hash)), t);
+        super::projects::hover_end(
+            ui,
+            bg,
+            row.response.rect,
+            egui::Id::unique(("commit", &c.hash)),
+            t,
+        );
     }
 }
 
@@ -677,29 +1031,54 @@ fn run_pills(ui: &mut egui::Ui, runs: &[crate::git::Run], t: &Tone) {
         for r in runs {
             let (word, color) = match (r.status.as_str(), r.conclusion.as_str()) {
                 ("completed", "success") => (crate::tr!("réussi", "passed"), GREEN),
-                ("completed", "failure" | "startup_failure" | "timed_out") => (crate::tr!("échoué", "failed"), red),
+                ("completed", "failure" | "startup_failure" | "timed_out") => {
+                    (crate::tr!("échoué", "failed"), red)
+                }
                 ("completed", "cancelled") => (crate::tr!("annulé", "cancelled"), t.tertiary),
                 ("completed", _) => (crate::tr!("terminé", "finished"), t.tertiary),
-                ("queued" | "waiting" | "pending" | "requested", _) => (crate::tr!("en attente", "queued"), t.secondary),
+                ("queued" | "waiting" | "pending" | "requested", _) => {
+                    (crate::tr!("en attente", "queued"), t.secondary)
+                }
                 _ => (crate::tr!("en cours", "running"), BLUE),
             };
             let label = format!("{} · {word}", r.branch);
             let font = FontId::proportional(12.0);
             let g = ui.painter().layout_no_wrap(label, font, t.text);
-            let (rect, resp) = ui.allocate_exact_size(g.size() + egui::vec2(26.0, 8.0), egui::Sense::click());
-            let a = ui.ctx().animate_bool_with_time(resp.id.with("hov"), resp.hovered(), 0.15);
+            let (rect, resp) =
+                ui.allocate_exact_size(g.size() + egui::vec2(26.0, 8.0), egui::Sense::click());
+            let a = ui
+                .ctx()
+                .animate_bool_with_time(resp.id.with("hov"), resp.hovered(), 0.15);
             let p = ui.painter();
             p.rect_filled(rect, 10.0, color.gamma_multiply(0.10 + 0.08 * a));
-            p.rect_stroke(rect, 10.0, egui::Stroke::new(1.0, color.gamma_multiply(0.35 + 0.4 * a)), egui::StrokeKind::Inside);
+            p.rect_stroke(
+                rect,
+                10.0,
+                egui::Stroke::new(1.0, color.gamma_multiply(0.35 + 0.4 * a)),
+                egui::StrokeKind::Inside,
+            );
             let dot = egui::pos2(rect.left() + 10.0, rect.center().y);
             if r.running() {
                 super::projects::pulse_dot(ui, dot, color);
             } else {
                 ui.painter().circle_filled(dot, 3.5, color);
             }
-            ui.painter().galley(egui::pos2(rect.left() + 18.0, rect.center().y - g.size().y / 2.0), g, t.text);
+            ui.painter().galley(
+                egui::pos2(rect.left() + 18.0, rect.center().y - g.size().y / 2.0),
+                g,
+                t.text,
+            );
             let when = super::chrome::relative_time(r.at);
-            if resp.on_hover_text(format!("{} — {}\n{when}\n{}", r.workflow, r.title, crate::tr!("Cliquer pour ouvrir sur GitHub", "Click to open on GitHub"))).on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
+            if resp
+                .on_hover_text(format!(
+                    "{} — {}\n{when}\n{}",
+                    r.workflow,
+                    r.title,
+                    crate::tr!("Cliquer pour ouvrir sur GitHub", "Click to open on GitHub")
+                ))
+                .on_hover_cursor(egui::CursorIcon::PointingHand)
+                .clicked()
+            {
                 open_url(&r.url);
             }
         }
@@ -710,11 +1089,19 @@ fn run_pills(ui: &mut egui::Ui, runs: &[crate::git::Run], t: &Tone) {
 fn branch_pill(ui: &mut egui::Ui, name: &str, t: &Tone) -> egui::Response {
     let font = FontId::monospace(12.5);
     let g = ui.painter().layout_no_wrap(name.to_string(), font, t.text);
-    let (rect, resp) = ui.allocate_exact_size(g.size() + egui::vec2(36.0, 8.0), egui::Sense::click());
-    let a = ui.ctx().animate_bool_with_time(resp.id.with("hov"), resp.hovered(), 0.15);
+    let (rect, resp) =
+        ui.allocate_exact_size(g.size() + egui::vec2(36.0, 8.0), egui::Sense::click());
+    let a = ui
+        .ctx()
+        .animate_bool_with_time(resp.id.with("hov"), resp.hovered(), 0.15);
     let p = ui.painter();
     p.rect_filled(rect, 7.0, t.fill.lerp_to_gamma(t.hover, a));
-    p.rect_stroke(rect, 7.0, egui::Stroke::new(1.0, t.border.lerp_to_gamma(BLUE, 0.6 * a)), egui::StrokeKind::Inside);
+    p.rect_stroke(
+        rect,
+        7.0,
+        egui::Stroke::new(1.0, t.border.lerp_to_gamma(BLUE, 0.6 * a)),
+        egui::StrokeKind::Inside,
+    );
     // A small branch mark: two dots and a fork.
     let c = egui::pos2(rect.left() + 11.0, rect.center().y);
     let st = egui::Stroke::new(1.3, BLUE);
@@ -723,23 +1110,61 @@ fn branch_pill(ui: &mut egui::Ui, name: &str, t: &Tone) -> egui::Response {
     p.circle_stroke(c + egui::vec2(3.0, -3.0), 1.8, st);
     p.line_segment([c + egui::vec2(-2.0, -2.2), c + egui::vec2(-2.0, 2.2)], st);
     p.line_segment([c + egui::vec2(3.0, -1.2), c + egui::vec2(-1.0, 2.6)], st);
-    p.galley(egui::pos2(rect.left() + 20.0, rect.center().y - g.size().y / 2.0), g, t.text);
-    p.text(egui::pos2(rect.right() - 9.0, rect.center().y), egui::Align2::CENTER_CENTER, "▾", FontId::proportional(11.0), t.tertiary);
-    resp.on_hover_text(crate::tr!("Changer de branche", "Switch branch")).on_hover_cursor(egui::CursorIcon::PointingHand)
+    p.galley(
+        egui::pos2(rect.left() + 20.0, rect.center().y - g.size().y / 2.0),
+        g,
+        t.text,
+    );
+    p.text(
+        egui::pos2(rect.right() - 9.0, rect.center().y),
+        egui::Align2::CENTER_CENTER,
+        "▾",
+        FontId::proportional(11.0),
+        t.tertiary,
+    );
+    resp.on_hover_text(crate::tr!("Changer de branche", "Switch branch"))
+        .on_hover_cursor(egui::CursorIcon::PointingHand)
 }
 
-fn suggest_commit(v: &mut Versions, page_id: &str, s: &GitState, prefer: Option<crate::sessions::Tool>, ctx: &egui::Context) {
+fn suggest_commit(
+    v: &mut Versions,
+    page_id: &str,
+    s: &GitState,
+    prefer: Option<crate::sessions::Tool>,
+    ctx: &egui::Context,
+) {
     let st = s.clone();
-    v.start(page_id, &s.root.clone(), crate::tr!("L'IA rédige le message", "The AI is writing the message"), ctx, move || match crate::git::suggest_commit(&st, prefer) {
-        Ok(m) => Outcome::Message(m),
-        Err(e) => Outcome::Failed(e),
-    });
+    v.start(
+        page_id,
+        &s.root.clone(),
+        crate::tr!("L'IA rédige le message", "The AI is writing the message"),
+        ctx,
+        move || match crate::git::suggest_commit(&st, prefer) {
+            Ok(m) => Outcome::Message(m),
+            Err(e) => Outcome::Failed(e),
+        },
+    );
 }
 
-fn suggest_release(v: &mut Versions, page_id: &str, s: &GitState, prefer: Option<crate::sessions::Tool>, ctx: &egui::Context) {
+fn suggest_release(
+    v: &mut Versions,
+    page_id: &str,
+    s: &GitState,
+    prefer: Option<crate::sessions::Tool>,
+    ctx: &egui::Context,
+) {
     let st = s.clone();
-    v.start(page_id, &s.root.clone(), crate::tr!("L'IA prépare les notes de version", "The AI is preparing the release notes"), ctx, move || match crate::git::suggest_release(&st, prefer) {
-        Ok((ver, notes)) => Outcome::Release(ver, notes),
-        Err(e) => Outcome::Failed(e),
-    });
+    v.start(
+        page_id,
+        &s.root.clone(),
+        crate::tr!(
+            "L'IA prépare les notes de version",
+            "The AI is preparing the release notes"
+        ),
+        ctx,
+        move || match crate::git::suggest_release(&st, prefer) {
+            Ok((ver, notes)) => Outcome::Release(ver, notes),
+            Err(e) => Outcome::Failed(e),
+        },
+    );
 }

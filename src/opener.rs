@@ -21,32 +21,57 @@ fn opener() -> &'static str {
 /// shell or the opener could read as something else.
 pub fn open_url(url: &str) -> Result<(), String> {
     if !url_ok(url) {
-        return Err(crate::trf!("adresse refusée : {url}", "address refused: {url}"));
+        return Err(crate::trf!(
+            "adresse refusée : {url}",
+            "address refused: {url}"
+        ));
     }
-    crate::proc::command(opener()).arg(url).spawn().map(|_| ()).map_err(|e| e.to_string())
+    crate::proc::command(opener())
+        .arg(url)
+        .spawn()
+        .map(|_| ())
+        .map_err(|e| e.to_string())
 }
 
 fn url_ok(url: &str) -> bool {
-    let Some(rest) = url.strip_prefix("https://") else { return false };
+    let Some(rest) = url.strip_prefix("https://") else {
+        return false;
+    };
     let host = rest.split(['/', '?', '#']).next().unwrap_or("");
-    !host.is_empty() && !host.starts_with('-') && !host.contains('@') && !url.chars().any(|c| c.is_whitespace() || c.is_control())
+    !host.is_empty()
+        && !host.starts_with('-')
+        && !host.contains('@')
+        && !url.chars().any(|c| c.is_whitespace() || c.is_control())
 }
 
 /// A folder (or a file) in the Finder / file manager: a full path that exists.
 pub fn open_path(path: &Path) -> Result<(), String> {
     if !path.is_absolute() || !path.exists() {
-        return Err(crate::trf!("introuvable : {}", "not found: {}", path.display()));
+        return Err(crate::trf!(
+            "introuvable : {}",
+            "not found: {}",
+            path.display()
+        ));
     }
-    crate::proc::command(opener()).arg(path).spawn().map(|_| ()).map_err(|e| e.to_string())
+    crate::proc::command(opener())
+        .arg(path)
+        .spawn()
+        .map(|_| ())
+        .map_err(|e| e.to_string())
 }
 
 /// The system's "choose a folder" dialog (Finder, Explorer, GTK/KDE), opened on `start` when
 /// it is a folder. Blocks until the person picks a folder or cancels (`None`): call it off
 /// the interface thread.
 pub fn pick_folder(prompt: &str, start: Option<&Path>) -> Option<std::path::PathBuf> {
-    let start = start.filter(|p| p.is_absolute() && p.is_dir()).map(|p| p.display().to_string()).unwrap_or_default();
+    let start = start
+        .filter(|p| p.is_absolute() && p.is_dir())
+        .map(|p| p.display().to_string())
+        .unwrap_or_default();
     let out = pick_folder_cmd(prompt, &start)?;
-    let s = String::from_utf8_lossy(&out).trim_end_matches(['\r', '\n']).to_string();
+    let s = String::from_utf8_lossy(&out)
+        .trim_end_matches(['\r', '\n'])
+        .to_string();
     // Finder answers "/Users/me/Code/x/": keep the folder without its last slash.
     let t = s.trim_end_matches('/');
     let p = std::path::PathBuf::from(if t.is_empty() { "/" } else { t });
@@ -54,7 +79,11 @@ pub fn pick_folder(prompt: &str, start: Option<&Path>) -> Option<std::path::Path
 }
 
 fn run_out(cmd: &mut Command) -> Option<Vec<u8>> {
-    let o = cmd.stdin(std::process::Stdio::null()).stderr(std::process::Stdio::null()).output().ok()?;
+    let o = cmd
+        .stdin(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .output()
+        .ok()?;
     (o.status.success() && !o.stdout.is_empty()).then_some(o.stdout)
 }
 
@@ -81,7 +110,12 @@ fn pick_folder_cmd(prompt: &str, start: &str) -> Option<Vec<u8>> {
         $d.Description = $env:ORCHESTRA_PICK_PROMPT; \
         if ($env:ORCHESTRA_PICK_START) { $d.SelectedPath = $env:ORCHESTRA_PICK_START }; \
         if ($d.ShowDialog() -eq 'OK') { [Console]::OutputEncoding = [Text.Encoding]::UTF8; Write-Output $d.SelectedPath }";
-    run_out(crate::proc::command("powershell").args(["-NoProfile", "-STA", "-Command", script]).env("ORCHESTRA_PICK_PROMPT", prompt).env("ORCHESTRA_PICK_START", start))
+    run_out(
+        crate::proc::command("powershell")
+            .args(["-NoProfile", "-STA", "-Command", script])
+            .env("ORCHESTRA_PICK_PROMPT", prompt)
+            .env("ORCHESTRA_PICK_START", start),
+    )
 }
 
 #[cfg(not(any(target_os = "macos", windows)))]
@@ -92,18 +126,33 @@ fn pick_folder_cmd(prompt: &str, start: &str) -> Option<Vec<u8>> {
         zen.arg(format!("--filename={start}/"));
     }
     // zenity there (even if cancelled) settles it; only a missing zenity falls back to kdialog.
-    if let Ok(o) = zen.stdin(std::process::Stdio::null()).stderr(std::process::Stdio::null()).output() {
+    if let Ok(o) = zen
+        .stdin(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .output()
+    {
         return (o.status.success() && !o.stdout.is_empty()).then_some(o.stdout);
     }
-    let home = dirs::home_dir().map(|h| h.display().to_string()).unwrap_or_else(|| "/".into());
-    run_out(crate::proc::command("kdialog").args(["--getexistingdirectory", if start.is_empty() { &home } else { start }, "--title", prompt]))
+    let home = dirs::home_dir()
+        .map(|h| h.display().to_string())
+        .unwrap_or_else(|| "/".into());
+    run_out(crate::proc::command("kdialog").args([
+        "--getexistingdirectory",
+        if start.is_empty() { &home } else { start },
+        "--title",
+        prompt,
+    ]))
 }
 
 #[cfg(test)]
 mod tests {
     #[test]
     fn only_https_pages() {
-        for ok in ["https://github.com/Bwwwah/orchestra", "https://cli.github.com", "https://github.com/a/b/actions/runs/1?x=1#y"] {
+        for ok in [
+            "https://github.com/Bwwwah/orchestra",
+            "https://cli.github.com",
+            "https://github.com/a/b/actions/runs/1?x=1#y",
+        ] {
             assert!(super::url_ok(ok), "{ok}");
         }
         for bad in [

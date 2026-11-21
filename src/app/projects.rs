@@ -40,7 +40,10 @@ mod folder_picker {
         }
         let ctx = ctx.clone();
         std::thread::spawn(move || {
-            let got = crate::opener::pick_folder(crate::tr!("Dossier du projet", "Project folder"), from.as_deref());
+            let got = crate::opener::pick_folder(
+                crate::tr!("Dossier du projet", "Project folder"),
+                from.as_deref(),
+            );
             if let Some(p) = got {
                 *PICKED.lock().unwrap_or_else(|e| e.into_inner()) = Some(p);
             }
@@ -76,7 +79,12 @@ impl LiveIndex {
             .iter()
             .map(|p| {
                 let pr = p.project.as_ref();
-                format!("{}={}@{};", p.id, pr.map(|x| x.folder.as_str()).unwrap_or(""), pr.map(|x| x.sessions_cleared).unwrap_or(0))
+                format!(
+                    "{}={}@{};",
+                    p.id,
+                    pr.map(|x| x.folder.as_str()).unwrap_or(""),
+                    pr.map(|x| x.sessions_cleared).unwrap_or(0)
+                )
             })
             .collect();
         if Arc::ptr_eq(&self.src, &live) && sig == self.sig {
@@ -88,8 +96,14 @@ impl LiveIndex {
             match ws.project_for_path(std::path::Path::new(&s.cwd)) {
                 Some(p) => {
                     // Hidden by "Effacer l'historique" until it is used again.
-                    if p.project.as_ref().is_none_or(|pr| pr.session_shown(s.last_activity)) {
-                        self.by_project.entry(p.id.clone()).or_default().push(s.clone());
+                    if p.project
+                        .as_ref()
+                        .is_none_or(|pr| pr.session_shown(s.last_activity))
+                    {
+                        self.by_project
+                            .entry(p.id.clone())
+                            .or_default()
+                            .push(s.clone());
                     }
                 }
                 None => match loose.iter_mut().find(|(f, _)| *f == s.cwd) {
@@ -106,8 +120,18 @@ impl LiveIndex {
 
 /// Last activity, session count and tokens of a project, live sessions included.
 fn activity(pr: &Project, updated: u64, live: &[SessionInfo]) -> (u64, usize, u64) {
-    let last = live.iter().map(|s| s.last_activity).max().unwrap_or(0).max(pr.last_activity).max(updated);
-    let stored_only = pr.sessions.iter().filter(|x| !live.iter().any(|l| l.id == x.id)).count();
+    let last = live
+        .iter()
+        .map(|s| s.last_activity)
+        .max()
+        .unwrap_or(0)
+        .max(pr.last_activity)
+        .max(updated);
+    let stored_only = pr
+        .sessions
+        .iter()
+        .filter(|x| !live.iter().any(|l| l.id == x.id))
+        .count();
     let tokens = live.iter().map(|s| s.tokens.billed).sum();
     (last, live.len() + stored_only, tokens)
 }
@@ -139,20 +163,36 @@ fn step_color(s: StepStatus, t: &Tone) -> Color32 {
 
 /// A small rounded tag with coloured text.
 fn chip(ui: &mut egui::Ui, text: &str, color: Color32, sense: egui::Sense) -> egui::Response {
-    let g = ui.painter().layout_no_wrap(text.to_string(), FontId::proportional(12.0), color);
+    let g = ui
+        .painter()
+        .layout_no_wrap(text.to_string(), FontId::proportional(12.0), color);
     let (rect, resp) = ui.allocate_exact_size(g.size() + egui::vec2(14.0, 6.0), sense);
     let fill = color.gamma_multiply(if resp.hovered() { 0.28 } else { 0.16 });
     ui.painter().rect_filled(rect, 6.0, fill);
-    ui.painter().galley(rect.min + egui::vec2(7.0, 3.0), g, color);
+    ui.painter()
+        .galley(rect.min + egui::vec2(7.0, 3.0), g, color);
     resp
 }
 
 /// The tool of a session ("Claude Code", "Codex"…) as a chip in a fixed-width column, so
 /// the titles of the rows below each other start at the same place.
 fn tool_chip(ui: &mut egui::Ui, label: &str, t: &Tone) {
-    let col = ui.painter().layout_no_wrap("Claude Code".into(), FontId::proportional(12.0), t.secondary).size().x + 14.0;
+    let col = ui
+        .painter()
+        .layout_no_wrap(
+            "Claude Code".into(),
+            FontId::proportional(12.0),
+            t.secondary,
+        )
+        .size()
+        .x
+        + 14.0;
     let (rect, _) = ui.allocate_exact_size(egui::vec2(col, 20.0), egui::Sense::hover());
-    let mut child = ui.new_child(egui::UiBuilder::new().max_rect(rect).layout(egui::Layout::left_to_right(egui::Align::Center)));
+    let mut child = ui.new_child(
+        egui::UiBuilder::new()
+            .max_rect(rect)
+            .layout(egui::Layout::left_to_right(egui::Align::Center)),
+    );
     chip(&mut child, label, t.secondary, egui::Sense::hover());
 }
 
@@ -170,7 +210,9 @@ fn tool_label(tool: &str) -> String {
 
 /// The command that plugs this app into Claude Code as an MCP server.
 pub fn mcp_command() -> String {
-    let exe = std::env::current_exe().map(|p| p.display().to_string()).unwrap_or_else(|_| "orchestra".into());
+    let exe = std::env::current_exe()
+        .map(|p| p.display().to_string())
+        .unwrap_or_else(|_| "orchestra".into());
     format!("claude mcp add --scope user orchestra -- \"{exe}\" mcp")
 }
 
@@ -470,7 +512,12 @@ const TEXT: f32 = 14.0;
 
 /// A card; `extra` adds blank space at its bottom (to line it up with its neighbours).
 /// Returns its natural height, without that space.
-pub(super) fn card(ui: &mut egui::Ui, t: &Tone, extra: f32, add: impl FnOnce(&mut egui::Ui)) -> f32 {
+pub(super) fn card(
+    ui: &mut egui::Ui,
+    t: &Tone,
+    extra: f32,
+    add: impl FnOnce(&mut egui::Ui),
+) -> f32 {
     // The border lights up softly under the pointer (last frame's rect).
     let id = ui.next_auto_id().with("card-hover");
     let prev: Option<egui::Rect> = ui.ctx().data(|d| d.get_temp(id));
@@ -479,7 +526,12 @@ pub(super) fn card(ui: &mut egui::Ui, t: &Tone, extra: f32, add: impl FnOnce(&mu
     let border = t.border.lerp_to_gamma(t.tertiary, 0.6 * a);
     let r = egui::Frame::new()
         .fill(t.card)
-        .shadow(egui::epaint::Shadow { offset: [0, (2.0 + 4.0 * a) as i8], blur: (6.0 + 10.0 * a) as u8, spread: 0, color: Color32::from_black_alpha((18.0 + 30.0 * a) as u8) })
+        .shadow(egui::epaint::Shadow {
+            offset: [0, (2.0 + 4.0 * a) as i8],
+            blur: (6.0 + 10.0 * a) as u8,
+            spread: 0,
+            color: Color32::from_black_alpha((18.0 + 30.0 * a) as u8),
+        })
         .stroke(egui::Stroke::new(1.0, border))
         .corner_radius(12.0)
         .inner_margin(egui::Margin::symmetric(18, 16))
@@ -500,8 +552,11 @@ pub(super) fn accent_of(title: &str) -> Color32 {
         "ÉTAT DES LIEUX" | "CURRENT STATE" => Color32::from_rgb(144, 101, 176),
         "ÉTAPES" | "STEPS" => GREEN,
         "SESSIONS IA" | "AI SESSIONS" => Color32::from_rgb(204, 120, 92),
-        "VERSIONS" => BLUE,
-        "PAGES" | "CONTENU" | "CONTENTS" => Color32::from_rgb(160, 160, 160),
+        "VERSIONS" | "PROJETS" | "PROJECTS" => BLUE,
+        "POUR COMMENCER" | "TO GET GOING" => GREEN,
+        "PAGES" | "CONTENU" | "CONTENTS" | "PAGES RÉCENTES" | "RECENT PAGES" => {
+            Color32::from_rgb(160, 160, 160)
+        }
         _ => Color32::from_rgb(212, 76, 125),
     }
 }
@@ -515,7 +570,9 @@ pub(super) fn hover_begin(ui: &egui::Ui) -> egui::layers::ShapeIdx {
 /// A folder as shown on screen: the home directory abbreviated to « ~ », the same way
 /// everywhere (`/Users/name/Code/x` and `~/Code/x` read alike).
 pub(super) fn tilde(path: &str) -> String {
-    let home = std::env::var("HOME").or_else(|_| std::env::var("USERPROFILE")).unwrap_or_default();
+    let home = std::env::var("HOME")
+        .or_else(|_| std::env::var("USERPROFILE"))
+        .unwrap_or_default();
     tilde_in(path.trim(), &home)
 }
 
@@ -540,11 +597,22 @@ fn tilde_abbreviates_the_home_folder() {
     assert_eq!(tilde_in("/opt/x", ""), "/opt/x");
 }
 
-pub(super) fn hover_end(ui: &egui::Ui, idx: egui::layers::ShapeIdx, rect: egui::Rect, id: egui::Id, t: &Tone) -> f32 {
+pub(super) fn hover_end(
+    ui: &egui::Ui,
+    idx: egui::layers::ShapeIdx,
+    rect: egui::Rect,
+    id: egui::Id,
+    t: &Tone,
+) -> f32 {
     let r = rect.expand2(egui::vec2(6.0, 2.0));
-    let a = ui.ctx().animate_bool_with_time(id, ui.rect_contains_pointer(r), 0.14);
+    let a = ui
+        .ctx()
+        .animate_bool_with_time(id, ui.rect_contains_pointer(r), 0.14);
     if a > 0.0 {
-        ui.painter().set(idx, egui::Shape::rect_filled(r, 7.0, t.hover.gamma_multiply(a)));
+        ui.painter().set(
+            idx,
+            egui::Shape::rect_filled(r, 7.0, t.hover.gamma_multiply(a)),
+        );
     }
     a
 }
@@ -553,14 +621,21 @@ pub(super) fn hover_end(ui: &egui::Ui, idx: egui::layers::ShapeIdx, rect: egui::
 pub(super) fn pulse_dot(ui: &egui::Ui, c: egui::Pos2, color: Color32) {
     let time = ui.input(|i| i.time);
     let ph = (time % 1.6 / 1.6) as f32;
-    ui.painter().circle_filled(c, 4.0 + 5.0 * ph, color.gamma_multiply(0.45 * (1.0 - ph)));
+    ui.painter()
+        .circle_filled(c, 4.0 + 5.0 * ph, color.gamma_multiply(0.45 * (1.0 - ph)));
     ui.painter().circle_filled(c, 4.0, color);
-    ui.ctx().request_repaint_after(std::time::Duration::from_millis(33));
+    ui.ctx()
+        .request_repaint_after(std::time::Duration::from_millis(33));
 }
 
 /// Fraction going smoothly to `target` (bars, progress).
-pub(super) fn smooth(ui: &egui::Ui, id: impl std::hash::Hash + std::fmt::Debug, target: f32) -> f32 {
-    ui.ctx().animate_value_with_time(egui::Id::unique(id), target, 0.6)
+pub(super) fn smooth(
+    ui: &egui::Ui,
+    id: impl std::hash::Hash + std::fmt::Debug,
+    target: f32,
+) -> f32 {
+    ui.ctx()
+        .animate_value_with_time(egui::Id::unique(id), target, 0.6)
 }
 
 /// "ÉTAPES        3 / 10" style header: small caps on the left, extra on the right.
@@ -582,8 +657,13 @@ pub(super) fn card_title(ui: &mut egui::Ui, title: &str, extra: &str, t: &Tone) 
 /// A thin line across the card, between a list and its footer actions.
 pub(super) fn card_rule(ui: &mut egui::Ui, t: &Tone) {
     ui.add_space(6.0);
-    let (r, _) = ui.allocate_exact_size(egui::vec2(ui.available_width(), 1.0), egui::Sense::hover());
-    ui.painter().hline(r.x_range(), r.center().y, egui::Stroke::new(1.0, t.border.gamma_multiply(0.7)));
+    let (r, _) =
+        ui.allocate_exact_size(egui::vec2(ui.available_width(), 1.0), egui::Sense::hover());
+    ui.painter().hline(
+        r.x_range(),
+        r.center().y,
+        egui::Stroke::new(1.0, t.border.gamma_multiply(0.7)),
+    );
     ui.add_space(6.0);
 }
 
@@ -591,26 +671,38 @@ pub(super) fn card_rule(ui: &mut egui::Ui, t: &Tone) {
 /// than the blue pills of the main actions.
 pub(super) fn quiet_link(ui: &mut egui::Ui, text: &str, t: &Tone) -> egui::Response {
     let font = FontId::proportional(12.5);
-    let g = ui.painter().layout_no_wrap(text.to_string(), font, t.tertiary);
-    let (rect, resp) = ui.allocate_exact_size(g.size() + egui::vec2(4.0, 8.0), egui::Sense::click());
-    let a = ui.ctx().animate_bool_with_time(resp.id.with("hov"), resp.hovered(), 0.14);
+    let g = ui
+        .painter()
+        .layout_no_wrap(text.to_string(), font, t.tertiary);
+    let (rect, resp) =
+        ui.allocate_exact_size(g.size() + egui::vec2(4.0, 8.0), egui::Sense::click());
+    let a = ui
+        .ctx()
+        .animate_bool_with_time(resp.id.with("hov"), resp.hovered(), 0.14);
     let color = t.tertiary.lerp_to_gamma(t.secondary, a);
     let pos = egui::pos2(rect.left() + 2.0, rect.center().y - g.size().y / 2.0);
-    ui.painter().galley_with_override_text_color(pos, g.clone(), color);
+    ui.painter()
+        .galley_with_override_text_color(pos, g.clone(), color);
     if a > 0.0 {
         let y = pos.y + g.size().y + 0.5;
-        ui.painter().hline(pos.x..=pos.x + g.size().x, y, egui::Stroke::new(1.0, color.gamma_multiply(a)));
+        ui.painter().hline(
+            pos.x..=pos.x + g.size().x,
+            y,
+            egui::Stroke::new(1.0, color.gamma_multiply(a)),
+        );
     }
     resp.on_hover_cursor(egui::CursorIcon::PointingHand)
 }
 
 fn flag(ui: &egui::Ui, key: (&str, &str)) -> bool {
-    ui.ctx().data(|d| d.get_temp::<bool>(egui::Id::unique(key)).unwrap_or(false))
+    ui.ctx()
+        .data(|d| d.get_temp::<bool>(egui::Id::unique(key)).unwrap_or(false))
 }
 
 fn toggle_flag(ui: &egui::Ui, key: (&str, &str)) {
     let v = flag(ui, key);
-    ui.ctx().data_mut(|d| d.insert_temp(egui::Id::unique(key), !v));
+    ui.ctx()
+        .data_mut(|d| d.insert_temp(egui::Id::unique(key), !v));
 }
 
 fn link(ui: &mut egui::Ui, text: &str) -> bool {
@@ -622,24 +714,43 @@ fn link(ui: &mut egui::Ui, text: &str) -> bool {
 pub(super) fn action_link(ui: &mut egui::Ui, text: &str) -> egui::Response {
     let arrow = !text.starts_with('+') && !text.ends_with('▾') && !text.ends_with('▴');
     let font = FontId::proportional(12.5);
-    let g = ui.painter().layout_no_wrap(text.to_string(), font.clone(), BLUE);
+    let g = ui
+        .painter()
+        .layout_no_wrap(text.to_string(), font.clone(), BLUE);
     let extra = if arrow { 14.0 } else { 0.0 };
     let size = g.size() + egui::vec2(18.0 + extra, 8.0);
     let (rect, resp) = ui.allocate_exact_size(size, egui::Sense::click());
-    let a = ui.ctx().animate_bool_with_time(resp.id.with("hov"), resp.hovered(), 0.16);
-    let down = ui.ctx().animate_bool_with_time(resp.id.with("down"), resp.is_pointer_button_down_on(), 0.08);
+    let a = ui
+        .ctx()
+        .animate_bool_with_time(resp.id.with("hov"), resp.hovered(), 0.16);
+    let down = ui.ctx().animate_bool_with_time(
+        resp.id.with("down"),
+        resp.is_pointer_button_down_on(),
+        0.08,
+    );
     let r = rect.shrink(1.2 * down);
     let p = ui.painter();
     p.rect_filled(r, 8.0, BLUE.gamma_multiply(0.10 + 0.14 * a));
     if a > 0.0 {
-        p.rect_stroke(r, 8.0, egui::Stroke::new(1.0, BLUE.gamma_multiply(0.45 * a)), egui::StrokeKind::Inside);
+        p.rect_stroke(
+            r,
+            8.0,
+            egui::Stroke::new(1.0, BLUE.gamma_multiply(0.45 * a)),
+            egui::StrokeKind::Inside,
+        );
     }
     let color = BLUE.lerp_to_gamma(Color32::from_rgb(120, 180, 255), a * 0.6);
     let pos = egui::pos2(r.left() + 9.0, r.center().y - g.size().y / 2.0);
     p.galley(pos, g, color);
     if arrow {
         let x = r.right() - 13.0 + 3.0 * a;
-        p.text(egui::pos2(x, r.center().y), egui::Align2::CENTER_CENTER, "→", font, color.gamma_multiply(0.35 + 0.65 * a));
+        p.text(
+            egui::pos2(x, r.center().y),
+            egui::Align2::CENTER_CENTER,
+            "→",
+            font,
+            color.gamma_multiply(0.35 + 0.65 * a),
+        );
     }
     resp.on_hover_cursor(egui::CursorIcon::PointingHand)
 }
@@ -649,7 +760,10 @@ fn line(ui: &mut egui::Ui, job: egui::text::LayoutJob, width: f32) -> egui::Resp
     let mut job = job;
     job.wrap = egui::text::TextWrapping::truncate_at_width(width.max(30.0));
     let g = ui.fonts_mut(|f| f.layout_job(job));
-    let (r, resp) = ui.allocate_exact_size(egui::vec2(width.max(30.0), g.size().y), egui::Sense::click());
+    let (r, resp) = ui.allocate_exact_size(
+        egui::vec2(width.max(30.0), g.size().y),
+        egui::Sense::click(),
+    );
     ui.painter().galley(r.min, g, t_text_fallback());
     resp
 }
@@ -672,7 +786,12 @@ fn t_text_fallback() -> Color32 {
 fn split_area(title: &str) -> (Option<&str>, &str) {
     if let Some((a, rest)) = title.split_once(':') {
         let a = a.trim();
-        if !a.is_empty() && a.chars().count() <= 18 && a.split_whitespace().count() <= 2 && !a.contains('`') && !rest.trim().is_empty() {
+        if !a.is_empty()
+            && a.chars().count() <= 18
+            && a.split_whitespace().count() <= 2
+            && !a.contains('`')
+            && !rest.trim().is_empty()
+        {
             return (Some(a), rest.trim());
         }
     }
@@ -683,11 +802,21 @@ fn split_area(title: &str) -> (Option<&str>, &str) {
 fn step_icon(ui: &mut egui::Ui, step_id: &str, st: StepStatus, t: &Tone) -> egui::Response {
     let (r, resp) = ui.allocate_exact_size(egui::vec2(18.0, 20.0), egui::Sense::click());
     let c = r.center();
-    let hov = ui.ctx().animate_bool_with_time(resp.id.with("h"), resp.hovered(), 0.12);
+    let hov = ui
+        .ctx()
+        .animate_bool_with_time(resp.id.with("h"), resp.hovered(), 0.12);
     let color = step_color(st, t).lerp_to_gamma(BLUE, hov);
     // Filling in when it becomes "en cours" or "terminée", with a small pop.
-    let doing = ui.ctx().animate_bool_with_time(egui::Id::unique(("step-doing", step_id)), st == StepStatus::Doing, 0.25);
-    let done = ui.ctx().animate_bool_with_time(egui::Id::unique(("step-done", step_id)), st == StepStatus::Done, 0.3);
+    let doing = ui.ctx().animate_bool_with_time(
+        egui::Id::unique(("step-doing", step_id)),
+        st == StepStatus::Doing,
+        0.25,
+    );
+    let done = ui.ctx().animate_bool_with_time(
+        egui::Id::unique(("step-done", step_id)),
+        st == StepStatus::Done,
+        0.3,
+    );
     let pop = 1.0 + 0.25 * (done * std::f32::consts::PI).sin();
     let p = ui.painter();
     p.circle_stroke(c, 6.5 * pop, egui::Stroke::new(1.5, color));
@@ -697,85 +826,172 @@ fn step_icon(ui: &mut egui::Ui, step_id: &str, st: StepStatus, t: &Tone) -> egui
     if done > 0.0 {
         p.circle_filled(c, 7.0 * done * pop, color);
         let k = done;
-        p.line_segment([c + egui::vec2(-3.0, 0.2) * k, c + egui::vec2(-0.8, 2.6) * k], egui::Stroke::new(1.6, t.card));
-        p.line_segment([c + egui::vec2(-0.8, 2.6) * k, c + egui::vec2(3.4, -2.4) * k], egui::Stroke::new(1.6, t.card));
+        p.line_segment(
+            [c + egui::vec2(-3.0, 0.2) * k, c + egui::vec2(-0.8, 2.6) * k],
+            egui::Stroke::new(1.6, t.card),
+        );
+        p.line_segment(
+            [c + egui::vec2(-0.8, 2.6) * k, c + egui::vec2(3.4, -2.4) * k],
+            egui::Stroke::new(1.6, t.card),
+        );
     }
-    resp.on_hover_text(crate::trf!("{} — cliquer pour changer", "{} — click to change", st.label()))
+    resp.on_hover_text(crate::trf!(
+        "{} — cliquer pour changer",
+        "{} — click to change",
+        st.label()
+    ))
 }
 
-fn session_row(ui: &mut egui::Ui, page_id: &str, s: &SessionInfo, t: &Tone) -> Option<super::notices::Notice> {
+fn session_row(
+    ui: &mut egui::Ui,
+    page_id: &str,
+    s: &SessionInfo,
+    t: &Tone,
+) -> Option<super::notices::Notice> {
     let mut msg = None;
     let open_key = ("session-open", s.id.as_str());
     let open = flag(ui, open_key);
     let w = ui.available_width();
     let bg = hover_begin(ui);
-    let row = ui
-        .horizontal(|ui| {
-            let live = s.is_live(now());
-            let (r, _) = ui.allocate_exact_size(egui::vec2(10.0, 20.0), egui::Sense::hover());
-            if live {
-                pulse_dot(ui, r.center(), GREEN);
-            } else {
-                ui.painter().circle_filled(r.center(), 4.0, t.border);
-            }
-            tool_chip(ui, s.tool.label(), t);
-            let when = relative_time(s.last_activity);
-            let when_w = ui.painter().layout_no_wrap(when.clone(), FontId::proportional(12.5), t.tertiary).size().x;
-            let room = ui.available_width() - when_w - 16.0;
-            let job = egui::text::LayoutJob::single_section(s.display_title(), egui::TextFormat::simple(FontId::proportional(TEXT), t.text));
-            let r = line(ui, job, room);
-            ui.label(RichText::new(when).size(12.5).color(t.tertiary));
-            r
-        });
-    hover_end(ui, bg, row.response.rect, egui::Id::unique(("session-row", &s.id)), t);
+    let row = ui.horizontal(|ui| {
+        let live = s.is_live(now());
+        let (r, _) = ui.allocate_exact_size(egui::vec2(10.0, 20.0), egui::Sense::hover());
+        if live {
+            pulse_dot(ui, r.center(), GREEN);
+        } else {
+            ui.painter().circle_filled(r.center(), 4.0, t.border);
+        }
+        tool_chip(ui, s.tool.label(), t);
+        let when = relative_time(s.last_activity);
+        let when_w = ui
+            .painter()
+            .layout_no_wrap(when.clone(), FontId::proportional(12.5), t.tertiary)
+            .size()
+            .x;
+        let room = ui.available_width() - when_w - 16.0;
+        let job = egui::text::LayoutJob::single_section(
+            s.display_title(),
+            egui::TextFormat::simple(FontId::proportional(TEXT), t.text),
+        );
+        let r = line(ui, job, room);
+        ui.label(RichText::new(when).size(12.5).color(t.tertiary));
+        r
+    });
+    hover_end(
+        ui,
+        bg,
+        row.response.rect,
+        egui::Id::unique(("session-row", &s.id)),
+        t,
+    );
     let resp = row.inner;
     if resp.clicked() {
         toggle_flag(ui, open_key);
     }
     let _ = page_id;
     if open {
-        egui::Frame::new().inner_margin(egui::Margin { left: 18, right: 0, top: 2, bottom: 6 }).show(ui, |ui| {
-            ui.set_max_width(w - 18.0);
-            let n = s.user_messages + s.agent_messages;
-            let mut meta = crate::trf!("{n} message{p}", "{n} message{p}", p = crate::i18n::plural(n as usize));
-            if s.tokens.billed > 0 {
-                meta.push_str(&crate::trf!(" · {} tokens", " · {} tokens", human_tokens(s.tokens.billed)));
-            }
-            for x in [&s.git_branch, &s.model] {
-                if !x.is_empty() {
-                    meta.push_str(&format!(" · {x}"));
+        egui::Frame::new()
+            .inner_margin(egui::Margin {
+                left: 18,
+                right: 0,
+                top: 2,
+                bottom: 6,
+            })
+            .show(ui, |ui| {
+                ui.set_max_width(w - 18.0);
+                let n = s.user_messages + s.agent_messages;
+                let mut meta = crate::trf!(
+                    "{n} message{p}",
+                    "{n} message{p}",
+                    p = crate::i18n::plural(n as usize)
+                );
+                if s.tokens.billed > 0 {
+                    meta.push_str(&crate::trf!(
+                        " · {} tokens",
+                        " · {} tokens",
+                        human_tokens(s.tokens.billed)
+                    ));
                 }
-            }
-            ui.label(RichText::new(meta).size(12.5).color(t.tertiary));
-            if !s.last_reply.is_empty() {
-                ui.add_space(2.0);
-                ui.add(egui::Label::new(RichText::new(crate::trf!("Dernière réponse : {}", "Last answer: {}", s.last_reply)).size(13.0).color(t.secondary)).wrap());
-            }
-            ui.add_space(4.0);
-            ui.horizontal(|ui| {
-                let (Some(cmd), Some(resume)) = (s.resume_command(), s.resume_args()) else {
-                    ui.label(RichText::new(crate::tr!("Id de session invalide : reprise impossible", "Invalid session id: can't resume")).size(12.5).color(t.tertiary));
-                    return;
-                };
-                if action_link(ui, crate::tr!("Reprendre ici", "Resume here")).on_hover_text(crate::tr!("Rouvre la session dans le terminal intégré", "Reopens the session in the built-in terminal")).clicked() {
-                    let title = format!("{} · {}", s.tool.label(), crate::richtext::one_line(&s.display_title(), 24));
-                    super::term_ui::request(ui.ctx(), &title, &s.cwd, Some(resume));
+                for x in [&s.git_branch, &s.model] {
+                    if !x.is_empty() {
+                        meta.push_str(&format!(" · {x}"));
+                    }
                 }
-                if action_link(ui, crate::tr!("Terminal macOS", "macOS Terminal")).on_hover_text(&cmd).clicked() {
-                    msg = Some(match crate::sessions::open_in_terminal(&cmd) {
-                        Ok(()) => super::notices::Notice::Ack(crate::tr!("Session rouverte dans le Terminal.", "Session reopened in the Terminal.").to_string()),
-                        Err(e) => {
-                            ui.ctx().copy_text(cmd.clone());
-                            super::notices::Notice::Error(crate::trf!("Terminal indisponible ({e}) : commande copiée.", "Terminal unavailable ({e}): command copied."))
-                        }
-                    });
+                ui.label(RichText::new(meta).size(12.5).color(t.tertiary));
+                if !s.last_reply.is_empty() {
+                    ui.add_space(2.0);
+                    ui.add(
+                        egui::Label::new(
+                            RichText::new(crate::trf!(
+                                "Dernière réponse : {}",
+                                "Last answer: {}",
+                                s.last_reply
+                            ))
+                            .size(13.0)
+                            .color(t.secondary),
+                        )
+                        .wrap(),
+                    );
                 }
-                if action_link(ui, crate::tr!("Copier la commande", "Copy the command")).on_hover_text(&cmd).clicked() {
-                    ui.ctx().copy_text(cmd.clone());
-                    msg = Some(super::notices::Notice::Ack(crate::tr!("Commande copiée.", "Command copied.").into()));
-                }
+                ui.add_space(4.0);
+                ui.horizontal(|ui| {
+                    let (Some(cmd), Some(resume)) = (s.resume_command(), s.resume_args()) else {
+                        ui.label(
+                            RichText::new(crate::tr!(
+                                "Id de session invalide : reprise impossible",
+                                "Invalid session id: can't resume"
+                            ))
+                            .size(12.5)
+                            .color(t.tertiary),
+                        );
+                        return;
+                    };
+                    if action_link(ui, crate::tr!("Reprendre ici", "Resume here"))
+                        .on_hover_text(crate::tr!(
+                            "Rouvre la session dans le terminal intégré",
+                            "Reopens the session in the built-in terminal"
+                        ))
+                        .clicked()
+                    {
+                        let title = format!(
+                            "{} · {}",
+                            s.tool.label(),
+                            crate::richtext::one_line(&s.display_title(), 24)
+                        );
+                        super::term_ui::request(ui.ctx(), &title, &s.cwd, Some(resume));
+                    }
+                    if action_link(ui, crate::tr!("Terminal macOS", "macOS Terminal"))
+                        .on_hover_text(&cmd)
+                        .clicked()
+                    {
+                        msg = Some(match crate::sessions::open_in_terminal(&cmd) {
+                            Ok(()) => super::notices::Notice::Ack(
+                                crate::tr!(
+                                    "Session rouverte dans le Terminal.",
+                                    "Session reopened in the Terminal."
+                                )
+                                .to_string(),
+                            ),
+                            Err(e) => {
+                                ui.ctx().copy_text(cmd.clone());
+                                super::notices::Notice::Error(crate::trf!(
+                                    "Terminal indisponible ({e}) : commande copiée.",
+                                    "Terminal unavailable ({e}): command copied."
+                                ))
+                            }
+                        });
+                    }
+                    if action_link(ui, crate::tr!("Copier la commande", "Copy the command"))
+                        .on_hover_text(&cmd)
+                        .clicked()
+                    {
+                        ui.ctx().copy_text(cmd.clone());
+                        msg = Some(super::notices::Notice::Ack(
+                            crate::tr!("Commande copiée.", "Command copied.").into(),
+                        ));
+                    }
+                });
             });
-        });
     }
     ui.add_space(2.0);
     msg
@@ -827,7 +1043,11 @@ fn draw(ui: &mut egui::Ui, cx: &mut Cx, k: CardKind, extra: f32) -> f32 {
         CardKind::Sessions | CardKind::Pages => 2.0,
         CardKind::Versions => 3.0,
     };
-    let t0: f64 = ui.ctx().data(|d| d.get_temp(appear_key())).map(|(_, t): (String, f64)| t).unwrap_or(0.0);
+    let t0: f64 = ui
+        .ctx()
+        .data(|d| d.get_temp(appear_key()))
+        .map(|(_, t): (String, f64)| t)
+        .unwrap_or(0.0);
     let p = (((ui.input(|i| i.time) - t0) as f32 - order * 0.07) / 0.35).clamp(0.0, 1.0);
     let e = 1.0 - (1.0 - p).powi(3);
     if e < 1.0 {
@@ -865,7 +1085,9 @@ fn draw_card(ui: &mut egui::Ui, cx: &mut Cx, k: CardKind, extra: f32) -> f32 {
             let folder = cx.pr.folder.trim().to_string();
             let prefer = cx.live.first().map(|s| s.tool);
             let title = cx.title.clone();
-            super::versions::versions_card(ui, cx.vers, cx.page_id, &folder, &title, prefer, cx.t, extra)
+            super::versions::versions_card(
+                ui, cx.vers, cx.page_id, &folder, &title, prefer, cx.t, extra,
+            )
         }
     }
 }
@@ -884,12 +1106,23 @@ fn card_key(page_id: &str, k: CardKind) -> egui::Id {
 
 /// One card at the top of each column, then each other card under the column that is
 /// shortest so far (heights from the last frame), so no column stays half empty.
-fn balance<const N: usize>(ui: &egui::Ui, page_id: &str, heads: [CardKind; N], rest: &[CardKind]) -> Vec<Vec<CardKind>> {
-    let h = |k: CardKind| -> f32 { ui.ctx().data(|d| d.get_temp(card_key(page_id, k))).unwrap_or(200.0) };
+fn balance<const N: usize>(
+    ui: &egui::Ui,
+    page_id: &str,
+    heads: [CardKind; N],
+    rest: &[CardKind],
+) -> Vec<Vec<CardKind>> {
+    let h = |k: CardKind| -> f32 {
+        ui.ctx()
+            .data(|d| d.get_temp(card_key(page_id, k)))
+            .unwrap_or(200.0)
+    };
     let mut cols: Vec<Vec<CardKind>> = heads.iter().map(|k| vec![*k]).collect();
     let mut tot: Vec<f32> = heads.iter().map(|k| h(*k)).collect();
     for k in rest {
-        let i = (0..N).min_by(|a, b| tot[*a].total_cmp(&tot[*b])).unwrap_or(0);
+        let i = (0..N)
+            .min_by(|a, b| tot[*a].total_cmp(&tot[*b]))
+            .unwrap_or(0);
         cols[i].push(*k);
         tot[i] += h(*k) + 16.0;
     }
@@ -919,14 +1152,22 @@ fn columns(ui: &mut egui::Ui, cx: &mut Cx, cols: &[Vec<CardKind>], gap: f32) {
                         total += gap;
                     }
                     let last = i + 1 == col.len();
-                    let extra = if last && cols.len() > 1 { (target - prev.get(ci).copied().unwrap_or(target)).max(0.0) } else { 0.0 };
+                    let extra = if last && cols.len() > 1 {
+                        (target - prev.get(ci).copied().unwrap_or(target)).max(0.0)
+                    } else {
+                        0.0
+                    };
                     total += draw(ui, cx, *k, extra);
                 }
                 now[ci] = total;
             });
         }
     });
-    if now.iter().zip(prev.iter().chain(std::iter::repeat(&-1.0))).any(|(a, b)| (a - b).abs() > 0.5) {
+    if now
+        .iter()
+        .zip(prev.iter().chain(std::iter::repeat(&-1.0)))
+        .any(|(a, b)| (a - b).abs() > 0.5)
+    {
         if std::env::var_os("ORCHESTRA_PROFILE").is_some() {
             eprintln!("colonnes : {prev:?} -> {now:?}");
         }
@@ -942,7 +1183,8 @@ pub(super) fn project_panel(ui: &mut egui::Ui, cx: &mut Cx) -> Option<super::not
     let shown: Option<(String, f64)> = ui.ctx().data(|d| d.get_temp(appear_key()));
     if shown.as_ref().is_none_or(|(id, _)| id != cx.page_id) {
         let now_t = ui.input(|i| i.time);
-        ui.ctx().data_mut(|d| d.insert_temp(appear_key(), (cx.page_id.to_string(), now_t)));
+        ui.ctx()
+            .data_mut(|d| d.insert_temp(appear_key(), (cx.page_id.to_string(), now_t)));
     }
     let mut cx_copy = false;
     {
@@ -1031,7 +1273,8 @@ pub(super) fn project_panel(ui: &mut egui::Ui, cx: &mut Cx) -> Option<super::not
                 });
             }
         });
-        let editing_folder = !pr.read_only && (flag(ui, ("edit-folder", page_id)) || pr.folder.trim().is_empty());
+        let editing_folder =
+            !pr.read_only && (flag(ui, ("edit-folder", page_id)) || pr.folder.trim().is_empty());
         ui.horizontal(|ui| {
             // Lecture seule, on the right of the folder line.
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -1104,7 +1347,6 @@ pub(super) fn project_panel(ui: &mut egui::Ui, cx: &mut Cx) -> Option<super::not
             });
         });
         ui.add_space(12.0);
-
     }
     if cx_copy {
         cx.actions.push(Action::LocalCopy(cx.page_id.to_string()));
@@ -1115,19 +1357,39 @@ pub(super) fn project_panel(ui: &mut egui::Ui, cx: &mut Cx) -> Option<super::not
     let gap = 16.0;
     use CardKind::*;
     // The AIs' questions, when there are some: first of the cards placed after the heads.
-    let asked: &[CardKind] = if cx.questions.is_empty() { &[] } else { &[Questions] };
+    let asked: &[CardKind] = if cx.questions.is_empty() {
+        &[]
+    } else {
+        &[Questions]
+    };
     // The git card (Versions) only for code projects.
-    let vers: &[CardKind] = if shows_git(ui.ctx(), cx.pr) { &[Versions] } else { &[] };
+    let vers: &[CardKind] = if shows_git(ui.ctx(), cx.pr) {
+        &[Versions]
+    } else {
+        &[]
+    };
     if w >= 1380.0 {
         let rest: Vec<CardKind> = asked.iter().chain(vers).copied().chain([Pages]).collect();
         let cols = balance(ui, cx.page_id, [Summary(420.0), Steps, Sessions], &rest);
         columns(ui, cx, &cols, gap);
     } else if w >= 860.0 {
-        let rest: Vec<CardKind> = asked.iter().copied().chain([Sessions]).chain(vers.iter().copied()).chain([Pages]).collect();
+        let rest: Vec<CardKind> = asked
+            .iter()
+            .copied()
+            .chain([Sessions])
+            .chain(vers.iter().copied())
+            .chain([Pages])
+            .collect();
         let cols = balance(ui, cx.page_id, [Summary(380.0), Steps], &rest);
         columns(ui, cx, &cols, gap);
     } else {
-        let one: Vec<CardKind> = [Summary(210.0), Steps].into_iter().chain(asked.iter().copied()).chain([Sessions]).chain(vers.iter().copied()).chain([Pages]).collect();
+        let one: Vec<CardKind> = [Summary(210.0), Steps]
+            .into_iter()
+            .chain(asked.iter().copied())
+            .chain([Sessions])
+            .chain(vers.iter().copied())
+            .chain([Pages])
+            .collect();
         columns(ui, cx, &[one], gap);
     }
     ui.add_space(gap);
@@ -1162,7 +1424,12 @@ fn questions_card(ui: &mut egui::Ui, cx: &mut Cx, extra: f32) -> f32 {
     let msgs: Vec<&crate::model::InboxMsg> = cx.questions.iter().collect();
     let mut sent = None;
     let h = card(ui, t, extra, |ui| {
-        card_title(ui, crate::tr!("QUESTIONS DES IA", "THE AIS' QUESTIONS"), &super::orch_ui::questions_count(&msgs), t);
+        card_title(
+            ui,
+            crate::tr!("QUESTIONS DES IA", "THE AIS' QUESTIONS"),
+            &super::orch_ui::questions_count(&msgs),
+            t,
+        );
         sent = super::orch_ui::question_list(ui, &msgs, |_| None, t);
     });
     if sent.is_some() {
@@ -1175,12 +1442,23 @@ fn summary_card(ui: &mut egui::Ui, cx: &mut Cx, folded_h: f32, extra: f32) -> f3
     let (page_id, pr, t) = (cx.page_id, &*cx.pr, cx.t);
     // ---- State of play: folded to ~8 lines unless unfolded.
     card(ui, t, extra, |ui| {
-        let by = if pr.summary_by.is_empty() { String::new() } else { format!("{} · {}", pr.summary_by, relative_time(pr.summary_updated)) };
+        let by = if pr.summary_by.is_empty() {
+            String::new()
+        } else {
+            format!("{} · {}", pr.summary_by, relative_time(pr.summary_updated))
+        };
         card_title(ui, crate::tr!("ÉTAT DES LIEUX", "CURRENT STATE"), &by, t);
         if cx.ai.filling(page_id) {
             ui.horizontal(|ui| {
                 ui.add(egui::Spinner::new().size(12.0));
-                ui.label(RichText::new(crate::tr!("L'IA lit le projet et écrit l'état des lieux…", "The AI is reading the project and writing its state…")).size(13.0).color(t.secondary));
+                ui.label(
+                    RichText::new(crate::tr!(
+                        "L'IA lit le projet et écrit l'état des lieux…",
+                        "The AI is reading the project and writing its state…"
+                    ))
+                    .size(13.0)
+                    .color(t.secondary),
+                );
             });
             ui.add_space(4.0);
         }
@@ -1202,18 +1480,27 @@ fn summary_card(ui: &mut egui::Ui, cx: &mut Cx, folded_h: f32, extra: f32) -> f3
                 .layout(egui::Layout::top_down(egui::Align::Min)),
         );
         if !open {
-            child.set_clip_rect(egui::Rect::from_min_size(top, egui::vec2(w, folded_h)).intersect(ui.clip_rect()));
+            child.set_clip_rect(
+                egui::Rect::from_min_size(top, egui::vec2(w, folded_h)).intersect(ui.clip_rect()),
+            );
         }
         child.set_max_width(760.0f32.min(w));
         super::rich::markdown(&mut child, &pr.summary, TEXT, t);
         let content_h = child.min_rect().height();
         let overflows = content_h > folded_h + 4.0;
-        let shown = if open || !overflows { content_h } else { folded_h };
+        let shown = if open || !overflows {
+            content_h
+        } else {
+            folded_h
+        };
         let shown_rect = egui::Rect::from_min_size(top, egui::vec2(w, shown));
         ui.allocate_rect(shown_rect, egui::Sense::hover());
         if overflows && !open {
             // Fade the last lines into the card.
-            let fade = egui::Rect::from_min_max(egui::pos2(shown_rect.left(), shown_rect.bottom() - 48.0), shown_rect.max);
+            let fade = egui::Rect::from_min_max(
+                egui::pos2(shown_rect.left(), shown_rect.bottom() - 48.0),
+                shown_rect.max,
+            );
             let mut mesh = egui::Mesh::default();
             let clear = t.card.gamma_multiply(0.0);
             mesh.colored_vertex(fade.left_top(), clear);
@@ -1224,7 +1511,16 @@ fn summary_card(ui: &mut egui::Ui, cx: &mut Cx, folded_h: f32, extra: f32) -> f3
             mesh.add_triangle(0, 2, 3);
             ui.painter().add(mesh);
         }
-        if overflows && link(ui, if open { crate::tr!("Réduire ▴", "Collapse ▴") } else { crate::tr!("Afficher tout ▾", "Show all ▾") }) {
+        if overflows
+            && link(
+                ui,
+                if open {
+                    crate::tr!("Réduire ▴", "Collapse ▴")
+                } else {
+                    crate::tr!("Afficher tout ▾", "Show all ▾")
+                },
+            )
+        {
             toggle_flag(ui, key);
         }
     })
@@ -1273,13 +1569,21 @@ fn steps_card(ui: &mut egui::Ui, cx: &mut Cx, extra: f32) -> f32 {
     let (done, total) = pr.progress();
     let (start, width) = (ui.cursor().min, ui.available_width());
     let h = card(ui, t, extra, |ui| {
-        card_title(ui, crate::tr!("ÉTAPES", "STEPS"), &format!("{done} / {total}"), t);
+        card_title(
+            ui,
+            crate::tr!("ÉTAPES", "STEPS"),
+            &format!("{done} / {total}"),
+            t,
+        );
         let mut cycle = None;
         let mut remove = None;
         let show_done = flag(ui, ("done-open", page_id));
         let rows: Vec<usize> = (0..pr.steps.len())
             .filter(|&i| pr.steps[i].status != StepStatus::Done)
-            .chain((0..pr.steps.len()).filter(|&i| show_done && pr.steps[i].status == StepStatus::Done))
+            .chain(
+                (0..pr.steps.len())
+                    .filter(|&i| show_done && pr.steps[i].status == StepStatus::Done),
+            )
             .collect();
         if pr.steps.is_empty() {
             ui.label(RichText::new(crate::tr!("Aucune étape. Ajoutez-en une, demandez des suggestions à l'IA, ou collez un texte à transformer en étapes.", "No step. Add one, ask the AI for suggestions, or paste a text to turn into steps.")).color(t.tertiary).italics());
@@ -1287,30 +1591,49 @@ fn steps_card(ui: &mut egui::Ui, cx: &mut Cx, extra: f32) -> f32 {
         // Open steps are put in order by dragging them by their handle (left of the circle).
         let drag_key = egui::Id::unique(("step-drag", page_id));
         let mut dragging: Option<String> = ui.ctx().data(|d| d.get_temp(drag_key));
-        let open_count = pr.steps.iter().filter(|s| s.status != StepStatus::Done).count();
+        let open_count = pr
+            .steps
+            .iter()
+            .filter(|s| s.status != StepStatus::Done)
+            .count();
         let mut open_rows: Vec<(String, egui::Rect)> = vec![];
         for i in rows {
             let s = &pr.steps[i];
             let open_key = ("step-open", s.id.as_str());
             let open = flag(ui, open_key);
             let (area, text) = split_area(&s.title);
-            let color = if s.status == StepStatus::Done { t.tertiary } else { t.text };
+            let color = if s.status == StepStatus::Done {
+                t.tertiary
+            } else {
+                t.text
+            };
             let bg = hover_begin(ui);
             let row = ui.horizontal_top(|ui| {
                 if !ro {
-                    let (hr, h) = ui.allocate_exact_size(egui::vec2(10.0, 22.0), egui::Sense::drag());
+                    let (hr, h) =
+                        ui.allocate_exact_size(egui::vec2(10.0, 22.0), egui::Sense::drag());
                     if s.status != StepStatus::Done && open_count > 1 {
-                        let active = h.hovered() || h.dragged() || dragging.as_deref() == Some(s.id.as_str());
+                        let active = h.hovered()
+                            || h.dragged()
+                            || dragging.as_deref() == Some(s.id.as_str());
                         let col = if active { t.secondary } else { t.border };
                         for dy in [-5.0, 0.0, 5.0] {
                             for dx in [-2.0, 2.0] {
-                                ui.painter().circle_filled(hr.center() + egui::vec2(dx, dy), 1.3, col);
+                                ui.painter().circle_filled(
+                                    hr.center() + egui::vec2(dx, dy),
+                                    1.3,
+                                    col,
+                                );
                             }
                         }
                         if h.drag_started() {
                             dragging = Some(s.id.clone());
                         }
-                        h.on_hover_cursor(egui::CursorIcon::Grab).on_hover_text(crate::tr!("Glisser pour changer l'ordre", "Drag to change the order"));
+                        h.on_hover_cursor(egui::CursorIcon::Grab)
+                            .on_hover_text(crate::tr!(
+                                "Glisser pour changer l'ordre",
+                                "Drag to change the order"
+                            ));
                     }
                 }
                 if step_icon(ui, &s.id, s.status, t).clicked() && !ro {
@@ -1331,13 +1654,41 @@ fn steps_card(ui: &mut egui::Ui, cx: &mut Cx, extra: f32) -> f32 {
                         ui.set_max_width(room);
                         let r = ui.add(egui::Label::new(job).wrap().sense(egui::Sense::click()));
                         // Another computer's AI has reserved it (shared project).
-                        let held = s.held_elsewhere(&crate::store::computer_id(), crate::model::now_ms());
+                        let held =
+                            s.held_elsewhere(&crate::store::computer_id(), crate::model::now_ms());
                         if !s.source.is_empty() || s.received || held {
-                            let by = if s.source.is_empty() { String::new() } else { crate::trf!("ajoutée par {} · {}", "added by {} · {}", s.source, relative_time(s.created)) };
+                            let by = if s.source.is_empty() {
+                                String::new()
+                            } else {
+                                crate::trf!(
+                                    "ajoutée par {} · {}",
+                                    "added by {} · {}",
+                                    s.source,
+                                    relative_time(s.created)
+                                )
+                            };
                             // Written on another computer of the shared project.
-                            let from = if s.received { crate::tr!("reçue d'un autre membre du projet", "received from another member of the project") } else { "" };
-                            let hold = if held { crate::tr!("en cours par une IA d'un autre ordinateur", "in progress by an AI on another computer") } else { "" };
-                            let line = [by.as_str(), from, hold].into_iter().filter(|x| !x.is_empty()).collect::<Vec<_>>().join(" · ");
+                            let from = if s.received {
+                                crate::tr!(
+                                    "reçue d'un autre membre du projet",
+                                    "received from another member of the project"
+                                )
+                            } else {
+                                ""
+                            };
+                            let hold = if held {
+                                crate::tr!(
+                                    "en cours par une IA d'un autre ordinateur",
+                                    "in progress by an AI on another computer"
+                                )
+                            } else {
+                                ""
+                            };
+                            let line = [by.as_str(), from, hold]
+                                .into_iter()
+                                .filter(|x| !x.is_empty())
+                                .collect::<Vec<_>>()
+                                .join(" · ");
                             ui.label(RichText::new(line).size(12.0).color(t.tertiary));
                         }
                         r
@@ -1348,19 +1699,45 @@ fn steps_card(ui: &mut egui::Ui, cx: &mut Cx, extra: f32) -> f32 {
                 };
                 // The whole row up to its right edge, where the "×" sits: the cross must stay
                 // visible while the pointer is on it, not only over the text.
-                let row_rect = egui::Rect::from_min_max(ui.min_rect().min, egui::pos2(ui.max_rect().right(), ui.min_rect().bottom()));
+                let row_rect = egui::Rect::from_min_max(
+                    ui.min_rect().min,
+                    egui::pos2(ui.max_rect().right(), ui.min_rect().bottom()),
+                );
                 let hovered = ui.rect_contains_pointer(row_rect) && !ro;
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Min), |ui| {
-                    let rest = if hovered { t.secondary } else { Color32::TRANSPARENT };
-                    if icons::delete_cross(ui, 20.0, rest, t.text, t.selected, crate::tr!("Supprimer l'étape", "Delete the step")).clicked() {
+                    let rest = if hovered {
+                        t.secondary
+                    } else {
+                        Color32::TRANSPARENT
+                    };
+                    if icons::delete_cross(
+                        ui,
+                        20.0,
+                        rest,
+                        t.text,
+                        t.selected,
+                        crate::tr!("Supprimer l'étape", "Delete the step"),
+                    )
+                    .clicked()
+                    {
                         remove = Some(s.id.clone());
                     }
                 });
                 resp
             });
-            hover_end(ui, bg, row.response.rect, egui::Id::unique(("step-row", &s.id)), t);
+            hover_end(
+                ui,
+                bg,
+                row.response.rect,
+                egui::Id::unique(("step-row", &s.id)),
+                t,
+            );
             if dragging.as_deref() == Some(s.id.as_str()) {
-                ui.painter().rect_filled(row.response.rect.expand2(egui::vec2(6.0, 2.0)), 6.0, BLUE.gamma_multiply(0.08));
+                ui.painter().rect_filled(
+                    row.response.rect.expand2(egui::vec2(6.0, 2.0)),
+                    6.0,
+                    BLUE.gamma_multiply(0.08),
+                );
             }
             if s.status != StepStatus::Done {
                 open_rows.push((s.id.clone(), row.response.rect));
@@ -1373,11 +1750,24 @@ fn steps_card(ui: &mut egui::Ui, cx: &mut Cx, extra: f32) -> f32 {
         // While dragging: a line where the step would land; it moves there on release.
         if let Some(d) = dragging.clone() {
             let released = ui.input(|i| i.pointer.any_released() || !i.pointer.primary_down());
-            if let (Some(pos), Some((_, first))) = (ui.ctx().pointer_latest_pos(), open_rows.first()) {
+            if let (Some(pos), Some((_, first))) =
+                (ui.ctx().pointer_latest_pos(), open_rows.first())
+            {
                 ui.ctx().set_cursor_icon(egui::CursorIcon::Grabbing);
-                let target = open_rows.iter().find(|(_, r)| pos.y < r.center().y).map(|(id, r)| (id.clone(), r.top() - 1.0));
-                let y = target.as_ref().map(|(_, y)| *y).or_else(|| open_rows.last().map(|(_, r)| r.bottom() + 1.0)).unwrap_or(first.top());
-                ui.painter().hline(first.left()..=first.right(), y, egui::Stroke::new(2.0, BLUE));
+                let target = open_rows
+                    .iter()
+                    .find(|(_, r)| pos.y < r.center().y)
+                    .map(|(id, r)| (id.clone(), r.top() - 1.0));
+                let y = target
+                    .as_ref()
+                    .map(|(_, y)| *y)
+                    .or_else(|| open_rows.last().map(|(_, r)| r.bottom() + 1.0))
+                    .unwrap_or(first.top());
+                ui.painter().hline(
+                    first.left()..=first.right(),
+                    y,
+                    egui::Stroke::new(2.0, BLUE),
+                );
                 if released {
                     pr.move_step(&d, target.as_ref().map(|(id, _)| id.as_str()));
                 }
@@ -1399,22 +1789,66 @@ fn steps_card(ui: &mut egui::Ui, cx: &mut Cx, extra: f32) -> f32 {
             let confirming = flag(ui, confirm_key);
             let mut clear = false;
             ui.horizontal(|ui| {
-                if link(ui, &if show_done { crate::tr!("Masquer les étapes terminées", "Hide finished steps").to_string() } else { if done == 1 { crate::tr!("Voir l'étape terminée", "Show the finished step").to_string() } else { crate::trf!("Voir les {done} étapes terminées", "Show the {done} finished steps") } }) {
+                if link(
+                    ui,
+                    &if show_done {
+                        crate::tr!("Masquer les étapes terminées", "Hide finished steps")
+                            .to_string()
+                    } else {
+                        if done == 1 {
+                            crate::tr!("Voir l'étape terminée", "Show the finished step")
+                                .to_string()
+                        } else {
+                            crate::trf!(
+                                "Voir les {done} étapes terminées",
+                                "Show the {done} finished steps"
+                            )
+                        }
+                    },
+                ) {
                     toggle_flag(ui, ("done-open", page_id));
                 }
                 if ro {
                     return;
                 }
                 if confirming {
-                    let sure = if done == 1 { crate::tr!("Confirmer : supprimer 1 étape terminée", "Confirm: delete 1 finished step").to_string() } else { crate::trf!("Confirmer : supprimer {done} étapes terminées", "Confirm: delete {done} finished steps") };
-                    if ui.add(egui::Label::new(RichText::new(sure).size(13.0).color(Color32::from_rgb(224, 62, 62))).sense(egui::Sense::click())).on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
+                    let sure = if done == 1 {
+                        crate::tr!(
+                            "Confirmer : supprimer 1 étape terminée",
+                            "Confirm: delete 1 finished step"
+                        )
+                        .to_string()
+                    } else {
+                        crate::trf!(
+                            "Confirmer : supprimer {done} étapes terminées",
+                            "Confirm: delete {done} finished steps"
+                        )
+                    };
+                    if ui
+                        .add(
+                            egui::Label::new(
+                                RichText::new(sure)
+                                    .size(13.0)
+                                    .color(Color32::from_rgb(224, 62, 62)),
+                            )
+                            .sense(egui::Sense::click()),
+                        )
+                        .on_hover_cursor(egui::CursorIcon::PointingHand)
+                        .clicked()
+                    {
                         clear = true;
                         toggle_flag(ui, confirm_key);
                     }
                     if quiet_link(ui, crate::tr!("Annuler", "Cancel"), t).clicked() {
                         toggle_flag(ui, confirm_key);
                     }
-                } else if quiet_link(ui, crate::tr!("Supprimer les terminées", "Delete finished ones"), t).clicked() {
+                } else if quiet_link(
+                    ui,
+                    crate::tr!("Supprimer les terminées", "Delete finished ones"),
+                    t,
+                )
+                .clicked()
+                {
                     toggle_flag(ui, confirm_key);
                 }
             });
@@ -1423,7 +1857,12 @@ fn steps_card(ui: &mut egui::Ui, cx: &mut Cx, extra: f32) -> f32 {
             }
         }
         if let Some(id) = cycle {
-            let cur = pr.steps.iter().find(|s| s.id == id).map(|s| s.status).unwrap_or_default();
+            let cur = pr
+                .steps
+                .iter()
+                .find(|s| s.id == id)
+                .map(|s| s.status)
+                .unwrap_or_default();
             let next = match cur {
                 StepStatus::Todo => StepStatus::Doing,
                 StepStatus::Doing => StepStatus::Done,
@@ -1464,19 +1903,41 @@ fn steps_card(ui: &mut egui::Ui, cx: &mut Cx, extra: f32) -> f32 {
         }
         // A row exactly as tall as the « + »: the text typed (or the label) is centred on it.
         inline_row(ui, |ui| {
-            let (r, plus) = ui.allocate_exact_size(egui::vec2(18.0, INLINE_H), egui::Sense::click());
-            let hover_row = ui.rect_contains_pointer(egui::Rect::from_min_size(r.min, egui::vec2(ui.available_width() + 18.0, 22.0)));
-            let col = if adding || hover_row { t.secondary } else { t.tertiary };
+            let (r, plus) =
+                ui.allocate_exact_size(egui::vec2(18.0, INLINE_H), egui::Sense::click());
+            let hover_row = ui.rect_contains_pointer(egui::Rect::from_min_size(
+                r.min,
+                egui::vec2(ui.available_width() + 18.0, 22.0),
+            ));
+            let col = if adding || hover_row {
+                t.secondary
+            } else {
+                t.tertiary
+            };
             let c = r.center();
-            ui.painter().line_segment([c - egui::vec2(5.0, 0.0), c + egui::vec2(5.0, 0.0)], egui::Stroke::new(1.5, col));
-            ui.painter().line_segment([c - egui::vec2(0.0, 5.0), c + egui::vec2(0.0, 5.0)], egui::Stroke::new(1.5, col));
+            ui.painter().line_segment(
+                [c - egui::vec2(5.0, 0.0), c + egui::vec2(5.0, 0.0)],
+                egui::Stroke::new(1.5, col),
+            );
+            ui.painter().line_segment(
+                [c - egui::vec2(0.0, 5.0), c + egui::vec2(0.0, 5.0)],
+                egui::Stroke::new(1.5, col),
+            );
             if adding {
                 let edit = ui.add(
                     inline_edit(egui::TextEdit::singleline(new_step))
-                        .hint_text(if arrived.is_some() { crate::tr!("Votre tâche, puis Entrée", "Your task, then Enter") } else { crate::tr!("Nouvelle étape, puis Entrée", "New step, then Enter") })
+                        .hint_text(if arrived.is_some() {
+                            crate::tr!("Votre tâche, puis Entrée", "Your task, then Enter")
+                        } else {
+                            crate::tr!("Nouvelle étape, puis Entrée", "New step, then Enter")
+                        })
                         .desired_width(f32::INFINITY),
                 );
-                if !edit.has_focus() && !edit.lost_focus() && new_step.is_empty() && !ui.ctx().memory(|m| m.has_focus(edit.id)) {
+                if !edit.has_focus()
+                    && !edit.lost_focus()
+                    && new_step.is_empty()
+                    && !ui.ctx().memory(|m| m.has_focus(edit.id))
+                {
                     edit.request_focus();
                 }
                 let enter = ui.input(|i| i.key_pressed(Key::Enter));
@@ -1490,7 +1951,14 @@ fn steps_card(ui: &mut egui::Ui, cx: &mut Cx, extra: f32) -> f32 {
                     toggle_flag(ui, adding_key);
                 }
             } else {
-                let lbl = ui.add(egui::Label::new(RichText::new(crate::tr!("Ajouter une étape", "Add a step")).size(TEXT).color(col)).sense(egui::Sense::click()));
+                let lbl = ui.add(
+                    egui::Label::new(
+                        RichText::new(crate::tr!("Ajouter une étape", "Add a step"))
+                            .size(TEXT)
+                            .color(col),
+                    )
+                    .sense(egui::Sense::click()),
+                );
                 if lbl.clicked() || plus.clicked() {
                     toggle_flag(ui, adding_key);
                 }
@@ -1501,12 +1969,25 @@ fn steps_card(ui: &mut egui::Ui, cx: &mut Cx, extra: f32) -> f32 {
         ai_steps(ui, page_id, pr, ai, prefer, t);
     });
     // Arriving from « Ajouter des tâches »: the card glows green, then fades.
-    if let Some(glow) = steps_focus_age(ui.ctx(), page_id).map(steps_glow).filter(|g| *g > 0.0) {
+    if let Some(glow) = steps_focus_age(ui.ctx(), page_id)
+        .map(steps_glow)
+        .filter(|g| *g > 0.0)
+    {
         let rect = egui::Rect::from_min_size(start, egui::vec2(width, h + extra.max(0.0)));
         let p = ui.painter();
         p.rect_filled(rect, 12.0, GREEN.gamma_multiply(0.07 * glow));
-        p.rect_stroke(rect, 12.0, egui::Stroke::new(2.0, GREEN.gamma_multiply(glow)), egui::StrokeKind::Inside);
-        p.rect_stroke(rect.expand(3.0), 15.0, egui::Stroke::new(3.0, GREEN.gamma_multiply(0.25 * glow)), egui::StrokeKind::Inside);
+        p.rect_stroke(
+            rect,
+            12.0,
+            egui::Stroke::new(2.0, GREEN.gamma_multiply(glow)),
+            egui::StrokeKind::Inside,
+        );
+        p.rect_stroke(
+            rect.expand(3.0),
+            15.0,
+            egui::Stroke::new(3.0, GREEN.gamma_multiply(0.25 * glow)),
+            egui::StrokeKind::Inside,
+        );
         ui.ctx().request_repaint();
     }
     h
@@ -1520,7 +2001,11 @@ fn steps_glow(age: f64) -> f32 {
     if !(0.0..HOLD + FADE).contains(&age) {
         return 0.0;
     }
-    if age < HOLD { 1.0 } else { (1.0 - (age - HOLD) / FADE) as f32 }
+    if age < HOLD {
+        1.0
+    } else {
+        (1.0 - (age - HOLD) / FADE) as f32
+    }
 }
 
 #[cfg(test)]
@@ -1544,10 +2029,14 @@ const INLINE_H: f32 = 22.0;
 /// A row of exactly `INLINE_H`, its items centred on it. `ui.horizontal` centres each item
 /// on the row as it stands when the item is added, so a field after a taller icon sat high.
 fn inline_row<R>(ui: &mut egui::Ui, add: impl FnOnce(&mut egui::Ui) -> R) -> R {
-    ui.allocate_ui_with_layout(egui::vec2(ui.available_width(), INLINE_H), egui::Layout::left_to_right(egui::Align::Center), |ui| {
-        ui.set_min_height(INLINE_H);
-        add(ui)
-    })
+    ui.allocate_ui_with_layout(
+        egui::vec2(ui.available_width(), INLINE_H),
+        egui::Layout::left_to_right(egui::Align::Center),
+        |ui| {
+            ui.set_min_height(INLINE_H);
+            add(ui)
+        },
+    )
     .inner
 }
 
@@ -1562,38 +2051,93 @@ fn inline_edit(edit: egui::TextEdit<'_>) -> egui::TextEdit<'_> {
 
 /// Under the steps: ask the AI for steps (from the project or from a pasted text), and
 /// the proposals to tick before they become steps. Nothing is added without a click.
-fn ai_steps(ui: &mut egui::Ui, page_id: &str, pr: &mut Project, ai: &mut super::ai_fill::AiJobs, prefer: Option<crate::sessions::Tool>, t: &Tone) {
+fn ai_steps(
+    ui: &mut egui::Ui,
+    page_id: &str,
+    pr: &mut Project,
+    ai: &mut super::ai_fill::AiJobs,
+    prefer: Option<crate::sessions::Tool>,
+    t: &Tone,
+) {
     let folder = pr.folder.trim().to_string();
     let folder_ok = !folder.is_empty() && crate::project::normalize_folder(&folder).is_dir();
-    let existing: Vec<String> = pr.steps.iter().filter(|s| s.status != StepStatus::Done).map(|s| s.title.clone()).collect();
+    let existing: Vec<String> = pr
+        .steps
+        .iter()
+        .filter(|s| s.status != StepStatus::Done)
+        .map(|s| s.title.clone())
+        .collect();
     if let Some(list) = ai.proposals.get_mut(page_id) {
         let mut add = false;
         let mut drop = false;
-        egui::Frame::new().fill(BLUE.gamma_multiply(0.05)).stroke(egui::Stroke::new(1.0, BLUE.gamma_multiply(0.25))).corner_radius(8.0).inner_margin(egui::Margin::same(10)).show(ui, |ui| {
-            ui.set_width(ui.available_width());
-            ui.label(RichText::new(crate::tr!("Proposées par l'IA — cochez celles à garder", "Proposed by the AI — tick the ones to keep")).size(12.5).color(BLUE));
-            ui.add_space(2.0);
-            for (title, keep) in list.iter_mut() {
-                ui.horizontal(|ui| {
-                    ui.checkbox(keep, "");
-                    let room = ui.available_width();
-                    ui.allocate_ui_with_layout(egui::vec2(room, 0.0), egui::Layout::top_down(egui::Align::Min), |ui| {
-                        ui.set_width(room);
-                        ui.add(egui::Label::new(RichText::new(title.as_str()).size(13.5).color(if *keep { t.text } else { t.tertiary })).wrap());
+        egui::Frame::new()
+            .fill(BLUE.gamma_multiply(0.05))
+            .stroke(egui::Stroke::new(1.0, BLUE.gamma_multiply(0.25)))
+            .corner_radius(8.0)
+            .inner_margin(egui::Margin::same(10))
+            .show(ui, |ui| {
+                ui.set_width(ui.available_width());
+                ui.label(
+                    RichText::new(crate::tr!(
+                        "Proposées par l'IA — cochez celles à garder",
+                        "Proposed by the AI — tick the ones to keep"
+                    ))
+                    .size(12.5)
+                    .color(BLUE),
+                );
+                ui.add_space(2.0);
+                for (title, keep) in list.iter_mut() {
+                    ui.horizontal(|ui| {
+                        ui.checkbox(keep, "");
+                        let room = ui.available_width();
+                        ui.allocate_ui_with_layout(
+                            egui::vec2(room, 0.0),
+                            egui::Layout::top_down(egui::Align::Min),
+                            |ui| {
+                                ui.set_width(room);
+                                ui.add(
+                                    egui::Label::new(
+                                        RichText::new(title.as_str()).size(13.5).color(if *keep {
+                                            t.text
+                                        } else {
+                                            t.tertiary
+                                        }),
+                                    )
+                                    .wrap(),
+                                );
+                            },
+                        );
                     });
+                }
+                ui.add_space(4.0);
+                let n = list.iter().filter(|(_, k)| *k).count();
+                ui.horizontal(|ui| {
+                    if ui
+                        .add_enabled(
+                            n > 0,
+                            egui::Button::new(
+                                RichText::new(crate::trf!("Ajouter ({n})", "Add ({n})")).size(13.0),
+                            ),
+                        )
+                        .clicked()
+                    {
+                        add = true;
+                    }
+                    if ui
+                        .add(
+                            egui::Button::new(
+                                RichText::new(crate::tr!("Ignorer", "Dismiss"))
+                                    .size(13.0)
+                                    .color(t.tertiary),
+                            )
+                            .frame(false),
+                        )
+                        .clicked()
+                    {
+                        drop = true;
+                    }
                 });
-            }
-            ui.add_space(4.0);
-            let n = list.iter().filter(|(_, k)| *k).count();
-            ui.horizontal(|ui| {
-                if ui.add_enabled(n > 0, egui::Button::new(RichText::new(crate::trf!("Ajouter ({n})", "Add ({n})")).size(13.0))).clicked() {
-                    add = true;
-                }
-                if ui.add(egui::Button::new(RichText::new(crate::tr!("Ignorer", "Dismiss")).size(13.0).color(t.tertiary)).frame(false)).clicked() {
-                    drop = true;
-                }
             });
-        });
         if add {
             for (title, keep) in list.iter() {
                 if *keep {
@@ -1609,7 +2153,14 @@ fn ai_steps(ui: &mut egui::Ui, page_id: &str, pr: &mut Project, ai: &mut super::
     if ai.tasking(page_id) {
         ui.horizontal(|ui| {
             ui.add(egui::Spinner::new().size(12.0));
-            ui.label(RichText::new(crate::tr!("L'IA prépare des étapes…", "The AI is preparing steps…")).size(13.0).color(t.secondary));
+            ui.label(
+                RichText::new(crate::tr!(
+                    "L'IA prépare des étapes…",
+                    "The AI is preparing steps…"
+                ))
+                .size(13.0)
+                .color(t.secondary),
+            );
         });
         return;
     }
@@ -1629,7 +2180,15 @@ fn ai_steps(ui: &mut egui::Ui, page_id: &str, pr: &mut Project, ai: &mut super::
         let err_key = egui::Id::unique(("paste-image-error", page_id));
         let mut images: Vec<String> = ui.ctx().data(|d| d.get_temp(img_key)).unwrap_or_default();
         let mut err: Option<String> = ui.ctx().data(|d| d.get_temp(err_key)).unwrap_or_default();
-        let dropped: Vec<String> = ui.ctx().input(|i| i.raw.dropped_files.iter().map(|f| f.path().to_path_buf()).filter(|p| crate::sync::is_image(p)).map(|p| p.display().to_string()).collect());
+        let dropped: Vec<String> = ui.ctx().input(|i| {
+            i.raw
+                .dropped_files
+                .iter()
+                .map(|f| f.path().to_path_buf())
+                .filter(|p| crate::sync::is_image(p))
+                .map(|p| p.display().to_string())
+                .collect()
+        });
         for p in dropped {
             if !images.contains(&p) {
                 images.push(p);
@@ -1640,9 +2199,26 @@ fn ai_steps(ui: &mut egui::Ui, page_id: &str, pr: &mut Project, ai: &mut super::
         for (i, p) in images.iter().enumerate() {
             ui.horizontal(|ui| {
                 ui.spacing_mut().item_spacing.x = 6.0;
-                let name = std::path::Path::new(p).file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_else(|| p.clone());
-                ui.label(RichText::new(crate::trf!("Image : {name}", "Image: {name}")).size(12.5).color(t.secondary)).on_hover_text(p.as_str());
-                if icons::delete_cross(ui, 18.0, t.tertiary, t.text, t.selected, crate::tr!("Retirer l'image", "Remove the image")).clicked() {
+                let name = std::path::Path::new(p)
+                    .file_name()
+                    .map(|n| n.to_string_lossy().to_string())
+                    .unwrap_or_else(|| p.clone());
+                ui.label(
+                    RichText::new(crate::trf!("Image : {name}", "Image: {name}"))
+                        .size(12.5)
+                        .color(t.secondary),
+                )
+                .on_hover_text(p.as_str());
+                if icons::delete_cross(
+                    ui,
+                    18.0,
+                    t.tertiary,
+                    t.text,
+                    t.selected,
+                    crate::tr!("Retirer l'image", "Remove the image"),
+                )
+                .clicked()
+                {
                     remove = Some(i);
                 }
             });
@@ -1715,19 +2291,46 @@ fn sessions_card(ui: &mut egui::Ui, cx: &mut Cx, extra: f32) -> f32 {
     let mut msg = None;
     let mut clear = false;
     let h = card(ui, t, extra, |ui| {
-        let others: Vec<&crate::project::SessionRef> = pr.sessions.iter().filter(|x| !live.iter().any(|l| l.id == x.id)).collect();
+        let others: Vec<&crate::project::SessionRef> = pr
+            .sessions
+            .iter()
+            .filter(|x| !live.iter().any(|l| l.id == x.id))
+            .collect();
         let n = live.len() + others.len();
-        card_title(ui, crate::tr!("SESSIONS IA", "AI SESSIONS"), &if n > 0 { n.to_string() } else { String::new() }, t);
+        card_title(
+            ui,
+            crate::tr!("SESSIONS IA", "AI SESSIONS"),
+            &if n > 0 { n.to_string() } else { String::new() },
+            t,
+        );
         if !pr.folder.trim().is_empty() {
             // Start something new in the project's folder, in the built-in terminal.
             ui.horizontal_wrapped(|ui| {
                 ui.spacing_mut().item_spacing.x = 6.0;
-                ui.label(RichText::new(crate::tr!("Nouvelle session", "New session")).size(12.5).color(t.tertiary));
-                let name = std::path::Path::new(pr.folder.trim()).file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+                ui.label(
+                    RichText::new(crate::tr!("Nouvelle session", "New session"))
+                        .size(12.5)
+                        .color(t.tertiary),
+                );
+                let name = std::path::Path::new(pr.folder.trim())
+                    .file_name()
+                    .map(|n| n.to_string_lossy().to_string())
+                    .unwrap_or_default();
                 for (label, cmd, accent) in cx.launchers.clone() {
                     let accent = if cmd.is_none() { t.secondary } else { accent };
-                    if launch_pill(ui, label, accent, t).on_hover_text(crate::trf!("Ouvrir {label} dans {name}, dans le terminal intégré", "Open {label} in {name}, in the built-in terminal")).clicked() {
-                        super::term_ui::request(ui.ctx(), &format!("{label} · {name}"), pr.folder.trim(), cmd.map(String::from));
+                    if launch_pill(ui, label, accent, t)
+                        .on_hover_text(crate::trf!(
+                            "Ouvrir {label} dans {name}, dans le terminal intégré",
+                            "Open {label} in {name}, in the built-in terminal"
+                        ))
+                        .clicked()
+                    {
+                        super::term_ui::request(
+                            ui.ctx(),
+                            &format!("{label} · {name}"),
+                            pr.folder.trim(),
+                            cmd.map(String::from),
+                        );
                     }
                 }
             });
@@ -1735,9 +2338,15 @@ fn sessions_card(ui: &mut egui::Ui, cx: &mut Cx, extra: f32) -> f32 {
         }
         if n == 0 {
             let hint = if pr.folder.trim().is_empty() {
-                crate::tr!("Indiquez le dossier du projet : ses sessions Claude Code et Codex apparaîtront ici toutes seules.", "Set the project's folder: its Claude Code and Codex sessions will show up here by themselves.")
+                crate::tr!(
+                    "Indiquez le dossier du projet : ses sessions Claude Code et Codex apparaîtront ici toutes seules.",
+                    "Set the project's folder: its Claude Code and Codex sessions will show up here by themselves."
+                )
             } else {
-                crate::tr!("Aucune session Claude Code ou Codex trouvée dans ce dossier pour l'instant.", "No Claude Code or Codex session found in this folder yet.")
+                crate::tr!(
+                    "Aucune session Claude Code ou Codex trouvée dans ce dossier pour l'instant.",
+                    "No Claude Code or Codex session found in this folder yet."
+                )
             };
             ui.label(RichText::new(hint).color(t.tertiary).italics());
         }
@@ -1752,16 +2361,39 @@ fn sessions_card(ui: &mut egui::Ui, cx: &mut Cx, extra: f32) -> f32 {
             let bg = hover_begin(ui);
             let row = ui.horizontal(|ui| {
                 let (r, _) = ui.allocate_exact_size(egui::vec2(10.0, 20.0), egui::Sense::hover());
-                ui.painter().circle_stroke(r.center(), 3.5, egui::Stroke::new(1.2, t.border));
+                ui.painter()
+                    .circle_stroke(r.center(), 3.5, egui::Stroke::new(1.2, t.border));
                 tool_chip(ui, &tool_label(&s.tool), t);
                 let when = relative_time(s.last_activity);
-                let room = ui.available_width() - ui.painter().layout_no_wrap(when.clone(), FontId::proportional(12.5), t.tertiary).size().x - 16.0;
-                let title = if s.title.is_empty() { s.id.clone() } else { s.title.clone() };
-                let job = egui::text::LayoutJob::single_section(title, egui::TextFormat::simple(FontId::proportional(TEXT), t.text));
-                line(ui, job, room).on_hover_text(if s.location.is_empty() { &s.id } else { &s.location });
+                let room = ui.available_width()
+                    - ui.painter()
+                        .layout_no_wrap(when.clone(), FontId::proportional(12.5), t.tertiary)
+                        .size()
+                        .x
+                    - 16.0;
+                let title = if s.title.is_empty() {
+                    s.id.clone()
+                } else {
+                    s.title.clone()
+                };
+                let job = egui::text::LayoutJob::single_section(
+                    title,
+                    egui::TextFormat::simple(FontId::proportional(TEXT), t.text),
+                );
+                line(ui, job, room).on_hover_text(if s.location.is_empty() {
+                    &s.id
+                } else {
+                    &s.location
+                });
                 ui.label(RichText::new(when).size(12.5).color(t.tertiary));
             });
-            hover_end(ui, bg, row.response.rect, egui::Id::unique(("session-other", &s.id)), t);
+            hover_end(
+                ui,
+                bg,
+                row.response.rect,
+                egui::Id::unique(("session-other", &s.id)),
+                t,
+            );
             ui.add_space(4.0);
         }
         if n > 0 {
@@ -1796,9 +2428,19 @@ fn sessions_card(ui: &mut egui::Ui, cx: &mut Cx, extra: f32) -> f32 {
         if confirming {
             {
                 ui.horizontal_wrapped(|ui| {
-                    let sure = crate::tr!("Confirmer : effacer l'historique", "Confirm: clear the history");
+                    let sure = crate::tr!(
+                        "Confirmer : effacer l'historique",
+                        "Confirm: clear the history"
+                    );
                     if ui
-                        .add(egui::Label::new(RichText::new(sure).size(13.0).color(Color32::from_rgb(224, 62, 62))).sense(egui::Sense::click()))
+                        .add(
+                            egui::Label::new(
+                                RichText::new(sure)
+                                    .size(13.0)
+                                    .color(Color32::from_rgb(224, 62, 62)),
+                            )
+                            .sense(egui::Sense::click()),
+                        )
                         .on_hover_cursor(egui::CursorIcon::PointingHand)
                         .clicked()
                     {
@@ -1840,7 +2482,10 @@ impl NotesApp {
                     }
                 }
                 None => out.push(SyncCandidate {
-                    name: std::path::Path::new(&root).file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_else(|| root.clone()),
+                    name: std::path::Path::new(&root)
+                        .file_name()
+                        .map(|n| n.to_string_lossy().to_string())
+                        .unwrap_or_else(|| root.clone()),
                     folder: root,
                     tool: s.tool,
                     last: s.last_activity,
@@ -1850,17 +2495,28 @@ impl NotesApp {
             }
         }
         for p in self.ws.projects() {
-            let Some(pr) = p.project.as_ref() else { continue };
+            let Some(pr) = p.project.as_ref() else {
+                continue;
+            };
             if pr.folder.trim().is_empty() {
                 continue;
             }
-            let f = crate::project::normalize_folder(&pr.folder).display().to_string();
+            let f = crate::project::normalize_folder(&pr.folder)
+                .display()
+                .to_string();
             match out.iter_mut().find(|c| c.folder == f) {
                 Some(c) => {
                     c.is_project = true;
                     c.name = p.display_title();
                 }
-                None => out.push(SyncCandidate { folder: f, name: p.display_title(), tool: Tool::ClaudeCode, last: pr.last_activity, is_project: true, checked: false }),
+                None => out.push(SyncCandidate {
+                    folder: f,
+                    name: p.display_title(),
+                    tool: Tool::ClaudeCode,
+                    last: pr.last_activity,
+                    is_project: true,
+                    checked: false,
+                }),
             }
         }
         for c in out.iter_mut() {
@@ -1994,7 +2650,9 @@ impl NotesApp {
         ui.add_space(16.0);
         if let Some(wanted) = start {
             let ctx = ui.ctx().clone();
-            self.sync_run = Some(crate::sync::SyncRun::start(wanted, move || ctx.request_repaint()));
+            self.sync_run = Some(crate::sync::SyncRun::start(wanted, move || {
+                ctx.request_repaint()
+            }));
             self.sync_dialog = None;
         }
         if close {
@@ -2012,21 +2670,52 @@ impl NotesApp {
         let mut open_ai = false;
         ui.horizontal_wrapped(|ui| {
             ui.spacing_mut().item_spacing.x = 6.0;
-            ui.label(RichText::new(crate::tr!("IA branchées :", "AIs plugged in:")).size(12.5).color(t.tertiary));
+            ui.label(
+                RichText::new(crate::tr!("IA branchées :", "AIs plugged in:"))
+                    .size(12.5)
+                    .color(t.tertiary),
+            );
             match &states {
                 None => {
                     ui.add(egui::Spinner::new().size(11.0));
-                    ui.label(RichText::new(crate::tr!("recherche des IA…", "looking for AIs…")).size(12.5).color(t.tertiary));
+                    ui.label(
+                        RichText::new(crate::tr!("recherche des IA…", "looking for AIs…"))
+                            .size(12.5)
+                            .color(t.tertiary),
+                    );
                 }
                 Some(s) if !s.iter().any(|x| x.plugged) => {
-                    ui.label(RichText::new(crate::tr!("aucune pour l'instant", "none yet")).size(12.5).color(t.tertiary));
+                    ui.label(
+                        RichText::new(crate::tr!("aucune pour l'instant", "none yet"))
+                            .size(12.5)
+                            .color(t.tertiary),
+                    );
                 }
                 Some(s) => {
                     for x in s.iter().filter(|x| x.plugged) {
-                        let failed = report.as_ref().and_then(|r| r.iter().find(|(n, _)| n == x.ai.label())).and_then(|(_, o)| if let crate::setup::Outcome::Failed(e) = o { Some(e.clone()) } else { None });
+                        let failed = report
+                            .as_ref()
+                            .and_then(|r| r.iter().find(|(n, _)| n == x.ai.label()))
+                            .and_then(|(_, o)| {
+                                if let crate::setup::Outcome::Failed(e) = o {
+                                    Some(e.clone())
+                                } else {
+                                    None
+                                }
+                            });
                         match failed {
-                            Some(e) => ui.label(RichText::new(format!("{} ✖", x.ai.label())).size(12.5).color(Color32::from_rgb(224, 62, 62))).on_hover_text(e),
-                            None => ui.label(RichText::new(format!("{} ✔", x.ai.label())).size(12.5).color(GREEN)),
+                            Some(e) => ui
+                                .label(
+                                    RichText::new(format!("{} ✖", x.ai.label()))
+                                        .size(12.5)
+                                        .color(Color32::from_rgb(224, 62, 62)),
+                                )
+                                .on_hover_text(e),
+                            None => ui.label(
+                                RichText::new(format!("{} ✔", x.ai.label()))
+                                    .size(12.5)
+                                    .color(GREEN),
+                            ),
                         };
                     }
                 }
@@ -2042,7 +2731,13 @@ impl NotesApp {
 }
 
 /// The strip above a page that mirrors a project file (README, docs…).
-pub(super) fn source_banner(ui: &mut egui::Ui, page_id: &str, src: &crate::docs::PageSource, edited: bool, actions: &mut Vec<Action>) {
+pub(super) fn source_banner(
+    ui: &mut egui::Ui,
+    page_id: &str,
+    src: &crate::docs::PageSource,
+    edited: bool,
+    actions: &mut Vec<Action>,
+) {
     let t = tone(ui.visuals().dark_mode);
     if src.is_dir || src.rel.is_empty() {
         return;
@@ -2112,9 +2807,25 @@ fn pages_card(ui: &mut egui::Ui, cx: &mut Cx, extra: f32) -> f32 {
     let pages = cx.pages;
     let actions = &mut *cx.actions;
     card(ui, t, extra, |ui| {
-        card_title(ui, "PAGES", &if pages.is_empty() { String::new() } else { pages.len().to_string() }, t);
+        card_title(
+            ui,
+            "PAGES",
+            &if pages.is_empty() {
+                String::new()
+            } else {
+                pages.len().to_string()
+            },
+            t,
+        );
         if pages.is_empty() {
-            ui.label(RichText::new(crate::tr!("Le README et le dossier docs/ du projet apparaîtront ici en pages.", "The project's README and docs/ folder will show up here as pages.")).color(t.tertiary).italics());
+            ui.label(
+                RichText::new(crate::tr!(
+                    "Le README et le dossier docs/ du projet apparaîtront ici en pages.",
+                    "The project's README and docs/ folder will show up here as pages."
+                ))
+                .color(t.tertiary)
+                .italics(),
+            );
         }
         tree_list(ui, pages, 1, t, actions);
         if !ro {
@@ -2128,7 +2839,13 @@ fn pages_card(ui: &mut egui::Ui, cx: &mut Cx, extra: f32) -> f32 {
 
 /// Rows of a page tree: fold arrows, icon, title, the file path on hover; a click opens.
 /// Branches at `fold_from` levels and deeper start folded.
-pub(super) fn tree_list(ui: &mut egui::Ui, pages: &[PageRow], fold_from: usize, t: &Tone, actions: &mut Vec<Action>) {
+pub(super) fn tree_list(
+    ui: &mut egui::Ui,
+    pages: &[PageRow],
+    fold_from: usize,
+    t: &Tone,
+    actions: &mut Vec<Action>,
+) {
     // Folded branches: everything below a folded row is skipped.
     let mut hide_below: Option<usize> = None;
     for p in pages {
@@ -2143,34 +2860,80 @@ pub(super) fn tree_list(ui: &mut egui::Ui, pages: &[PageRow], fold_from: usize, 
         let row_h = 28.0;
         let w = ui.available_width();
         let (rect, resp) = ui.allocate_exact_size(egui::vec2(w, row_h), egui::Sense::click());
-        let a = ui.ctx().animate_bool_with_time(resp.id.with("hov"), resp.hovered(), 0.14);
+        let a = ui
+            .ctx()
+            .animate_bool_with_time(resp.id.with("hov"), resp.hovered(), 0.14);
         if a > 0.0 {
-            ui.painter().rect_filled(rect, 6.0, t.hover.gamma_multiply(a));
+            ui.painter()
+                .rect_filled(rect, 6.0, t.hover.gamma_multiply(a));
         }
         let x0 = rect.left() + 4.0 + p.depth as f32 * 18.0 + 3.0 * a;
         // Fold arrow.
-        let arrow = egui::Rect::from_min_size(egui::pos2(x0, rect.top() + 6.0), egui::vec2(16.0, 16.0));
+        let arrow =
+            egui::Rect::from_min_size(egui::pos2(x0, rect.top() + 6.0), egui::vec2(16.0, 16.0));
         let mut arrow_clicked = false;
         if p.has_kids {
             let ar = ui.interact(arrow, resp.id.with("fold"), egui::Sense::click());
-            icons::paint(ui.painter(), arrow.shrink(2.0), if folded { icons::Icon::ChevronRight } else { icons::Icon::ChevronDown }, t.tertiary);
+            icons::paint(
+                ui.painter(),
+                arrow.shrink(2.0),
+                if folded {
+                    icons::Icon::ChevronRight
+                } else {
+                    icons::Icon::ChevronDown
+                },
+                t.tertiary,
+            );
             arrow_clicked = ar.clicked();
             if arrow_clicked {
                 toggle_flag(ui, fold_key);
             }
         }
         let x = x0 + 20.0;
-        ui.painter().text(egui::pos2(x, rect.center().y), egui::Align2::LEFT_CENTER, &p.icon, FontId::proportional(14.0), t.text);
-        let path_w = if p.rel.is_empty() { 0.0 } else { ui.painter().layout_no_wrap(p.rel.clone(), FontId::monospace(11.0), t.tertiary).size().x.min(w * 0.4) };
-        let mut job = egui::text::LayoutJob::single_section(p.title.clone(), egui::TextFormat::simple(FontId::proportional(14.0), t.text));
-        job.wrap = egui::text::TextWrapping::truncate_at_width((rect.right() - x - 26.0 - path_w - 16.0).max(40.0));
+        ui.painter().text(
+            egui::pos2(x, rect.center().y),
+            egui::Align2::LEFT_CENTER,
+            &p.icon,
+            FontId::proportional(14.0),
+            t.text,
+        );
+        let path_w = if p.rel.is_empty() {
+            0.0
+        } else {
+            ui.painter()
+                .layout_no_wrap(p.rel.clone(), FontId::monospace(11.0), t.tertiary)
+                .size()
+                .x
+                .min(w * 0.4)
+        };
+        let mut job = egui::text::LayoutJob::single_section(
+            p.title.clone(),
+            egui::TextFormat::simple(FontId::proportional(14.0), t.text),
+        );
+        job.wrap = egui::text::TextWrapping::truncate_at_width(
+            (rect.right() - x - 26.0 - path_w - 16.0).max(40.0),
+        );
         let g = ui.fonts_mut(|f| f.layout_job(job));
-        ui.painter().galley(egui::pos2(x + 24.0, rect.center().y - g.size().y / 2.0), g, t.text);
+        ui.painter().galley(
+            egui::pos2(x + 24.0, rect.center().y - g.size().y / 2.0),
+            g,
+            t.text,
+        );
         if !p.rel.is_empty() && resp.hovered() {
-            let mut job = egui::text::LayoutJob::single_section(p.rel.clone(), egui::TextFormat::simple(FontId::monospace(11.0), t.tertiary));
+            let mut job = egui::text::LayoutJob::single_section(
+                p.rel.clone(),
+                egui::TextFormat::simple(FontId::monospace(11.0), t.tertiary),
+            );
             job.wrap = egui::text::TextWrapping::truncate_at_width(path_w);
             let g = ui.fonts_mut(|f| f.layout_job(job));
-            ui.painter().galley(egui::pos2(rect.right() - 8.0 - g.size().x, rect.center().y - g.size().y / 2.0), g, t.tertiary);
+            ui.painter().galley(
+                egui::pos2(
+                    rect.right() - 8.0 - g.size().x,
+                    rect.center().y - g.size().y / 2.0,
+                ),
+                g,
+                t.tertiary,
+            );
         }
         if resp.clicked() && !arrow_clicked {
             actions.push(Action::Open(p.id.clone()));
@@ -2182,15 +2945,42 @@ pub(super) fn tree_list(ui: &mut egui::Ui, pages: &[PageRow], fold_from: usize, 
 }
 
 /// A documentation folder: everything inside it, as a tree.
-pub(super) fn folder_view(ui: &mut egui::Ui, rel: &str, pages: &[PageRow], t: &Tone, actions: &mut Vec<Action>) {
+pub(super) fn folder_view(
+    ui: &mut egui::Ui,
+    rel: &str,
+    pages: &[PageRow],
+    t: &Tone,
+    actions: &mut Vec<Action>,
+) {
     let files = pages.iter().filter(|p| !p.has_kids).count();
     card(ui, t, 0.0, |ui| {
-        let what = if rel.is_empty() { crate::tr!("Dossier", "Folder").to_string() } else { crate::trf!("Dossier {rel}", "Folder {rel}") };
-        card_title(ui, crate::tr!("CONTENU", "CONTENTS"), &crate::trf!("{files} fichier{s}", "{files} file{s}", s = crate::i18n::plural(files)), t);
-        ui.label(RichText::new(what).font(FontId::monospace(12.0)).color(t.tertiary));
+        let what = if rel.is_empty() {
+            crate::tr!("Dossier", "Folder").to_string()
+        } else {
+            crate::trf!("Dossier {rel}", "Folder {rel}")
+        };
+        card_title(
+            ui,
+            crate::tr!("CONTENU", "CONTENTS"),
+            &crate::trf!(
+                "{files} fichier{s}",
+                "{files} file{s}",
+                s = crate::i18n::plural(files)
+            ),
+            t,
+        );
+        ui.label(
+            RichText::new(what)
+                .font(FontId::monospace(12.0))
+                .color(t.tertiary),
+        );
         ui.add_space(6.0);
         if pages.is_empty() {
-            ui.label(RichText::new(crate::tr!("Ce dossier est vide.", "This folder is empty.")).color(t.tertiary).italics());
+            ui.label(
+                RichText::new(crate::tr!("Ce dossier est vide.", "This folder is empty."))
+                    .color(t.tertiary)
+                    .italics(),
+            );
         }
         tree_list(ui, pages, usize::MAX, t, actions);
     });
@@ -2204,16 +2994,35 @@ fn launch_pill(ui: &mut egui::Ui, label: &str, accent: Color32, t: &Tone) -> egu
     let (rect, resp) = ui.allocate_exact_size(size, egui::Sense::click());
     let p = ui.painter();
     p.rect_filled(rect, 13.0, if resp.hovered() { t.hover } else { t.card });
-    p.rect_stroke(rect, 13.0, egui::Stroke::new(1.0, if resp.hovered() { accent.gamma_multiply(0.8) } else { t.border }), egui::StrokeKind::Inside);
+    p.rect_stroke(
+        rect,
+        13.0,
+        egui::Stroke::new(
+            1.0,
+            if resp.hovered() {
+                accent.gamma_multiply(0.8)
+            } else {
+                t.border
+            },
+        ),
+        egui::StrokeKind::Inside,
+    );
     // Terminal mark: a rounded square with "›_".
-    let m = egui::Rect::from_center_size(egui::pos2(rect.left() + 16.0, rect.center().y), egui::vec2(16.0, 14.0));
+    let m = egui::Rect::from_center_size(
+        egui::pos2(rect.left() + 16.0, rect.center().y),
+        egui::vec2(16.0, 14.0),
+    );
     p.rect_filled(m, 3.0, accent.gamma_multiply(0.22));
     let c = m.center();
     let s = egui::Stroke::new(1.4, accent);
     p.line_segment([c + egui::vec2(-4.5, -3.0), c + egui::vec2(-1.5, 0.0)], s);
     p.line_segment([c + egui::vec2(-1.5, 0.0), c + egui::vec2(-4.5, 3.0)], s);
     p.line_segment([c + egui::vec2(0.5, 3.5), c + egui::vec2(4.5, 3.5)], s);
-    p.galley(egui::pos2(rect.left() + 30.0, rect.center().y - g.size().y / 2.0), g, t.text);
+    p.galley(
+        egui::pos2(rect.left() + 30.0, rect.center().y - g.size().y / 2.0),
+        g,
+        t.text,
+    );
     resp
 }
 
@@ -2242,37 +3051,54 @@ impl NotesApp {
     /// Start the review a button asked for, and collect the finished ones.
     pub(super) fn review_tick(&mut self, ctx: &egui::Context) {
         if let Some(r) = ctx.data_mut(|d| d.remove_temp::<ReviewRequest>(review_key()))
-            && !self.reviews.contains_key(&r.page_id) {
-                let out: Arc<std::sync::Mutex<Option<_>>> = Arc::default();
-                let (o2, c2) = (out.clone(), ctx.clone());
-                let code = self.code_forced(&r.page_id);
-                std::thread::spawn(move || {
-                    let res = crate::sync::ask_review(&r.folder, code, r.prefer);
-                    *o2.lock_or_recover() = Some(res);
-                    c2.request_repaint();
-                });
-                self.reviews.insert(r.page_id.clone(), ReviewJob { result: out });
-            }
-        let done: Vec<String> = self.reviews.iter().filter(|(_, j)| j.result.lock_or_recover().is_some()).map(|(k, _)| k.clone()).collect();
+            && !self.reviews.contains_key(&r.page_id)
+        {
+            let out: Arc<std::sync::Mutex<Option<_>>> = Arc::default();
+            let (o2, c2) = (out.clone(), ctx.clone());
+            let code = self.code_forced(&r.page_id);
+            std::thread::spawn(move || {
+                let res = crate::sync::ask_review(&r.folder, code, r.prefer);
+                *o2.lock_or_recover() = Some(res);
+                c2.request_repaint();
+            });
+            self.reviews
+                .insert(r.page_id.clone(), ReviewJob { result: out });
+        }
+        let done: Vec<String> = self
+            .reviews
+            .iter()
+            .filter(|(_, j)| j.result.lock_or_recover().is_some())
+            .map(|(k, _)| k.clone())
+            .collect();
         for id in done {
-            let Some(job) = self.reviews.remove(&id) else { continue };
-            let Some(res) = job.result.lock_or_recover().take() else { continue };
+            let Some(job) = self.reviews.remove(&id) else {
+                continue;
+            };
+            let Some(res) = job.result.lock_or_recover().take() else {
+                continue;
+            };
             match res {
                 Ok((text, tool)) => {
                     if let Some(pr) = self.ws.page_mut(&id).and_then(|p| p.project.as_mut()) {
-                        pr.review = Some(crate::project::Review { text: crate::richtext::clean(&text, 2500), by: tool.label().to_string(), at: crate::model::now_ms() });
+                        pr.review = Some(crate::project::Review {
+                            text: crate::richtext::clean(&text, 2500),
+                            by: tool.label().to_string(),
+                            at: crate::model::now_ms(),
+                        });
                         pr.touch();
                     }
                     self.detect_changes();
                 }
-                Err(e) => self.fail(crate::trf!("Regard extérieur impossible : {e}", "Outside view failed: {e}")),
+                Err(e) => self.fail(crate::trf!(
+                    "Regard extérieur impossible : {e}",
+                    "Outside view failed: {e}"
+                )),
             }
         }
         if !self.reviews.is_empty() {
             ctx.request_repaint_after(std::time::Duration::from_secs(1));
         }
     }
-
 }
 
 /// "### Avis / ### Projets similaires / ### Suggestions": side by side when there is room
@@ -2291,12 +3117,22 @@ fn review_sections(ui: &mut egui::Ui, text: &str, t: &Tone) {
     }
     let w = ui.available_width();
     let n = parts.len();
-    let cols = if n >= 2 && w >= 860.0 { n.min(3) } else if n >= 2 && w >= 560.0 { 2 } else { 1 };
+    let cols = if n >= 2 && w >= 860.0 {
+        n.min(3)
+    } else if n >= 2 && w >= 560.0 {
+        2
+    } else {
+        1
+    };
     if cols == 1 {
         super::rich::markdown(ui, text, TEXT, t);
         return;
     }
-    let accents = [Color32::from_rgb(212, 76, 125), Color32::from_rgb(144, 101, 176), GREEN];
+    let accents = [
+        Color32::from_rgb(212, 76, 125),
+        Color32::from_rgb(144, 101, 176),
+        GREEN,
+    ];
     let gap = 12.0;
     // Tiles of a row share the tallest one's height (from the last frame); a row with
     // fewer tiles shares its width between them.
@@ -2318,18 +3154,22 @@ fn review_sections(ui: &mut egui::Ui, text: &str, t: &Tone) {
                     .show(ui, |ui| {
                         ui.set_width(cw - 26.0);
                         ui.vertical(|ui| {
-                        ui.set_width(cw - 26.0);
-                        let top = ui.cursor().top();
-                        if !title.is_empty() {
-                            ui.label(RichText::new(title).font(semibold(14.0)).color(accent.lerp_to_gamma(t.text, 0.4)));
-                            ui.add_space(4.0);
-                        }
-                        super::rich::markdown(ui, body.trim(), 13.5, t);
-                        let used = ui.cursor().top() - top;
-                        now = now.max(used);
-                        if tallest > used {
-                            ui.add_space(tallest - used);
-                        }
+                            ui.set_width(cw - 26.0);
+                            let top = ui.cursor().top();
+                            if !title.is_empty() {
+                                ui.label(
+                                    RichText::new(title)
+                                        .font(semibold(14.0))
+                                        .color(accent.lerp_to_gamma(t.text, 0.4)),
+                                );
+                                ui.add_space(4.0);
+                            }
+                            super::rich::markdown(ui, body.trim(), 13.5, t);
+                            let used = ui.cursor().top() - top;
+                            now = now.max(used);
+                            if tallest > used {
+                                ui.add_space(tallest - used);
+                            }
                         });
                     });
                 let _ = r;
@@ -2355,15 +3195,27 @@ fn quick_question(ui: &mut egui::Ui, cx: &mut Cx) {
     let mut text: String = ui.ctx().data(|d| d.get_temp(text_key)).unwrap_or_default();
     let asking = cx.ai.asking(page_id).map(String::from);
     let hint = if shows_git(ui.ctx(), cx.pr) {
-        crate::tr!("Question rapide à l'IA, ex. « telle fonctionnalité serait-elle intéressante ? »", "Quick question to the AI, e.g. « would this feature be worth it? »")
+        crate::tr!(
+            "Question rapide à l'IA, ex. « telle fonctionnalité serait-elle intéressante ? »",
+            "Quick question to the AI, e.g. « would this feature be worth it? »"
+        )
     } else {
-        crate::tr!("Question rapide à l'IA, ex. « que me reste-t-il à rendre ? », « quel document manque ? »", "Quick question to the AI, e.g. « what do I still have to hand in? », « which document is missing? »")
+        crate::tr!(
+            "Question rapide à l'IA, ex. « que me reste-t-il à rendre ? », « quel document manque ? »",
+            "Quick question to the AI, e.g. « what do I still have to hand in? », « which document is missing? »"
+        )
     };
     let mut close = false;
     card(ui, t, 0.0, |ui| {
         inline_row(ui, |ui| {
             let (r, _) = ui.allocate_exact_size(egui::vec2(18.0, INLINE_H), egui::Sense::hover());
-            ui.painter().text(r.center(), egui::Align2::CENTER_CENTER, "?", semibold(15.0), Color32::from_rgb(144, 101, 176));
+            ui.painter().text(
+                r.center(),
+                egui::Align2::CENTER_CENTER,
+                "?",
+                semibold(15.0),
+                Color32::from_rgb(144, 101, 176),
+            );
             let send_w = 90.0;
             let edit = ui.add_enabled(
                 asking.is_none(),
@@ -2374,9 +3226,20 @@ fn quick_question(ui: &mut egui::Ui, cx: &mut Cx) {
             );
             let ready = asking.is_none() && !text.trim().is_empty();
             let enter = edit.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter));
-            let sent = ui.add_enabled_ui(ready, |ui| action_link(ui, crate::tr!("Demander", "Ask"))).inner.clicked();
+            let sent = ui
+                .add_enabled_ui(ready, |ui| action_link(ui, crate::tr!("Demander", "Ask")))
+                .inner
+                .clicked();
             if ready && (sent || enter) {
-                super::ai_fill::request(ui.ctx(), super::ai_fill::AiReq::Question { page_id: page_id.to_string(), folder: folder.clone(), question: text.trim().to_string(), prefer });
+                super::ai_fill::request(
+                    ui.ctx(),
+                    super::ai_fill::AiReq::Question {
+                        page_id: page_id.to_string(),
+                        folder: folder.clone(),
+                        question: text.trim().to_string(),
+                        prefer,
+                    },
+                );
                 text.clear();
             }
         });
@@ -2385,14 +3248,38 @@ fn quick_question(ui: &mut egui::Ui, cx: &mut Cx) {
             ui.label(RichText::new(q).size(12.5).color(t.secondary).italics());
             ui.horizontal(|ui| {
                 ui.add(egui::Spinner::new().size(12.0));
-                ui.label(RichText::new(crate::tr!("L'IA réfléchit… (quelques dizaines de secondes)", "The AI is thinking… (a few dozen seconds)")).size(12.5).color(t.tertiary));
+                ui.label(
+                    RichText::new(crate::tr!(
+                        "L'IA réfléchit… (quelques dizaines de secondes)",
+                        "The AI is thinking… (a few dozen seconds)"
+                    ))
+                    .size(12.5)
+                    .color(t.tertiary),
+                );
             });
         } else if let Some(a) = cx.ai.answers.get(page_id) {
             card_rule(ui, t);
             ui.horizontal(|ui| {
-                ui.add(egui::Label::new(RichText::new(&a.question).size(12.5).color(t.secondary).italics()).wrap());
+                ui.add(
+                    egui::Label::new(
+                        RichText::new(&a.question)
+                            .size(12.5)
+                            .color(t.secondary)
+                            .italics(),
+                    )
+                    .wrap(),
+                );
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Min), |ui| {
-                    if icons::delete_cross(ui, 20.0, t.tertiary, t.text, t.selected, crate::tr!("Fermer la réponse", "Close the answer")).clicked() {
+                    if icons::delete_cross(
+                        ui,
+                        20.0,
+                        t.tertiary,
+                        t.text,
+                        t.selected,
+                        crate::tr!("Fermer la réponse", "Close the answer"),
+                    )
+                    .clicked()
+                    {
                         close = true;
                     }
                 });
@@ -2403,11 +3290,22 @@ fn quick_question(ui: &mut egui::Ui, cx: &mut Cx) {
                     super::rich::markdown(ui, md, 13.5, t);
                     if !a.by.is_empty() {
                         ui.add_space(2.0);
-                        ui.label(RichText::new(crate::trf!("réponse de {}", "answer by {}", a.by)).size(11.5).color(t.tertiary));
+                        ui.label(
+                            RichText::new(crate::trf!("réponse de {}", "answer by {}", a.by))
+                                .size(11.5)
+                                .color(t.tertiary),
+                        );
                     }
                 }
                 Err(e) => {
-                    ui.add(egui::Label::new(RichText::new(crate::trf!("Pas de réponse : {e}", "No answer: {e}")).size(12.5).color(ORANGE)).wrap());
+                    ui.add(
+                        egui::Label::new(
+                            RichText::new(crate::trf!("Pas de réponse : {e}", "No answer: {e}"))
+                                .size(12.5)
+                                .color(ORANGE),
+                        )
+                        .wrap(),
+                    );
                 }
             }
         }
@@ -2425,15 +3323,30 @@ fn review_card(ui: &mut egui::Ui, cx: &mut Cx) {
     let reviewing = cx.reviewing || cx.ai.filling(page_id);
     let code = shows_git(ui.ctx(), pr);
     card(ui, t, 0.0, |ui| {
-        let by = pr.review.as_ref().map(|r| format!("{} · {}", r.by, relative_time(r.at))).unwrap_or_default();
+        let by = pr
+            .review
+            .as_ref()
+            .map(|r| format!("{} · {}", r.by, relative_time(r.at)))
+            .unwrap_or_default();
         card_title(ui, crate::tr!("REGARD EXTÉRIEUR", "OUTSIDE VIEW"), &by, t);
         let ask = |ui: &mut egui::Ui, label: &str| {
             let folder = pr.folder.trim().to_string();
             let ok = !folder.is_empty() && crate::project::normalize_folder(&folder).is_dir();
             let r = ui.add_enabled(ok, egui::Button::new(RichText::new(label).size(13.0)));
-            let r = if ok { r.on_hover_text(crate::tr!("L'IA lit le projet sans rien modifier, regarde le web, puis répond en quelques lignes (1 à 3 min, sur votre abonnement).", "The AI reads the project without changing anything, looks at the web, then answers in a few lines (1 to 3 min, on your subscription).")) } else { r.on_disabled_hover_text(crate::tr!("Indiquez d'abord le dossier du projet", "Set the project's folder first")) };
+            let r = if ok {
+                r.on_hover_text(crate::tr!("L'IA lit le projet sans rien modifier, regarde le web, puis répond en quelques lignes (1 à 3 min, sur votre abonnement).", "The AI reads the project without changing anything, looks at the web, then answers in a few lines (1 to 3 min, on your subscription)."))
+            } else {
+                r.on_disabled_hover_text(crate::tr!(
+                    "Indiquez d'abord le dossier du projet",
+                    "Set the project's folder first"
+                ))
+            };
             if r.clicked() {
-                let req = ReviewRequest { page_id: page_id.to_string(), folder, prefer };
+                let req = ReviewRequest {
+                    page_id: page_id.to_string(),
+                    folder,
+                    prefer,
+                };
                 ui.ctx().data_mut(|d| d.insert_temp(review_key(), req));
             }
         };
@@ -2464,7 +3377,10 @@ fn review_card(ui: &mut egui::Ui, cx: &mut Cx) {
                 .wrap(),
             );
             ui.add_space(6.0);
-            ask(ui, crate::tr!("Demander un avis à l'IA", "Ask the AI for an opinion"));
+            ask(
+                ui,
+                crate::tr!("Demander un avis à l'IA", "Ask the AI for an opinion"),
+            );
         }
     });
 }

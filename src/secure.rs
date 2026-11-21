@@ -50,7 +50,10 @@ fn read_raw(r: &mut impl Read, max: usize) -> std::io::Result<Vec<u8>> {
     r.read_exact(&mut len)?;
     let len = u32::from_be_bytes(len) as usize;
     if len > max {
-        return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, crate::tr!("message trop long", "message too long")));
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            crate::tr!("message trop long", "message too long"),
+        ));
     }
     let mut buf = vec![0u8; len];
     r.read_exact(&mut buf)?;
@@ -59,26 +62,53 @@ fn read_raw(r: &mut impl Read, max: usize) -> std::io::Result<Vec<u8>> {
 
 /// Run the key exchange over a fresh connection. `hosting` picks which derived key each side
 /// sends with. Both ends must use the same code.
-pub fn handshake(stream: &mut (impl Read + Write), code: &str, hosting: bool) -> std::io::Result<(Sender, Receiver)> {
-    let (state, outbound) = Spake2::<Ed25519Group>::start_symmetric(&Password::new(code.as_bytes()), &Identity::new(b"orchestra/direct/1"));
+pub fn handshake(
+    stream: &mut (impl Read + Write),
+    code: &str,
+    hosting: bool,
+) -> std::io::Result<(Sender, Receiver)> {
+    let (state, outbound) = Spake2::<Ed25519Group>::start_symmetric(
+        &Password::new(code.as_bytes()),
+        &Identity::new(b"orchestra/direct/1"),
+    );
     write_raw(stream, &outbound)?;
     let inbound = read_raw(stream, MAX_HANDSHAKE_FRAME)?;
-    let shared = state.finish(&inbound).map_err(|_| std::io::Error::new(std::io::ErrorKind::InvalidData, crate::tr!("échange de clés invalide", "invalid key exchange")))?;
+    let shared = state.finish(&inbound).map_err(|_| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            crate::tr!("échange de clés invalide", "invalid key exchange"),
+        )
+    })?;
     let hk = Hkdf::<Sha256>::new(Some(b"orchestra"), &shared);
     let mut host_key = [0u8; 32];
     let mut peer_key = [0u8; 32];
-    hk.expand(b"host->peer", &mut host_key).map_err(|_| std::io::Error::other("hkdf"))?;
-    hk.expand(b"peer->host", &mut peer_key).map_err(|_| std::io::Error::other("hkdf"))?;
-    let (send_key, recv_key) = if hosting { (host_key, peer_key) } else { (peer_key, host_key) };
+    hk.expand(b"host->peer", &mut host_key)
+        .map_err(|_| std::io::Error::other("hkdf"))?;
+    hk.expand(b"peer->host", &mut peer_key)
+        .map_err(|_| std::io::Error::other("hkdf"))?;
+    let (send_key, recv_key) = if hosting {
+        (host_key, peer_key)
+    } else {
+        (peer_key, host_key)
+    };
     Ok((
-        Sender { cipher: ChaCha20Poly1305::new(Key::from_slice(&send_key)), counter: 0 },
-        Receiver { cipher: ChaCha20Poly1305::new(Key::from_slice(&recv_key)), counter: 0 },
+        Sender {
+            cipher: ChaCha20Poly1305::new(Key::from_slice(&send_key)),
+            counter: 0,
+        },
+        Receiver {
+            cipher: ChaCha20Poly1305::new(Key::from_slice(&recv_key)),
+            counter: 0,
+        },
     ))
 }
 
 impl Sender {
     pub fn send(&mut self, w: &mut impl Write, plain: &[u8]) -> std::io::Result<()> {
-        let sealed = self.cipher.encrypt(&nonce(self.counter), plain).map_err(|_| std::io::Error::other("chiffrement"))?;
+        let sealed = self
+            .cipher
+            .encrypt(&nonce(self.counter), plain)
+            .map_err(|_| std::io::Error::other("chiffrement"))?;
         self.counter += 1;
         write_raw(w, &sealed)
     }
@@ -96,7 +126,10 @@ pub enum RecvError {
 impl Receiver {
     pub fn recv(&mut self, r: &mut impl Read) -> Result<Vec<u8>, RecvError> {
         let sealed = read_raw(r, MAX_FRAME).map_err(|_| RecvError::Closed)?;
-        let plain = self.cipher.decrypt(&nonce(self.counter), sealed.as_slice()).map_err(|_| RecvError::Refused)?;
+        let plain = self
+            .cipher
+            .decrypt(&nonce(self.counter), sealed.as_slice())
+            .map_err(|_| RecvError::Refused)?;
         self.counter += 1;
         Ok(plain)
     }
@@ -107,7 +140,10 @@ mod tests {
     use super::*;
     use std::net::{TcpListener, TcpStream};
 
-    fn pair(code_a: &str, code_b: &str) -> ((Sender, Receiver, TcpStream), (Sender, Receiver, TcpStream)) {
+    fn pair(
+        code_a: &str,
+        code_b: &str,
+    ) -> ((Sender, Receiver, TcpStream), (Sender, Receiver, TcpStream)) {
         let l = TcpListener::bind("127.0.0.1:0").unwrap();
         let addr = l.local_addr().unwrap();
         let cb = code_b.to_string();
@@ -123,7 +159,8 @@ mod tests {
 
     #[test]
     fn same_code_talks_both_ways() {
-        let ((mut htx, mut hrx, mut hs), (mut ptx, mut prx, mut ps)) = pair("loutre-42", "loutre-42");
+        let ((mut htx, mut hrx, mut hs), (mut ptx, mut prx, mut ps)) =
+            pair("loutre-42", "loutre-42");
         ptx.send(&mut ps, b"bonjour").unwrap();
         assert_eq!(hrx.recv(&mut hs).unwrap(), b"bonjour");
         htx.send(&mut hs, b"salut").unwrap();
@@ -160,19 +197,27 @@ mod tests {
             }
         }
         let mut wire = Wire(Cursor::new(incoming), vec![]);
-        let err = handshake(&mut wire, "loutre-42", true).err().expect("refused");
+        let err = handshake(&mut wire, "loutre-42", true)
+            .err()
+            .expect("refused");
         assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
         assert_eq!(wire.0.position(), 4, "only the length was read");
         // Our own key message fits the limit, so a real exchange still works.
         let sent = u32::from_be_bytes(wire.1[..4].try_into().unwrap()) as usize;
-        assert!(sent <= MAX_HANDSHAKE_FRAME, "SPAKE2 message of {sent} bytes");
+        assert!(
+            sent <= MAX_HANDSHAKE_FRAME,
+            "SPAKE2 message of {sent} bytes"
+        );
     }
 
     #[test]
     fn nothing_readable_on_the_wire() {
         let mut wire: Vec<u8> = vec![];
         let key = ChaCha20Poly1305::new(Key::from_slice(&[7u8; 32]));
-        let mut s = Sender { cipher: key, counter: 0 };
+        let mut s = Sender {
+            cipher: key,
+            counter: 0,
+        };
         s.send(&mut wire, b"page secrete").unwrap();
         assert!(!wire.windows(7).any(|w| w == b"secrete"));
     }

@@ -3,11 +3,11 @@
 //! run in it as they would in Terminal.app. The window draws the grid (app/term_ui.rs) and
 //! sends the keys typed into it.
 
+use crate::LockOrRecover;
 use portable_pty::{Child, CommandBuilder, MasterPty, PtySize, native_pty_system};
 use std::io::{Read, Write};
 use std::num::NonZeroU16;
 use std::sync::atomic::{AtomicBool, Ordering};
-use crate::LockOrRecover;
 use std::sync::{Arc, Mutex, OnceLock};
 
 /// The person's shell PATH, looked up once (see `sync::shell_path`).
@@ -39,20 +39,41 @@ fn nz(n: u16) -> NonZeroU16 {
 
 impl Term {
     /// A login shell in `cwd`; with `cmd`, the shell runs it first, then stays open.
-    pub fn spawn(title: &str, cwd: &str, cmd: Option<&str>, on_output: impl Fn() + Send + 'static) -> Result<Term, String> {
+    pub fn spawn(
+        title: &str,
+        cwd: &str,
+        cmd: Option<&str>,
+        on_output: impl Fn() + Send + 'static,
+    ) -> Result<Term, String> {
         Self::spawn_with(title, cwd, cmd, true, on_output)
     }
 
     /// The shell runs `cmd` and ends with it: `exited()` says when the program has quit
     /// (sessions driven by Orchestra, which must notice it).
-    pub fn spawn_once(title: &str, cwd: &str, cmd: &str, on_output: impl Fn() + Send + 'static) -> Result<Term, String> {
+    pub fn spawn_once(
+        title: &str,
+        cwd: &str,
+        cmd: &str,
+        on_output: impl Fn() + Send + 'static,
+    ) -> Result<Term, String> {
         Self::spawn_with(title, cwd, Some(cmd), false, on_output)
     }
 
-    fn spawn_with(title: &str, cwd: &str, cmd: Option<&str>, keep_shell: bool, on_output: impl Fn() + Send + 'static) -> Result<Term, String> {
+    fn spawn_with(
+        title: &str,
+        cwd: &str,
+        cmd: Option<&str>,
+        keep_shell: bool,
+        on_output: impl Fn() + Send + 'static,
+    ) -> Result<Term, String> {
         let (rows, cols) = (24u16, 80u16);
         let pair = native_pty_system()
-            .openpty(PtySize { rows, cols, pixel_width: 0, pixel_height: 0 })
+            .openpty(PtySize {
+                rows,
+                cols,
+                pixel_width: 0,
+                pixel_height: 0,
+            })
             .map_err(|e| e.to_string())?;
         #[cfg(windows)]
         let c = {
@@ -73,7 +94,11 @@ impl Term {
             let mut c = CommandBuilder::new(&shell);
             match cmd {
                 Some(cmd) if keep_shell => {
-                    c.args(["-l", "-c", &format!("{cmd}; exec {} -l", crate::sessions::shell_quote(&shell))]);
+                    c.args([
+                        "-l",
+                        "-c",
+                        &format!("{cmd}; exec {} -l", crate::sessions::shell_quote(&shell)),
+                    ]);
                 }
                 Some(cmd) => {
                     c.args(["-l", "-c", cmd]);
@@ -177,7 +202,12 @@ impl Term {
         }
         self.size = (rows, cols);
         self.parser.lock_or_recover().set_size(nz(rows), nz(cols));
-        let _ = self.master.resize(PtySize { rows, cols, pixel_width: 0, pixel_height: 0 });
+        let _ = self.master.resize(PtySize {
+            rows,
+            cols,
+            pixel_width: 0,
+            pixel_height: 0,
+        });
     }
 
     pub fn with_screen<R>(&self, f: impl FnOnce(&vt100::Screen) -> R) -> R {
@@ -188,8 +218,21 @@ impl Term {
     /// the mouse (Claude Code does) gets the wheel and scrolls itself; one on the alternate
     /// screen without it gets arrow keys, like in most terminals; otherwise our history moves.
     pub fn wheel(&mut self, lines: i32, row: u16, col: u16) {
-        let (mode, enc, alt) = self.with_screen(|s| (s.mouse_protocol_mode(), s.mouse_protocol_encoding(), s.alternate_screen()));
-        match wheel_bytes(mode != vt100::MouseProtocolMode::None, enc == vt100::MouseProtocolEncoding::Sgr, alt, lines, row, col) {
+        let (mode, enc, alt) = self.with_screen(|s| {
+            (
+                s.mouse_protocol_mode(),
+                s.mouse_protocol_encoding(),
+                s.alternate_screen(),
+            )
+        });
+        match wheel_bytes(
+            mode != vt100::MouseProtocolMode::None,
+            enc == vt100::MouseProtocolEncoding::Sgr,
+            alt,
+            lines,
+            row,
+            col,
+        ) {
             Some(out) => {
                 let _ = self.writer.write_all(&out);
                 let _ = self.writer.flush();
@@ -244,7 +287,12 @@ impl Term {
             return;
         }
         if let Some(pid) = self.child.process_id() {
-            let _ = crate::proc::command(tree_kill_program()).args(tree_kill_args(pid)).stdin(std::process::Stdio::null()).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null()).status();
+            let _ = crate::proc::command(tree_kill_program())
+                .args(tree_kill_args(pid))
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .status();
         }
         let _ = self.child.kill();
     }
@@ -291,17 +339,26 @@ mod stop_tests {
         std::fs::create_dir_all(&dir).unwrap();
         let pidfile = dir.join("pid");
         let cmd = format!("sleep 60 & echo $! > '{}'; wait", pidfile.display());
-        let mut t = super::Term::spawn_once("test", &dir.display().to_string(), &cmd, || {}).unwrap();
+        let mut t =
+            super::Term::spawn_once("test", &dir.display().to_string(), &cmd, || {}).unwrap();
         let mut pid = String::new();
         for _ in 0..100 {
-            pid = std::fs::read_to_string(&pidfile).unwrap_or_default().trim().to_string();
+            pid = std::fs::read_to_string(&pidfile)
+                .unwrap_or_default()
+                .trim()
+                .to_string();
             if !pid.is_empty() {
                 break;
             }
             std::thread::sleep(std::time::Duration::from_millis(50));
         }
         assert!(!pid.is_empty(), "the command didn't start");
-        let alive = |p: &str| std::process::Command::new("kill").args(["-0", p]).status().is_ok_and(|s| s.success());
+        let alive = |p: &str| {
+            std::process::Command::new("kill")
+                .args(["-0", p])
+                .status()
+                .is_ok_and(|s| s.success())
+        };
         assert!(alive(&pid));
         t.stop();
         let mut gone = false;
@@ -319,7 +376,14 @@ mod stop_tests {
 
 /// What the wheel sends to the program: mouse events when it tracks the mouse (SGR or
 /// classic encoding), arrow keys on the alternate screen; None: move our own history.
-pub fn wheel_bytes(tracking: bool, sgr: bool, alt: bool, lines: i32, row: u16, col: u16) -> Option<Vec<u8>> {
+pub fn wheel_bytes(
+    tracking: bool,
+    sgr: bool,
+    alt: bool,
+    lines: i32,
+    row: u16,
+    col: u16,
+) -> Option<Vec<u8>> {
     let n = lines.unsigned_abs().min(10);
     let mut out = Vec::new();
     if tracking {
@@ -348,7 +412,13 @@ pub fn wheel_bytes(tracking: bool, sgr: bool, alt: bool, lines: i32, row: u16, c
 
 /// The bytes a key sends, as xterm does. `app_cursor`: the program asked for the
 /// "application" arrow keys (`ESC O A` instead of `ESC [ A`).
-pub fn key_bytes(key: egui_keys::Key, ctrl: bool, alt: bool, shift: bool, app_cursor: bool) -> Option<Vec<u8>> {
+pub fn key_bytes(
+    key: egui_keys::Key,
+    ctrl: bool,
+    alt: bool,
+    shift: bool,
+    app_cursor: bool,
+) -> Option<Vec<u8>> {
     use egui_keys::Key as K;
     let arrow = |c: char| {
         let mods = 1 + (shift as u8) + 2 * (alt as u8) + 4 * (ctrl as u8);
@@ -369,8 +439,20 @@ pub fn key_bytes(key: egui_keys::Key, ctrl: bool, alt: bool, shift: bool, app_cu
                 b"\r".to_vec()
             }
         }
-        K::Tab => if shift { b"\x1b[Z".to_vec() } else { b"\t".to_vec() },
-        K::Backspace => if alt { b"\x1b\x7f".to_vec() } else { b"\x7f".to_vec() },
+        K::Tab => {
+            if shift {
+                b"\x1b[Z".to_vec()
+            } else {
+                b"\t".to_vec()
+            }
+        }
+        K::Backspace => {
+            if alt {
+                b"\x1b\x7f".to_vec()
+            } else {
+                b"\x7f".to_vec()
+            }
+        }
         K::Escape => b"\x1b".to_vec(),
         K::ArrowUp => arrow('A'),
         K::ArrowDown => arrow('B'),
@@ -405,15 +487,49 @@ pub mod egui_keys {
 /// A colour of the 256-colour palette, as RGB.
 pub fn palette(i: u8, dark: bool) -> (u8, u8, u8) {
     const BASE_DARK: [(u8, u8, u8); 16] = [
-        (40, 40, 40), (229, 83, 75), (110, 190, 112), (230, 190, 90), (88, 150, 230), (190, 120, 220), (80, 190, 200), (210, 210, 210),
-        (110, 110, 110), (255, 120, 110), (140, 220, 140), (250, 215, 120), (120, 175, 255), (215, 150, 240), (110, 215, 225), (245, 245, 245),
+        (40, 40, 40),
+        (229, 83, 75),
+        (110, 190, 112),
+        (230, 190, 90),
+        (88, 150, 230),
+        (190, 120, 220),
+        (80, 190, 200),
+        (210, 210, 210),
+        (110, 110, 110),
+        (255, 120, 110),
+        (140, 220, 140),
+        (250, 215, 120),
+        (120, 175, 255),
+        (215, 150, 240),
+        (110, 215, 225),
+        (245, 245, 245),
     ];
     const BASE_LIGHT: [(u8, u8, u8); 16] = [
-        (30, 30, 30), (200, 40, 40), (40, 140, 60), (170, 120, 0), (30, 90, 200), (150, 60, 180), (20, 140, 150), (190, 190, 190),
-        (100, 100, 100), (230, 70, 60), (60, 170, 80), (200, 150, 20), (60, 120, 230), (180, 90, 210), (40, 170, 180), (250, 250, 250),
+        (30, 30, 30),
+        (200, 40, 40),
+        (40, 140, 60),
+        (170, 120, 0),
+        (30, 90, 200),
+        (150, 60, 180),
+        (20, 140, 150),
+        (190, 190, 190),
+        (100, 100, 100),
+        (230, 70, 60),
+        (60, 170, 80),
+        (200, 150, 20),
+        (60, 120, 230),
+        (180, 90, 210),
+        (40, 170, 180),
+        (250, 250, 250),
     ];
     match i {
-        0..=15 => if dark { BASE_DARK[i as usize] } else { BASE_LIGHT[i as usize] },
+        0..=15 => {
+            if dark {
+                BASE_DARK[i as usize]
+            } else {
+                BASE_LIGHT[i as usize]
+            }
+        }
         16..=231 => {
             let n = i - 16;
             let v = |x: u8| if x == 0 { 0 } else { 55 + x * 40 };
@@ -452,11 +568,26 @@ mod tests {
 
     #[test]
     fn keys() {
-        assert_eq!(key_bytes(Key::Enter, false, false, false, false), Some(b"\r".to_vec()));
-        assert_eq!(key_bytes(Key::Tab, false, false, true, false), Some(b"\x1b[Z".to_vec()));
-        assert_eq!(key_bytes(Key::ArrowUp, false, false, false, false), Some(b"\x1b[A".to_vec()));
-        assert_eq!(key_bytes(Key::ArrowUp, false, false, false, true), Some(b"\x1bOA".to_vec()));
-        assert_eq!(key_bytes(Key::ArrowLeft, false, true, false, false), Some(b"\x1b[1;3D".to_vec()));
+        assert_eq!(
+            key_bytes(Key::Enter, false, false, false, false),
+            Some(b"\r".to_vec())
+        );
+        assert_eq!(
+            key_bytes(Key::Tab, false, false, true, false),
+            Some(b"\x1b[Z".to_vec())
+        );
+        assert_eq!(
+            key_bytes(Key::ArrowUp, false, false, false, false),
+            Some(b"\x1b[A".to_vec())
+        );
+        assert_eq!(
+            key_bytes(Key::ArrowUp, false, false, false, true),
+            Some(b"\x1bOA".to_vec())
+        );
+        assert_eq!(
+            key_bytes(Key::ArrowLeft, false, true, false, false),
+            Some(b"\x1b[1;3D".to_vec())
+        );
         assert_eq!(key_bytes(Key::C, true, false, false, false), Some(vec![3]));
         assert_eq!(key_bytes(Key::C, false, false, false, false), None);
     }
@@ -464,10 +595,22 @@ mod tests {
     #[test]
     fn restore() {
         assert_eq!(restore_cmd(None), None);
-        assert_eq!(restore_cmd(Some("claude")).as_deref(), Some("claude --continue"));
-        assert_eq!(restore_cmd(Some("claude --resume abc")).as_deref(), Some("claude --resume abc"));
-        assert_eq!(restore_cmd(Some("codex")).as_deref(), Some("codex resume --last"));
-        assert_eq!(restore_cmd(Some("codex resume x")).as_deref(), Some("codex resume x"));
+        assert_eq!(
+            restore_cmd(Some("claude")).as_deref(),
+            Some("claude --continue")
+        );
+        assert_eq!(
+            restore_cmd(Some("claude --resume abc")).as_deref(),
+            Some("claude --resume abc")
+        );
+        assert_eq!(
+            restore_cmd(Some("codex")).as_deref(),
+            Some("codex resume --last")
+        );
+        assert_eq!(
+            restore_cmd(Some("codex resume x")).as_deref(),
+            Some("codex resume x")
+        );
         assert_eq!(ordered(((3, 1), (1, 5))), ((1, 5), (3, 1)));
     }
 
@@ -481,13 +624,23 @@ mod tests {
     #[test]
     fn shell_runs_in_a_pty() {
         let dir = std::env::temp_dir();
-        let mut t = Term::spawn("test", &dir.display().to_string(), Some("printf 'bonjour %s' tableau; exit 0"), || {}).unwrap();
+        let mut t = Term::spawn(
+            "test",
+            &dir.display().to_string(),
+            Some("printf 'bonjour %s' tableau; exit 0"),
+            || {},
+        )
+        .unwrap();
         t.resize(10, 40);
         let start = std::time::Instant::now();
         while !t.text().contains("bonjour tableau") && start.elapsed().as_secs() < 5 {
             std::thread::sleep(std::time::Duration::from_millis(50));
         }
-        assert!(t.text().contains("bonjour tableau"), "écran : {:?}", t.text());
+        assert!(
+            t.text().contains("bonjour tableau"),
+            "écran : {:?}",
+            t.text()
+        );
         t.write(b"exit\r");
     }
 }
@@ -508,9 +661,18 @@ mod wheel_tests {
 
     #[test]
     fn wheel_goes_to_a_program_that_tracks_the_mouse() {
-        assert_eq!(wheel_bytes(true, true, false, 2, 2, 3).unwrap(), b"\x1b[<64;4;3M\x1b[<64;4;3M".to_vec());
-        assert_eq!(wheel_bytes(true, false, false, -1, 0, 0).unwrap(), vec![0x1b, b'[', b'M', 32 + 65, 33, 33]);
-        assert_eq!(wheel_bytes(false, false, true, -2, 0, 0).unwrap(), b"\x1b[B\x1b[B".to_vec());
+        assert_eq!(
+            wheel_bytes(true, true, false, 2, 2, 3).unwrap(),
+            b"\x1b[<64;4;3M\x1b[<64;4;3M".to_vec()
+        );
+        assert_eq!(
+            wheel_bytes(true, false, false, -1, 0, 0).unwrap(),
+            vec![0x1b, b'[', b'M', 32 + 65, 33, 33]
+        );
+        assert_eq!(
+            wheel_bytes(false, false, true, -2, 0, 0).unwrap(),
+            b"\x1b[B\x1b[B".to_vec()
+        );
         assert!(wheel_bytes(false, false, false, 3, 0, 0).is_none());
     }
 
