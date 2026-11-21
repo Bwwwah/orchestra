@@ -2105,6 +2105,23 @@ mod card_layout_tests {
             .collect()
     }
 
+    /// The sessions are grouped by AI provider, in the order each first comes (the live
+    /// ones first), so each gets a box of its own.
+    #[test]
+    fn sessions_are_grouped_by_provider() {
+        use super::provider_groups;
+        let s = |v: &[&str]| v.iter().map(|x| x.to_string()).collect::<Vec<_>>();
+        let g = provider_groups(&s(&["Claude Code", "Codex", "Claude Code"]), &s(&["Gemini", "Codex"]));
+        let labels: Vec<&str> = g.iter().map(|x| x.0.as_str()).collect();
+        assert_eq!(labels, ["Claude Code", "Codex", "Gemini"]);
+        assert_eq!((g[0].1.clone(), g[0].2.clone()), (vec![0, 2], vec![]));
+        assert_eq!((g[1].1.clone(), g[1].2.clone()), (vec![1], vec![1]));
+        assert_eq!((g[2].1.clone(), g[2].2.clone()), (vec![], vec![0]));
+        // One provider only: one group (its rows go straight in the card).
+        assert_eq!(provider_groups(&s(&["Claude Code"]), &s(&["Claude Code"])).len(), 1);
+        assert!(provider_groups(&[], &[]).is_empty());
+    }
+
     /// Starting a session is a card of its own, always right above the sessions' list,
     /// whichever column the list landed in; without a folder, nothing is added.
     #[test]
@@ -2500,6 +2517,72 @@ fn new_session_card(ui: &mut egui::Ui, cx: &mut Cx, extra: f32) -> f32 {
     })
 }
 
+/// The sessions grouped by AI provider, in the order they first come (the live ones first):
+/// each provider's label, then the indices of its live sessions (`live`) and of its other
+/// sessions (`others`), both given as their providers' labels.
+fn provider_groups(live: &[String], others: &[String]) -> Vec<(String, Vec<usize>, Vec<usize>)> {
+    let mut groups: Vec<(String, Vec<usize>, Vec<usize>)> = vec![];
+    fn slot<'a>(g: &'a mut Vec<(String, Vec<usize>, Vec<usize>)>, l: &str) -> &'a mut (String, Vec<usize>, Vec<usize>) {
+        let i = match g.iter().position(|x| x.0 == l) {
+            Some(i) => i,
+            None => {
+                g.push((l.to_string(), vec![], vec![]));
+                g.len() - 1
+            }
+        };
+        &mut g[i]
+    }
+    for (i, l) in live.iter().enumerate() {
+        slot(&mut groups, l).1.push(i);
+    }
+    for (i, l) in others.iter().enumerate() {
+        slot(&mut groups, l).2.push(i);
+    }
+    groups
+}
+
+/// A session an AI linked itself (not read from disk): same columns as `session_row`, a
+/// hollow dot, the tool, the title, the time.
+fn other_session_row(ui: &mut egui::Ui, s: &crate::project::SessionRef, t: &Tone) {
+    let bg = hover_begin(ui);
+    let row = ui.horizontal(|ui| {
+        let (r, _) = ui.allocate_exact_size(egui::vec2(10.0, 20.0), egui::Sense::hover());
+        ui.painter()
+            .circle_stroke(r.center(), 3.5, egui::Stroke::new(1.2, t.border));
+        tool_chip(ui, &tool_label(&s.tool), t);
+        let when = relative_time(s.last_activity);
+        let room = ui.available_width()
+            - ui.painter()
+                .layout_no_wrap(when.clone(), FontId::proportional(12.5), t.tertiary)
+                .size()
+                .x
+            - 16.0;
+        let title = if s.title.is_empty() {
+            s.id.clone()
+        } else {
+            s.title.clone()
+        };
+        let job = egui::text::LayoutJob::single_section(
+            title,
+            egui::TextFormat::simple(FontId::proportional(TEXT), t.text),
+        );
+        line(ui, job, room).on_hover_text(if s.location.is_empty() {
+            &s.id
+        } else {
+            &s.location
+        });
+        ui.label(RichText::new(when).size(12.5).color(t.tertiary));
+    });
+    hover_end(
+        ui,
+        bg,
+        row.response.rect,
+        egui::Id::unique(("session-other", &s.id)),
+        t,
+    );
+    ui.add_space(4.0);
+}
+
 fn sessions_card(ui: &mut egui::Ui, cx: &mut Cx, extra: f32) -> f32 {
     let (page_id, pr, t, live) = (cx.page_id, &*cx.pr, cx.t, cx.live);
     // ---- Sessions: live ones read from disk, plus those an AI linked itself.
@@ -2533,50 +2616,43 @@ fn sessions_card(ui: &mut egui::Ui, cx: &mut Cx, extra: f32) -> f32 {
             ui.label(RichText::new(hint).color(t.tertiary).italics());
         }
         let all = flag(ui, ("all-sessions", page_id));
-        for s in live.iter().take(if all { usize::MAX } else { 4 }) {
-            if let Some(m) = session_row(ui, page_id, s, t) {
-                msg = Some(m);
+        // One box per AI provider (Claude Code, Codex…) when there are several, each with its
+        // own sessions; with a single provider, its rows straight in the card.
+        let live_labels: Vec<String> = live.iter().map(|s| s.tool.label().to_string()).collect();
+        let other_labels: Vec<String> = others.iter().map(|s| tool_label(&s.tool)).collect();
+        let groups = provider_groups(&live_labels, &other_labels);
+        let boxed = groups.len() > 1;
+        for (label, live_i, other_i) in &groups {
+            let mut rows = |ui: &mut egui::Ui| {
+                for &i in live_i.iter().take(if all { usize::MAX } else { 4 }) {
+                    if let Some(m) = session_row(ui, page_id, &live[i], t) {
+                        msg = Some(m);
+                    }
+                }
+                for &i in other_i.iter().take(if all { usize::MAX } else { 3 }) {
+                    other_session_row(ui, others[i], t);
+                }
+            };
+            if boxed {
+                let accent = accent_of("SESSIONS IA");
+                egui::Frame::new()
+                    .stroke(egui::Stroke::new(1.0, t.border))
+                    .corner_radius(10.0)
+                    .inner_margin(egui::Margin::symmetric(10, 8))
+                    .show(ui, |ui| {
+                        ui.set_width(ui.available_width());
+                        ui.horizontal(|ui| {
+                            ui.label(RichText::new(label).font(FontId::proportional(13.0)).strong().color(accent));
+                            let k = live_i.len() + other_i.len();
+                            ui.label(RichText::new(k.to_string()).size(12.0).color(t.tertiary));
+                        });
+                        ui.add_space(4.0);
+                        rows(ui);
+                    });
+                ui.add_space(8.0);
+            } else {
+                rows(ui);
             }
-        }
-        for s in others.iter().take(if all { usize::MAX } else { 3 }) {
-            // Same columns as the rows above: a (hollow) dot, the tool, the title, the time.
-            let bg = hover_begin(ui);
-            let row = ui.horizontal(|ui| {
-                let (r, _) = ui.allocate_exact_size(egui::vec2(10.0, 20.0), egui::Sense::hover());
-                ui.painter()
-                    .circle_stroke(r.center(), 3.5, egui::Stroke::new(1.2, t.border));
-                tool_chip(ui, &tool_label(&s.tool), t);
-                let when = relative_time(s.last_activity);
-                let room = ui.available_width()
-                    - ui.painter()
-                        .layout_no_wrap(when.clone(), FontId::proportional(12.5), t.tertiary)
-                        .size()
-                        .x
-                    - 16.0;
-                let title = if s.title.is_empty() {
-                    s.id.clone()
-                } else {
-                    s.title.clone()
-                };
-                let job = egui::text::LayoutJob::single_section(
-                    title,
-                    egui::TextFormat::simple(FontId::proportional(TEXT), t.text),
-                );
-                line(ui, job, room).on_hover_text(if s.location.is_empty() {
-                    &s.id
-                } else {
-                    &s.location
-                });
-                ui.label(RichText::new(when).size(12.5).color(t.tertiary));
-            });
-            hover_end(
-                ui,
-                bg,
-                row.response.rect,
-                egui::Id::unique(("session-other", &s.id)),
-                t,
-            );
-            ui.add_space(4.0);
         }
         if n > 0 {
             card_rule(ui, t);
