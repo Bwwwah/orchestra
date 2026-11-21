@@ -2319,9 +2319,20 @@ fn mission_text(
 }
 
 /// Put before the mission when a session goes on in a new conversation (short sessions:
-/// one per step done): the AI has none of the earlier turns, and is told where the state of
-/// the work is rather than left to guess or redo it.
-pub fn fresh_conversation_note() -> &'static str {
+/// one per step done; `paused`: after a pause longer than the cache's life): the AI has none
+/// of the earlier turns, and is told where the state of the work is rather than left to
+/// guess or redo it.
+pub fn fresh_conversation_note(paused: bool) -> &'static str {
+    if paused {
+        return crate::tr!(
+            "Nouvelle conversation de la même session, après une longue pause : la personne a répondu à ta question (section « Questions posées » de get_project_state) et tu n'as pas l'historique des tours d'avant. \
+             Ne t'appuie que sur get_project_state et, s'il le faut, sur git log et git status. \
+             Ne refais pas une étape déjà « done » ; une étape restée « doing » que get_project_state ne dit pas réservée par un autre ordinateur est la tienne : reprends-la d'abord, avec la réponse.\n\n",
+            "New conversation of the same session, after a long pause: the person answered your question (section « Questions posées » of get_project_state) and you don't have the earlier turns. \
+             Rely only on get_project_state and, if needed, on git log and git status. \
+             Don't redo a step already « done »; a step left « doing » that get_project_state doesn't say is reserved by another computer is yours: take it up first, with the answer.\n\n"
+        );
+    }
     crate::tr!(
         "Nouvelle conversation de la même session : l'étape précédente est terminée et tu n'as pas l'historique des tours d'avant. \
          Ne t'appuie que sur get_project_state (étapes, état des lieux, questions posées) et, s'il le faut, sur git log et git status. \
@@ -2907,9 +2918,12 @@ mod tests {
                 && on.contains(&SELF_STEPS_MAX.to_string())
         );
         // A new conversation starts from the project's state, not from a history it lacks.
-        let fresh = fresh_conversation_note();
-        assert!(fresh.contains("get_project_state") && fresh.contains("« doing »"));
-        assert!(fresh.ends_with("\n\n"));
+        for paused in [false, true] {
+            let fresh = fresh_conversation_note(paused);
+            assert!(fresh.contains("get_project_state") && fresh.contains("« doing »"));
+            assert!(fresh.ends_with("\n\n"));
+        }
+        assert!(fresh_conversation_note(true).contains("Questions posées"));
         assert!(endless_prompt(true).contains("add_steps"));
         // Asked to stop once the steps are done: it adds none.
         assert!(!endless_prompt(false).contains("add_steps"));
