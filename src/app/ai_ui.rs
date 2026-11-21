@@ -18,6 +18,8 @@ pub struct Ais {
     /// The other plugged AIs (not Claude Code) and their figures when Orchestra can read
     /// them (Codex); None for those that tell none (Gemini, Vibe). Read with `usage`.
     pub others: Vec<(crate::auto::Agent, Option<crate::usage::Usage>)>,
+    /// Mistral Vibe's plan and tokens, when it is among `others`.
+    pub vibe: Option<crate::usage::VibeUse>,
     pub tracking: bool,
     /// An install started from the settings (built-in terminal): the AI, when it started,
     /// and the last check of whether it is there yet. Plugged in as soon as it is.
@@ -253,6 +255,13 @@ impl NotesApp {
                 .into_iter()
                 .map(|a| (a, crate::usage::read_for(a)))
                 .collect();
+            self.ais.vibe = self
+                .ais
+                .others
+                .iter()
+                .any(|(a, _)| *a == crate::auto::Agent::Vibe)
+                .then(crate::usage::read_vibe)
+                .flatten();
             self.ais.tracking = crate::usage::tracking_on();
             // Our status line left pointing to an Orchestra that is gone (moved, updated, or
             // built in a deleted copy): it measures nothing, so the sessions would stop as
@@ -348,7 +357,8 @@ impl NotesApp {
     pub(super) fn usage_widget(&mut self, ui: &mut egui::Ui, t: &Tone) {
         self.claude_usage_tile(ui, t);
         for (agent, usage) in self.ais.others.clone() {
-            if other_usage_tile(ui, agent, usage.as_ref(), t).clicked() {
+            let vibe = self.ais.vibe.as_ref().filter(|_| agent == crate::auto::Agent::Vibe);
+            if other_usage_tile(ui, agent, usage.as_ref(), vibe, t).clicked() {
                 self.open_settings(SettingsTab::Ai);
             }
         }
@@ -506,9 +516,39 @@ impl NotesApp {
 pub(super) fn quota_title(agent: crate::auto::Agent) -> String {
     if crate::usage::reports_usage(agent) {
         crate::trf!("Abonnement {}", "{} subscription", agent.label())
+    } else if agent == crate::auto::Agent::Vibe {
+        crate::trf!("Utilisation de {}", "{} usage", agent.label())
     } else {
         crate::trf!("Quota {}", "{} quota", agent.label())
     }
+}
+
+/// Mistral Vibe's plan and tokens, in the tile's hover and the settings.
+pub(super) fn vibe_details(ui: &mut egui::Ui, v: &crate::usage::VibeUse, t: &Tone) {
+    if let Some(plan) = &v.plan {
+        ui.label(RichText::new(crate::trf!("Forfait : {}", "Plan: {}", plan)).size(13.0));
+    }
+    ui.label(
+        RichText::new(crate::trf!(
+            "Jetons utilisés : {} sur 24 h, {} sur 7 jours",
+            "Tokens used: {} over 24 h, {} over 7 days",
+            crate::usage::tokens_short(v.tokens_day),
+            crate::usage::tokens_short(v.tokens_week)
+        ))
+        .size(13.0),
+    );
+    if v.at > 0 {
+        ui.label(
+            RichText::new(crate::trf!(
+                "Dernière session {}",
+                "Last session {}",
+                super::chrome::relative_time(v.at)
+            ))
+            .size(11.5)
+            .color(t.tertiary),
+        );
+    }
+    ui.add_space(2.0);
 }
 
 /// A plugged AI other than Claude Code, in the sidebar: its windows (5 h, week) when Orchestra
@@ -517,6 +557,7 @@ fn other_usage_tile(
     ui: &mut egui::Ui,
     agent: crate::auto::Agent,
     usage: Option<&crate::usage::Usage>,
+    vibe: Option<&crate::usage::VibeUse>,
     t: &Tone,
 ) -> egui::Response {
     let (r, g, b) = agent.ai().accent();
@@ -526,7 +567,9 @@ fn other_usage_tile(
     let shown: Vec<crate::usage::Window> = usage
         .map(|u| u.windows.iter().take(2).cloned().collect())
         .unwrap_or_default();
-    let h = if shown.is_empty() {
+    let h = if shown.is_empty() && vibe.is_some() {
+        46.0
+    } else if shown.is_empty() {
         28.0
     } else {
         26.0 + 20.0 * shown.len() as f32
@@ -552,12 +595,28 @@ fn other_usage_tile(
         semibold(12.5),
         t.text,
     );
-    let head = match usage {
-        Some(u) => five_reset_in(u, crate::model::now_ms())
+    let head = match (usage, vibe) {
+        (Some(u), _) => five_reset_in(u, crate::model::now_ms())
             .unwrap_or_else(|| super::chrome::relative_time(u.at)),
-        None if crate::usage::reports_usage(agent) => crate::tr!("en attente…", "waiting…").into(),
-        None => crate::tr!("non lisible", "not readable").into(),
+        (None, Some(v)) => v.plan.clone().unwrap_or_default(),
+        (None, None) if crate::usage::reports_usage(agent) => crate::tr!("en attente…", "waiting…").into(),
+        (None, None) => crate::tr!("non lisible", "not readable").into(),
     };
+    if let (true, Some(v)) = (shown.is_empty(), vibe) {
+        // No share of a limit to show: the tokens used, over a day and a week.
+        p.text(
+            egui::pos2(rect.left() + 12.0, rect.top() + 33.0),
+            egui::Align2::LEFT_CENTER,
+            crate::trf!(
+                "24 h : {} jetons · 7 j : {}",
+                "24 h: {} tokens · 7 d: {}",
+                crate::usage::tokens_short(v.tokens_day),
+                crate::usage::tokens_short(v.tokens_week)
+            ),
+            FontId::proportional(11.5),
+            t.secondary,
+        );
+    }
     p.text(
         egui::pos2(rect.right() - 12.0, top),
         egui::Align2::RIGHT_CENTER,
@@ -608,6 +667,9 @@ fn other_usage_tile(
         ui.add_space(4.0);
         match (usage, crate::usage::unreadable_reason(agent)) {
             (_, Some(why)) => {
+                if let Some(v) = vibe {
+                    vibe_details(ui, v, t);
+                }
                 ui.label(RichText::new(why).size(12.5).color(t.secondary));
             }
             (None, None) => {
