@@ -1495,7 +1495,8 @@ pub fn work_done(r: &crate::model::RunRecord, base: &str) -> (Vec<String>, usize
 pub struct Reader {
     path: Option<PathBuf>,
     offset: u64,
-    carry: String,
+    /// The end of the last read that isn't a whole line yet (bytes: a character may be cut).
+    carry: Vec<u8>,
     seen: HashSet<String>,
     /// Billed tokens (input, output, cache writes).
     pub tokens: u64,
@@ -1532,22 +1533,30 @@ impl Reader {
             return;
         };
         let len = f.metadata().map(|m| m.len()).unwrap_or(0);
-        if len <= self.offset {
+        if len < self.offset {
+            // Shorter than what was read: rewritten from scratch, read it again from the start
+            // (records already counted are recognised by their ids).
+            self.offset = 0;
+            self.carry.clear();
+        }
+        if len == self.offset {
             return;
         }
         if f.seek(SeekFrom::Start(self.offset)).is_err() {
             return;
         }
-        let mut buf = String::new();
-        if f.read_to_string(&mut buf).is_err() {
+        // Only up to the length seen: what the AI writes meanwhile is read next time, not
+        // twice. As bytes: a character cut at the end waits in `carry` for its other half.
+        let mut buf = std::mem::take(&mut self.carry);
+        if f.take(len - self.offset).read_to_end(&mut buf).is_err() {
             return;
         }
         self.offset = len;
         self.last_growth = Some(std::time::Instant::now());
-        let text = std::mem::take(&mut self.carry) + &buf;
-        let mut lines: Vec<&str> = text.split('\n').collect();
-        self.carry = lines.pop().unwrap_or("").to_string();
-        for l in lines {
+        let cut = buf.iter().rposition(|b| *b == b'\n').map(|i| i + 1).unwrap_or(0);
+        self.carry = buf.split_off(cut);
+        let text = String::from_utf8_lossy(&buf);
+        for l in text.split('\n').filter(|l| !l.trim().is_empty()) {
             let Ok(v) = serde_json::from_str::<Value>(l) else {
                 continue;
             };
@@ -3103,6 +3112,41 @@ mod tests {
         unsafe { std::env::remove_var("CLAUDE_CONFIG_DIR") };
         assert!(r.turn_over);
         assert_eq!(r.tokens, 20);
+        assert_eq!(signal(&r.last_text), Signal::Done);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// A session file read while it is being written: a line (and a character) cut at the
+    /// end waits for its other half; a file rewritten shorter is read again from the start.
+    #[test]
+    fn reader_survives_cut_lines_and_rewritten_files() {
+        let dir = std::env::temp_dir().join(format!("orch-reader-{}", uuid::Uuid::new_v4().simple()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let f = dir.join("s.jsonl");
+        let since = std::time::SystemTime::UNIX_EPOCH;
+        let answer = |id: &str, text: &str| {
+            format!(
+                "{{\"type\":\"assistant\",\"message\":{{\"id\":\"{id}\",\"stop_reason\":\"end_turn\",\"usage\":{{\"input_tokens\":4,\"output_tokens\":1}},\"content\":[{{\"type\":\"text\",\"text\":\"{text}\"}}]}}}}\n"
+            )
+        };
+        let line = answer("m1", "Étape terminée [[CONTINUER]]");
+        // Cut in the middle of « É » (two bytes in UTF-8).
+        let at = line.find('É').unwrap() + 1;
+        std::fs::write(&f, &line.as_bytes()[..at]).unwrap();
+        let mut r = Reader { path: Some(f.clone()), ..Default::default() };
+        r.poll(Agent::ClaudeCode, &dir, since);
+        assert_eq!((r.records, r.tokens), (0, 0), "half a line: nothing yet");
+        // The rest arrives: the line is read whole, its accent intact, once.
+        std::fs::write(&f, line.as_bytes()).unwrap();
+        r.poll(Agent::ClaudeCode, &dir, since);
+        assert_eq!((r.records, r.tokens), (1, 5));
+        assert!(r.last_text.starts_with("Étape terminée"), "{}", r.last_text);
+        r.poll(Agent::ClaudeCode, &dir, since);
+        assert_eq!(r.records, 1, "nothing read twice");
+        // Rewritten shorter, with another answer: read from the start; m1 isn't counted again.
+        std::fs::write(&f, answer("m2", "ok [[FINI]]")).unwrap();
+        r.poll(Agent::ClaudeCode, &dir, since);
+        assert_eq!(r.tokens, 10);
         assert_eq!(signal(&r.last_text), Signal::Done);
         let _ = std::fs::remove_dir_all(dir);
     }

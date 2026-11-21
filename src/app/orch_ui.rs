@@ -399,6 +399,20 @@ impl NotesApp {
             )
             .into());
         }
+        // Nothing to work on (and not endless, where the AI finds its steps): it would stop
+        // at once, after starting Claude Code for nothing. Also for « Lancer la sélection ».
+        if endless.is_none()
+            && !pr
+                .steps
+                .iter()
+                .any(|s| s.status != crate::project::StepStatus::Done)
+        {
+            return Err(crate::tr!(
+                "aucune étape ouverte : ajoutez des étapes, ou activez « sans fin »",
+                "no open step: add steps, or turn on « endless »"
+            )
+            .into());
+        }
         if !self.ais.plugged().contains(&crate::setup::Ai::ClaudeCode) {
             return Err(crate::tr!(
                 "Claude Code n'est pas branché (Réglages › IA)",
@@ -3632,9 +3646,10 @@ impl Stop {
                 "pause : la réserve minimum de la semaine ({r:.0} %) approche",
                 "paused: the week's minimum reserve ({r:.0} %) is near"
             ),
+            // Any agent's (Claude, Codex…): the session knows which by its card.
             Stop::SubscriptionLimit => crate::tr!(
-                "limite de l'abonnement Claude atteinte",
-                "Claude subscription limit reached"
+                "limite de l'abonnement de l'IA atteinte",
+                "the AI's subscription limit reached"
             )
             .into(),
             Stop::Unmeasured => crate::tr!(
