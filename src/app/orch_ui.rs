@@ -1267,7 +1267,17 @@ impl NotesApp {
         rec.resume_at = resume_at;
         // No copy (a project without git): nothing to merge nor discard, the work is there.
         if auto::in_place(rec) {
-            rec.closed = auto::in_place_note().into();
+            // Where the folder was backed up before the session (`base` for a session in place).
+            rec.closed = if base.is_empty() {
+                auto::in_place_note().into()
+            } else {
+                crate::trf!(
+                    "{} ; sauvegarde d'avant la session : {}",
+                    "{}; backup from before the session: {}",
+                    auto::in_place_note(),
+                    super::projects::tilde(&base)
+                )
+            };
         }
         let rec = rec.clone();
         let (commits, dirty) = auto::work_done(&rec, &base);
@@ -3393,7 +3403,7 @@ fn run_actions(
             RichText::new(crate::trf!(
                 "Pas de copie : {}.",
                 "No copy: {}.",
-                auto::in_place_note()
+                if r.closed.is_empty() { auto::in_place_note() } else { r.closed.as_str() }
             ))
             .size(12.5)
             .color(t.tertiary),

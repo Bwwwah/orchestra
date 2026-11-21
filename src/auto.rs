@@ -941,13 +941,7 @@ pub fn make_copy(folder: &str, title: &str, on_dev: bool, code: bool) -> Result<
             )
             .into());
         }
-        let d = dir.display().to_string();
-        return Ok(Copy {
-            root: d.clone(),
-            worktree: d,
-            branch: String::new(),
-            base: String::new(),
-        });
+        return in_place_copy(&dir, &crate::store::data_dir().join("backups"), title);
     }
     let copies = crate::store::data_dir().join("worktrees");
     if on_dev {
@@ -1362,6 +1356,114 @@ pub fn discard(r: &crate::model::RunRecord) -> Result<String, String> {
     git(&rd, &["branch", "-D", &r.branch])?;
     delete_remote_later(r.root.clone(), r.branch.clone());
     Ok(crate::tr!("Copie et branche supprimées.", "Copy and branch deleted.").into())
+}
+
+/// A session right in the project's folder `dir`: no copy and no git to go back with, so a
+/// backup of the folder in `backups` first, or no session.
+fn in_place_copy(dir: &Path, backups: &Path, title: &str) -> Result<Copy, String> {
+    let backup = backup_folder(dir, backups, title)?;
+    let d = dir.display().to_string();
+    Ok(Copy {
+        root: d.clone(),
+        worktree: d,
+        branch: String::new(),
+        // For a session in place, `base` is where its backup is.
+        base: backup.display().to_string(),
+    })
+}
+
+/// The largest folder backed up before a session in place (bytes): past it, the session
+/// isn't started rather than run without a way back.
+pub const BACKUP_MAX: u64 = 2 * 1024 * 1024 * 1024;
+
+/// Backups kept per project: the oldest go.
+pub const BACKUPS_KEPT: usize = 5;
+
+/// Copy the project's folder `src` into `backups/<project>-<time>` before a session works
+/// in it (a project without git: no other way back). Links are not followed (nothing outside
+/// the folder is copied). The `BACKUPS_KEPT` latest of the project are kept. Err: too big,
+/// or the copy failed (the session then doesn't start).
+pub fn backup_folder(src: &Path, backups: &Path, title: &str) -> Result<PathBuf, String> {
+    fn size(dir: &Path, total: &mut u64) -> std::io::Result<()> {
+        for e in std::fs::read_dir(dir)? {
+            let e = e?;
+            let t = e.file_type()?;
+            if t.is_dir() {
+                size(&e.path(), total)?;
+            } else if t.is_file() {
+                *total += e.metadata()?.len();
+                if *total > BACKUP_MAX {
+                    return Ok(());
+                }
+            }
+        }
+        Ok(())
+    }
+    fn copy(from: &Path, to: &Path) -> std::io::Result<()> {
+        std::fs::create_dir_all(to)?;
+        for e in std::fs::read_dir(from)? {
+            let e = e?;
+            let t = e.file_type()?;
+            let dest = to.join(e.file_name());
+            if t.is_dir() {
+                copy(&e.path(), &dest)?;
+            } else if t.is_file() {
+                std::fs::copy(e.path(), &dest)?;
+            }
+        }
+        Ok(())
+    }
+    let mut total = 0;
+    size(src, &mut total).map_err(|e| e.to_string())?;
+    if total > BACKUP_MAX {
+        return Err(crate::trf!(
+            "le dossier du projet dépasse {} Go : trop gros pour être sauvegardé avant la session (sans dépôt git, c'est la seule façon de revenir en arrière)",
+            "the project's folder is over {} GB: too big to back up before the session (without a git repository, that's the only way back)",
+            BACKUP_MAX / (1024 * 1024 * 1024)
+        ));
+    }
+    let name = if slug(title).is_empty() {
+        "projet".to_string()
+    } else {
+        slug(title)
+    };
+    let mut dest = backups.join(format!("{name}-{}", local_stamp(crate::model::now_ms())));
+    // Two sessions in the same second: a suffix rather than one backup over the other.
+    let mut n = 2;
+    while dest.exists() {
+        dest = backups.join(format!("{name}-{}-{n}", local_stamp(crate::model::now_ms())));
+        n += 1;
+    }
+    if let Err(e) = copy(src, &dest) {
+        let _ = std::fs::remove_dir_all(&dest);
+        return Err(crate::trf!(
+            "sauvegarde du dossier avant la session impossible ({e}) : session non lancée",
+            "couldn't back up the folder before the session ({e}): session not started"
+        ));
+    }
+    // The oldest of this project's backups go (their names sort by time).
+    let prefix = format!("{name}-");
+    let mut mine: Vec<PathBuf> = std::fs::read_dir(backups)
+        .into_iter()
+        .flatten()
+        .flatten()
+        // This project's only: its name, then the date (not « projet-2-… » for « projet »).
+        .filter(|e| {
+            let f = e.file_name().to_string_lossy().to_string();
+            f.strip_prefix(&prefix).is_some_and(|rest| {
+                let b = rest.as_bytes();
+                b.len() >= 15 && b[..8].iter().all(u8::is_ascii_digit) && b[8] == b'-'
+            })
+        })
+        .map(|e| e.path())
+        .filter(|p| p.is_dir())
+        .collect();
+    mine.sort();
+    let excess = mine.len().saturating_sub(BACKUPS_KEPT);
+    for old in mine.into_iter().take(excess) {
+        let _ = std::fs::remove_dir_all(old);
+    }
+    Ok(dest)
 }
 
 /// What becomes of a session's work in a project without git.
@@ -2625,10 +2727,31 @@ mod tests {
         }
         // A code project still needs a repository.
         assert!(make_copy(&folder, "Code", false, true).is_err());
-        // Without code: the folder itself, no branch, nothing copied.
-        let c = make_copy(&folder, "Inscription", true, false).unwrap();
+        // Without code: the folder itself, no branch, but a backup of it first.
+        let backups = dir.with_extension("backups");
+        let c = in_place_copy(&crate::project::normalize_folder(&folder), &backups, "Inscription").unwrap();
         assert_eq!(c.worktree, crate::project::normalize_folder(&folder).display().to_string());
-        assert!(c.branch.is_empty() && c.base.is_empty());
+        assert!(c.branch.is_empty());
+        let saved = PathBuf::from(&c.base);
+        assert!(saved.starts_with(&backups), "{saved:?}");
+        assert_eq!(std::fs::read_to_string(saved.join("dossier.txt")).unwrap(), "brouillon");
+        // Only the latest are kept, and never another project's.
+        std::fs::create_dir_all(backups.join("inscription-2-20200101-000000")).unwrap();
+        for i in 0..BACKUPS_KEPT + 2 {
+            std::fs::create_dir_all(backups.join(format!("inscription-2019010{i}-000000"))).unwrap();
+        }
+        let again = backup_folder(&crate::project::normalize_folder(&folder), &backups, "Inscription").unwrap();
+        let mine = std::fs::read_dir(&backups)
+            .unwrap()
+            .flatten()
+            .filter(|e| {
+                let n = e.file_name().to_string_lossy().to_string();
+                n.starts_with("inscription-") && !n.starts_with("inscription-2-")
+            })
+            .count();
+        assert_eq!(mine, BACKUPS_KEPT);
+        assert!(again.is_dir() && backups.join("inscription-2-20200101-000000").is_dir());
+        let _ = std::fs::remove_dir_all(&backups);
         let rec = crate::model::RunRecord {
             title: "Inscription".into(),
             root: c.root.clone(),
