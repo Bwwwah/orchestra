@@ -23,7 +23,7 @@ use std::process::Stdio;
 // Codex, Gemini and Vibe are chosen from the « Sessions IA » card once it has its list of
 // AIs (a later step); until then only the tests name them.
 #[allow(dead_code)]
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Agent {
     ClaudeCode,
     Codex,
@@ -68,8 +68,10 @@ impl Agent {
     /// Autonomous work is wired for it: its command (with permissions), its session files
     /// and the reading of its turns. Only Claude Code so far; the others are listed so the
     /// rest of the program can name them, and are never started alone until this is true.
+    /// Never true for an agent whose use Orchestra can't read (`usage::reports_usage`): its
+    /// sessions could not be stopped at their ceiling.
     pub fn ready(self) -> bool {
-        matches!(self, Agent::ClaudeCode)
+        matches!(self, Agent::ClaudeCode) && crate::usage::reports_usage(self)
     }
 
     /// The command started in the hidden terminal, in the copy `cwd`.
@@ -1598,8 +1600,7 @@ impl Reader {
                             self.turn_over = !calls && !text.trim().is_empty();
                         }
                         Some("error") => {
-                            let low = text.to_lowercase();
-                            if is_limit_message(&text) || low.contains("quota exceeded") || low.contains("resource_exhausted") {
+                            if is_limit_message(&text) {
                                 self.limit_hit = Some(text);
                                 self.turn_over = true;
                             }
@@ -1897,6 +1898,10 @@ pub fn is_limit_message(text: &str) -> bool {
         || t.contains("hit your limit")
         || t.contains("reached your usage limit")
         || t.contains("usage limit")
+        // Gemini CLI (Google's quota) and Mistral Vibe (the API's rate limit).
+        || t.contains("quota exceeded")
+        || t.contains("resource_exhausted")
+        || t.contains("rate limit exceeded")
 }
 
 /// When the limit of such a message resets (ms), read from the message: the time stamp of

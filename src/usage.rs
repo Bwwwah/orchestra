@@ -222,15 +222,13 @@ pub fn read() -> Option<Usage> {
 //   hold tokens and cost, not a limit. Nothing to read.
 
 /// The agents whose use of the subscription Orchestra can read (the ceiling of a session
-/// rests on it: the « Quota » step).
-#[allow(dead_code)]
+/// rests on it).
 pub fn reports_usage(agent: crate::auto::Agent) -> bool {
     use crate::auto::Agent;
     matches!(agent, Agent::ClaudeCode | Agent::Codex)
 }
 
 /// The latest figures of an agent; None for those that tell none (see above).
-#[allow(dead_code)]
 pub fn read_for(agent: crate::auto::Agent) -> Option<Usage> {
     use crate::auto::Agent;
     match agent {

@@ -277,11 +277,25 @@ struct CopyJob {
     done: std::sync::mpsc::Receiver<Result<String, String>>,
 }
 
+/// The figures of one agent's subscription, as last read.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Figures {
+    pub five: Option<f32>,
+    pub week: Option<f32>,
+    pub five_reset: Option<u64>,
+    pub week_reset: Option<u64>,
+}
+
 #[derive(Default)]
 pub struct Orch {
     pub runs: Vec<LiveRun>,
     drafts: HashMap<String, Draft>,
     watching: Option<String>,
+    /// The figures of the agents other than Claude Code (whose own are the fields below,
+    /// shown on the cards), and their last reading: each session is measured and stopped on
+    /// the subscription of its own agent, never on another's.
+    others: HashMap<Agent, Figures>,
+    others_reading: HashMap<Agent, (u64, f32, Option<u64>)>,
     /// (time of the reading, 5-hour %, its reset time).
     last_reading: Option<(u64, f32, Option<u64>)>,
     pub five: Option<f32>,
@@ -646,7 +660,11 @@ impl NotesApp {
         let pause = self.ws.settings.orch.pause_for_answer;
         let mut paused: Vec<(String, String, Wait)> = vec![];
         let mut finished: Vec<(usize, String, String)> = vec![];
+        let figures = self.figures_by_agent();
         for (i, r) in self.orch.runs.iter_mut().enumerate() {
+            // The subscription of this session's own agent; none read (an agent that tells
+            // nothing): no figures, and the session stops as unmeasured.
+            let fig = figures.get(&r.agent).copied().unwrap_or_default();
             // How the screen moves (idle = nothing drawn for a while).
             let screen = r.term.text();
             let h = hash(&screen);
@@ -715,7 +733,7 @@ impl NotesApp {
                         r.term.write(b"\r");
                         r.reader.turn_over = false;
                         r.nudged = false;
-                        r.week_at_turn = self.orch.week;
+                        r.week_at_turn = fig.week;
                         r.phase = if r.summarizing {
                             Phase::Summary(now)
                         } else {
@@ -748,10 +766,10 @@ impl NotesApp {
                     if let Some(msg) = r.reader.limit_hit.clone().or(on_screen) {
                         let now_ms = crate::model::now_ms();
                         let reset = auto::limit_reset(&msg, now_ms)
-                            .or(if self.orch.week.is_some_and(|w| w >= 99.0) {
-                                self.orch.week_reset
+                            .or(if fig.week.is_some_and(|w| w >= 99.0) {
+                                fig.week_reset
                             } else {
-                                self.orch.five_reset
+                                fig.five_reset
                             })
                             .filter(|&t| t > now_ms)
                             // Unknown: try again in an hour; still limited, it stops again.
@@ -823,7 +841,7 @@ impl NotesApp {
                         }
                         r.turns += 1;
                         // What this turn took from the week (a reset in between counts for nothing).
-                        if let (Some(a), Some(b)) = (r.week_at_turn, self.orch.week)
+                        if let (Some(a), Some(b)) = (r.week_at_turn, fig.week)
                             && b >= a
                         {
                             r.week_turn = r.week_turn.max(b - a);
@@ -847,7 +865,7 @@ impl NotesApp {
                             sig = Signal::Continue;
                         }
                         r.steps_at_turn = steps_now.iter().map(|s| s.id.clone()).collect();
-                        let five = self.orch.five;
+                        let five = fig.five;
                         r.done_streak = if sig == Signal::Done {
                             r.done_streak + 1
                         } else {
@@ -888,7 +906,7 @@ impl NotesApp {
                             limit: r.limit,
                             five,
                             global,
-                            week: self.orch.week,
+                            week: fig.week,
                             week_limit,
                             week_turn: r.week_turn,
                             measured: r.measured,
@@ -897,8 +915,8 @@ impl NotesApp {
                         });
                         // Stopped by a quota: when it resets, to start again then.
                         match stop.as_ref().map(Stop::quota) {
-                            Some(Quota::FiveHours) => r.quota_reset = self.orch.five_reset,
-                            Some(Quota::Week) => r.quota_reset = self.orch.week_reset,
+                            Some(Quota::FiveHours) => r.quota_reset = fig.five_reset,
+                            Some(Quota::Week) => r.quota_reset = fig.week_reset,
                             _ => {}
                         }
                         let reason = stop.map(|s| s.text());
@@ -1038,6 +1056,7 @@ impl NotesApp {
             return;
         }
         self.orch.usage_polled = Some(Instant::now());
+        self.other_agents_tick();
         // A window that has reset is dropped by read(): forget its old figure too, so a
         // limit reached before the reset doesn't block what follows.
         let Some(u) = crate::usage::read() else {
@@ -1065,26 +1084,56 @@ impl NotesApp {
             return;
         };
         self.orch.five = Some(five.pct);
-        let prev = self.orch.last_reading;
-        if prev.is_some_and(|(at, _, _)| at == u.at) {
-            return;
-        }
-        self.orch.last_reading = Some((u.at, five.pct, five.resets_at));
-        let rise = window_rise(prev.map(|(_, p, r)| (p, r)), five.pct, five.resets_at);
-        let deltas: Vec<u64> = self
-            .orch
-            .runs
-            .iter()
-            .map(|r| r.reader.tokens.saturating_sub(r.tokens_counted))
-            .collect();
-        let shares = split_rise(rise, &deltas);
-        for (r, s) in self.orch.runs.iter_mut().zip(shares) {
-            if u.at >= r.started_wall {
-                r.measured = true;
+        apply_reading(
+            &mut self.orch.runs,
+            Agent::ClaudeCode,
+            &mut self.orch.last_reading,
+            u.at,
+            &five,
+        );
+    }
+
+    /// The same for the other agents that have sessions running and tell their figures
+    /// (Codex); those that tell none (Gemini, Vibe) stay unmeasured, so their sessions stop
+    /// (`Stop::Unmeasured`) rather than run with no ceiling.
+    fn other_agents_tick(&mut self) {
+        let mut agents: Vec<Agent> = vec![];
+        for a in self.orch.runs.iter().map(|r| r.agent) {
+            if a != Agent::ClaudeCode && crate::usage::reports_usage(a) && !agents.contains(&a) {
+                agents.push(a);
             }
-            r.pct += s;
-            r.tokens_counted = r.reader.tokens;
         }
+        self.orch.others.retain(|a, _| agents.contains(a));
+        for a in agents {
+            let Some(u) = crate::usage::read_for(a) else {
+                // Reset or never seen: forget the old figures (as for Claude Code).
+                self.orch.others.remove(&a);
+                continue;
+            };
+            self.orch.others.insert(a, Figures::of(&u));
+            if let Some(five) = u.five() {
+                let mut last = self.orch.others_reading.get(&a).copied();
+                apply_reading(&mut self.orch.runs, a, &mut last, u.at, five);
+                if let Some(l) = last {
+                    self.orch.others_reading.insert(a, l);
+                }
+            }
+        }
+    }
+
+    /// The figures each session is measured and stopped on: those of its own agent.
+    fn figures_by_agent(&self) -> HashMap<Agent, Figures> {
+        let mut m = self.orch.others.clone();
+        m.insert(
+            Agent::ClaudeCode,
+            Figures {
+                five: self.orch.five,
+                week: self.orch.week,
+                five_reset: self.orch.five_reset,
+                week_reset: self.orch.week_reset,
+            },
+        );
+        m
     }
 
     /// Merge into main the finished sessions of projects that allow it, once closed, in
@@ -3579,6 +3628,62 @@ fn stop_reason(t: &TurnEnd) -> Option<Stop> {
     })
 }
 
+impl Figures {
+    fn of(u: &crate::usage::Usage) -> Self {
+        Figures {
+            five: u.five().map(|w| w.pct),
+            week: u.week().map(|w| w.pct),
+            five_reset: u.five().and_then(|w| w.resets_at),
+            week_reset: u.week().and_then(|w| w.resets_at),
+        }
+    }
+}
+
+/// A new reading of `agent`'s 5-hour window (taken at `at`): its rise since `last` is shared
+/// between that agent's running sessions only, by the tokens each used since then; the
+/// sessions of other agents, on other subscriptions, get nothing of it.
+fn apply_reading(
+    runs: &mut [LiveRun],
+    agent: Agent,
+    last: &mut Option<(u64, f32, Option<u64>)>,
+    at: u64,
+    five: &crate::usage::Window,
+) {
+    let prev = *last;
+    if prev.is_some_and(|(a, _, _)| a == at) {
+        return;
+    }
+    *last = Some((at, five.pct, five.resets_at));
+    let rise = window_rise(prev.map(|(_, p, r)| (p, r)), five.pct, five.resets_at);
+    let sessions: Vec<(Agent, u64)> = runs
+        .iter()
+        .map(|r| (r.agent, r.reader.tokens.saturating_sub(r.tokens_counted)))
+        .collect();
+    for (r, s) in runs.iter_mut().zip(agent_shares(&sessions, agent, rise)) {
+        let Some(s) = s else { continue };
+        if at >= r.started_wall {
+            r.measured = true;
+        }
+        r.pct += s;
+        r.tokens_counted = r.reader.tokens;
+    }
+}
+
+/// Each session's share of a rise of `agent`'s window (`sessions`: each one's agent and the
+/// tokens it used since the last reading): None for the sessions of other agents.
+fn agent_shares(sessions: &[(Agent, u64)], agent: Agent, rise: f32) -> Vec<Option<f32>> {
+    let deltas: Vec<u64> = sessions
+        .iter()
+        .filter(|(a, _)| *a == agent)
+        .map(|(_, d)| *d)
+        .collect();
+    let mut shares = split_rise(rise, &deltas).into_iter();
+    sessions
+        .iter()
+        .map(|(a, _)| if *a == agent { shares.next() } else { None })
+        .collect()
+}
+
 /// The last `n` lines of a terminal screen that hold something.
 fn last_lines(screen: &str, n: usize) -> String {
     let lines: Vec<&str> = screen.lines().filter(|l| !l.trim().is_empty()).collect();
@@ -4858,6 +4963,45 @@ mod tests {
             }
         );
         assert_eq!(window_bar(120.0, 5.0, 50.0, 200.0).stop, 100.0);
+    }
+
+    #[test]
+    fn each_session_is_stopped_on_its_own_agents_subscription() {
+        use super::{Agent, Figures, Stop, agent_shares, stop_reason};
+        // A rise of Codex's window goes to the Codex sessions only, by their tokens.
+        let sessions = [(Agent::ClaudeCode, 500), (Agent::Codex, 300), (Agent::Codex, 100)];
+        let s = agent_shares(&sessions, Agent::Codex, 8.0);
+        assert_eq!(s[0], None);
+        assert!((s[1].unwrap() - 6.0).abs() < 0.01 && (s[2].unwrap() - 2.0).abs() < 0.01);
+        let s = agent_shares(&sessions, Agent::ClaudeCode, 4.0);
+        assert!((s[0].unwrap() - 4.0).abs() < 0.01 && s[1].is_none() && s[2].is_none());
+        // Claude Code's window full, Codex's not: the Codex session goes on.
+        let claude = Figures { five: Some(80.0), ..Default::default() };
+        let codex = Figures { five: Some(10.0), week: Some(5.0), ..Default::default() };
+        let end = |f: Figures| {
+            let mut t = calm();
+            (t.five, t.week) = (f.five, f.week);
+            stop_reason(&t)
+        };
+        assert_eq!(end(claude), Some(Stop::GlobalLimit(60.0)));
+        assert_eq!(end(codex), None);
+        // An agent that tells no figures: never measured, so it stops at its second turn.
+        let mut t = calm();
+        (t.five, t.week, t.measured, t.turns) = (None, None, false, 2);
+        assert_eq!(stop_reason(&t), Some(Stop::Unmeasured));
+        // And none is ever started alone without its figures.
+        for a in Agent::ALL {
+            assert!(!a.ready() || crate::usage::reports_usage(a), "{a:?}");
+        }
+        // Their limit messages end the session on the spot.
+        for m in [
+            "You've hit your usage limit. Try again in 2 hours.",
+            "[API Error: Quota exceeded for quota metric 'Gemini 2.5 Pro Requests']",
+            "RESOURCE_EXHAUSTED",
+            "Error: Rate limit exceeded (429)",
+        ] {
+            assert!(crate::auto::is_limit_message(m), "{m}");
+        }
     }
 
     /// A turn that ends with nothing to stop on: under every limit, measured, few turns.
