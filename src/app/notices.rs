@@ -62,12 +62,22 @@ impl NotesApp {
         if text.is_empty() {
             return;
         }
-        let (title, body) = if text.chars().count() > TITLE_MAX { (crate::richtext::one_line(&text, TITLE_MAX), text.clone()) } else { (text.clone(), String::new()) };
+        let (title, body) = if text.chars().count() > TITLE_MAX {
+            (crate::richtext::one_line(&text, TITLE_MAX), text.clone())
+        } else {
+            (text.clone(), String::new())
+        };
         // The same message again (a retry loop, a save that keeps failing): bring the unread
         // one back to the top instead of piling copies up, and pop it up at most once a minute.
         let now = now_ms();
         let mut fresh = true;
-        if let Some(m) = self.ws.inbox.iter_mut().rev().find(|m| !m.read && m.kind == kind && m.title == title && m.text == body) {
+        if let Some(m) = self
+            .ws
+            .inbox
+            .iter_mut()
+            .rev()
+            .find(|m| !m.read && m.kind == kind && m.title == title && m.text == body)
+        {
             fresh = now.saturating_sub(m.at) >= 60_000;
             m.at = now;
         } else {
@@ -87,7 +97,12 @@ impl NotesApp {
         // Same text already up: start it again rather than stacking it.
         self.toasts.retain(|t| t.text != text);
         self.toast_seq += 1;
-        self.toasts.push(Toast { id: self.toast_seq, text, error, born: Instant::now() });
+        self.toasts.push(Toast {
+            id: self.toast_seq,
+            text,
+            error,
+            born: Instant::now(),
+        });
         // At most four at once, the oldest leave first.
         if self.toasts.len() > 4 {
             let cut = self.toasts.len() - 4;
@@ -108,7 +123,10 @@ impl NotesApp {
         let mut next_wake = f32::MAX;
         let bottom = 22.0 + self.dock_h + if fab { 60.0 } else { 0.0 };
         egui::Area::new(egui::Id::unique("toasts"))
-            .anchor(egui::Align2::RIGHT_BOTTOM, egui::vec2(-22.0 - self.side_w, -bottom))
+            .anchor(
+                egui::Align2::RIGHT_BOTTOM,
+                egui::vec2(-22.0 - self.side_w, -bottom),
+            )
             .order(egui::Order::Tooltip)
             .show(ctx, |ui| {
                 ui.set_max_width(360.0);
@@ -124,35 +142,86 @@ impl NotesApp {
                     next_wake = next_wake.min(if alpha < 1.0 { 0.03 } else { life - age - 0.4 });
                     let frame = egui::Frame::new()
                         .fill(t.card.gamma_multiply(alpha))
-                        .stroke(egui::Stroke::new(1.0, if toast.error { red.gamma_multiply(0.6 * alpha) } else { t.border.gamma_multiply(alpha) }))
+                        .stroke(egui::Stroke::new(
+                            1.0,
+                            if toast.error {
+                                red.gamma_multiply(0.6 * alpha)
+                            } else {
+                                t.border.gamma_multiply(alpha)
+                            },
+                        ))
                         .corner_radius(10.0)
                         .inner_margin(egui::Margin::symmetric(12, 9))
-                        .shadow(egui::Shadow { offset: [0, 4], blur: 14, spread: 0, color: Color32::from_black_alpha((40.0 * alpha) as u8) });
+                        .shadow(egui::Shadow {
+                            offset: [0, 4],
+                            blur: 14,
+                            spread: 0,
+                            color: Color32::from_black_alpha((40.0 * alpha) as u8),
+                        });
                     let r = frame.show(ui, |ui| {
                         ui.set_width(336.0);
                         ui.horizontal_top(|ui| {
                             if toast.error {
-                                let (dot, _) = ui.allocate_exact_size(egui::vec2(10.0, 18.0), egui::Sense::hover());
-                                ui.painter().circle_filled(dot.center(), 4.0, red.gamma_multiply(alpha));
+                                let (dot, _) = ui.allocate_exact_size(
+                                    egui::vec2(10.0, 18.0),
+                                    egui::Sense::hover(),
+                                );
+                                ui.painter().circle_filled(
+                                    dot.center(),
+                                    4.0,
+                                    red.gamma_multiply(alpha),
+                                );
                             }
                             ui.vertical(|ui| {
                                 ui.set_width(ui.available_width() - 24.0);
                                 if toast.error {
-                                    ui.label(RichText::new(crate::tr!("Erreur", "Error")).size(11.5).color(red.gamma_multiply(alpha)));
+                                    ui.label(
+                                        RichText::new(crate::tr!("Erreur", "Error"))
+                                            .size(11.5)
+                                            .color(red.gamma_multiply(alpha)),
+                                    );
                                 }
-                                ui.add(egui::Label::new(RichText::new(&toast.text).size(13.0).color(t.text.gamma_multiply(alpha))).wrap());
+                                ui.add(
+                                    egui::Label::new(
+                                        RichText::new(&toast.text)
+                                            .size(13.0)
+                                            .color(t.text.gamma_multiply(alpha)),
+                                    )
+                                    .wrap(),
+                                );
                             });
-                            if icons::button(ui, icons::Icon::Close, 20.0, t.secondary, t.hover, crate::tr!("Fermer", "Close")).clicked() {
+                            if icons::button(
+                                ui,
+                                icons::Icon::Close,
+                                20.0,
+                                t.secondary,
+                                t.hover,
+                                crate::tr!("Fermer", "Close"),
+                            )
+                            .clicked()
+                            {
                                 close.push(toast.id);
                             }
                         });
                     });
-                    let resp = ui.interact(r.response.rect, egui::Id::unique(("toast", toast.id)), egui::Sense::click());
+                    let resp = ui.interact(
+                        r.response.rect,
+                        egui::Id::unique(("toast", toast.id)),
+                        egui::Sense::click(),
+                    );
                     // Hovered: it stays up while it's read.
                     if resp.hovered() {
                         toast.born = Instant::now();
                     }
-                    if toast.error && resp.on_hover_text(crate::tr!("Ouvrir la boîte de réception", "Open the inbox")).clicked() && !close.contains(&toast.id) {
+                    if toast.error
+                        && resp
+                            .on_hover_text(crate::tr!(
+                                "Ouvrir la boîte de réception",
+                                "Open the inbox"
+                            ))
+                            .clicked()
+                        && !close.contains(&toast.id)
+                    {
                         open_inbox = true;
                         close.push(toast.id);
                     }
@@ -164,7 +233,9 @@ impl NotesApp {
             self.view = View::Inbox;
         }
         if !self.toasts.is_empty() {
-            ctx.request_repaint_after(std::time::Duration::from_secs_f32(next_wake.clamp(0.016, 10.0)));
+            ctx.request_repaint_after(std::time::Duration::from_secs_f32(
+                next_wake.clamp(0.016, 10.0),
+            ));
         }
     }
 }
@@ -175,7 +246,13 @@ mod tests {
 
     #[test]
     fn results_map_to_levels() {
-        assert_eq!(Notice::from_result(Ok("ok".into())), Notice::Info("ok".into()));
-        assert_eq!(Notice::from_result(Err("ko".into())), Notice::Error("ko".into()));
+        assert_eq!(
+            Notice::from_result(Ok("ok".into())),
+            Notice::Info("ok".into())
+        );
+        assert_eq!(
+            Notice::from_result(Err("ko".into())),
+            Notice::Error("ko".into())
+        );
     }
 }

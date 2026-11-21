@@ -14,8 +14,8 @@ mod awake;
 mod clip;
 mod collab;
 mod docs;
-mod live;
 mod git;
+mod live;
 mod mcp;
 mod model;
 mod opener;
@@ -27,10 +27,10 @@ mod secret;
 mod secure;
 mod sessions;
 mod setup;
-mod sync;
-mod terminal;
 mod shot;
 mod store;
+mod sync;
+mod terminal;
 mod update;
 mod usage;
 
@@ -127,7 +127,11 @@ fn main() {
                     // From the read to the write: an AI's write through MCP isn't overwritten.
                     let _lock = store::lock_workspace();
                     let mut ws = store::load();
-                    let stem = std::path::Path::new(file).file_stem().and_then(|s| s.to_str()).unwrap_or("Import").to_string();
+                    let stem = std::path::Path::new(file)
+                        .file_stem()
+                        .and_then(|s| s.to_str())
+                        .unwrap_or("Import")
+                        .to_string();
                     let page = store::page_from_markdown(&md, &stem);
                     let title = page.display_title();
                     ws.pages.push(page);
@@ -150,8 +154,14 @@ fn main() {
             None => usage("import a besoin d'un fichier"),
         },
         Some("serveur") | Some("server") => {
-            let port = args.get(1).and_then(|p| p.parse().ok()).unwrap_or(live::DEFAULT_PORT);
-            let code = args.get(2).cloned().unwrap_or_else(|| model::new_id()[..8].to_string());
+            let port = args
+                .get(1)
+                .and_then(|p| p.parse().ok())
+                .unwrap_or(live::DEFAULT_PORT);
+            let code = args
+                .get(2)
+                .cloned()
+                .unwrap_or_else(|| model::new_id()[..8].to_string());
             run_server(port, &code)
         }
         Some("sync") => {
@@ -179,7 +189,11 @@ fn main() {
         // macOS may pass a process serial number when the app is opened from Finder.
         Some(a) if a.starts_with("-psn_") => run_window(None),
         // A link copied with Cmd/Ctrl+L.
-        Some(a) if a.starts_with("orchestra://page/") => run_window(Some(a["orchestra://page/".len()..].trim_end_matches('/').to_string())),
+        Some(a) if a.starts_with("orchestra://page/") => run_window(Some(
+            a["orchestra://page/".len()..]
+                .trim_end_matches('/')
+                .to_string(),
+        )),
         Some(other) => usage(&format!("option inconnue : {other}")),
     };
     std::process::exit(code);
@@ -197,7 +211,11 @@ fn run_server(port: u16, code: &str) -> i32 {
             return 1;
         }
     };
-    println!("Serveur en direct sur {} (port {}), code « {code} »", server.status().address, server.port().unwrap_or(port));
+    println!(
+        "Serveur en direct sur {} (port {}), code « {code} »",
+        server.status().address,
+        server.port().unwrap_or(port)
+    );
     println!("Données : {}", store::workspace_path().display());
     loop {
         for msg in server.drain() {
@@ -215,9 +233,10 @@ fn run_server(port: u16, code: &str) -> i32 {
                     let _lock = store::lock_workspace();
                     let mut ws = store::load();
                     if absorb(&mut ws, m)
-                        && let Err(e) = store::save(&ws) {
-                            eprintln!("orchestra: enregistrement impossible : {e}");
-                        }
+                        && let Err(e) = store::save(&ws)
+                    {
+                        eprintln!("orchestra: enregistrement impossible : {e}");
+                    }
                 }
                 _ => {}
             }
@@ -231,14 +250,26 @@ fn run_server(port: u16, code: &str) -> i32 {
 /// private pages that must never reach the others.
 fn welcome(ws: &model::Workspace) -> Vec<live::LiveMsg> {
     let out = ws.shared_copy();
-    vec![live::LiveMsg::Pages { pages: out.pages, deleted: out.deleted }, live::LiveMsg::Chat { msgs: out.chat.into_values().collect() }]
+    vec![
+        live::LiveMsg::Pages {
+            pages: out.pages,
+            deleted: out.deleted,
+        },
+        live::LiveMsg::Chat {
+            msgs: out.chat.into_values().collect(),
+        },
+    ]
 }
 
 /// Merge what a peer sent into the server's copy; true when it is to be saved.
 fn absorb(ws: &mut model::Workspace, msg: live::LiveMsg) -> bool {
     match msg {
         live::LiveMsg::Pages { pages, deleted } => {
-            let other = model::Workspace { pages, deleted, ..Default::default() };
+            let other = model::Workspace {
+                pages,
+                deleted,
+                ..Default::default()
+            };
             collab::merge(ws, &other) > 0 || !other.deleted.is_empty()
         }
         live::LiveMsg::Chat { msgs } => ws.accept_chat(msgs) > 0,
@@ -256,7 +287,10 @@ fn window_size() -> [f32; 2] {
     use model::original::*;
     std::env::var("ORCHESTRA_WINDOW")
         .ok()
-        .and_then(|v| v.split_once('x').and_then(|(w, h)| Some([w.trim().parse().ok()?, h.trim().parse().ok()?])))
+        .and_then(|v| {
+            v.split_once('x')
+                .and_then(|(w, h)| Some([w.trim().parse().ok()?, h.trim().parse().ok()?]))
+        })
         .unwrap_or([DEFAULT_WINDOW_WIDTH, DEFAULT_WINDOW_HEIGHT])
 }
 
@@ -280,7 +314,11 @@ fn run_window(open: Option<String>) -> i32 {
             .with_title_shown(false),
         ..Default::default()
     };
-    match eframe::run_native("Orchestra", options, Box::new(move |cc| Ok(Box::new(app::Shell::new(cc, open))))) {
+    match eframe::run_native(
+        "Orchestra",
+        options,
+        Box::new(move |cc| Ok(Box::new(app::Shell::new(cc, open)))),
+    ) {
         Ok(()) => 0,
         Err(e) => {
             eprintln!("orchestra: impossible d'ouvrir la fenêtre : {e}");
@@ -301,17 +339,35 @@ mod server_tests {
         let shared = ws.create_project("Partagé", "/Users/moi/code/app");
         let private = ws.create_project("Privé", "");
         let notes = ws.create_page("Notes perso", None);
-        ws.page_mut(&shared).unwrap().project.as_mut().unwrap().shared = true;
+        ws.page_mut(&shared)
+            .unwrap()
+            .project
+            .as_mut()
+            .unwrap()
+            .shared = true;
         for (pid, txt) in [(&shared, "salut"), (&private, "secret")] {
-            ws.chat.insert(txt.into(), crate::model::ChatMsg { id: txt.into(), project: pid.clone(), author: "moi".into(), text: txt.into(), at: 1 });
+            ws.chat.insert(
+                txt.into(),
+                crate::model::ChatMsg {
+                    id: txt.into(),
+                    project: pid.clone(),
+                    author: "moi".into(),
+                    text: txt.into(),
+                    at: 1,
+                },
+            );
         }
         let msgs = super::welcome(&ws);
-        let Some(LiveMsg::Pages { pages, .. }) = msgs.first() else { panic!("pages first") };
+        let Some(LiveMsg::Pages { pages, .. }) = msgs.first() else {
+            panic!("pages first")
+        };
         let ids: Vec<&str> = pages.iter().map(|p| p.id.as_str()).collect();
         assert_eq!(ids, vec![shared.as_str()]);
         assert!(!ids.contains(&notes.as_str()) && !ids.contains(&private.as_str()));
         assert!(pages[0].project.as_ref().unwrap().folder.is_empty());
-        let Some(LiveMsg::Chat { msgs: chat }) = msgs.get(1) else { panic!("chat second") };
+        let Some(LiveMsg::Chat { msgs: chat }) = msgs.get(1) else {
+            panic!("chat second")
+        };
         assert_eq!(chat.len(), 1);
         assert_eq!(chat[0].text, "salut");
     }
@@ -322,16 +378,45 @@ mod server_tests {
     fn the_server_merges_into_what_is_on_file() {
         let mut theirs = crate::model::Workspace::default();
         let p = theirs.create_project("Partagé", "");
-        theirs.page_mut(&p).unwrap().project.as_mut().unwrap().shared = true;
+        theirs
+            .page_mut(&p)
+            .unwrap()
+            .project
+            .as_mut()
+            .unwrap()
+            .shared = true;
         let mut on_file = crate::model::Workspace::default();
         let mcp = on_file.create_page("Écrite par une IA", None);
         let pages = theirs.shared_copy().pages;
-        assert!(super::absorb(&mut on_file, LiveMsg::Pages { pages, deleted: Default::default() }));
+        assert!(super::absorb(
+            &mut on_file,
+            LiveMsg::Pages {
+                pages,
+                deleted: Default::default()
+            }
+        ));
         assert!(on_file.page(&mcp).is_some() && on_file.page(&p).is_some());
-        let m = crate::model::ChatMsg { id: "m1".into(), project: p.clone(), author: "a".into(), text: "salut".into(), at: 1 };
-        assert!(super::absorb(&mut on_file, LiveMsg::Chat { msgs: vec![m.clone()] }));
-        assert!(!super::absorb(&mut on_file, LiveMsg::Chat { msgs: vec![m] }));
-        assert!(!super::absorb(&mut on_file, LiveMsg::Bye { name: "x".into() }));
+        let m = crate::model::ChatMsg {
+            id: "m1".into(),
+            project: p.clone(),
+            author: "a".into(),
+            text: "salut".into(),
+            at: 1,
+        };
+        assert!(super::absorb(
+            &mut on_file,
+            LiveMsg::Chat {
+                msgs: vec![m.clone()]
+            }
+        ));
+        assert!(!super::absorb(
+            &mut on_file,
+            LiveMsg::Chat { msgs: vec![m] }
+        ));
+        assert!(!super::absorb(
+            &mut on_file,
+            LiveMsg::Bye { name: "x".into() }
+        ));
     }
 }
 

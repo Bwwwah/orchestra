@@ -8,18 +8,22 @@
 //! Runs go one after the other, so two agents never write the workspace at the same time.
 //! It uses the person's own Claude / Codex subscription, as if they had typed the request.
 
+use crate::LockOrRecover;
 use crate::sessions::Tool;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::atomic::{AtomicBool, Ordering};
-use crate::LockOrRecover;
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 /// API keys found in the environment make Claude Code / Codex bill API credits instead of
 /// the person's subscription ("Credit balance is too low"): agents launched from the
 /// dashboard never get them, so they use the account the person logged in with.
-pub const API_KEY_VARS: [&str; 3] = ["ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "OPENAI_API_KEY"];
+pub const API_KEY_VARS: [&str; 3] = [
+    "ANTHROPIC_API_KEY",
+    "ANTHROPIC_AUTH_TOKEN",
+    "OPENAI_API_KEY",
+];
 
 /// What a Claude Code session puts in the environment of the programs it runs. Orchestra
 /// started from one (`cargo run` in a Claude Code terminal) would hand them down: a Claude
@@ -69,10 +73,20 @@ fn shell_path_is_read_once_and_shared() {
     let a = shell_path();
     let first = start.elapsed();
     let t = Instant::now();
-    let others: Vec<String> = (0..8).map(|_| std::thread::spawn(shell_path)).map(|h| h.join().unwrap()).collect();
-    assert!(others.iter().all(|p| *p == a), "every caller sees the same PATH");
+    let others: Vec<String> = (0..8)
+        .map(|_| std::thread::spawn(shell_path))
+        .map(|h| h.join().unwrap())
+        .collect();
+    assert!(
+        others.iter().all(|p| *p == a),
+        "every caller sees the same PATH"
+    );
     // The first call may start a shell; the next ones must not.
-    assert!(t.elapsed() < Duration::from_millis(50), "later calls took {:?} (first {first:?})", t.elapsed());
+    assert!(
+        t.elapsed() < Duration::from_millis(50),
+        "later calls took {:?} (first {first:?})",
+        t.elapsed()
+    );
     assert!(!a.is_empty());
 }
 
@@ -88,7 +102,9 @@ fn read_shell_path() -> String {
         use std::os::unix::process::CommandExt;
         let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".into());
         let mut cmd = crate::proc::command(&shell);
-        cmd.args(["-lic", "printf '__PATH__%s\\n' \"$PATH\""]).stdin(Stdio::null()).stderr(Stdio::null());
+        cmd.args(["-lic", "printf '__PATH__%s\\n' \"$PATH\""])
+            .stdin(Stdio::null())
+            .stderr(Stdio::null());
         // An interactive shell takes over its terminal (job control). When Orchestra runs as
         // the MCP server of a Claude Code session, that terminal is Claude Code's, which
         // then loses it and quits in the middle of its turn. In a session of its own, the
@@ -104,12 +120,19 @@ fn read_shell_path() -> String {
         let from_shell = out
             .ok()
             .and_then(|o| String::from_utf8(o.stdout).ok())
-            .and_then(|s| s.lines().find_map(|l| l.strip_prefix("__PATH__").map(String::from)))
+            .and_then(|s| {
+                s.lines()
+                    .find_map(|l| l.strip_prefix("__PATH__").map(String::from))
+            })
             .unwrap_or_default();
         parts.extend(std::env::split_paths(&from_shell).filter(|p| !p.as_os_str().is_empty()));
     }
     let home = dirs::home_dir().unwrap_or_default();
-    let mut extras = vec![home.join(".local/bin"), home.join(".claude/local"), home.join(".npm-global/bin")];
+    let mut extras = vec![
+        home.join(".local/bin"),
+        home.join(".claude/local"),
+        home.join(".npm-global/bin"),
+    ];
     if cfg!(windows) {
         if let Some(d) = dirs::data_dir() {
             extras.push(d.join("npm"));
@@ -128,13 +151,23 @@ fn read_shell_path() -> String {
             parts.push(p);
         }
     }
-    std::env::join_paths(parts).map(|s| s.to_string_lossy().to_string()).unwrap_or_default()
+    std::env::join_paths(parts)
+        .map(|s| s.to_string_lossy().to_string())
+        .unwrap_or_default()
 }
 
 /// A program on this PATH (with `.exe` / `.cmd` on Windows).
 pub fn which(name: &str, path: &str) -> Option<PathBuf> {
-    let exts: &[&str] = if cfg!(windows) { &[".exe", ".cmd", ".bat", ""] } else { &[""] };
-    std::env::split_paths(path).find_map(|d| exts.iter().map(|e| d.join(format!("{name}{e}"))).find(|p| p.is_file()))
+    let exts: &[&str] = if cfg!(windows) {
+        &[".exe", ".cmd", ".bat", ""]
+    } else {
+        &[""]
+    };
+    std::env::split_paths(path).find_map(|d| {
+        exts.iter()
+            .map(|e| d.join(format!("{name}{e}")))
+            .find(|p| p.is_file())
+    })
 }
 
 /// Claude Code and Codex, when installed.
@@ -144,7 +177,6 @@ pub fn detect(path: &str) -> Vec<Agent> {
         .filter_map(|(tool, name)| which(name, path).map(|bin| Agent { tool, bin }))
         .collect()
 }
-
 
 /// Make sure the agent knows the dashboard's MCP server (added once, for every folder).
 pub fn ensure_mcp(agent: &Agent, exe: &Path, path: &str) -> Result<&'static str, String> {
@@ -158,12 +190,14 @@ pub fn ensure_mcp(agent: &Agent, exe: &Path, path: &str) -> Result<&'static str,
 
 /// What the agent is asked, in the project's folder.
 pub fn prompt(folder: &str) -> String {
-    crate::trf!("Tu es connecté au tableau de bord « orchestra » par MCP. Le projet est dans le dossier « {folder} ».\n\
+    crate::trf!(
+        "Tu es connecté au tableau de bord « orchestra » par MCP. Le projet est dans le dossier « {folder} ».\n\
          1. Appelle get_project_state avec folder = « {folder} » pour voir s'il existe déjà.\n\
          2. Examine rapidement le projet SANS RIEN MODIFIER : README, structure des dossiers, `git log --oneline -20`, `git status`.\n\
          3. S'il n'existe pas, appelle create_project (title : nom court et lisible du projet, folder : « {folder} ») ; sinon update_project.\n\
             Donne status, et l'état des lieux avec les listes done, in_progress et blockers : 3 à 6 éléments chacune au plus, une phrase courte par élément, sans Markdown.\n\
-         Ne modifie aucun fichier, ne lance aucune autre commande. Termine en répondant seulement « ok ».", "You are connected to the « orchestra » dashboard through MCP. The project is in the folder « {folder} ».\n\
+         Ne modifie aucun fichier, ne lance aucune autre commande. Termine en répondant seulement « ok ».",
+        "You are connected to the « orchestra » dashboard through MCP. The project is in the folder « {folder} ».\n\
          1. Call get_project_state with folder = « {folder} » to see if it already exists.\n\
          2. Look quickly at the project WITHOUT CHANGING ANYTHING: README, folder structure, `git log --oneline -20`, `git status`.\n\
          3. If it doesn't exist, call create_project (title: short readable name of the project, folder: « {folder} »); otherwise update_project.\n\
@@ -188,18 +222,35 @@ fn agent_args(tool: Tool, prompt: &str) -> Vec<String> {
             "--disallowedTools".into(),
             "mcp__orchestra__add_steps".into(),
         ],
-        Tool::Codex => vec!["exec".into(), "--sandbox".into(), "read-only".into(), "--skip-git-repo-check".into(), prompt.into()],
+        Tool::Codex => vec![
+            "exec".into(),
+            "--sandbox".into(),
+            "read-only".into(),
+            "--skip-git-repo-check".into(),
+            prompt.into(),
+        ],
     }
 }
 
 fn last_line(s: &str) -> Option<String> {
-    s.lines().rev().map(str::trim).find(|l| !l.is_empty()).map(|l| crate::richtext::one_line(l, 160))
+    s.lines()
+        .rev()
+        .map(str::trim)
+        .find(|l| !l.is_empty())
+        .map(|l| crate::richtext::one_line(l, 160))
 }
 
 /// Run one agent in one folder; stops it after `PER_PROJECT` or when `cancel` is set.
 /// Run an agent headless in `folder` with these arguments. Returns its final answer and a
 /// short report ("terminé en 42 s"), or an error people can act on.
-fn run_agent(agent: &Agent, folder: &str, args: Vec<String>, path: &str, cancel: &AtomicBool, limit: Duration) -> Result<(String, String), String> {
+fn run_agent(
+    agent: &Agent,
+    folder: &str,
+    args: Vec<String>,
+    path: &str,
+    cancel: &AtomicBool,
+    limit: Duration,
+) -> Result<(String, String), String> {
     let dir = crate::project::normalize_folder(folder);
     if !dir.is_dir() {
         return Err(crate::tr!("dossier introuvable", "folder not found").into());
@@ -227,8 +278,18 @@ fn run_agent(agent: &Agent, folder: &str, args: Vec<String>, path: &str, cancel:
             s
         })
     };
-    let out_t = read(child.stdout.take().map(|x| Box::new(x) as Box<dyn std::io::Read + Send>));
-    let err_t = read(child.stderr.take().map(|x| Box::new(x) as Box<dyn std::io::Read + Send>));
+    let out_t = read(
+        child
+            .stdout
+            .take()
+            .map(|x| Box::new(x) as Box<dyn std::io::Read + Send>),
+    );
+    let err_t = read(
+        child
+            .stderr
+            .take()
+            .map(|x| Box::new(x) as Box<dyn std::io::Read + Send>),
+    );
     let start = Instant::now();
     let status = loop {
         if let Some(st) = child.try_wait().map_err(|e| e.to_string())? {
@@ -237,7 +298,11 @@ fn run_agent(agent: &Agent, folder: &str, args: Vec<String>, path: &str, cancel:
         if cancel.load(Ordering::Relaxed) || start.elapsed() > limit {
             let _ = child.kill();
             let _ = child.wait();
-            return Err(if cancel.load(Ordering::Relaxed) { crate::tr!("arrêté", "stopped").into() } else { crate::tr!("trop long, arrêté", "too long, stopped").into() });
+            return Err(if cancel.load(Ordering::Relaxed) {
+                crate::tr!("arrêté", "stopped").into()
+            } else {
+                crate::tr!("trop long, arrêté", "too long, stopped").into()
+            });
         }
         std::thread::sleep(Duration::from_millis(300));
     };
@@ -251,18 +316,38 @@ fn run_agent(agent: &Agent, folder: &str, args: Vec<String>, path: &str, cancel:
         return Err(crate::tr!("Claude Code est connecté avec une clé API sans crédit, pas à votre abonnement : lancez `claude`, puis `/login` et choisissez votre compte Claude (Pro / Max).", "Claude Code is signed in with an API key without credit, not your subscription: run `claude`, then `/login` and choose your Claude account (Pro / Max).").into());
     }
     if agent.tool == Tool::ClaudeCode
-        && let Ok(v) = serde_json::from_str::<serde_json::Value>(out.trim()) {
-            let result = v.get("result").and_then(|x| x.as_str()).unwrap_or("").to_string();
-            if v.get("is_error").and_then(|x| x.as_bool()) == Some(true) {
-                return Err(crate::richtext::one_line(if result.is_empty() { "erreur" } else { &result }, 160));
-            }
-            let turns = v.get("num_turns").and_then(|x| x.as_u64()).unwrap_or(0);
-            return Ok((result, crate::trf!("terminé en {} s, {turns} échanges", "done in {} s, {turns} exchanges", start.elapsed().as_secs())));
+        && let Ok(v) = serde_json::from_str::<serde_json::Value>(out.trim())
+    {
+        let result = v
+            .get("result")
+            .and_then(|x| x.as_str())
+            .unwrap_or("")
+            .to_string();
+        if v.get("is_error").and_then(|x| x.as_bool()) == Some(true) {
+            return Err(crate::richtext::one_line(
+                if result.is_empty() { "erreur" } else { &result },
+                160,
+            ));
         }
+        let turns = v.get("num_turns").and_then(|x| x.as_u64()).unwrap_or(0);
+        return Ok((
+            result,
+            crate::trf!(
+                "terminé en {} s, {turns} échanges",
+                "done in {} s, {turns} exchanges",
+                start.elapsed().as_secs()
+            ),
+        ));
+    }
     if status.success() {
-        Ok((out.trim().to_string(), crate::trf!("terminé en {} s", "done in {} s", start.elapsed().as_secs())))
+        Ok((
+            out.trim().to_string(),
+            crate::trf!("terminé en {} s", "done in {} s", start.elapsed().as_secs()),
+        ))
     } else {
-        Err(last_line(&err).or_else(|| last_line(&out)).unwrap_or_else(|| format!("code {}", status.code().unwrap_or(-1))))
+        Err(last_line(&err)
+            .or_else(|| last_line(&out))
+            .unwrap_or_else(|| format!("code {}", status.code().unwrap_or(-1))))
     }
 }
 
@@ -280,12 +365,29 @@ pub fn auth_error_text() -> &'static str {
 }
 
 fn is_auth_error(low: &str) -> bool {
-    ["oauth", "authentication_error", "failed to authenticate", "not logged in", "please run /login", "invalid api key"].iter().any(|k| low.contains(k))
+    [
+        "oauth",
+        "authentication_error",
+        "failed to authenticate",
+        "not logged in",
+        "please run /login",
+        "invalid api key",
+    ]
+    .iter()
+    .any(|k| low.contains(k))
 }
 
 /// Synchronise one folder (see `prompt`).
 fn run_one(agent: &Agent, folder: &str, path: &str, cancel: &AtomicBool) -> Result<String, String> {
-    run_agent(agent, folder, agent_args(agent.tool, &prompt(folder)), path, cancel, PER_PROJECT).map(|(_, report)| report)
+    run_agent(
+        agent,
+        folder,
+        agent_args(agent.tool, &prompt(folder)),
+        path,
+        cancel,
+        PER_PROJECT,
+    )
+    .map(|(_, report)| report)
 }
 
 /// What the agent is asked for the "Regard extérieur" card. `code`: a code project
@@ -316,14 +418,16 @@ pub fn review_prompt(folder: &str, code: bool) -> String {
              ### Suggestions\n- 3 or 4 bullets: concrete next actions, the most useful or urgent first"
         );
     }
-    crate::trf!("Donne un regard extérieur sur le projet du dossier « {folder} ». Lis-le rapidement SANS RIEN MODIFIER \
+    crate::trf!(
+        "Donne un regard extérieur sur le projet du dossier « {folder} ». Lis-le rapidement SANS RIEN MODIFIER \
          (README, structure, `git log --oneline -15`) ; si l'outil get_project_state du serveur orchestra est disponible, \
          appelle-le avec folder = « {folder} » pour connaître l'état des lieux. Si tu peux chercher sur le web, regarde \
          quels projets ou produits similaires existent ou sont apparus récemment.\n\
          Réponds UNIQUEMENT avec ce Markdown, en français, condensé (900 caractères au plus en tout, pas de tableau, pas d'introduction ni de conclusion) :\n\
          ### Avis\n- 2 ou 3 puces : forces et faiblesses, sans complaisance\n\
          ### Projets similaires\n- 2 ou 3 puces : nom — en quoi il ressemble ou diffère (écris « rien de notable » si tu n'en vois pas)\n\
-         ### Suggestions\n- 3 ou 4 puces : fonctionnalités ou actions concrètes pour la suite, la plus utile d'abord", "Give an outside view of the project in the folder « {folder} ». Read it quickly WITHOUT CHANGING ANYTHING \
+         ### Suggestions\n- 3 ou 4 puces : fonctionnalités ou actions concrètes pour la suite, la plus utile d'abord",
+        "Give an outside view of the project in the folder « {folder} ». Read it quickly WITHOUT CHANGING ANYTHING \
          (README, structure, `git log --oneline -15`); if the orchestra server's get_project_state tool is available, \
          call it with folder = « {folder} » to know the current state. If you can search the web, look at \
          which similar projects or products exist or appeared recently.\n\
@@ -366,7 +470,8 @@ pub fn fill_prompt(folder: &str, code: bool) -> String {
 }
 
 fn fill_prompt_code(folder: &str) -> String {
-    crate::trf!("Remplis la fiche du projet du dossier « {folder} » dans un tableau de bord. Lis-le rapidement SANS RIEN MODIFIER \
+    crate::trf!(
+        "Remplis la fiche du projet du dossier « {folder} » dans un tableau de bord. Lis-le rapidement SANS RIEN MODIFIER \
          (README, structure des dossiers, `git log --oneline -20`, `git status`). Si tu peux chercher sur le web, regarde quels \
          projets ou produits similaires existent.\n\
          Réponds UNIQUEMENT avec un objet JSON, en français, sans bloc de code :\n\
@@ -375,7 +480,8 @@ fn fill_prompt_code(folder: &str) -> String {
          - notes : une ou deux phrases sur ce qu'est le projet (peut être vide) ;\n\
          - review : un regard extérieur en Markdown, 900 caractères au plus, avec exactement ces sections : « ### Avis » (2 ou 3 puces, forces et faiblesses, sans complaisance), \
          « ### Projets similaires » (2 ou 3 puces « nom — en quoi il ressemble ou diffère », ou « rien de notable »), « ### Suggestions » (3 ou 4 puces, la plus utile d'abord).\n\
-         Ne propose pas de liste de tâches.", "Fill in the card of the project in the folder « {folder} » in a dashboard. Read it quickly WITHOUT CHANGING ANYTHING \
+         Ne propose pas de liste de tâches.",
+        "Fill in the card of the project in the folder « {folder} » in a dashboard. Read it quickly WITHOUT CHANGING ANYTHING \
          (README, folder structure, `git log --oneline -20`, `git status`). If you can search the web, look at which \
          similar projects or products exist.\n\
          Answer ONLY with a JSON object, in English, no code block:\n\
@@ -393,11 +499,28 @@ pub fn parse_fill(answer: &str) -> Result<Fill, String> {
     let (Some(a), Some(b)) = (answer.find('{'), answer.rfind('}')) else {
         return Err(crate::tr!("réponse de l'IA illisible", "unreadable AI answer").into());
     };
-    let v: serde_json::Value = serde_json::from_str(&answer[a..=b]).map_err(|_| crate::tr!("réponse de l'IA illisible", "unreadable AI answer").to_string())?;
+    let v: serde_json::Value = serde_json::from_str(&answer[a..=b])
+        .map_err(|_| crate::tr!("réponse de l'IA illisible", "unreadable AI answer").to_string())?;
     let list = |k: &str| -> Vec<String> {
-        v.get(k).and_then(|x| x.as_array()).map(|a| a.iter().filter_map(|x| x.as_str()).map(|x| x.trim().to_string()).filter(|x| !x.is_empty()).take(8).collect()).unwrap_or_default()
+        v.get(k)
+            .and_then(|x| x.as_array())
+            .map(|a| {
+                a.iter()
+                    .filter_map(|x| x.as_str())
+                    .map(|x| x.trim().to_string())
+                    .filter(|x| !x.is_empty())
+                    .take(8)
+                    .collect()
+            })
+            .unwrap_or_default()
     };
-    let text = |k: &str| v.get(k).and_then(|x| x.as_str()).unwrap_or("").trim().to_string();
+    let text = |k: &str| {
+        v.get(k)
+            .and_then(|x| x.as_str())
+            .unwrap_or("")
+            .trim()
+            .to_string()
+    };
     Ok(Fill {
         status: crate::project::ProjectStatus::from_name(&text("status")),
         done: list("done"),
@@ -410,8 +533,18 @@ pub fn parse_fill(answer: &str) -> Result<Fill, String> {
 
 /// Ask an agent to fill in a project's cards (read-only, web search allowed).
 /// `code`: the project kind forced by the person (None: detected).
-pub fn ask_fill(folder: &str, code: Option<bool>, prefer: Option<Tool>) -> Result<(Fill, Tool), String> {
-    let (answer, tool) = ask(folder, fill_prompt(folder, crate::project::code_kind(folder, code)), "Read,Glob,Grep,Bash(git log:*),Bash(git status:*),Bash(ls:*),WebSearch,WebFetch", 30, prefer)?;
+pub fn ask_fill(
+    folder: &str,
+    code: Option<bool>,
+    prefer: Option<Tool>,
+) -> Result<(Fill, Tool), String> {
+    let (answer, tool) = ask(
+        folder,
+        fill_prompt(folder, crate::project::code_kind(folder, code)),
+        "Read,Glob,Grep,Bash(git log:*),Bash(git status:*),Bash(ls:*),WebSearch,WebFetch",
+        30,
+        prefer,
+    )?;
     Ok((parse_fill(&answer)?, tool))
 }
 
@@ -427,7 +560,13 @@ pub fn parse_tasks(answer: &str) -> Vec<String> {
             .or_else(|| l.strip_prefix("• "))
             .or_else(|| {
                 let d = l.find(|c: char| !c.is_ascii_digit())?;
-                (d > 0).then(|| l[d..].strip_prefix(". ").or_else(|| l[d..].strip_prefix(") "))).flatten()
+                (d > 0)
+                    .then(|| {
+                        l[d..]
+                            .strip_prefix(". ")
+                            .or_else(|| l[d..].strip_prefix(") "))
+                    })
+                    .flatten()
             });
         if let Some(t) = rest {
             let t = t.trim().trim_matches('*').trim();
@@ -442,11 +581,24 @@ pub fn parse_tasks(answer: &str) -> Vec<String> {
 
 /// Next tasks for a project, proposed by an AI that reads it (read-only). `existing`: the
 /// steps already there, not to repeat.
-pub fn ask_tasks(folder: &str, existing: &[String], prefer: Option<Tool>) -> Result<Vec<String>, String> {
-    let have = if existing.is_empty() { crate::tr!("(aucune)", "(none)").to_string() } else { existing.iter().map(|e| format!("- {e}")).collect::<Vec<_>>().join("\n") };
+pub fn ask_tasks(
+    folder: &str,
+    existing: &[String],
+    prefer: Option<Tool>,
+) -> Result<Vec<String>, String> {
+    let have = if existing.is_empty() {
+        crate::tr!("(aucune)", "(none)").to_string()
+    } else {
+        existing
+            .iter()
+            .map(|e| format!("- {e}"))
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
     // These steps are what the AIs work on when they run on their own (Orchestration page):
     // each must be a real piece of work, precise enough to be done and checked without a human.
-    let prompt = crate::trf!("Tu prépares le travail d'une IA qui va avancer SEULE sur le projet du dossier « {folder} ». \
+    let prompt = crate::trf!(
+        "Tu prépares le travail d'une IA qui va avancer SEULE sur le projet du dossier « {folder} ». \
          Lis-le SANS RIEN MODIFIER, et lis vraiment le code, pas seulement le README : structure, manifestes \
          (Cargo.toml, package.json…), les fichiers source principaux, les tests, `git log --oneline -15`, `git status`.\n\
          Propose ensuite 4 à 8 étapes, réparties entre ces trois domaines :\n\
@@ -460,7 +612,8 @@ pub fn ask_tasks(folder: &str, existing: &[String], prefer: Option<Tool>) -> Res
          Ne répète pas les étapes déjà là :\n{have}\n\n\
          Réponds UNIQUEMENT par la liste, la plus importante d'abord, une étape par ligne au format \
          « - Domaine : action à l'infinitif (fichier ou module) », 140 caractères au plus. \
-         Exemple : « - Sécurité : échapper le nom de dossier passé à la commande git (src/git.rs) ».", "You are preparing the work of an AI that will move the project in the folder « {folder} » forward ON ITS OWN. \
+         Exemple : « - Sécurité : échapper le nom de dossier passé à la commande git (src/git.rs) ».",
+        "You are preparing the work of an AI that will move the project in the folder « {folder} » forward ON ITS OWN. \
          Read it WITHOUT CHANGING ANYTHING, and really read the code, not just the README: structure, manifests \
          (Cargo.toml, package.json…), the main source files, the tests, `git log --oneline -15`, `git status`.\n\
          Then propose 4 to 8 steps, spread across these three areas:\n\
@@ -474,8 +627,15 @@ pub fn ask_tasks(folder: &str, existing: &[String], prefer: Option<Tool>) -> Res
          Don't repeat the steps already there:\n{have}\n\n\
          Answer ONLY with the list, the most important first, one step per line as \
          « - Area: action (file or module) », 140 characters at most. \
-         Example: « - Security: escape the folder name passed to the git command (src/git.rs) ».");
-    let (answer, _) = ask(folder, prompt, "Read,Glob,Grep,Bash(git log:*),Bash(git status:*),Bash(ls:*)", 40, prefer)?;
+         Example: « - Security: escape the folder name passed to the git command (src/git.rs) »."
+    );
+    let (answer, _) = ask(
+        folder,
+        prompt,
+        "Read,Glob,Grep,Bash(git log:*),Bash(git status:*),Bash(ls:*)",
+        40,
+        prefer,
+    )?;
     let tasks = parse_tasks(&answer);
     if tasks.is_empty() {
         return Err(crate::tr!("l'IA n'a proposé aucune tâche", "the AI proposed no task").into());
@@ -497,20 +657,40 @@ pub enum Weight {
 /// The command line for one question to an agent. Images: Codex takes them with `--image`;
 /// Claude Code reads them itself, from their folders added with `--add-dir`. A light
 /// question runs on Sonnet (Claude Code) or with low reasoning effort (Codex).
-fn ask_args(tool: Tool, prompt: String, claude_tools: &str, max_turns: u32, images: &[String], weight: Weight) -> Vec<String> {
+fn ask_args(
+    tool: Tool,
+    prompt: String,
+    claude_tools: &str,
+    max_turns: u32,
+    images: &[String],
+    weight: Weight,
+) -> Vec<String> {
     match tool {
         Tool::ClaudeCode => {
-            let mut a: Vec<String> = vec!["-p".into(), prompt, "--output-format".into(), "json".into(), "--max-turns".into(), max_turns.to_string(), "--allowedTools".into(), claude_tools.into()];
+            let mut a: Vec<String> = vec![
+                "-p".into(),
+                prompt,
+                "--output-format".into(),
+                "json".into(),
+                "--max-turns".into(),
+                max_turns.to_string(),
+                "--allowedTools".into(),
+                claude_tools.into(),
+            ];
             if weight == Weight::Light {
                 a.push("--model".into());
                 a.push("sonnet".into());
             }
             let mut dirs: Vec<String> = vec![];
             for i in images {
-                if let Some(d) = Path::new(i).parent().map(|d| d.display().to_string()).filter(|d| !d.is_empty())
-                    && !dirs.contains(&d) {
-                        dirs.push(d);
-                    }
+                if let Some(d) = Path::new(i)
+                    .parent()
+                    .map(|d| d.display().to_string())
+                    .filter(|d| !d.is_empty())
+                    && !dirs.contains(&d)
+                {
+                    dirs.push(d);
+                }
             }
             for d in dirs {
                 a.push("--add-dir".into());
@@ -519,7 +699,12 @@ fn ask_args(tool: Tool, prompt: String, claude_tools: &str, max_turns: u32, imag
             a
         }
         Tool::Codex => {
-            let mut a: Vec<String> = vec!["exec".into(), "--sandbox".into(), "read-only".into(), "--skip-git-repo-check".into()];
+            let mut a: Vec<String> = vec![
+                "exec".into(),
+                "--sandbox".into(),
+                "read-only".into(),
+                "--skip-git-repo-check".into(),
+            ];
             if weight == Weight::Light {
                 a.push("-c".into());
                 a.push("model_reasoning_effort=\"low\"".into());
@@ -536,63 +721,163 @@ fn ask_args(tool: Tool, prompt: String, claude_tools: &str, max_turns: u32, imag
 
 /// The image files a person may join to a text (by their extension).
 pub fn is_image(path: &Path) -> bool {
-    path.extension().and_then(|e| e.to_str()).is_some_and(|e| matches!(e.to_ascii_lowercase().as_str(), "png" | "jpg" | "jpeg" | "gif" | "webp"))
+    path.extension().and_then(|e| e.to_str()).is_some_and(|e| {
+        matches!(
+            e.to_ascii_lowercase().as_str(),
+            "png" | "jpg" | "jpeg" | "gif" | "webp"
+        )
+    })
 }
 
 /// A pasted text (notes, an email, a list…) and joined images (screenshots…) turned into
 /// tasks by an AI. It reads nothing else.
-pub fn text_to_tasks(folder: &str, text: &str, images: &[String], prefer: Option<Tool>) -> Result<Vec<String>, String> {
-    let text = if text.trim().is_empty() { crate::tr!("(pas de texte : seulement les images)", "(no text: only the images)").to_string() } else { text.to_string() };
+pub fn text_to_tasks(
+    folder: &str,
+    text: &str,
+    images: &[String],
+    prefer: Option<Tool>,
+) -> Result<Vec<String>, String> {
+    let text = if text.trim().is_empty() {
+        crate::tr!(
+            "(pas de texte : seulement les images)",
+            "(no text: only the images)"
+        )
+        .to_string()
+    } else {
+        text.to_string()
+    };
     let tools_rule = if images.is_empty() {
         crate::tr!("N'utilise aucun outil.", "Don't use any tool.").to_string()
     } else {
-        let list = images.iter().map(|i| format!("- {i}")).collect::<Vec<_>>().join("\n");
-        crate::trf!("Des images sont jointes (captures d'écran, photos…) : regarde-les (outil Read sur chaque chemin) et tiens-en compte autant que du texte. N'utilise aucun autre outil.\nImages :\n{list}", "Images are joined (screenshots, photos…): look at them (Read tool on each path) and take them into account as much as the text. Don't use any other tool.\nImages:\n{list}")
+        let list = images
+            .iter()
+            .map(|i| format!("- {i}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        crate::trf!(
+            "Des images sont jointes (captures d'écran, photos…) : regarde-les (outil Read sur chaque chemin) et tiens-en compte autant que du texte. N'utilise aucun autre outil.\nImages :\n{list}",
+            "Images are joined (screenshots, photos…): look at them (Read tool on each path) and take them into account as much as the text. Don't use any other tool.\nImages:\n{list}"
+        )
     };
-    let prompt = crate::trf!("Transforme ce texte en tâches claires et actionnables pour un projet : regroupe ce qui va ensemble, retire les doublons \
+    let prompt = crate::trf!(
+        "Transforme ce texte en tâches claires et actionnables pour un projet : regroupe ce qui va ensemble, retire les doublons \
          et le bavardage, garde l'ordre logique. Une tâche = une action courte à l'infinitif (tu peux la préfixer d'un domaine court suivi de « : »).\n\
-         Réponds UNIQUEMENT par la liste, une tâche par ligne commençant par « - ». {tools_rule}\n\nTexte :\n{text}", "Turn this text into clear, actionable tasks for a project: group what belongs together, drop duplicates \
+         Réponds UNIQUEMENT par la liste, une tâche par ligne commençant par « - ». {tools_rule}\n\nTexte :\n{text}",
+        "Turn this text into clear, actionable tasks for a project: group what belongs together, drop duplicates \
          and chatter, keep a logical order. One task = one short action (you may prefix it with a short area followed by « : »).\n\
-         Answer ONLY with the list, one task per line starting with « - ». {tools_rule}\n\nText:\n{text}");
-    let dir = if !folder.trim().is_empty() && crate::project::normalize_folder(folder).is_dir() { folder.to_string() } else { dirs::home_dir().unwrap_or_default().display().to_string() };
-    let (answer, _) = ask_with_images(&dir, prompt, "Read", 3 + images.len() as u32, prefer, images, Weight::Light)?;
+         Answer ONLY with the list, one task per line starting with « - ». {tools_rule}\n\nText:\n{text}"
+    );
+    let dir = if !folder.trim().is_empty() && crate::project::normalize_folder(folder).is_dir() {
+        folder.to_string()
+    } else {
+        dirs::home_dir().unwrap_or_default().display().to_string()
+    };
+    let (answer, _) = ask_with_images(
+        &dir,
+        prompt,
+        "Read",
+        3 + images.len() as u32,
+        prefer,
+        images,
+        Weight::Light,
+    )?;
     let tasks = parse_tasks(&answer);
     if tasks.is_empty() {
-        return Err(crate::tr!("l'IA n'a trouvé aucune tâche dans ce texte", "the AI found no task in this text").into());
+        return Err(crate::tr!(
+            "l'IA n'a trouvé aucune tâche dans ce texte",
+            "the AI found no task in this text"
+        )
+        .into());
     }
     Ok(tasks)
 }
 
 /// Ask an agent one question in `folder` and return its answer. Claude Code may use only
 /// `claude_tools`; Codex runs read-only. `prefer`: the agent to use when installed.
-pub fn ask(folder: &str, prompt: String, claude_tools: &str, max_turns: u32, prefer: Option<Tool>) -> Result<(String, Tool), String> {
-    ask_with_images(folder, prompt, claude_tools, max_turns, prefer, &[], Weight::Full)
+pub fn ask(
+    folder: &str,
+    prompt: String,
+    claude_tools: &str,
+    max_turns: u32,
+    prefer: Option<Tool>,
+) -> Result<(String, Tool), String> {
+    ask_with_images(
+        folder,
+        prompt,
+        claude_tools,
+        max_turns,
+        prefer,
+        &[],
+        Weight::Full,
+    )
 }
 
 /// Like `ask`, for a question that only puts given material into shape (see `Weight::Light`).
-pub fn ask_light(folder: &str, prompt: String, claude_tools: &str, max_turns: u32, prefer: Option<Tool>) -> Result<(String, Tool), String> {
-    ask_with_images(folder, prompt, claude_tools, max_turns, prefer, &[], Weight::Light)
+pub fn ask_light(
+    folder: &str,
+    prompt: String,
+    claude_tools: &str,
+    max_turns: u32,
+    prefer: Option<Tool>,
+) -> Result<(String, Tool), String> {
+    ask_with_images(
+        folder,
+        prompt,
+        claude_tools,
+        max_turns,
+        prefer,
+        &[],
+        Weight::Light,
+    )
 }
 
 /// Like `ask`, with images the agent may look at: Codex gets them with `--image`, Claude Code
 /// reads them (its `Read` tool must be allowed) from folders added with `--add-dir`.
-pub fn ask_with_images(folder: &str, prompt: String, claude_tools: &str, max_turns: u32, prefer: Option<Tool>, images: &[String], weight: Weight) -> Result<(String, Tool), String> {
+pub fn ask_with_images(
+    folder: &str,
+    prompt: String,
+    claude_tools: &str,
+    max_turns: u32,
+    prefer: Option<Tool>,
+    images: &[String],
+    weight: Weight,
+) -> Result<(String, Tool), String> {
     let path = shell_path();
     let agents = detect(&path);
     let agent = agents
         .iter()
         .find(|a| Some(a.tool) == prefer)
         .or_else(|| agents.first())
-        .ok_or(crate::tr!("Ni Claude Code ni Codex n'ont été trouvés sur cette machine.", "Neither Claude Code nor Codex was found on this computer."))?;
+        .ok_or(crate::tr!(
+            "Ni Claude Code ni Codex n'ont été trouvés sur cette machine.",
+            "Neither Claude Code nor Codex was found on this computer."
+        ))?;
     let prompt_copy = prompt.clone();
     let args = ask_args(agent.tool, prompt, claude_tools, max_turns, images, weight);
-    let res = run_agent(agent, folder, args, &path, &AtomicBool::new(false), PER_PROJECT);
+    let res = run_agent(
+        agent,
+        folder,
+        args,
+        &path,
+        &AtomicBool::new(false),
+        PER_PROJECT,
+    );
     // Claude Code can't renew its sign-in headless: Codex answers instead, when installed.
-    if matches!(&res, Err(e) if e == AUTH_ERROR) && prefer != Some(Tool::Codex)
+    if matches!(&res, Err(e) if e == AUTH_ERROR)
+        && prefer != Some(Tool::Codex)
         && agents.iter().any(|a| a.tool == Tool::Codex)
-            && let Ok(r) = ask_with_images(folder, prompt_copy, claude_tools, max_turns, Some(Tool::Codex), images, weight) {
-                return Ok(r);
-            }
+        && let Ok(r) = ask_with_images(
+            folder,
+            prompt_copy,
+            claude_tools,
+            max_turns,
+            Some(Tool::Codex),
+            images,
+            weight,
+        )
+    {
+        return Ok(r);
+    }
     let (answer, _) = res?;
     if answer.trim().is_empty() {
         return Err(crate::tr!("l'IA n'a rien répondu", "the AI answered nothing").into());
@@ -636,20 +921,47 @@ fn question_prompt(folder: &str, question: &str, code: bool) -> String {
 }
 
 /// A quick question about a project, answered in a few lines by an agent (read-only).
-pub fn ask_question(folder: &str, question: &str, code: Option<bool>, prefer: Option<Tool>) -> Result<(String, Tool), String> {
+pub fn ask_question(
+    folder: &str,
+    question: &str,
+    code: Option<bool>,
+    prefer: Option<Tool>,
+) -> Result<(String, Tool), String> {
     if question.trim().is_empty() {
         return Err(crate::tr!("question vide", "empty question").into());
     }
-    let dir = if !folder.trim().is_empty() && crate::project::normalize_folder(folder).is_dir() { crate::project::normalize_folder(folder).display().to_string() } else { dirs::home_dir().unwrap_or_default().display().to_string() };
+    let dir = if !folder.trim().is_empty() && crate::project::normalize_folder(folder).is_dir() {
+        crate::project::normalize_folder(folder)
+            .display()
+            .to_string()
+    } else {
+        dirs::home_dir().unwrap_or_default().display().to_string()
+    };
     let code = crate::project::code_kind(&dir, code);
-    let (answer, tool) = ask(&dir, question_prompt(&dir, question, code),"Read,Glob,Grep,Bash(git log:*),Bash(ls:*)", 12, prefer)?;
+    let (answer, tool) = ask(
+        &dir,
+        question_prompt(&dir, question, code),
+        "Read,Glob,Grep,Bash(git log:*),Bash(ls:*)",
+        12,
+        prefer,
+    )?;
     Ok((answer.trim().to_string(), tool))
 }
 
 /// Ask an agent for a short outside view of a project (read-only, web search allowed).
 /// `prefer`: the agent that worked on the project last, when it is installed.
-pub fn ask_review(folder: &str, code: Option<bool>, prefer: Option<Tool>) -> Result<(String, Tool), String> {
-    ask(folder, review_prompt(folder, crate::project::code_kind(folder, code)), "Read,Glob,Grep,Bash(git log:*),Bash(ls:*),WebSearch,WebFetch,mcp__orchestra__get_project_state", 30, prefer)
+pub fn ask_review(
+    folder: &str,
+    code: Option<bool>,
+    prefer: Option<Tool>,
+) -> Result<(String, Tool), String> {
+    ask(
+        folder,
+        review_prompt(folder, crate::project::code_kind(folder, code)),
+        "Read,Glob,Grep,Bash(git log:*),Bash(ls:*),WebSearch,WebFetch,mcp__orchestra__get_project_state",
+        30,
+        prefer,
+    )
 }
 
 /// Where a folder's repository starts (the nearest folder holding `.git`), else itself.
@@ -699,7 +1011,16 @@ impl SyncRun {
     /// to whichever agent is.
     pub fn start(wanted: Vec<(String, Tool)>, on_change: impl Fn() + Send + 'static) -> Self {
         let run = SyncRun {
-            jobs: Arc::new(Mutex::new(wanted.iter().map(|(f, t)| Job { folder: f.clone(), tool: *t, state: JobState::Waiting }).collect())),
+            jobs: Arc::new(Mutex::new(
+                wanted
+                    .iter()
+                    .map(|(f, t)| Job {
+                        folder: f.clone(),
+                        tool: *t,
+                        state: JobState::Waiting,
+                    })
+                    .collect(),
+            )),
             notes: Arc::default(),
             cancel: Arc::default(),
             finished: Arc::default(),
@@ -721,11 +1042,19 @@ impl SyncRun {
                 match ensure_mcp(a, &exe, &path) {
                     Ok(m) => {
                         if m == "branché" {
-                            note(crate::trf!("{} est maintenant branché au tableau de bord.", "{} is now plugged into the dashboard.", a.tool.label()));
+                            note(crate::trf!(
+                                "{} est maintenant branché au tableau de bord.",
+                                "{} is now plugged into the dashboard.",
+                                a.tool.label()
+                            ));
                         }
                         ready.push(a.clone());
                     }
-                    Err(e) => note(crate::trf!("{} n'a pas pu être branché : {e}", "{} couldn't be plugged in: {e}", a.tool.label())),
+                    Err(e) => note(crate::trf!(
+                        "{} n'a pas pu être branché : {e}",
+                        "{} couldn't be plugged in: {e}",
+                        a.tool.label()
+                    )),
                 }
             }
             let n = r.jobs.lock_or_recover().len();
@@ -737,7 +1066,11 @@ impl SyncRun {
                     let j = &r.jobs.lock_or_recover()[i];
                     (j.folder.clone(), j.tool)
                 };
-                let agent = ready.iter().find(|a| a.tool == tool).or_else(|| ready.first()).cloned();
+                let agent = ready
+                    .iter()
+                    .find(|a| a.tool == tool)
+                    .or_else(|| ready.first())
+                    .cloned();
                 let result = match &agent {
                     None => Err(crate::tr!("aucune IA disponible", "no AI available").to_string()),
                     Some(a) => {
@@ -769,7 +1102,11 @@ impl SyncRun {
     }
 
     pub fn snapshot(&self) -> (Vec<Job>, Vec<String>, bool) {
-        (self.jobs.lock_or_recover().clone(), self.notes.lock_or_recover().clone(), self.finished.load(Ordering::Relaxed))
+        (
+            self.jobs.lock_or_recover().clone(),
+            self.notes.lock_or_recover().clone(),
+            self.finished.load(Ordering::Relaxed),
+        )
     }
 }
 
@@ -783,13 +1120,27 @@ mod tests {
         let c = ask_args(Tool::ClaudeCode, "p".into(), "Read", 5, &imgs, Weight::Full);
         // Claude reads them itself: their folder is added once.
         assert_eq!(c.iter().filter(|a| *a == "--add-dir").count(), 1);
-        assert!(c.windows(2).any(|w| w[0] == "--add-dir" && w[1] == "/tmp/x"));
+        assert!(
+            c.windows(2)
+                .any(|w| w[0] == "--add-dir" && w[1] == "/tmp/x")
+        );
         let x = ask_args(Tool::Codex, "p".into(), "Read", 5, &imgs, Weight::Full);
-        assert!(x.contains(&"--image=/tmp/x/a.png".to_string()) && x.contains(&"--image=/tmp/x/b.jpg".to_string()));
+        assert!(
+            x.contains(&"--image=/tmp/x/a.png".to_string())
+                && x.contains(&"--image=/tmp/x/b.jpg".to_string())
+        );
         assert_eq!(x.last().map(String::as_str), Some("p"));
         // Without images, nothing changes.
-        assert!(!ask_args(Tool::ClaudeCode, "p".into(), "Read", 5, &[], Weight::Full).contains(&"--add-dir".to_string()));
-        assert!(is_image(Path::new("/a/B.PNG")) && is_image(Path::new("c.webp")) && !is_image(Path::new("notes.txt")) && !is_image(Path::new("dir")));
+        assert!(
+            !ask_args(Tool::ClaudeCode, "p".into(), "Read", 5, &[], Weight::Full)
+                .contains(&"--add-dir".to_string())
+        );
+        assert!(
+            is_image(Path::new("/a/B.PNG"))
+                && is_image(Path::new("c.webp"))
+                && !is_image(Path::new("notes.txt"))
+                && !is_image(Path::new("dir"))
+        );
     }
 
     #[test]
@@ -797,11 +1148,24 @@ mod tests {
         let c = ask_args(Tool::ClaudeCode, "p".into(), "Read", 3, &[], Weight::Light);
         assert!(c.windows(2).any(|w| w[0] == "--model" && w[1] == "sonnet"));
         let x = ask_args(Tool::Codex, "p".into(), "Read", 3, &[], Weight::Light);
-        assert!(x.windows(2).any(|w| w[0] == "-c" && w[1] == "model_reasoning_effort=\"low\""));
-        assert_eq!(x.last().map(String::as_str), Some("p"), "the prompt stays last, after « -- »");
+        assert!(
+            x.windows(2)
+                .any(|w| w[0] == "-c" && w[1] == "model_reasoning_effort=\"low\"")
+        );
+        assert_eq!(
+            x.last().map(String::as_str),
+            Some("p"),
+            "the prompt stays last, after « -- »"
+        );
         // A full question keeps the person's own default model.
-        assert!(!ask_args(Tool::ClaudeCode, "p".into(), "Read", 3, &[], Weight::Full).contains(&"--model".to_string()));
-        assert!(!ask_args(Tool::Codex, "p".into(), "Read", 3, &[], Weight::Full).contains(&"-c".to_string()));
+        assert!(
+            !ask_args(Tool::ClaudeCode, "p".into(), "Read", 3, &[], Weight::Full)
+                .contains(&"--model".to_string())
+        );
+        assert!(
+            !ask_args(Tool::Codex, "p".into(), "Read", 3, &[], Weight::Full)
+                .contains(&"-c".to_string())
+        );
     }
 
     #[test]
@@ -814,10 +1178,16 @@ mod tests {
         }
         let (r, f) = (review_prompt("/tmp/x", false), fill_prompt("/tmp/x", false));
         assert!(r.contains("Ressources utiles") || r.contains("Useful resources"));
-        assert!(!r.contains("git log"), "no git history for a project of documents");
+        assert!(
+            !r.contains("git log"),
+            "no git history for a project of documents"
+        );
         assert!(f.contains("Ressources utiles") || f.contains("Useful resources"));
         assert!(review_prompt("/tmp/x", true).contains("git log"));
-        assert!(!fill_prompt("/tmp/x", true).contains("Ressources utiles") && !fill_prompt("/tmp/x", true).contains("Useful resources"));
+        assert!(
+            !fill_prompt("/tmp/x", true).contains("Ressources utiles")
+                && !fill_prompt("/tmp/x", true).contains("Useful resources")
+        );
     }
 
     #[test]
@@ -826,7 +1196,11 @@ mod tests {
         for code in [true, false] {
             let p = question_prompt("/tmp/x", &long, code);
             assert!(p.contains("/tmp/x"));
-            assert_eq!(p.matches('é').count() - question_prompt("/tmp/x", "", code).matches('é').count(), QUESTION_MAX, "the question is cut at QUESTION_MAX");
+            assert_eq!(
+                p.matches('é').count() - question_prompt("/tmp/x", "", code).matches('é').count(),
+                QUESTION_MAX,
+                "the question is cut at QUESTION_MAX"
+            );
             assert!(p.contains("RIEN") || p.contains("NOTHING"));
         }
         // A project without code: no talk of code, its documents instead.
@@ -834,7 +1208,10 @@ mod tests {
         assert!(!p.contains("code »") && !p.contains("dans le code") && !p.contains("in the code"));
         assert!(p.contains("documents"));
         assert!(question_prompt("/tmp/x", "?", true).contains("code"));
-        assert!(ask_question("/tmp/x", "   ", None, None).is_err(), "an empty question never reaches an agent");
+        assert!(
+            ask_question("/tmp/x", "   ", None, None).is_err(),
+            "an empty question never reaches an agent"
+        );
     }
 
     #[test]
@@ -844,8 +1221,18 @@ mod tests {
         assert_eq!((f.done.len(), f.doing.len(), f.notes.as_str()), (1, 1, "N"));
         assert!(f.review.starts_with("### Avis"));
         assert!(parse_fill("pas de json").is_err());
-        let t = parse_tasks("Voici :\n- UI : refaire la page\n* Écrire les tests\n2. Publier\n- [ ] Coller\n- UI : refaire la page\ntexte");
-        assert_eq!(t, vec!["UI : refaire la page", "Écrire les tests", "Publier", "Coller"]);
+        let t = parse_tasks(
+            "Voici :\n- UI : refaire la page\n* Écrire les tests\n2. Publier\n- [ ] Coller\n- UI : refaire la page\ntexte",
+        );
+        assert_eq!(
+            t,
+            vec![
+                "UI : refaire la page",
+                "Écrire les tests",
+                "Publier",
+                "Coller"
+            ]
+        );
     }
 
     #[test]
@@ -854,10 +1241,16 @@ mod tests {
         let deep = base.join("proj/src/app");
         std::fs::create_dir_all(&deep).unwrap();
         std::fs::create_dir_all(base.join("proj/.git")).unwrap();
-        assert_eq!(repo_root(&deep.display().to_string()), base.join("proj").display().to_string());
+        assert_eq!(
+            repo_root(&deep.display().to_string()),
+            base.join("proj").display().to_string()
+        );
         let other = base.join("loose");
         std::fs::create_dir_all(&other).unwrap();
-        assert_eq!(repo_root(&other.display().to_string()), other.display().to_string());
+        assert_eq!(
+            repo_root(&other.display().to_string()),
+            other.display().to_string()
+        );
         let _ = std::fs::remove_dir_all(base);
     }
 
@@ -866,7 +1259,12 @@ mod tests {
         let p = prompt("/x/y");
         assert!(p.contains("get_project_state") && p.contains("SANS RIEN MODIFIER"));
         let a = agent_args(Tool::ClaudeCode, &p).join(" ");
-        assert!(a.contains("--allowedTools") && !a.contains("Edit") && !a.contains("Write") && !a.contains("skip-permissions"));
+        assert!(
+            a.contains("--allowedTools")
+                && !a.contains("Edit")
+                && !a.contains("Write")
+                && !a.contains("skip-permissions")
+        );
         assert!(agent_args(Tool::Codex, &p).join(" ").contains("read-only"));
     }
 
@@ -877,7 +1275,11 @@ mod tests {
         std::fs::create_dir_all(base.join("bin")).unwrap();
         std::fs::create_dir_all(base.join("proj")).unwrap();
         let bin = base.join("bin/claude");
-        std::fs::write(&bin, "#!/bin/sh\necho '{\"is_error\":false,\"num_turns\":3,\"result\":\"ok\"}'\n").unwrap();
+        std::fs::write(
+            &bin,
+            "#!/bin/sh\necho '{\"is_error\":false,\"num_turns\":3,\"result\":\"ok\"}'\n",
+        )
+        .unwrap();
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
@@ -886,9 +1288,17 @@ mod tests {
         let path = format!("{}:/usr/bin:/bin", base.join("bin").display());
         let agents = detect(&path);
         assert_eq!(agents[0].tool, Tool::ClaudeCode);
-        let r = run_one(&agents[0], &base.join("proj").display().to_string(), &path, &AtomicBool::new(false));
+        let r = run_one(
+            &agents[0],
+            &base.join("proj").display().to_string(),
+            &path,
+            &AtomicBool::new(false),
+        );
         assert!(r.unwrap().contains("3 échanges"));
-        assert_eq!(run_one(&agents[0], "/nope/nope", &path, &AtomicBool::new(false)), Err("dossier introuvable".into()));
+        assert_eq!(
+            run_one(&agents[0], "/nope/nope", &path, &AtomicBool::new(false)),
+            Err("dossier introuvable".into())
+        );
         let _ = std::fs::remove_dir_all(base);
     }
 }

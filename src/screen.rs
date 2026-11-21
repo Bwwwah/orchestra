@@ -123,7 +123,12 @@ pub fn open_settings() -> Result<(), String> {
     if !cfg!(target_os = "macos") {
         return Ok(());
     }
-    crate::proc::command("open").arg("x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture").stdin(Stdio::null()).spawn().map(|_| ()).map_err(|e| e.to_string())
+    crate::proc::command("open")
+        .arg("x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture")
+        .stdin(Stdio::null())
+        .spawn()
+        .map(|_| ())
+        .map_err(|e| e.to_string())
 }
 
 /// The permission (now missing) was there for an earlier version: the entry left by the
@@ -136,7 +141,9 @@ fn stale_after_update(granted_version: &str, current: &str) -> bool {
 /// Running as Orchestra.app (not `cargo run`): only then is the system's entry ours.
 #[cfg(target_os = "macos")]
 fn in_app_bundle() -> bool {
-    std::env::current_exe().map(|p| p.to_string_lossy().contains(".app/Contents/MacOS/")).unwrap_or(false)
+    std::env::current_exe()
+        .map(|p| p.to_string_lossy().contains(".app/Contents/MacOS/"))
+        .unwrap_or(false)
 }
 
 pub fn shots_dir() -> PathBuf {
@@ -149,16 +156,25 @@ const KEEP_FOR: Duration = Duration::from_secs(24 * 3600);
 /// Delete the pictures of `dir` older than `max_age` (by modification time). Only .png and
 /// .jpg files: nothing else in the folder is touched. Returns how many went.
 fn prune_old(dir: &Path, max_age: Duration, now: SystemTime) -> usize {
-    let Ok(entries) = std::fs::read_dir(dir) else { return 0 };
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return 0;
+    };
     let mut removed = 0;
     for e in entries.flatten() {
         let path = e.path();
-        let picture = matches!(path.extension().and_then(|x| x.to_str()), Some("png" | "jpg" | "jpeg"));
+        let picture = matches!(
+            path.extension().and_then(|x| x.to_str()),
+            Some("png" | "jpg" | "jpeg")
+        );
         let Ok(meta) = e.metadata() else { continue };
         if !picture || !meta.is_file() {
             continue;
         }
-        let old = meta.modified().ok().and_then(|m| now.duration_since(m).ok()).is_some_and(|age| age > max_age);
+        let old = meta
+            .modified()
+            .ok()
+            .and_then(|m| now.duration_since(m).ok())
+            .is_some_and(|age| age > max_age);
         if old && std::fs::remove_file(&path).is_ok() {
             removed += 1;
         }
@@ -190,11 +206,18 @@ fn no_picture() -> String {
 }
 
 fn run(cmd: &str, args: &[&str]) -> Result<String, String> {
-    let out = crate::proc::command(cmd).args(args).stdin(Stdio::null()).output().map_err(|e| format!("{cmd}: {e}"))?;
+    let out = crate::proc::command(cmd)
+        .args(args)
+        .stdin(Stdio::null())
+        .output()
+        .map_err(|e| format!("{cmd}: {e}"))?;
     if out.status.success() {
         Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
     } else {
-        Err(format!("{cmd}: {}", String::from_utf8_lossy(&out.stderr).trim()))
+        Err(format!(
+            "{cmd}: {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        ))
     }
 }
 
@@ -204,7 +227,10 @@ fn new_file(dir: &Path, ext: &str) -> PathBuf {
 
 /// "x,y,w,h" as four whole numbers.
 pub fn parse_bounds(s: &str) -> Option<(i64, i64, i64, i64)> {
-    let v: Vec<i64> = s.split(',').map(|p| p.trim().parse::<f64>().ok().map(|f| f.round() as i64)).collect::<Option<Vec<_>>>()?;
+    let v: Vec<i64> = s
+        .split(',')
+        .map(|p| p.trim().parse::<f64>().ok().map(|f| f.round() as i64))
+        .collect::<Option<Vec<_>>>()?;
     match v[..] {
         [x, y, w, h] if w > 0 && h > 0 => Some((x, y, w, h)),
         _ => None,
@@ -240,12 +266,25 @@ fn capture(dir: &Path, app: Option<&str>) -> Result<Shot, String> {
                     region = Some(format!("{x},{y},{w},{h}"));
                     note = format!("the front window of « {app} »");
                 }
-                None => note = format!("the whole screen, with « {app} » in front (its window couldn't be found)"),
+                None => {
+                    note = format!(
+                        "the whole screen, with « {app} » in front (its window couldn't be found)"
+                    )
+                }
             },
-            Err(e) if e.contains("-1728") || e.contains("-10814") || e.contains("Can’t get application") || e.contains("Can't get application") => {
+            Err(e)
+                if e.contains("-1728")
+                    || e.contains("-10814")
+                    || e.contains("Can’t get application")
+                    || e.contains("Can't get application") =>
+            {
                 return Err(format!("No app named « {app} » was found on this Mac."));
             }
-            Err(_) => note = format!("the whole screen, with « {app} » in front (give System Events the Accessibility permission to capture only its window)"),
+            Err(_) => {
+                note = format!(
+                    "the whole screen, with « {app} » in front (give System Events the Accessibility permission to capture only its window)"
+                )
+            }
         }
     }
     let mut args = vec!["-x".to_string()];
@@ -273,7 +312,9 @@ fn capture(dir: &Path, app: Option<&str>) -> Result<Shot, String> {
     let p = path.display().to_string();
     run("powershell", &["-NoProfile", "-Command", script, &p])?;
     let note = match app {
-        Some(a) => format!("the whole screen (capturing only « {a} » isn't supported on Windows yet)"),
+        Some(a) => {
+            format!("the whole screen (capturing only « {a} » isn't supported on Windows yet)")
+        }
         None => "the whole main screen".into(),
     };
     Ok(Shot { path, note })
@@ -289,12 +330,20 @@ fn capture(dir: &Path, app: Option<&str>) -> Result<Shot, String> {
             if let Some(id) = ids.lines().next().filter(|l| !l.trim().is_empty()) {
                 let _ = run("xdotool", &["windowactivate", "--sync", id]);
                 if run("import", &["-window", id, &p]).is_ok() {
-                    return Ok(Shot { path, note: format!("the window of « {app} »") });
+                    return Ok(Shot {
+                        path,
+                        note: format!("the window of « {app} »"),
+                    });
                 }
             }
         }
     }
-    let tries: [(&str, Vec<&str>); 4] = [("grim", vec![&p]), ("gnome-screenshot", vec!["-f", &p]), ("scrot", vec!["-o", &p]), ("import", vec!["-window", "root", &p])];
+    let tries: [(&str, Vec<&str>); 4] = [
+        ("grim", vec![&p]),
+        ("gnome-screenshot", vec!["-f", &p]),
+        ("scrot", vec!["-o", &p]),
+        ("import", vec!["-window", "root", &p]),
+    ];
     for (cmd, args) in tries {
         if run(cmd, &args).is_ok() {
             let note = match app {
@@ -312,11 +361,21 @@ pub fn base64(data: &[u8]) -> String {
     const T: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
     let mut out = String::with_capacity(data.len().div_ceil(3) * 4);
     for c in data.chunks(3) {
-        let n = (c[0] as u32) << 16 | (*c.get(1).unwrap_or(&0) as u32) << 8 | *c.get(2).unwrap_or(&0) as u32;
+        let n = (c[0] as u32) << 16
+            | (*c.get(1).unwrap_or(&0) as u32) << 8
+            | *c.get(2).unwrap_or(&0) as u32;
         out.push(T[(n >> 18) as usize & 63] as char);
         out.push(T[(n >> 12) as usize & 63] as char);
-        out.push(if c.len() > 1 { T[(n >> 6) as usize & 63] as char } else { '=' });
-        out.push(if c.len() > 2 { T[n as usize & 63] as char } else { '=' });
+        out.push(if c.len() > 1 {
+            T[(n >> 6) as usize & 63] as char
+        } else {
+            '='
+        });
+        out.push(if c.len() > 2 {
+            T[n as usize & 63] as char
+        } else {
+            '='
+        });
     }
     out
 }
@@ -355,13 +414,17 @@ mod tests {
 
     #[test]
     fn old_screenshots_are_deleted_and_nothing_else() {
-        let dir = std::env::temp_dir().join(format!("orchestra-shots-test-{}", uuid::Uuid::new_v4().simple()));
+        let dir = std::env::temp_dir().join(format!(
+            "orchestra-shots-test-{}",
+            uuid::Uuid::new_v4().simple()
+        ));
         std::fs::create_dir_all(dir.join("sous-dossier.png")).unwrap();
         let now = SystemTime::now();
         let make = |name: &str, age_h: u64| {
             let p = dir.join(name);
             let f = std::fs::File::create(&p).unwrap();
-            f.set_modified(now - Duration::from_secs(age_h * 3600)).unwrap();
+            f.set_modified(now - Duration::from_secs(age_h * 3600))
+                .unwrap();
             p
         };
         let old_png = make("ancienne.png", 25);
@@ -372,7 +435,10 @@ mod tests {
         assert!(!old_png.exists() && !old_jpg.exists());
         assert!(fresh.exists(), "a picture of the last 24 h stays");
         assert!(other.exists(), "only pictures are deleted");
-        assert!(dir.join("sous-dossier.png").is_dir(), "folders are left alone");
+        assert!(
+            dir.join("sous-dossier.png").is_dir(),
+            "folders are left alone"
+        );
         // A missing folder is not an error.
         assert_eq!(prune_old(&dir.join("absent"), KEEP_FOR, now), 0);
         let _ = std::fs::remove_dir_all(&dir);
@@ -381,7 +447,10 @@ mod tests {
     #[test]
     fn window_bounds_from_applescript() {
         assert_eq!(parse_bounds("10, 25, 800, 600"), Some((10, 25, 800, 600)));
-        assert_eq!(parse_bounds("-1440,0,1440,900"), Some((-1440, 0, 1440, 900)));
+        assert_eq!(
+            parse_bounds("-1440,0,1440,900"),
+            Some((-1440, 0, 1440, 900))
+        );
         assert_eq!(parse_bounds("1,2,0,4"), None);
         assert_eq!(parse_bounds("1,2,3"), None);
         assert_eq!(parse_bounds("a,b,c,d"), None);

@@ -35,23 +35,33 @@ pub struct SharedFolder {
 
 impl Connector for SharedFolder {
     fn name(&self) -> String {
-        crate::trf!("Dossier partagé {}", "Shared folder {}", self.folder.display())
+        crate::trf!(
+            "Dossier partagé {}",
+            "Shared folder {}",
+            self.folder.display()
+        )
     }
 
     fn pull(&self) -> Result<Vec<Workspace>, String> {
-        let entries = std::fs::read_dir(&self.folder).map_err(|e| crate::trf!("dossier illisible : {e}", "unreadable folder: {e}"))?;
+        let entries = std::fs::read_dir(&self.folder)
+            .map_err(|e| crate::trf!("dossier illisible : {e}", "unreadable folder: {e}"))?;
         let mine = format!("{}.json", author_file(&self.author));
         let mut out = vec![];
         for e in entries.flatten() {
             let p = e.path();
-            let name = p.file_name().and_then(|n| n.to_str()).unwrap_or("").to_string();
+            let name = p
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or("")
+                .to_string();
             if !name.ends_with(".json") || name == mine {
                 continue;
             }
             if let Ok(s) = std::fs::read_to_string(&p)
-                && let Ok(ws) = serde_json::from_str::<Workspace>(&s) {
-                    out.push(ws);
-                }
+                && let Ok(ws) = serde_json::from_str::<Workspace>(&s)
+            {
+                out.push(ws);
+            }
         }
         Ok(out)
     }
@@ -60,9 +70,15 @@ impl Connector for SharedFolder {
         std::fs::create_dir_all(&self.folder).map_err(|e| e.to_string())?;
         let mut shared = ws.clone();
         shared.settings = Default::default(); // personal settings stay personal
-        let path = self.folder.join(format!("{}.json", author_file(&self.author)));
+        let path = self
+            .folder
+            .join(format!("{}.json", author_file(&self.author)));
         let tmp = path.with_extension("json.tmp");
-        std::fs::write(&tmp, serde_json::to_string_pretty(&shared).unwrap_or_default()).map_err(|e| e.to_string())?;
+        std::fs::write(
+            &tmp,
+            serde_json::to_string_pretty(&shared).unwrap_or_default(),
+        )
+        .map_err(|e| e.to_string())?;
         std::fs::rename(tmp, path).map_err(|e| e.to_string())
     }
 }
@@ -83,17 +99,33 @@ impl UserCommand {
             c.args(["-c", &shell_line]);
             c
         };
-        cmd.stdin(if input.is_some() { Stdio::piped() } else { Stdio::null() })
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped());
-        let mut child = cmd.spawn().map_err(|e| crate::trf!("impossible de lancer la commande : {e}", "couldn't run the command: {e}"))?;
+        cmd.stdin(if input.is_some() {
+            Stdio::piped()
+        } else {
+            Stdio::null()
+        })
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+        let mut child = cmd.spawn().map_err(|e| {
+            crate::trf!(
+                "impossible de lancer la commande : {e}",
+                "couldn't run the command: {e}"
+            )
+        })?;
         if let (Some(text), Some(mut stdin)) = (input, child.stdin.take()) {
-            stdin.write_all(text.as_bytes()).map_err(|e| e.to_string())?;
+            stdin
+                .write_all(text.as_bytes())
+                .map_err(|e| e.to_string())?;
         }
         let out = child.wait_with_output().map_err(|e| e.to_string())?;
         if !out.status.success() {
-            return Err(crate::trf!("la commande a échoué ({}) : {}", "the command failed ({}): {}",
-                out.status.code().map(|c| c.to_string()).unwrap_or_else(|| "?".into()),
+            return Err(crate::trf!(
+                "la commande a échoué ({}) : {}",
+                "the command failed ({}): {}",
+                out.status
+                    .code()
+                    .map(|c| c.to_string())
+                    .unwrap_or_else(|| "?".into()),
                 String::from_utf8_lossy(&out.stderr).trim()
             ));
         }
@@ -116,23 +148,35 @@ impl Connector for UserCommand {
         if let Ok(list) = serde_json::from_str::<Vec<Workspace>>(text) {
             return Ok(list);
         }
-        serde_json::from_str::<Workspace>(text).map(|w| vec![w]).map_err(|e| crate::trf!("réponse illisible : {e}", "unreadable answer: {e}"))
+        serde_json::from_str::<Workspace>(text)
+            .map(|w| vec![w])
+            .map_err(|e| crate::trf!("réponse illisible : {e}", "unreadable answer: {e}"))
     }
 
     fn push(&self, ws: &Workspace) -> Result<(), String> {
         let mut shared = ws.clone();
         shared.settings = Default::default();
-        self.run("push", Some(serde_json::to_string(&shared).unwrap_or_default())).map(|_| ())
+        self.run(
+            "push",
+            Some(serde_json::to_string(&shared).unwrap_or_default()),
+        )
+        .map(|_| ())
     }
 }
 
 fn author_file(author: &str) -> String {
     let a = crate::store::safe_name(author);
-    if author.trim().is_empty() { whoami() } else { a }
+    if author.trim().is_empty() {
+        whoami()
+    } else {
+        a
+    }
 }
 
 fn whoami() -> String {
-    std::env::var("USER").or_else(|_| std::env::var("USERNAME")).unwrap_or_else(|_| "moi".into())
+    std::env::var("USER")
+        .or_else(|_| std::env::var("USERNAME"))
+        .unwrap_or_else(|_| "moi".into())
 }
 
 pub fn connector_for(ws: &Workspace) -> Option<Box<dyn Connector>> {
@@ -140,9 +184,14 @@ pub fn connector_for(ws: &Workspace) -> Option<Box<dyn Connector>> {
     match c.connector {
         ConnectorKind::None => None,
         ConnectorKind::SharedFolder if !c.folder.trim().is_empty() => {
-            Some(Box::new(SharedFolder { folder: PathBuf::from(c.folder.trim()), author: c.author.clone() }))
+            Some(Box::new(SharedFolder {
+                folder: PathBuf::from(c.folder.trim()),
+                author: c.author.clone(),
+            }))
         }
-        ConnectorKind::Command if !c.command.trim().is_empty() => Some(Box::new(UserCommand { command: c.command.trim().to_string() })),
+        ConnectorKind::Command if !c.command.trim().is_empty() => Some(Box::new(UserCommand {
+            command: c.command.trim().to_string(),
+        })),
         ConnectorKind::Live => None,
         _ => None,
     }
@@ -169,12 +218,17 @@ pub fn merge(ours: &mut Workspace, theirs: &Workspace) -> usize {
     }
     let deleted = ours.deleted.clone();
     let before = ours.pages.len();
-    ours.pages.retain(|p| deleted.get(&p.id).map(|t| p.updated > *t).unwrap_or(true));
+    ours.pages
+        .retain(|p| deleted.get(&p.id).map(|t| p.updated > *t).unwrap_or(true));
     changed += before - ours.pages.len();
     // Only pages of shared projects, as in live mode: never one of our private pages, nor a
     // page slipped under one, nor a stray page of theirs.
     for tp in ours.accept_remote(theirs.pages.clone()) {
-        if deleted.get(&tp.id).map(|t| tp.updated <= *t).unwrap_or(false) {
+        if deleted
+            .get(&tp.id)
+            .map(|t| tp.updated <= *t)
+            .unwrap_or(false)
+        {
             continue;
         }
         match ours.pages.iter_mut().find(|p| p.id == tp.id) {
@@ -209,8 +263,13 @@ pub fn merge_page(ours: &mut Page, theirs: &Page) -> bool {
         *e = (*e).max(*t);
     }
     let theirs_newer = theirs.updated > ours.updated;
-    let (newer, older) = if theirs_newer { (theirs.clone(), ours.clone()) } else { (ours.clone(), theirs.clone()) };
-    let older_by_id: HashMap<&str, &Block> = older.blocks.iter().map(|b| (b.id.as_str(), b)).collect();
+    let (newer, older) = if theirs_newer {
+        (theirs.clone(), ours.clone())
+    } else {
+        (ours.clone(), theirs.clone())
+    };
+    let older_by_id: HashMap<&str, &Block> =
+        older.blocks.iter().map(|b| (b.id.as_str(), b)).collect();
     let alive = |b: &Block| tomb.get(&b.id).map(|t| b.updated > *t).unwrap_or(true);
     // Blocks of the copy edited last, each replaced by the other side's version if more recent.
     let mut blocks: Vec<Block> = newer
@@ -226,7 +285,11 @@ pub fn merge_page(ours: &mut Page, theirs: &Page) -> bool {
     let mut prev: Option<String> = None;
     for b in &older.blocks {
         if !present.contains(&b.id) {
-            let at = prev.as_ref().and_then(|p| blocks.iter().position(|x| &x.id == p)).map(|i| i + 1).unwrap_or(0);
+            let at = prev
+                .as_ref()
+                .and_then(|p| blocks.iter().position(|x| &x.id == p))
+                .map(|i| i + 1)
+                .unwrap_or(0);
             blocks.insert(at.min(blocks.len()), b.clone());
         }
         prev = Some(b.id.clone());
@@ -249,7 +312,9 @@ pub fn merge_page(ours: &mut Page, theirs: &Page) -> bool {
 
 /// Pull, merge, then push. Returns a short report for the window.
 pub fn sync(ws: &mut Workspace) -> Result<String, String> {
-    let conn = connector_for(ws).ok_or_else(|| crate::tr!("aucun branchement configuré", "no connection set up").to_string())?;
+    let conn = connector_for(ws).ok_or_else(|| {
+        crate::tr!("aucun branchement configuré", "no connection set up").to_string()
+    })?;
     let others = conn.pull()?;
     let mut changed = 0;
     for o in &others {
@@ -257,7 +322,13 @@ pub fn sync(ws: &mut Workspace) -> Result<String, String> {
     }
     // Only the shared projects (and their discussions) go out.
     conn.push(&ws.shared_copy())?;
-    Ok(crate::trf!("{} : {} copie(s) lue(s), {} page(s) mise(s) à jour", "{}: {} copy(ies) read, {} page(s) updated", conn.name(), others.len(), changed))
+    Ok(crate::trf!(
+        "{} : {} copie(s) lue(s), {} page(s) mise(s) à jour",
+        "{}: {} copy(ies) read, {} page(s) updated",
+        conn.name(),
+        others.len(),
+        changed
+    ))
 }
 
 #[cfg(test)]
@@ -267,7 +338,10 @@ mod tests {
 
     fn page_with(texts: &[&str]) -> Page {
         let mut p = Page::new("P", None);
-        p.blocks = texts.iter().map(|t| Block::new(crate::model::BlockKind::Paragraph, *t)).collect();
+        p.blocks = texts
+            .iter()
+            .map(|t| Block::new(crate::model::BlockKind::Paragraph, *t))
+            .collect();
         p
     }
 
@@ -296,7 +370,10 @@ mod tests {
     #[test]
     fn received_projects_keep_what_this_computer_decides() {
         let mut ours = Page::new("Projet", None);
-        let mut p = crate::project::Project { shared: true, ..crate::project::Project::new("/Users/moi/code/app") };
+        let mut p = crate::project::Project {
+            shared: true,
+            ..crate::project::Project::new("/Users/moi/code/app")
+        };
         p.add_step("Vraie étape", "moi");
         ours.project = Some(p);
         ours.updated = 10;
@@ -321,7 +398,10 @@ mod tests {
         // The steps are shared: ours stays as ours, theirs comes in, on one line, cut short,
         // and marked as received.
         assert_eq!(mp.steps.len(), 2);
-        assert_eq!((mp.steps[0].title.as_str(), mp.steps[0].received), ("Vraie étape", false));
+        assert_eq!(
+            (mp.steps[0].title.as_str(), mp.steps[0].received),
+            ("Vraie étape", false)
+        );
         assert!(mp.steps[1].received && !mp.steps[1].title.contains('\n'));
         assert!(mp.steps[1].title.chars().count() <= crate::project::RECEIVED_STEP_MAX);
         // A project new here: its steps come in, all marked as received; never its folder.
@@ -339,7 +419,10 @@ mod tests {
     fn steps_are_shared_step_by_step() {
         use crate::project::{Project, StepStatus};
         let mut base = Page::new("Projet", None);
-        let mut p = Project { shared: true, ..Project::new("/x") };
+        let mut p = Project {
+            shared: true,
+            ..Project::new("/x")
+        };
         let a = p.add_step("A", "moi");
         let b = p.add_step("B", "moi");
         let c = p.add_step("C", "moi");
@@ -360,7 +443,11 @@ mod tests {
         let mut merged = here.clone();
         assert!(merge_page(&mut merged, &there));
         let mp = merged.project.as_ref().unwrap();
-        let got: Vec<(&str, bool)> = mp.steps.iter().map(|s| (s.title.as_str(), s.received)).collect();
+        let got: Vec<(&str, bool)> = mp
+            .steps
+            .iter()
+            .map(|s| (s.title.as_str(), s.received))
+            .collect();
         assert_eq!(got, [("A", false), ("B renommée", false), ("D", true)]);
         assert_eq!(mp.steps[0].status, StepStatus::Done);
         assert!(mp.deleted_steps.contains_key(&c));
@@ -370,7 +457,10 @@ mod tests {
         let bp = back.project.as_ref().unwrap();
         assert!(!bp.steps.iter().any(|s| s.id == c));
         assert!(!bp.steps.iter().find(|s| s.id == d).unwrap().received);
-        assert_eq!(bp.steps.iter().find(|s| s.id == a).unwrap().status, StepStatus::Done);
+        assert_eq!(
+            bp.steps.iter().find(|s| s.id == a).unwrap().status,
+            StepStatus::Done
+        );
     }
 
     /// Two AIs, one per computer, take the same step before seeing each other: both copies
@@ -379,28 +469,49 @@ mod tests {
     fn a_step_taken_on_two_computers_goes_to_the_first() {
         use crate::project::{Project, StepStatus};
         let mut base = Page::new("Projet", None);
-        let mut p = Project { shared: true, ..Project::new("/x") };
+        let mut p = Project {
+            shared: true,
+            ..Project::new("/x")
+        };
         let a = p.add_step("A", "moi");
         base.project = Some(p);
         let (mut here, mut there) = (base.clone(), base.clone());
-        here.project.as_mut().unwrap().claim_step(&a, "ordi-ici").unwrap();
+        here.project
+            .as_mut()
+            .unwrap()
+            .claim_step(&a, "ordi-ici")
+            .unwrap();
         here.updated = crate::model::now_ms();
         // There takes it later: a later edit, yet it must not win.
-        there.project.as_mut().unwrap().claim_step(&a, "ordi-la").unwrap();
+        there
+            .project
+            .as_mut()
+            .unwrap()
+            .claim_step(&a, "ordi-la")
+            .unwrap();
         there.updated = crate::model::now_ms();
         let (h, t) = (here.clone(), there.clone());
         merge_page(&mut here, &t);
         merge_page(&mut there, &h);
         for pg in [&here, &there] {
             let s = &pg.project.as_ref().unwrap().steps[0];
-            assert_eq!((s.status, s.held_by.as_str()), (StepStatus::Doing, "ordi-ici"));
+            assert_eq!(
+                (s.status, s.held_by.as_str()),
+                (StepStatus::Doing, "ordi-ici")
+            );
         }
         // There, the AI is refused the step; it isn't its next one any more.
         let tp = there.project.as_mut().unwrap();
         assert!(tp.claim_step(&a, "ordi-la").is_err());
-        assert!(tp.next_step_for("ordi-la", crate::model::now_ms()).is_none());
+        assert!(
+            tp.next_step_for("ordi-la", crate::model::now_ms())
+                .is_none()
+        );
         // Done here: the step comes back done everywhere, reservation cleared.
-        here.project.as_mut().unwrap().set_step_status(&a, StepStatus::Done);
+        here.project
+            .as_mut()
+            .unwrap()
+            .set_step_status(&a, StepStatus::Done);
         merge_page(&mut there, &here);
         let s = &there.project.as_ref().unwrap().steps[0];
         assert_eq!(s.status, StepStatus::Done);
@@ -429,7 +540,10 @@ mod tests {
     fn newest_wins_and_deletions_stick() {
         let mut a = Workspace::default();
         let mut p = Page::new("A", None);
-        p.project = Some(crate::project::Project { shared: true, ..crate::project::Project::new("") });
+        p.project = Some(crate::project::Project {
+            shared: true,
+            ..crate::project::Project::new("")
+        });
         p.updated = 10;
         a.pages.push(p.clone());
         let mut private = Page::new("Privée", None);
@@ -461,7 +575,13 @@ mod tests {
         ours.page_mut(&mine).unwrap().updated = 10;
         let mut theirs = Workspace::default();
         let shared = theirs.create_project("Partagé", "");
-        theirs.page_mut(&shared).unwrap().project.as_mut().unwrap().shared = true;
+        theirs
+            .page_mut(&shared)
+            .unwrap()
+            .project
+            .as_mut()
+            .unwrap()
+            .shared = true;
         let doc = theirs.create_page("Doc", Some(shared.clone()));
         let stray = theirs.create_page("Page glissée", None);
         let private = theirs.create_project("Privé chez eux", "");
@@ -471,7 +591,16 @@ mod tests {
         edit.updated = 99;
         theirs.pages.push(edit);
         for (id, pid) in [("ok", &shared), ("non", &private)] {
-            theirs.chat.insert(id.into(), crate::model::ChatMsg { id: id.into(), project: pid.clone(), author: "eux".into(), text: id.into(), at: 1 });
+            theirs.chat.insert(
+                id.into(),
+                crate::model::ChatMsg {
+                    id: id.into(),
+                    project: pid.clone(),
+                    author: "eux".into(),
+                    text: id.into(),
+                    at: 1,
+                },
+            );
         }
         merge(&mut ours, &theirs);
         assert!(ours.page(&shared).is_some() && ours.page(&doc).is_some());

@@ -29,7 +29,9 @@ pub struct Usage {
 }
 
 fn claude_dir() -> PathBuf {
-    std::env::var_os("CLAUDE_CONFIG_DIR").map(PathBuf::from).unwrap_or_else(|| dirs::home_dir().unwrap_or_default().join(".claude"))
+    std::env::var_os("CLAUDE_CONFIG_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| dirs::home_dir().unwrap_or_default().join(".claude"))
 }
 
 pub(crate) fn claude_json() -> PathBuf {
@@ -52,7 +54,9 @@ pub fn shown(label: &str) -> String {
     if !crate::i18n::en() {
         return label.to_string();
     }
-    label.replace("Semaine", "Week").replace("Dépenses", "Spending")
+    label
+        .replace("Semaine", "Week")
+        .replace("Dépenses", "Spending")
 }
 
 fn label_for(key: &str) -> String {
@@ -69,19 +73,29 @@ fn label_for(key: &str) -> String {
 /// Seconds or milliseconds since epoch, or an ISO date, into ms.
 fn time_ms(v: &Value) -> Option<u64> {
     if let Some(n) = v.as_f64() {
-        return Some(if n > 1e12 { n as u64 } else { (n * 1000.0) as u64 });
+        return Some(if n > 1e12 {
+            n as u64
+        } else {
+            (n * 1000.0) as u64
+        });
     }
     v.as_str().and_then(crate::sessions::parse_iso_ms)
 }
 
 /// The status line's `rate_limits` object.
 fn from_rate_limits(v: &Value) -> Vec<Window> {
-    let Some(o) = v.as_object() else { return vec![] };
+    let Some(o) = v.as_object() else {
+        return vec![];
+    };
     let mut out: Vec<Window> = o
         .iter()
         .filter_map(|(k, w)| {
             let pct = w.get("used_percentage")?.as_f64()? as f32;
-            Some(Window { label: label_for(k), pct: pct.clamp(0.0, 100.0), resets_at: w.get("resets_at").and_then(time_ms) })
+            Some(Window {
+                label: label_for(k),
+                pct: pct.clamp(0.0, 100.0),
+                resets_at: w.get("resets_at").and_then(time_ms),
+            })
         })
         .collect();
     out.sort_by_key(|w| order(&w.label));
@@ -105,7 +119,12 @@ fn from_cache(v: &Value) -> Vec<Window> {
         match v {
             Value::Object(o) => {
                 if let Some(u) = o.get("utilization").and_then(Value::as_f64) {
-                    let name = o.get("display_name").or_else(|| o.get("name")).and_then(Value::as_str).map(|n| format!("Semaine ({n})")).unwrap_or_else(|| label_for(key));
+                    let name = o
+                        .get("display_name")
+                        .or_else(|| o.get("name"))
+                        .and_then(Value::as_str)
+                        .map(|n| format!("Semaine ({n})"))
+                        .unwrap_or_else(|| label_for(key));
                     out.push((name, u, o.get("resets_at").and_then(time_ms)));
                     return;
                 }
@@ -131,14 +150,23 @@ fn from_cache(v: &Value) -> Vec<Window> {
             continue;
         }
         let pct = if fraction { u * 100.0 } else { u } as f32;
-        out.push(Window { label, pct: pct.clamp(0.0, 100.0), resets_at: r });
+        out.push(Window {
+            label,
+            pct: pct.clamp(0.0, 100.0),
+            resets_at: r,
+        });
     }
     out.sort_by_key(|w| order(&w.label));
     out
 }
 
 fn mtime_ms(p: &std::path::Path) -> u64 {
-    std::fs::metadata(p).and_then(|m| m.modified()).ok().and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok()).map(|d| d.as_millis() as u64).unwrap_or(0)
+    std::fs::metadata(p)
+        .and_then(|m| m.modified())
+        .ok()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
 }
 
 /// The latest figures, from whichever source is freshest. Windows that already started
@@ -146,18 +174,30 @@ fn mtime_ms(p: &std::path::Path) -> u64 {
 pub fn read() -> Option<Usage> {
     let now = crate::model::now_ms();
     let mut best: Option<Usage> = None;
-    if let Some(v) = std::fs::read_to_string(captured_file()).ok().and_then(|t| serde_json::from_str::<Value>(&t).ok()) {
+    if let Some(v) = std::fs::read_to_string(captured_file())
+        .ok()
+        .and_then(|t| serde_json::from_str::<Value>(&t).ok())
+    {
         let w = from_rate_limits(&v["rate_limits"]);
         if !w.is_empty() {
-            best = Some(Usage { windows: w, at: v["at"].as_u64().unwrap_or(0) });
+            best = Some(Usage {
+                windows: w,
+                at: v["at"].as_u64().unwrap_or(0),
+            });
         }
     }
     let cj = claude_json();
-    if let Some(v) = std::fs::read_to_string(&cj).ok().and_then(|t| serde_json::from_str::<Value>(&t).ok()) {
+    if let Some(v) = std::fs::read_to_string(&cj)
+        .ok()
+        .and_then(|t| serde_json::from_str::<Value>(&t).ok())
+    {
         let c = &v["cachedUsageUtilization"];
         let w = from_cache(c);
         if !w.is_empty() {
-            let at = ["fetchedAt", "timestamp", "updatedAt", "lastUpdated"].iter().find_map(|k| c.get(*k).and_then(time_ms)).unwrap_or_else(|| mtime_ms(&cj));
+            let at = ["fetchedAt", "timestamp", "updatedAt", "lastUpdated"]
+                .iter()
+                .find_map(|k| c.get(*k).and_then(time_ms))
+                .unwrap_or_else(|| mtime_ms(&cj));
             if best.as_ref().is_none_or(|b| at > b.at) {
                 best = Some(Usage { windows: w, at });
             }
@@ -190,7 +230,11 @@ pub fn left_text(ms: u64) -> String {
     let min = ms / 60_000;
     let (d, h, m) = (min / (24 * 60), min / 60 % 24, min % 60);
     if d > 0 {
-        if crate::i18n::en() { format!("{d} d {h} h") } else { format!("{d} j {h} h") }
+        if crate::i18n::en() {
+            format!("{d} d {h} h")
+        } else {
+            format!("{d} j {h} h")
+        }
     } else if h > 0 {
         format!("{h} h {m:02}")
     } else if m > 0 {
@@ -252,9 +296,14 @@ pub fn push_sample(h: &mut Vec<Sample>, s: Sample) -> bool {
         return false;
     }
     if let Some(l) = h.last()
-        && (s.at <= l.at || (l.five == s.five && l.week == s.week && near(l.five_reset, s.five_reset) && near(l.week_reset, s.week_reset))) {
-            return false;
-        }
+        && (s.at <= l.at
+            || (l.five == s.five
+                && l.week == s.week
+                && near(l.five_reset, s.five_reset)
+                && near(l.week_reset, s.week_reset)))
+    {
+        return false;
+    }
     let cut = s.at.saturating_sub(30 * HOUR);
     h.push(s);
     let first_kept = h.iter().position(|x| x.at >= cut).unwrap_or(h.len());
@@ -266,7 +315,10 @@ pub fn push_sample(h: &mut Vec<Sample>, s: Sample) -> bool {
 
 /// The readings kept so far, oldest first.
 pub fn history() -> Vec<Sample> {
-    std::fs::read_to_string(history_file()).ok().and_then(|t| serde_json::from_str(&t).ok()).unwrap_or_default()
+    std::fs::read_to_string(history_file())
+        .ok()
+        .and_then(|t| serde_json::from_str(&t).ok())
+        .unwrap_or_default()
 }
 
 /// Keep this reading in the history; returns the history with it.
@@ -275,7 +327,10 @@ pub fn record(u: &Usage) -> Vec<Sample> {
     if push_sample(&mut h, u.sample()) {
         let _ = std::fs::create_dir_all(crate::store::data_dir());
         // Several Claude Code sessions run this at once: each through a temporary file of its own.
-        let _ = crate::store::write_atomic(&history_file(), serde_json::to_string(&h).unwrap_or_default().as_bytes());
+        let _ = crate::store::write_atomic(
+            &history_file(),
+            serde_json::to_string(&h).unwrap_or_default().as_bytes(),
+        );
     }
     h
 }
@@ -313,7 +368,12 @@ pub fn day_total(h: &[Sample], now: u64) -> Option<f32> {
                 if let Some(w) = cur.take().filter(counts) {
                     total += w.max;
                 }
-                cur = Some(Win { max: p, last: p, reset: s.five_reset, at: s.at });
+                cur = Some(Win {
+                    max: p,
+                    last: p,
+                    reset: s.five_reset,
+                    at: s.at,
+                });
             }
         }
     }
@@ -331,7 +391,10 @@ const WEEK_DROP: f32 = 5.0;
 /// over how long the readings go back (24 h at most). None without any weekly reading.
 pub fn day_week_used(h: &[Sample], now: u64) -> Option<(f32, u64)> {
     let from = now.saturating_sub(DAY);
-    let readings: Vec<&Sample> = h.iter().filter(|s| s.week.is_some() && s.at <= now).collect();
+    let readings: Vec<&Sample> = h
+        .iter()
+        .filter(|s| s.week.is_some() && s.at <= now)
+        .collect();
     // Starting point: the last reading before the 24 hours, or else the first one.
     let start = readings.iter().rposition(|s| s.at <= from).unwrap_or(0);
     let first = readings.get(start)?;
@@ -377,12 +440,33 @@ pub const DAY_SHARE: f32 = 100.0 / 7.0;
 /// (over a shorter span, compared with that span's share of a day).
 pub fn day_pace_line(used: f32, span: u64) -> (String, bool) {
     let full = span >= 23 * HOUR;
-    let share = if full { DAY_SHARE } else { DAY_SHARE * span as f32 / DAY as f32 };
+    let share = if full {
+        DAY_SHARE
+    } else {
+        DAY_SHARE * span as f32 / DAY as f32
+    };
     let fast = used > share + 0.05;
-    let when = if full { crate::tr!("Ces 24 h", "These 24 h").to_string() } else { crate::trf!("Depuis {}", "Last {}", left_text(span)) };
-    let pace = if fast { crate::tr!(" · plus vite que la part d'un jour", " · faster than a day's share") } else { "" };
+    let when = if full {
+        crate::tr!("Ces 24 h", "These 24 h").to_string()
+    } else {
+        crate::trf!("Depuis {}", "Last {}", left_text(span))
+    };
+    let pace = if fast {
+        crate::tr!(
+            " · plus vite que la part d'un jour",
+            " · faster than a day's share"
+        )
+    } else {
+        ""
+    };
     let (used, day) = (crate::i18n::dec1(used), crate::i18n::dec1(DAY_SHARE));
-    (crate::trf!("{when} : {used} % de la semaine utilisés (part d'un jour : {day} %){pace}", "{when}: {used} % of the week used (a day's share: {day} %){pace}"), fast)
+    (
+        crate::trf!(
+            "{when} : {used} % de la semaine utilisés (part d'un jour : {day} %){pace}",
+            "{when}: {used} % of the week used (a day's share: {day} %){pace}"
+        ),
+        fast,
+    )
 }
 
 /// The reserve is near: one more turn, as big as the biggest so far (at least half a
@@ -398,7 +482,10 @@ fn settings_file() -> PathBuf {
 }
 
 fn our_command(exe: &std::path::Path) -> String {
-    format!("{} statusline", crate::sessions::shell_quote(&exe.display().to_string()))
+    format!(
+        "{} statusline",
+        crate::sessions::shell_quote(&exe.display().to_string())
+    )
 }
 
 /// Our status line is the one Claude Code runs.
@@ -406,7 +493,11 @@ pub fn tracking_on() -> bool {
     std::fs::read_to_string(settings_file())
         .ok()
         .and_then(|t| serde_json::from_str::<Value>(&t).ok())
-        .and_then(|v| v["statusLine"]["command"].as_str().map(|c| c.ends_with(" statusline")))
+        .and_then(|v| {
+            v["statusLine"]["command"]
+                .as_str()
+                .map(|c| c.ends_with(" statusline"))
+        })
         .unwrap_or(false)
 }
 
@@ -415,15 +506,24 @@ pub fn tracking_on() -> bool {
 pub fn start_tracking(exe: &std::path::Path) -> Result<(), String> {
     let f = settings_file();
     let text = std::fs::read_to_string(&f).unwrap_or_default();
-    let mut v: Value = if text.trim().is_empty() { json!({}) } else { serde_json::from_str(&text).map_err(|e| format!("{} illisible ({e}), laissé tel quel", f.display()))? };
+    let mut v: Value = if text.trim().is_empty() {
+        json!({})
+    } else {
+        serde_json::from_str(&text)
+            .map_err(|e| format!("{} illisible ({e}), laissé tel quel", f.display()))?
+    };
     let obj = v.as_object_mut().ok_or("format inattendu")?;
     let mine = our_command(exe);
     if let Some(prev) = obj.get("statusLine").and_then(|s| s["command"].as_str())
-        && !prev.ends_with(" statusline") {
-            std::fs::create_dir_all(crate::store::data_dir()).map_err(|e| e.to_string())?;
-            std::fs::write(previous_file(), prev).map_err(|e| e.to_string())?;
-        }
-    obj.insert("statusLine".into(), json!({ "type": "command", "command": mine, "padding": 0 }));
+        && !prev.ends_with(" statusline")
+    {
+        std::fs::create_dir_all(crate::store::data_dir()).map_err(|e| e.to_string())?;
+        std::fs::write(previous_file(), prev).map_err(|e| e.to_string())?;
+    }
+    obj.insert(
+        "statusLine".into(),
+        json!({ "type": "command", "command": mine, "padding": 0 }),
+    );
     if !text.is_empty() {
         let bak = f.with_extension("json.bak");
         if !bak.exists() {
@@ -431,33 +531,49 @@ pub fn start_tracking(exe: &std::path::Path) -> Result<(), String> {
         }
     }
     std::fs::create_dir_all(claude_dir()).map_err(|e| e.to_string())?;
-    std::fs::write(&f, serde_json::to_string_pretty(&v).unwrap_or_default() + "\n").map_err(|e| e.to_string())
+    std::fs::write(
+        &f,
+        serde_json::to_string_pretty(&v).unwrap_or_default() + "\n",
+    )
+    .map_err(|e| e.to_string())
 }
 
 /// Put the person's own status line back (or none). Only while Claude Code's status line is
 /// still ours: one the person set since then stays.
 pub fn stop_tracking() -> Result<(), String> {
     let f = settings_file();
-    let Ok(text) = std::fs::read_to_string(&f) else { return Ok(()) };
+    let Ok(text) = std::fs::read_to_string(&f) else {
+        return Ok(());
+    };
     let mut v: Value = serde_json::from_str(&text).map_err(|e| e.to_string())?;
     let prev = std::fs::read_to_string(previous_file()).ok();
     if !restore_status_line(&mut v, prev.as_deref())? {
         return Ok(());
     }
     let _ = std::fs::remove_file(previous_file());
-    std::fs::write(&f, serde_json::to_string_pretty(&v).unwrap_or_default() + "\n").map_err(|e| e.to_string())
+    std::fs::write(
+        &f,
+        serde_json::to_string_pretty(&v).unwrap_or_default() + "\n",
+    )
+    .map_err(|e| e.to_string())
 }
 
 /// In Claude Code's settings `v`: ours replaced by the person's previous status line, or
 /// removed when there was none. False (and `v` untouched) when the status line isn't ours.
 fn restore_status_line(v: &mut Value, prev: Option<&str>) -> Result<bool, String> {
-    if !v["statusLine"]["command"].as_str().is_some_and(|c| c.ends_with(" statusline")) {
+    if !v["statusLine"]["command"]
+        .as_str()
+        .is_some_and(|c| c.ends_with(" statusline"))
+    {
         return Ok(false);
     }
     let obj = v.as_object_mut().ok_or("format inattendu")?;
     match prev.map(str::trim).filter(|p| !p.is_empty()) {
         Some(p) => {
-            obj.insert("statusLine".into(), json!({ "type": "command", "command": p }));
+            obj.insert(
+                "statusLine".into(),
+                json!({ "type": "command", "command": p }),
+            );
         }
         None => {
             obj.remove("statusLine");
@@ -496,33 +612,45 @@ pub fn statusline_main() {
         // The 24-hour figures need every reading, Orchestra open or not.
         let windows = from_rate_limits(&v["rate_limits"]);
         if !windows.is_empty() {
-            record(&Usage { windows, at: crate::model::now_ms() });
+            record(&Usage {
+                windows,
+                at: crate::model::now_ms(),
+            });
         }
     }
     // The person's own status line, unchanged.
     if let Ok(prev) = std::fs::read_to_string(previous_file())
-        && !prev.trim().is_empty() {
-            let shell = if cfg!(windows) { ("cmd", "/C") } else { ("sh", "-c") };
-            if let Ok(mut child) = crate::proc::command(shell.0)
-                .args([shell.1, prev.trim()])
-                .stdin(std::process::Stdio::piped())
-                .stdout(std::process::Stdio::inherit())
-                .spawn()
-            {
-                if let Some(mut i) = child.stdin.take() {
-                    let _ = i.write_all(input.as_bytes());
-                }
-                let _ = child.wait();
-                return;
+        && !prev.trim().is_empty()
+    {
+        let shell = if cfg!(windows) {
+            ("cmd", "/C")
+        } else {
+            ("sh", "-c")
+        };
+        if let Ok(mut child) = crate::proc::command(shell.0)
+            .args([shell.1, prev.trim()])
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::inherit())
+            .spawn()
+        {
+            if let Some(mut i) = child.stdin.take() {
+                let _ = i.write_all(input.as_bytes());
             }
+            let _ = child.wait();
+            return;
         }
+    }
     // Ours: model, then the windows.
     let mut parts = vec![];
     if let Some(m) = v["model"]["display_name"].as_str() {
         parts.push(m.to_string());
     }
     for w in from_rate_limits(&v["rate_limits"]) {
-        let short = if w.label.starts_with("Session") { "5 h".to_string() } else { w.label.to_lowercase() };
+        let short = if w.label.starts_with("Session") {
+            "5 h".to_string()
+        } else {
+            w.label.to_lowercase()
+        };
         parts.push(format!("{short} {:.0} %", w.pct));
     }
     println!("{}", parts.join(" · "));
@@ -534,11 +662,15 @@ mod tests {
 
     #[test]
     fn rate_limits_and_cache() {
-        let w = from_rate_limits(&json!({"seven_day": {"used_percentage": 41.2, "resets_at": 1738857600}, "five_hour": {"used_percentage": 23.5, "resets_at": 1738425600}}));
+        let w = from_rate_limits(
+            &json!({"seven_day": {"used_percentage": 41.2, "resets_at": 1738857600}, "five_hour": {"used_percentage": 23.5, "resets_at": 1738425600}}),
+        );
         assert_eq!(w[0].label, "Session (5 h)");
         assert_eq!(w[0].resets_at, Some(1738425600000));
         assert_eq!(w[1].pct, 41.2);
-        let c = from_cache(&json!({"utilization": {"five_hour": {"utilization": 0.3, "resets_at": "2026-11-18T15:00:00Z"}, "limits": [{"display_name": "Fable", "utilization": 0.57}]}}));
+        let c = from_cache(
+            &json!({"utilization": {"five_hour": {"utilization": 0.3, "resets_at": "2026-11-18T15:00:00Z"}, "limits": [{"display_name": "Fable", "utilization": 0.57}]}}),
+        );
         assert_eq!(c.len(), 2);
         assert!((c[0].pct - 30.0).abs() < 0.01);
         assert_eq!(c[1].label, "Semaine (Fable)");
@@ -579,13 +711,24 @@ mod tests {
         assert_eq!(left_text(12 * 60_000), "12 min");
         assert_eq!(left_text((2 * 60 + 4) * 60_000), "2 h 04");
         assert!(left_text((3 * 24 * 60 + 5 * 60) * 60_000).starts_with('3'));
-        let u = Usage { windows: from_rate_limits(&json!({"seven_day": {"used_percentage": 41.0}, "five_hour": {"used_percentage": 23.0}})), at: 0 };
+        let u = Usage {
+            windows: from_rate_limits(
+                &json!({"seven_day": {"used_percentage": 41.0}, "five_hour": {"used_percentage": 23.0}}),
+            ),
+            at: 0,
+        };
         assert_eq!(u.five().unwrap().pct, 23.0);
         assert_eq!(u.week().unwrap().pct, 41.0);
     }
 
     fn s(at_h: u64, five: f32, reset_h: Option<u64>) -> Sample {
-        Sample { at: at_h * HOUR, five: Some(five), five_reset: reset_h.map(|r| r * HOUR), week: None, week_reset: None }
+        Sample {
+            at: at_h * HOUR,
+            five: Some(five),
+            five_reset: reset_h.map(|r| r * HOUR),
+            week: None,
+            week_reset: None,
+        }
     }
 
     #[test]
@@ -593,7 +736,16 @@ mod tests {
         let mut h = vec![];
         assert!(push_sample(&mut h, s(1, 10.0, Some(5))));
         assert!(!push_sample(&mut h, s(2, 10.0, Some(5))), "same figures");
-        assert!(!push_sample(&mut h, Sample { at: 3 * HOUR, ..Default::default() }), "nothing in it");
+        assert!(
+            !push_sample(
+                &mut h,
+                Sample {
+                    at: 3 * HOUR,
+                    ..Default::default()
+                }
+            ),
+            "nothing in it"
+        );
         assert!(push_sample(&mut h, s(3, 20.0, Some(5))));
         for i in 4..40 {
             push_sample(&mut h, s(i, i as f32, Some(i + 4)));
@@ -607,41 +759,80 @@ mod tests {
         let now = 40 * HOUR;
         // Window ended 30 h ago (too old), one that ended 18 h after its start before now - 24 h
         // but was still running then, two inside the day.
-        let h = vec![s(8, 50.0, Some(10)), s(14, 30.0, Some(17)), s(16, 40.0, Some(17)), s(25, 20.0, Some(29)), s(28, 35.0, Some(29)), s(36, 10.0, Some(40))];
+        let h = vec![
+            s(8, 50.0, Some(10)),
+            s(14, 30.0, Some(17)),
+            s(16, 40.0, Some(17)),
+            s(25, 20.0, Some(29)),
+            s(28, 35.0, Some(29)),
+            s(36, 10.0, Some(40)),
+        ];
         assert_eq!(day_total(&h, now), Some(40.0 + 35.0 + 10.0));
         // Without reset times: a drop starts a new window.
-        let h = vec![s(30, 10.0, None), s(31, 25.0, None), s(33, 5.0, None), s(34, 15.0, None)];
+        let h = vec![
+            s(30, 10.0, None),
+            s(31, 25.0, None),
+            s(33, 5.0, None),
+            s(34, 15.0, None),
+        ];
         assert_eq!(day_total(&h, now), Some(25.0 + 15.0));
         assert_eq!(day_total(&[], now), None);
     }
 
     #[test]
     fn week_used_over_a_day() {
-        let w = |at_h: u64, pct: f32, reset_h: u64| Sample { at: at_h * HOUR, week: Some(pct), week_reset: Some(reset_h * HOUR), ..Default::default() };
+        let w = |at_h: u64, pct: f32, reset_h: u64| Sample {
+            at: at_h * HOUR,
+            week: Some(pct),
+            week_reset: Some(reset_h * HOUR),
+            ..Default::default()
+        };
         let now = 40 * HOUR;
         // 30 % before the day, 34 % then 36 %: 6 points over a full day.
-        let (used, span) = day_week_used(&[w(10, 28.0, 100), w(15, 30.0, 100), w(20, 34.0, 100), w(39, 36.0, 100)], now).unwrap();
+        let (used, span) = day_week_used(
+            &[
+                w(10, 28.0, 100),
+                w(15, 30.0, 100),
+                w(20, 34.0, 100),
+                w(39, 36.0, 100),
+            ],
+            now,
+        )
+        .unwrap();
         assert!((used - 6.0).abs() < 0.01);
         assert_eq!(span, 24 * HOUR);
         assert!((daily_pct(used) - 42.0).abs() < 0.01);
         // The week starts again: what came before the reset, then the new figure.
-        let (used, span) = day_week_used(&[w(30, 90.0, 32), w(31, 95.0, 32), w(35, 3.0, 200)], now).unwrap();
+        let (used, span) =
+            day_week_used(&[w(30, 90.0, 32), w(31, 95.0, 32), w(35, 3.0, 200)], now).unwrap();
         assert!((used - 8.0).abs() < 0.01);
         assert_eq!(span, 10 * HOUR);
         assert_eq!(day_week_used(&[], now), None);
         // Two sources taking turns (the status line, live, and ~/.claude.json, a little
         // late): the figure goes 40, 39.5, 40.2, 39.8, 41. Only the week's real rise, 1
         // point, counts; the dips and the climbs back over them don't.
-        let noisy = [w(20, 40.0, 100), w(21, 39.5, 100), w(22, 40.2, 100), w(23, 39.8, 100), w(24, 41.0, 100)];
+        let noisy = [
+            w(20, 40.0, 100),
+            w(21, 39.5, 100),
+            w(22, 40.2, 100),
+            w(23, 39.8, 100),
+            w(24, 41.0, 100),
+        ];
         let (used, _) = day_week_used(&noisy, now).unwrap();
         assert!((used - 1.0).abs() < 0.01, "{used}");
         // The late source without a reset time: a dip of a point or two is still the same
         // week, not a new one whose whole figure would count.
-        let bare = |at_h: u64, pct: f32| Sample { at: at_h * HOUR, week: Some(pct), ..Default::default() };
-        let (used, _) = day_week_used(&[w(20, 40.0, 100), bare(21, 38.5, ), w(22, 41.0, 100)], now).unwrap();
+        let bare = |at_h: u64, pct: f32| Sample {
+            at: at_h * HOUR,
+            week: Some(pct),
+            ..Default::default()
+        };
+        let (used, _) =
+            day_week_used(&[w(20, 40.0, 100), bare(21, 38.5), w(22, 41.0, 100)], now).unwrap();
         assert!((used - 1.0).abs() < 0.01, "{used}");
         // Without any reset time, a real new week (a big drop) still counts from zero.
-        let (used, _) = day_week_used(&[bare(30, 90.0), bare(31, 95.0), bare(35, 3.0)], now).unwrap();
+        let (used, _) =
+            day_week_used(&[bare(30, 90.0), bare(31, 95.0), bare(35, 3.0)], now).unwrap();
         assert!((used - 8.0).abs() < 0.01, "{used}");
     }
 
@@ -651,10 +842,16 @@ mod tests {
     fn day_pace_reads_in_points_of_the_week() {
         let (line, fast) = day_pace_line(15.0, 24 * HOUR);
         // French by default in tests: decimal commas.
-        assert!(line.contains("15,0 %") && line.contains("14,3 %") && !line.contains("105"), "{line}");
+        assert!(
+            line.contains("15,0 %") && line.contains("14,3 %") && !line.contains("105"),
+            "{line}"
+        );
         assert!(fast);
         assert!(!day_pace_line(10.0, 24 * HOUR).1);
-        assert!(!day_pace_line(14.28, 24 * HOUR).1, "a day's share exactly is not too fast");
+        assert!(
+            !day_pace_line(14.28, 24 * HOUR).1,
+            "a day's share exactly is not too fast"
+        );
         // Over 3 hours, a day's share is about 1.8 points.
         assert!(day_pace_line(2.0, 3 * HOUR).1);
         assert!(!day_pace_line(1.0, 3 * HOUR).1);
@@ -663,8 +860,14 @@ mod tests {
     #[test]
     fn pause_before_the_reserve() {
         assert!(!near_reserve(80.0, 95.0, 3.0));
-        assert!(near_reserve(92.5, 95.0, 3.0), "the next turn would bite into it");
-        assert!(near_reserve(94.6, 95.0, 0.0), "half a point of margin at least");
+        assert!(
+            near_reserve(92.5, 95.0, 3.0),
+            "the next turn would bite into it"
+        );
+        assert!(
+            near_reserve(94.6, 95.0, 0.0),
+            "half a point of margin at least"
+        );
         assert!(near_reserve(96.0, 95.0, 0.0));
     }
 }

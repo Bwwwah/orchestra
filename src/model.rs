@@ -1,9 +1,9 @@
 //! Data model: a workspace made of nested pages, each page made of blocks,
 //! and optionally holding a database (table / board / list views).
 
+pub use crate::project::Project;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
-pub use crate::project::Project;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 static CLOCK: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
@@ -12,7 +12,10 @@ static CLOCK: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0
 /// computer (a hybrid clock), so "most recent edit wins" holds even if clocks differ a little.
 pub fn now_ms() -> u64 {
     use std::sync::atomic::Ordering;
-    let sys = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_millis() as u64).unwrap_or(0);
+    let sys = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0);
     let mut cur = CLOCK.load(Ordering::SeqCst);
     loop {
         let next = sys.max(cur + 1);
@@ -107,7 +110,10 @@ impl BlockKind {
     pub fn from_name(s: &str) -> Option<BlockKind> {
         let s = s.trim().to_lowercase();
         BlockKind::ALL.into_iter().find(|k| {
-            serde_json::to_value(k).ok().and_then(|v| v.as_str().map(|x| x == s)) == Some(true)
+            serde_json::to_value(k)
+                .ok()
+                .and_then(|v| v.as_str().map(|x| x == s))
+                == Some(true)
                 || k.keywords().contains(&s.as_str())
                 || k.label().to_lowercase() == s
         })
@@ -136,7 +142,15 @@ pub struct Block {
 
 impl Block {
     pub fn new(kind: BlockKind, text: impl Into<String>) -> Self {
-        Block { id: new_id(), kind, text: text.into(), checked: false, extra: String::new(), indent: 0, updated: now_ms() }
+        Block {
+            id: new_id(),
+            kind,
+            text: text.into(),
+            checked: false,
+            extra: String::new(),
+            indent: 0,
+            updated: now_ms(),
+        }
     }
 }
 
@@ -151,8 +165,13 @@ pub enum ColumnKind {
 }
 
 impl ColumnKind {
-    pub const ALL: [ColumnKind; 5] =
-        [ColumnKind::Text, ColumnKind::Number, ColumnKind::Select, ColumnKind::Checkbox, ColumnKind::Date];
+    pub const ALL: [ColumnKind; 5] = [
+        ColumnKind::Text,
+        ColumnKind::Number,
+        ColumnKind::Select,
+        ColumnKind::Checkbox,
+        ColumnKind::Date,
+    ];
     pub fn label(self) -> &'static str {
         match self {
             ColumnKind::Text => crate::tr!("Texte", "Text"),
@@ -207,15 +226,35 @@ pub struct Database {
 
 impl Database {
     pub fn new_default() -> Self {
-        let name = Column { id: new_id(), name: crate::tr!("Nom", "Name").into(), kind: ColumnKind::Text, options: vec![] };
+        let name = Column {
+            id: new_id(),
+            name: crate::tr!("Nom", "Name").into(),
+            kind: ColumnKind::Text,
+            options: vec![],
+        };
         let status = Column {
             id: new_id(),
             name: crate::tr!("Statut", "Status").into(),
             kind: ColumnKind::Select,
-            options: vec![crate::tr!("À faire", "To do").into(), crate::tr!("En cours", "In progress").into(), crate::tr!("Terminé", "Done").into()],
+            options: vec![
+                crate::tr!("À faire", "To do").into(),
+                crate::tr!("En cours", "In progress").into(),
+                crate::tr!("Terminé", "Done").into(),
+            ],
         };
-        let date = Column { id: new_id(), name: "Date".into(), kind: ColumnKind::Date, options: vec![] };
-        let mut db = Database { columns: vec![name, status, date], rows: vec![], view: DbView::Table, sort: None, filter: String::new() };
+        let date = Column {
+            id: new_id(),
+            name: "Date".into(),
+            kind: ColumnKind::Date,
+            options: vec![],
+        };
+        let mut db = Database {
+            columns: vec![name, status, date],
+            rows: vec![],
+            view: DbView::Table,
+            sort: None,
+            filter: String::new(),
+        };
         db.add_row(crate::tr!("Première ligne", "First row"));
         db
     }
@@ -225,33 +264,48 @@ impl Database {
     }
 
     pub fn add_row(&mut self, title: &str) -> String {
-        let mut row = Row { id: new_id(), cells: BTreeMap::new(), page: None };
+        let mut row = Row {
+            id: new_id(),
+            cells: BTreeMap::new(),
+            page: None,
+        };
         if let Some(c) = self.columns.first() {
             row.cells.insert(c.id.clone(), title.to_string());
         }
         if let Some(c) = self.columns.iter().find(|c| c.kind == ColumnKind::Select)
-            && let Some(o) = c.options.first() {
-                row.cells.insert(c.id.clone(), o.clone());
-            }
+            && let Some(o) = c.options.first()
+        {
+            row.cells.insert(c.id.clone(), o.clone());
+        }
         let id = row.id.clone();
         self.rows.push(row);
         id
     }
 
     pub fn row_title(&self, row: &Row) -> String {
-        self.title_col().and_then(|c| row.cells.get(&c.id).cloned()).unwrap_or_default()
+        self.title_col()
+            .and_then(|c| row.cells.get(&c.id).cloned())
+            .unwrap_or_default()
     }
 
     pub fn column_by_name(&self, name: &str) -> Option<&Column> {
         let n = name.to_lowercase();
-        self.columns.iter().find(|c| c.name.to_lowercase() == n || c.id == name)
+        self.columns
+            .iter()
+            .find(|c| c.name.to_lowercase() == n || c.id == name)
     }
 
     /// Rows after the filter text and sort setting are applied (indexes into `rows`).
     pub fn visible_rows(&self) -> Vec<usize> {
         let f = self.filter.trim().to_lowercase();
         let mut idx: Vec<usize> = (0..self.rows.len())
-            .filter(|&i| f.is_empty() || self.rows[i].cells.values().any(|v| v.to_lowercase().contains(&f)))
+            .filter(|&i| {
+                f.is_empty()
+                    || self.rows[i]
+                        .cells
+                        .values()
+                        .any(|v| v.to_lowercase().contains(&f))
+            })
             .collect();
         if let Some((col, asc)) = &self.sort {
             let kind = self.columns.iter().find(|c| &c.id == col).map(|c| c.kind);
@@ -259,8 +313,16 @@ impl Database {
                 let va = self.rows[a].cells.get(col).cloned().unwrap_or_default();
                 let vb = self.rows[b].cells.get(col).cloned().unwrap_or_default();
                 let o = if kind == Some(ColumnKind::Number) {
-                    let na = va.trim().replace(',', ".").parse::<f64>().unwrap_or(f64::MIN);
-                    let nb = vb.trim().replace(',', ".").parse::<f64>().unwrap_or(f64::MIN);
+                    let na = va
+                        .trim()
+                        .replace(',', ".")
+                        .parse::<f64>()
+                        .unwrap_or(f64::MIN);
+                    let nb = vb
+                        .trim()
+                        .replace(',', ".")
+                        .parse::<f64>()
+                        .unwrap_or(f64::MIN);
                     na.partial_cmp(&nb).unwrap_or(std::cmp::Ordering::Equal)
                 } else {
                     va.to_lowercase().cmp(&vb.to_lowercase())
@@ -325,7 +387,11 @@ impl Page {
     }
 
     pub fn display_title(&self) -> String {
-        if self.title.trim().is_empty() { "Sans titre".to_string() } else { self.title.clone() }
+        if self.title.trim().is_empty() {
+            "Sans titre".to_string()
+        } else {
+            self.title.clone()
+        }
     }
 
     pub fn touch(&mut self) {
@@ -596,7 +662,12 @@ pub const REPORT_DAYS_KEPT: usize = 14;
 
 /// The steps a session report lists under « Étapes terminées » (« aucune » left out).
 fn finished_steps(report: &Page) -> Vec<String> {
-    let heading = |k: BlockKind| matches!(k, BlockKind::Heading1 | BlockKind::Heading2 | BlockKind::Heading3);
+    let heading = |k: BlockKind| {
+        matches!(
+            k,
+            BlockKind::Heading1 | BlockKind::Heading2 | BlockKind::Heading3
+        )
+    };
     let mut out = vec![];
     let mut inside = false;
     for b in &report.blocks {
@@ -635,24 +706,42 @@ impl EndConditions {
     /// Why an endless session stops now, if it does. `elapsed_ms`: since it started;
     /// `done_streak`: how many turns in a row the AI said it had nothing left — twice
     /// stops it anyway, so it never spends the budget going round in circles.
-    pub fn reached(&self, elapsed_ms: u64, steps_done: u32, turns: u32, done_streak: u32) -> Option<String> {
+    pub fn reached(
+        &self,
+        elapsed_ms: u64,
+        steps_done: u32,
+        turns: u32,
+        done_streak: u32,
+    ) -> Option<String> {
         if let Some(h) = self.hours.filter(|h| *h > 0.0)
-            && elapsed_ms as f64 >= h as f64 * 3_600_000.0 {
-                return Some(crate::trf!("durée atteinte ({h} h)", "time reached ({h} h)"));
-            }
+            && elapsed_ms as f64 >= h as f64 * 3_600_000.0
+        {
+            return Some(crate::trf!(
+                "durée atteinte ({h} h)",
+                "time reached ({h} h)"
+            ));
+        }
         if let Some(n) = self.steps.filter(|n| *n > 0)
-            && steps_done >= n {
-                return Some(crate::trf!("{n} étape(s) terminée(s)", "{n} step(s) done"));
-            }
+            && steps_done >= n
+        {
+            return Some(crate::trf!("{n} étape(s) terminée(s)", "{n} step(s) done"));
+        }
         if let Some(n) = self.turns.filter(|n| *n > 0)
-            && turns >= n {
-                return Some(crate::trf!("{n} tours atteints", "{n} turns reached"));
-            }
+            && turns >= n
+        {
+            return Some(crate::trf!("{n} tours atteints", "{n} turns reached"));
+        }
         if done_streak >= 1 && self.when_done {
             return Some(crate::tr!("mission terminée", "mission complete").into());
         }
         if done_streak >= 2 {
-            return Some(crate::tr!("plus rien à faire, deux tours de suite", "nothing left to do, two turns in a row").into());
+            return Some(
+                crate::tr!(
+                    "plus rien à faire, deux tours de suite",
+                    "nothing left to do, two turns in a row"
+                )
+                .into(),
+            );
         }
         None
     }
@@ -706,7 +795,10 @@ pub fn due_resumes(runs: &[RunRecord], now: u64, running: &[&str]) -> Vec<usize>
 pub fn suspended_runs(runs: &[RunRecord], now: u64, running: &[&str]) -> Vec<usize> {
     let mut out: Vec<usize> = vec![];
     for (i, r) in runs.iter().enumerate().rev() {
-        if r.resume_at <= now || running.contains(&r.project.as_str()) || out.iter().any(|&j| runs[j].project == r.project) {
+        if r.resume_at <= now
+            || running.contains(&r.project.as_str())
+            || out.iter().any(|&j| runs[j].project == r.project)
+        {
             continue;
         }
         out.push(i);
@@ -718,7 +810,9 @@ pub fn suspended_runs(runs: &[RunRecord], now: u64, running: &[&str]) -> Vec<usi
 /// Whether a question asked (ask_human) about `project` since `since` still waits for the
 /// person's answer.
 pub fn question_pending(inbox: &[InboxMsg], project: &str, since: u64) -> bool {
-    inbox.iter().any(|m| m.kind == "question" && m.project == project && m.answer.trim().is_empty() && m.at >= since)
+    inbox.iter().any(|m| {
+        m.kind == "question" && m.project == project && m.answer.trim().is_empty() && m.at >= since
+    })
 }
 
 /// How many of a project's latest questions its state of play shows the AIs.
@@ -735,7 +829,13 @@ impl Workspace {
     /// last edit: marked received at `now`. Returns their questions, for a notice.
     pub fn mark_answers_seen(&mut self, project: &str, now: u64) -> Vec<String> {
         let mut out = vec![];
-        for m in self.inbox.iter_mut().rev().filter(|m| m.kind == "question" && m.project == project).take(QUESTIONS_SHOWN) {
+        for m in self
+            .inbox
+            .iter_mut()
+            .rev()
+            .filter(|m| m.kind == "question" && m.project == project)
+            .take(QUESTIONS_SHOWN)
+        {
             if !m.answer.trim().is_empty() && !m.answer_seen() {
                 m.seen_at = now.max(m.answered_at);
                 out.push(crate::richtext::one_line(m.text.trim(), 120));
@@ -745,7 +845,13 @@ impl Workspace {
     }
 
     pub fn questions_markdown(&self, project: &str) -> Option<String> {
-        let qs: Vec<&InboxMsg> = self.inbox.iter().rev().filter(|m| m.kind == "question" && m.project == project).take(QUESTIONS_SHOWN).collect();
+        let qs: Vec<&InboxMsg> = self
+            .inbox
+            .iter()
+            .rev()
+            .filter(|m| m.kind == "question" && m.project == project)
+            .take(QUESTIONS_SHOWN)
+            .collect();
         if qs.is_empty() {
             return None;
         }
@@ -753,16 +859,27 @@ impl Workspace {
         for m in qs {
             let q = m.text.trim().replace('\n', "\n  ");
             if m.answer.trim().is_empty() {
-                out.push_str(&format!("- Question : {q}\n  Réponse : (pas encore de réponse)\n"));
+                out.push_str(&format!(
+                    "- Question : {q}\n  Réponse : (pas encore de réponse)\n"
+                ));
             } else {
                 let a = m.answer.trim().replace('\n', "\n  ");
-                out.push_str(&format!("- Question : {q}\n  Réponse de la personne : {a}\n"));
+                out.push_str(&format!(
+                    "- Question : {q}\n  Réponse de la personne : {a}\n"
+                ));
             }
         }
         Some(out)
     }
 
-    pub fn notify(&mut self, kind: &str, project: &str, title: &str, text: &str, page: Option<String>) {
+    pub fn notify(
+        &mut self,
+        kind: &str,
+        project: &str,
+        title: &str,
+        text: &str,
+        page: Option<String>,
+    ) {
         self.inbox.push(InboxMsg {
             id: new_id(),
             at: now_ms(),
@@ -863,52 +980,133 @@ impl Workspace {
         ws.settings.workspace_name = crate::tr!("Mon espace", "My workspace").into();
         // Fixed ids and times: two people who start fresh and then sync share these pages
         // instead of getting two copies of each.
-        let mut welcome = Page::new(crate::tr!("Bienvenue dans Orchestra !", "Welcome to Orchestra!"), None);
+        let mut welcome = Page::new(
+            crate::tr!("Bienvenue dans Orchestra !", "Welcome to Orchestra!"),
+            None,
+        );
         welcome.id = "start-bienvenue".into();
         welcome.created = 1;
         welcome.updated = 1;
         welcome.icon = "👋".into();
         welcome.blocks = vec![
-            Block::new(BlockKind::Callout, crate::tr!(
-                "Orchestra réunit vos **projets**, les **IA** qui travaillent dessus (Claude Code, Codex, Gemini CLI…) et vos **notes**. Tout reste sur votre ordinateur : pas de compte, pas de serveur.",
-                "Orchestra brings together your **projects**, the **AIs** working on them (Claude Code, Codex, Gemini CLI…) and your **notes**. Everything stays on your computer: no account, no server."
-            )),
-            Block::new(BlockKind::Heading2, crate::tr!("Comment ça marche", "How it works")),
-            Block::new(BlockKind::Numbered, crate::tr!(
-                "**Branchez une IA** : Réglages › IA (MCP). Orchestra s'ajoute de lui-même (par MCP) aux IA installées ; elles peuvent alors lire et écrire ici.",
-                "**Plug in an AI**: Settings › AI (MCP). Orchestra adds itself (through MCP) to the installed AIs; they can then read and write here."
-            )),
-            Block::new(BlockKind::Numbered, crate::tr!(
-                "**Créez un projet** : Projets › Nouveau projet, avec son dossier. L'IA remplit l'état des lieux et propose des étapes.",
-                "**Create a project**: Projects › New project, with its folder. The AI fills in the state of play and proposes steps."
-            )),
-            Block::new(BlockKind::Numbered, crate::tr!(
-                "**Écrivez vos étapes** dans le cadre « Étapes » du projet : une étape par ligne, ce que vous voulez voir fait.",
-                "**Write your steps** in the project's « Steps » box: one step per line, what you want done."
-            )),
-            Block::new(BlockKind::Numbered, crate::tr!(
-                "**Lancez une IA en autonomie** : Orchestration. Elle prend les étapes une à une, dans une copie à part du dossier, sans dépasser le budget fixé.",
-                "**Start an AI on its own**: Orchestration. It takes the steps one by one, in a separate copy of the folder, within the budget you set."
-            )),
-            Block::new(BlockKind::Numbered, crate::tr!(
-                "**Répondez à ses questions** : Boîte de réception. Votre réponse lui parvient à l'étape suivante.",
-                "**Answer its questions**: Inbox. Your answer reaches it at the next step."
-            )),
-            Block::new(BlockKind::Numbered, crate::tr!(
-                "**Gardez son travail** : à la fin de la session, Fusionner ramène la copie dans votre projet, Abandonner la jette.",
-                "**Keep its work**: when the session ends, Merge brings the copy back into your project, Discard throws it away."
-            )),
-            Block::new(BlockKind::Heading2, crate::tr!("Dans la barre de gauche 👈", "In the left sidebar 👈")),
-            Block::new(BlockKind::Bullet, crate::tr!("**Accueil** : ce qui demande votre attention et les pages récentes.", "**Home**: what needs your attention and recent pages.")),
-            Block::new(BlockKind::Bullet, crate::tr!("**Projets** : chaque projet, son état des lieux, ses étapes, ses sessions IA et ses versions (git).", "**Projects**: each project, its state of play, steps, AI sessions and versions (git).")),
-            Block::new(BlockKind::Bullet, crate::tr!("**Orchestration** : lancer, suivre et arrêter les IA autonomes, et régler leurs limites.", "**Orchestration**: start, follow and stop autonomous AIs, and set their limits.")),
-            Block::new(BlockKind::Bullet, crate::tr!("**Boîte de réception** : questions des IA, fins de session, rapports et messages de l'app.", "**Inbox**: AI questions, session ends, reports and app messages.")),
-            Block::new(BlockKind::Bullet, crate::tr!("**Pages privées** : vos notes, comme celle-ci ; elles ne quittent jamais votre ordinateur.", "**Private pages**: your notes, like this one; they never leave your computer.")),
-            Block::new(BlockKind::Heading2, crate::tr!("Écrire dans une page", "Writing in a page")),
-            Block::new(BlockKind::Todo, crate::tr!("Cliquez n'importe où et **tapez** `/` pour choisir un bloc : titres, tableaux, cases à cocher…", "Click anywhere and **type** `/` to choose a block: headings, tables, checkboxes…")),
-            Block::new(BlockKind::Todo, crate::tr!("Tapez `/page` pour créer une **sous-page** et y ranger ce que vous voulez", "Type `/page` to create a **subpage** and keep whatever you like in it")),
+            Block::new(
+                BlockKind::Callout,
+                crate::tr!(
+                    "Orchestra réunit vos **projets**, les **IA** qui travaillent dessus (Claude Code, Codex, Gemini CLI…) et vos **notes**. Tout reste sur votre ordinateur : pas de compte, pas de serveur.",
+                    "Orchestra brings together your **projects**, the **AIs** working on them (Claude Code, Codex, Gemini CLI…) and your **notes**. Everything stays on your computer: no account, no server."
+                ),
+            ),
+            Block::new(
+                BlockKind::Heading2,
+                crate::tr!("Comment ça marche", "How it works"),
+            ),
+            Block::new(
+                BlockKind::Numbered,
+                crate::tr!(
+                    "**Branchez une IA** : Réglages › IA (MCP). Orchestra s'ajoute de lui-même (par MCP) aux IA installées ; elles peuvent alors lire et écrire ici.",
+                    "**Plug in an AI**: Settings › AI (MCP). Orchestra adds itself (through MCP) to the installed AIs; they can then read and write here."
+                ),
+            ),
+            Block::new(
+                BlockKind::Numbered,
+                crate::tr!(
+                    "**Créez un projet** : Projets › Nouveau projet, avec son dossier. L'IA remplit l'état des lieux et propose des étapes.",
+                    "**Create a project**: Projects › New project, with its folder. The AI fills in the state of play and proposes steps."
+                ),
+            ),
+            Block::new(
+                BlockKind::Numbered,
+                crate::tr!(
+                    "**Écrivez vos étapes** dans le cadre « Étapes » du projet : une étape par ligne, ce que vous voulez voir fait.",
+                    "**Write your steps** in the project's « Steps » box: one step per line, what you want done."
+                ),
+            ),
+            Block::new(
+                BlockKind::Numbered,
+                crate::tr!(
+                    "**Lancez une IA en autonomie** : Orchestration. Elle prend les étapes une à une, dans une copie à part du dossier, sans dépasser le budget fixé.",
+                    "**Start an AI on its own**: Orchestration. It takes the steps one by one, in a separate copy of the folder, within the budget you set."
+                ),
+            ),
+            Block::new(
+                BlockKind::Numbered,
+                crate::tr!(
+                    "**Répondez à ses questions** : Boîte de réception. Votre réponse lui parvient à l'étape suivante.",
+                    "**Answer its questions**: Inbox. Your answer reaches it at the next step."
+                ),
+            ),
+            Block::new(
+                BlockKind::Numbered,
+                crate::tr!(
+                    "**Gardez son travail** : à la fin de la session, Fusionner ramène la copie dans votre projet, Abandonner la jette.",
+                    "**Keep its work**: when the session ends, Merge brings the copy back into your project, Discard throws it away."
+                ),
+            ),
+            Block::new(
+                BlockKind::Heading2,
+                crate::tr!("Dans la barre de gauche 👈", "In the left sidebar 👈"),
+            ),
+            Block::new(
+                BlockKind::Bullet,
+                crate::tr!(
+                    "**Accueil** : ce qui demande votre attention et les pages récentes.",
+                    "**Home**: what needs your attention and recent pages."
+                ),
+            ),
+            Block::new(
+                BlockKind::Bullet,
+                crate::tr!(
+                    "**Projets** : chaque projet, son état des lieux, ses étapes, ses sessions IA et ses versions (git).",
+                    "**Projects**: each project, its state of play, steps, AI sessions and versions (git)."
+                ),
+            ),
+            Block::new(
+                BlockKind::Bullet,
+                crate::tr!(
+                    "**Orchestration** : lancer, suivre et arrêter les IA autonomes, et régler leurs limites.",
+                    "**Orchestration**: start, follow and stop autonomous AIs, and set their limits."
+                ),
+            ),
+            Block::new(
+                BlockKind::Bullet,
+                crate::tr!(
+                    "**Boîte de réception** : questions des IA, fins de session, rapports et messages de l'app.",
+                    "**Inbox**: AI questions, session ends, reports and app messages."
+                ),
+            ),
+            Block::new(
+                BlockKind::Bullet,
+                crate::tr!(
+                    "**Pages privées** : vos notes, comme celle-ci ; elles ne quittent jamais votre ordinateur.",
+                    "**Private pages**: your notes, like this one; they never leave your computer."
+                ),
+            ),
+            Block::new(
+                BlockKind::Heading2,
+                crate::tr!("Écrire dans une page", "Writing in a page"),
+            ),
+            Block::new(
+                BlockKind::Todo,
+                crate::tr!(
+                    "Cliquez n'importe où et **tapez** `/` pour choisir un bloc : titres, tableaux, cases à cocher…",
+                    "Click anywhere and **type** `/` to choose a block: headings, tables, checkboxes…"
+                ),
+            ),
+            Block::new(
+                BlockKind::Todo,
+                crate::tr!(
+                    "Tapez `/page` pour créer une **sous-page** et y ranger ce que vous voulez",
+                    "Type `/page` to create a **subpage** and keep whatever you like in it"
+                ),
+            ),
             {
-                let mut b = Block::new(BlockKind::Toggle, crate::tr!("Raccourcis utiles (cliquez sur le triangle)", "Handy shortcuts (click the triangle)"));
+                let mut b = Block::new(
+                    BlockKind::Toggle,
+                    crate::tr!(
+                        "Raccourcis utiles (cliquez sur le triangle)",
+                        "Handy shortcuts (click the triangle)"
+                    ),
+                );
                 b.extra = crate::tr!("Entrée crée un bloc, Maj+Entrée va à la ligne, Tab décale un bloc vers la droite.\n\
 Glissez la poignée ⋯ à gauche d'un bloc pour le déplacer.\n\
 Cmd/Ctrl+P ou K pour chercher dans toutes les pages.", "Enter creates a block, Shift+Enter breaks the line, Tab indents a block.\n\
@@ -916,11 +1114,17 @@ Drag the ⋯ handle left of a block to move it.\n\
 Cmd/Ctrl+P or K to search all pages.").into();
                 b
             },
-            Block::new(BlockKind::Heading2, crate::tr!("Travailler à plusieurs", "Working together")),
-            Block::new(BlockKind::Paragraph, crate::tr!(
-                "Un projet partagé part chez votre équipe avec ses pages et sa discussion ; le reste reste privé. Le branchement se choisit dans Réglages › Collaboration : en direct (chiffré), dossier partagé ou votre propre commande.",
-                "A shared project goes to your team with its pages and its discussion; everything else stays private. The connection is chosen in Settings › Collaboration: live (encrypted), a shared folder or your own command."
-            )),
+            Block::new(
+                BlockKind::Heading2,
+                crate::tr!("Travailler à plusieurs", "Working together"),
+            ),
+            Block::new(
+                BlockKind::Paragraph,
+                crate::tr!(
+                    "Un projet partagé part chez votre équipe avec ses pages et sa discussion ; le reste reste privé. Le branchement se choisit dans Réglages › Collaboration : en direct (chiffré), dossier partagé ou votre propre commande.",
+                    "A shared project goes to your team with its pages and its discussion; everything else stays private. The connection is chosen in Settings › Collaboration: live (encrypted), a shared folder or your own command."
+                ),
+            ),
             Block::new(BlockKind::Divider, ""),
         ];
         let welcome_id = welcome.id.clone();
@@ -950,19 +1154,20 @@ Cmd/Ctrl+P or K to search all pages.").into();
             }
         }
         if let Some(t) = ws.pages.iter_mut().find(|p| p.id == "start-taches")
-            && let Some(db) = t.database.as_mut() {
-                for (i, c) in db.columns.iter_mut().enumerate() {
-                    let old = std::mem::replace(&mut c.id, format!("start-col{i}"));
-                    for r in db.rows.iter_mut() {
-                        if let Some(v) = r.cells.remove(&old) {
-                            r.cells.insert(c.id.clone(), v);
-                        }
+            && let Some(db) = t.database.as_mut()
+        {
+            for (i, c) in db.columns.iter_mut().enumerate() {
+                let old = std::mem::replace(&mut c.id, format!("start-col{i}"));
+                for r in db.rows.iter_mut() {
+                    if let Some(v) = r.cells.remove(&old) {
+                        r.cells.insert(c.id.clone(), v);
                     }
                 }
-                for (i, r) in db.rows.iter_mut().enumerate() {
-                    r.id = format!("start-row{i}");
-                }
             }
+            for (i, r) in db.rows.iter_mut().enumerate() {
+                r.id = format!("start-row{i}");
+            }
+        }
         ws
     }
 
@@ -984,7 +1189,12 @@ Cmd/Ctrl+P or K to search all pages.").into();
             .iter()
             .filter(|p| !p.trashed)
             .find(|p| p.title.to_lowercase() == k)
-            .or_else(|| self.pages.iter().filter(|p| !p.trashed).find(|p| p.title.to_lowercase().contains(&k)))
+            .or_else(|| {
+                self.pages
+                    .iter()
+                    .filter(|p| !p.trashed)
+                    .find(|p| p.title.to_lowercase().contains(&k))
+            })
     }
 
     /// "Rapports des IA" grows a page a day: the day pages beyond the `REPORT_DAYS_KEPT`
@@ -997,9 +1207,18 @@ Cmd/Ctrl+P or K to search all pages.").into();
         }
         let is_day = |t: &str| {
             let b = t.as_bytes();
-            b.len() == 10 && b[4] == b'-' && b[7] == b'-' && b.iter().enumerate().all(|(i, c)| i == 4 || i == 7 || c.is_ascii_digit())
+            b.len() == 10
+                && b[4] == b'-'
+                && b[7] == b'-'
+                && b.iter()
+                    .enumerate()
+                    .all(|(i, c)| i == 4 || i == 7 || c.is_ascii_digit())
         };
-        let mut days: Vec<&Page> = self.children(Some(root)).into_iter().filter(|p| is_day(&p.title)).collect();
+        let mut days: Vec<&Page> = self
+            .children(Some(root))
+            .into_iter()
+            .filter(|p| is_day(&p.title))
+            .collect();
         days.sort_by(|a, b| a.title.cmp(&b.title));
         let over = days.len().saturating_sub(REPORT_DAYS_KEPT);
         days.into_iter().take(over).map(|p| p.id.clone()).collect()
@@ -1028,14 +1247,22 @@ Cmd/Ctrl+P or K to search all pages.").into();
                 if steps.is_empty() {
                     md.push_str(&format!("- {}\n", r.display_title()));
                 } else {
-                    md.push_str(&format!("- **{}** : {}\n", r.display_title(), steps.join(" ; ")));
+                    md.push_str(&format!(
+                        "- **{}** : {}\n",
+                        r.display_title(),
+                        steps.join(" ; ")
+                    ));
                 }
             }
             md.push('\n');
         }
         let blocks = crate::store::page_from_markdown(&md, "").blocks;
         let title = crate::tr!("Synthèse des anciens rapports", "Summary of older reports");
-        let existing = self.children(Some(&root)).iter().find(|p| p.title == title).map(|p| p.id.clone());
+        let existing = self
+            .children(Some(&root))
+            .iter()
+            .find(|p| p.title == title)
+            .map(|p| p.id.clone());
         let id = existing.unwrap_or_else(|| {
             let id = self.create_page(title, Some(root.clone()));
             if let Some(p) = self.page_mut(&id) {
@@ -1055,7 +1282,10 @@ Cmd/Ctrl+P or K to search all pages.").into();
     }
 
     pub fn children(&self, parent: Option<&str>) -> Vec<&Page> {
-        self.pages.iter().filter(|p| !p.trashed && p.parent.as_deref() == parent).collect()
+        self.pages
+            .iter()
+            .filter(|p| !p.trashed && p.parent.as_deref() == parent)
+            .collect()
     }
 
     pub fn path_of(&self, id: &str) -> Vec<String> {
@@ -1078,7 +1308,11 @@ Cmd/Ctrl+P or K to search all pages.").into();
         let mut out = vec![];
         let mut stack = vec![id.to_string()];
         while let Some(cur) = stack.pop() {
-            for p in self.pages.iter().filter(|p| p.parent.as_deref() == Some(cur.as_str())) {
+            for p in self
+                .pages
+                .iter()
+                .filter(|p| p.parent.as_deref() == Some(cur.as_str()))
+            {
                 if !out.contains(&p.id) && p.id != id {
                     out.push(p.id.clone());
                     stack.push(p.id.clone());
@@ -1093,15 +1327,16 @@ Cmd/Ctrl+P or K to search all pages.").into();
         let id = p.id.clone();
         self.pages.push(p);
         if let Some(pid) = parent
-            && let Some(par) = self.page_mut(&pid) {
-                // A project lists its pages in its "Pages" card: no link at the bottom of its text.
-                if par.database.is_none() && par.project.is_none() {
-                    let mut b = Block::new(BlockKind::PageLink, "");
-                    b.extra = id.clone();
-                    par.blocks.push(b);
-                }
-                par.touch();
+            && let Some(par) = self.page_mut(&pid)
+        {
+            // A project lists its pages in its "Pages" card: no link at the bottom of its text.
+            if par.database.is_none() && par.project.is_none() {
+                let mut b = Block::new(BlockKind::PageLink, "");
+                b.extra = id.clone();
+                par.blocks.push(b);
             }
+            par.touch();
+        }
         id
     }
 
@@ -1112,9 +1347,16 @@ Cmd/Ctrl+P or K to search all pages.").into();
         if id == target || self.page(target).is_none() {
             return false;
         }
-        let Some(from) = self.pages.iter().position(|p| p.id == id) else { return false };
+        let Some(from) = self.pages.iter().position(|p| p.id == id) else {
+            return false;
+        };
         let p = self.pages.remove(from);
-        let at = self.pages.iter().position(|p| p.id == target).unwrap_or(self.pages.len()) + usize::from(after);
+        let at = self
+            .pages
+            .iter()
+            .position(|p| p.id == target)
+            .unwrap_or(self.pages.len())
+            + usize::from(after);
         let moved = at != from;
         self.pages.insert(at, p);
         moved
@@ -1134,9 +1376,10 @@ Cmd/Ctrl+P or K to search all pages.").into();
             let parent = self.page(id).and_then(|p| p.parent.clone());
             if let Some(par) = parent
                 && self.page(&par).map(|p| p.trashed).unwrap_or(true)
-                    && let Some(p) = self.page_mut(id) {
-                        p.parent = None;
-                    }
+                && let Some(p) = self.page_mut(id)
+            {
+                p.parent = None;
+            }
         }
     }
 
@@ -1180,11 +1423,31 @@ Cmd/Ctrl+P or K to search all pages.").into();
                 out.push((p.id.clone(), String::new()));
                 continue;
             }
-            let mut hit = p.blocks.iter().map(|b| format!("{} {}", b.text, if b.kind == BlockKind::Toggle { &b.extra } else { "" })).find(|t| t.to_lowercase().contains(&q));
+            let mut hit = p
+                .blocks
+                .iter()
+                .map(|b| {
+                    format!(
+                        "{} {}",
+                        b.text,
+                        if b.kind == BlockKind::Toggle {
+                            &b.extra
+                        } else {
+                            ""
+                        }
+                    )
+                })
+                .find(|t| t.to_lowercase().contains(&q));
             if hit.is_none()
-                && let Some(db) = &p.database {
-                    hit = db.rows.iter().flat_map(|r| r.cells.values()).find(|v| v.to_lowercase().contains(&q)).cloned();
-                }
+                && let Some(db) = &p.database
+            {
+                hit = db
+                    .rows
+                    .iter()
+                    .flat_map(|r| r.cells.values())
+                    .find(|v| v.to_lowercase().contains(&q))
+                    .cloned();
+            }
             if let Some(h) = hit {
                 out.push((p.id.clone(), snippet(&h, &q)));
             }
@@ -1196,7 +1459,10 @@ Cmd/Ctrl+P or K to search all pages.").into();
 fn snippet(text: &str, q: &str) -> String {
     let lower = text.to_lowercase();
     let chars: Vec<char> = text.chars().collect();
-    let pos = lower.find(q).map(|b| lower[..b].chars().count()).unwrap_or(0);
+    let pos = lower
+        .find(q)
+        .map(|b| lower[..b].chars().count())
+        .unwrap_or(0);
     let start = pos.saturating_sub(30);
     let end = (pos + q.chars().count() + 50).min(chars.len());
     let mut s: String = chars[start..end].iter().collect();
@@ -1227,7 +1493,10 @@ mod tests {
             ids.push(ws.create_page(&format!("2026-10-{d:02}"), Some(root.clone())));
         }
         ws.create_page("Synthèse", Some(root.clone()));
-        assert!(ws.old_report_days().is_empty(), "exactly the days kept: not too many");
+        assert!(
+            ws.old_report_days().is_empty(),
+            "exactly the days kept: not too many"
+        );
         // Two older days and one newer, created in any order.
         let old2 = ws.create_page("2026-09-02", Some(root.clone()));
         let old1 = ws.create_page("2026-09-01", Some(root.clone()));
@@ -1249,7 +1518,12 @@ mod tests {
         let root = ws.create_page("Rapports des IA", None);
         ws.settings.orch.reports_page = root.clone();
         let report = |ws: &mut super::Workspace, day: &str, title: &str, steps: &str| {
-            let mut p = crate::store::page_from_markdown(&format!("# x\n\n## Étapes terminées\n\n{steps}\n\n## Commits\n\n- `abc Message`\n"), title);
+            let mut p = crate::store::page_from_markdown(
+                &format!(
+                    "# x\n\n## Étapes terminées\n\n{steps}\n\n## Commits\n\n- `abc Message`\n"
+                ),
+                title,
+            );
             p.title = title.into();
             p.parent = Some(day.to_string());
             ws.pages.push(p);
@@ -1258,34 +1532,74 @@ mod tests {
         for d in 1..=super::REPORT_DAYS_KEPT + 2 {
             days.push(ws.create_page(&format!("2026-10-{d:02}"), Some(root.clone())));
         }
-        report(&mut ws, &days[0], "Orchestra · 09:00", "- Écrire les tests\n- Corriger le bug");
+        report(
+            &mut ws,
+            &days[0],
+            "Orchestra · 09:00",
+            "- Écrire les tests\n- Corriger le bug",
+        );
         report(&mut ws, &days[0], "Site · 14:00", "- aucune");
         let (sum, n) = ws.condense_old_reports().unwrap();
         assert_eq!(n, 2);
-        let text: Vec<String> = ws.page(&sum).unwrap().blocks.iter().map(|b| b.text.clone()).collect();
+        let text: Vec<String> = ws
+            .page(&sum)
+            .unwrap()
+            .blocks
+            .iter()
+            .map(|b| b.text.clone())
+            .collect();
         let all = text.join("\n");
         assert!(all.contains("2026-10-01") && all.contains("2026-10-02"));
-        assert!(all.contains("Orchestra · 09:00") && all.contains("Écrire les tests ; Corriger le bug"));
+        assert!(
+            all.contains("Orchestra · 09:00") && all.contains("Écrire les tests ; Corriger le bug")
+        );
         assert!(all.contains("Site · 14:00") && !all.contains("aucune ;"));
         assert!(!all.contains("abc Message"), "commits are left out");
         // The two days are in the trash with their reports; the recent ones stay.
         assert!(ws.page(&days[0]).unwrap().trashed && ws.page(&days[1]).unwrap().trashed);
-        assert!(ws.pages.iter().filter(|p| p.parent.as_deref() == Some(days[0].as_str())).all(|p| p.trashed));
+        assert!(
+            ws.pages
+                .iter()
+                .filter(|p| p.parent.as_deref() == Some(days[0].as_str()))
+                .all(|p| p.trashed)
+        );
         assert!(!ws.page(&days[2]).unwrap().trashed);
         assert!(ws.old_report_days().is_empty());
         // A new day later: the oldest kept one goes into the same summary.
         ws.create_page("2026-11-01", Some(root.clone()));
         let (sum2, n2) = ws.condense_old_reports().unwrap();
         assert_eq!((sum2.as_str(), n2), (sum.as_str(), 1));
-        assert!(ws.page(&sum).unwrap().blocks.iter().any(|b| b.text.contains("2026-10-03")));
-        assert_eq!(ws.children(Some(&root)).iter().filter(|p| p.title.starts_with("Synthèse") || p.title.starts_with("Summary")).count(), 1);
+        assert!(
+            ws.page(&sum)
+                .unwrap()
+                .blocks
+                .iter()
+                .any(|b| b.text.contains("2026-10-03"))
+        );
+        assert_eq!(
+            ws.children(Some(&root))
+                .iter()
+                .filter(|p| p.title.starts_with("Synthèse") || p.title.starts_with("Summary"))
+                .count(),
+            1
+        );
     }
 
     /// Suspended until a quota resets: latest per project, not running, soonest first.
     #[test]
     fn suspended_sessions_are_listed() {
-        let run = |project: &str, resume_at: u64| super::RunRecord { project: project.into(), resume_at, ..Default::default() };
-        let runs = vec![run("a", 500), run("b", 300), run("a", 900), run("c", 0), run("d", 50)];
+        let run = |project: &str, resume_at: u64| super::RunRecord {
+            project: project.into(),
+            resume_at,
+            ..Default::default()
+        };
+        let runs = vec![
+            run("a", 500),
+            run("b", 300),
+            run("a", 900),
+            run("c", 0),
+            run("d", 50),
+        ];
         // Now = 100: d is due (not suspended any more), c never was; a's latest wins.
         assert_eq!(super::suspended_runs(&runs, 100, &[]), vec![1, 2]);
         // A project already running again isn't shown as suspended.
@@ -1295,7 +1609,13 @@ mod tests {
 
     #[test]
     fn a_question_waits_until_answered() {
-        let q = |project: &str, at: u64, answer: &str| super::InboxMsg { kind: "question".into(), project: project.into(), at, answer: answer.into(), ..Default::default() };
+        let q = |project: &str, at: u64, answer: &str| super::InboxMsg {
+            kind: "question".into(),
+            project: project.into(),
+            at,
+            answer: answer.into(),
+            ..Default::default()
+        };
         let mut inbox = vec![q("p", 100, "")];
         assert!(super::question_pending(&inbox, "p", 50));
         // Another project's question, or one from before the session, doesn't hold it.
@@ -1313,17 +1633,33 @@ mod tests {
         let none = super::EndConditions::default();
         // No condition: only the budgets stop it, or nothing left to do twice in a row.
         assert!(none.reached(100 * 3_600_000, 50, 500, 0).is_none());
-        assert!(none.reached(0, 0, 1, 1).is_none(), "one [[FINI]] isn't enough without « when done »");
+        assert!(
+            none.reached(0, 0, 1, 1).is_none(),
+            "one [[FINI]] isn't enough without « when done »"
+        );
         assert!(none.reached(0, 0, 2, 2).is_some());
-        let c = super::EndConditions { hours: Some(2.0), steps: Some(3), turns: Some(10), when_done: false };
+        let c = super::EndConditions {
+            hours: Some(2.0),
+            steps: Some(3),
+            turns: Some(10),
+            when_done: false,
+        };
         assert!(c.reached(3_600_000, 2, 9, 0).is_none());
         assert!(c.reached(2 * 3_600_000, 0, 0, 0).is_some(), "time");
         assert!(c.reached(0, 3, 0, 0).is_some(), "steps");
         assert!(c.reached(0, 0, 10, 0).is_some(), "turns");
-        let d = super::EndConditions { when_done: true, ..Default::default() };
+        let d = super::EndConditions {
+            when_done: true,
+            ..Default::default()
+        };
         assert!(d.reached(0, 0, 1, 1).is_some());
         // Zero means « not set ».
-        let z = super::EndConditions { hours: Some(0.0), steps: Some(0), turns: Some(0), when_done: false };
+        let z = super::EndConditions {
+            hours: Some(0.0),
+            steps: Some(0),
+            turns: Some(0),
+            when_done: false,
+        };
         assert!(z.reached(10 * 3_600_000, 10, 10, 0).is_none());
         assert!(!c.describe().is_empty() && !none.describe().is_empty());
     }
@@ -1331,9 +1667,17 @@ mod tests {
     #[test]
     fn top_level_pages_are_reordered() {
         let mut ws = super::Workspace::default();
-        let ids: Vec<String> = ["A", "B", "C"].iter().map(|t| ws.create_page(t, None)).collect();
+        let ids: Vec<String> = ["A", "B", "C"]
+            .iter()
+            .map(|t| ws.create_page(t, None))
+            .collect();
         let kid = ws.create_page("A1", Some(ids[0].clone()));
-        let roots = |ws: &super::Workspace| ws.children(None).iter().map(|p| p.title.clone()).collect::<String>();
+        let roots = |ws: &super::Workspace| {
+            ws.children(None)
+                .iter()
+                .map(|p| p.title.clone())
+                .collect::<String>()
+        };
         assert_eq!(roots(&ws), "ABC");
         assert!(ws.move_page_near(&ids[2], &ids[0], false));
         assert_eq!(roots(&ws), "CAB");
@@ -1342,7 +1686,13 @@ mod tests {
         assert!(!ws.move_page_near(&ids[2], &ids[2], false));
         assert!(!ws.move_page_near(&ids[0], "absent", false));
         // Sub-pages stay under their parent.
-        assert_eq!(ws.children(Some(&ids[0])).iter().map(|p| p.id.clone()).collect::<Vec<_>>(), vec![kid]);
+        assert_eq!(
+            ws.children(Some(&ids[0]))
+                .iter()
+                .map(|p| p.id.clone())
+                .collect::<Vec<_>>(),
+            vec![kid]
+        );
     }
 
     #[test]
@@ -1356,8 +1706,18 @@ mod tests {
     #[test]
     fn stopped_sessions_resume_once_per_project() {
         use super::{RunRecord, due_resumes, resume_time};
-        let run = |p: &str, at: u64| RunRecord { project: p.into(), resume_at: at, ..Default::default() };
-        let runs = vec![run("a", resume_time(1_000)), run("a", resume_time(2_000)), run("b", 0), run("c", 999_999_999), run("d", 10)];
+        let run = |p: &str, at: u64| RunRecord {
+            project: p.into(),
+            resume_at: at,
+            ..Default::default()
+        };
+        let runs = vec![
+            run("a", resume_time(1_000)),
+            run("a", resume_time(2_000)),
+            run("b", 0),
+            run("c", 999_999_999),
+            run("d", 10),
+        ];
         // Due: the latest of "a" and "d"; "b" has none, "c" not yet.
         assert_eq!(due_resumes(&runs, 100_000, &[]), vec![4, 1]);
         // A project already at work isn't started twice.
@@ -1369,7 +1729,13 @@ mod tests {
     fn answers_reach_the_project_state() {
         let mut ws = super::Workspace::default();
         assert!(ws.questions_markdown("p1").is_none());
-        ws.notify("question", "p1", "Question sur X", "Garder l'ancienne API ?", None);
+        ws.notify(
+            "question",
+            "p1",
+            "Question sur X",
+            "Garder l'ancienne API ?",
+            None,
+        );
         ws.notify("question", "p2", "Question sur Y", "Autre projet", None);
         ws.notify("info", "p1", "Info", "pas une question", None);
         let md = ws.questions_markdown("p1").unwrap();
@@ -1388,13 +1754,18 @@ mod tests {
         ws.notify("question", "p1", "Q", "Garder l'API ?", None);
         ws.notify("question", "p1", "Q", "Sans réponse", None);
         ws.notify("question", "p2", "Q", "Autre projet", None);
-        assert!(ws.mark_answers_seen("p1", 10).is_empty(), "nothing answered yet");
+        assert!(
+            ws.mark_answers_seen("p1", 10).is_empty(),
+            "nothing answered yet"
+        );
         for i in [0, 2] {
             ws.inbox[i].answer = "oui".into();
             ws.inbox[i].answered_at = 5;
         }
         assert_eq!(ws.mark_answers_seen("p1", 10), ["Garder l'API ?"]);
-        assert!(ws.inbox[0].answer_seen() && !ws.inbox[1].answer_seen() && !ws.inbox[2].answer_seen());
+        assert!(
+            ws.inbox[0].answer_seen() && !ws.inbox[1].answer_seen() && !ws.inbox[2].answer_seen()
+        );
         assert!(ws.mark_answers_seen("p1", 20).is_empty(), "only once");
         // Edited after: received again at the next state of play.
         ws.inbox[0].answer = "non".into();
@@ -1415,17 +1786,46 @@ mod starter_tests {
     fn welcome_page_explains_the_app() {
         let ws = Workspace::starter();
         let w = ws.page("start-bienvenue").unwrap();
-        let text: String = w.blocks.iter().map(|b| b.text.as_str()).collect::<Vec<_>>().join("\n");
-        let parts: &[(&str, &str)] = &[("Projets", "Projects"), ("Orchestration", "Orchestration"), ("Boîte de réception", "Inbox"), ("Pages privées", "Private pages"), ("Étapes", "Steps"), ("Fusionner", "Merge"), ("MCP", "MCP")];
+        let text: String = w
+            .blocks
+            .iter()
+            .map(|b| b.text.as_str())
+            .collect::<Vec<_>>()
+            .join("\n");
+        let parts: &[(&str, &str)] = &[
+            ("Projets", "Projects"),
+            ("Orchestration", "Orchestration"),
+            ("Boîte de réception", "Inbox"),
+            ("Pages privées", "Private pages"),
+            ("Étapes", "Steps"),
+            ("Fusionner", "Merge"),
+            ("MCP", "MCP"),
+        ];
         for (fr, en) in parts {
             assert!(text.contains(fr) || text.contains(en), "{fr}");
         }
-        assert!(w.blocks.iter().filter(|b| b.kind == BlockKind::Numbered).count() >= 5);
+        assert!(
+            w.blocks
+                .iter()
+                .filter(|b| b.kind == BlockKind::Numbered)
+                .count()
+                >= 5
+        );
         let ids: std::collections::HashSet<_> = w.blocks.iter().map(|b| b.id.as_str()).collect();
         assert_eq!(ids.len(), w.blocks.len());
         assert!(w.blocks.iter().all(|b| b.id.starts_with("start-")));
         let last = w.blocks.last().unwrap();
-        assert_eq!((last.kind, last.extra.as_str()), (BlockKind::PageLink, "start-notes"));
-        assert_eq!(Workspace::starter().page("start-bienvenue").unwrap().blocks.len(), w.blocks.len());
+        assert_eq!(
+            (last.kind, last.extra.as_str()),
+            (BlockKind::PageLink, "start-notes")
+        );
+        assert_eq!(
+            Workspace::starter()
+                .page("start-bienvenue")
+                .unwrap()
+                .blocks
+                .len(),
+            w.blocks.len()
+        );
     }
 }

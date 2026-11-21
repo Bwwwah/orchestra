@@ -55,7 +55,11 @@ fn is_real_png(bytes: &[u8]) -> bool {
 }
 
 fn no_image() -> String {
-    crate::tr!("le presse-papiers ne contient pas d'image", "the clipboard holds no image").into()
+    crate::tr!(
+        "le presse-papiers ne contient pas d'image",
+        "the clipboard holds no image"
+    )
+    .into()
 }
 
 /// Save the clipboard's image as a new PNG file (or give the copied image file) and return
@@ -109,7 +113,10 @@ function run(argv) {
   if (!data || data.isNil() || data.length == 0) return 'none';
   return data.writeToFileAtomically(argv[0], true) ? 'ok' : 'none';
 }"#;
-    match run(crate::proc::command("osascript").args(["-l", "JavaScript", "-e", script]).arg(out)) {
+    match run(crate::proc::command("osascript")
+        .args(["-l", "JavaScript", "-e", script])
+        .arg(out))
+    {
         Grab::Nothing => {
             // The former way, kept as a fallback: AppleScript writes the clipboard's PNG data.
             let script = "on run argv\n\
@@ -119,7 +126,15 @@ function run(argv) {
                 end try\n\
                 close access f\n\
                 end run";
-            let ok = crate::proc::command("osascript").arg("-e").arg(script).arg(out).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).status().is_ok_and(|s| s.success());
+            let ok = crate::proc::command("osascript")
+                .arg("-e")
+                .arg(script)
+                .arg(out)
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status()
+                .is_ok_and(|s| s.success());
             if ok { Grab::Saved } else { Grab::Nothing }
         }
         g => g,
@@ -142,16 +157,32 @@ fn read_clipboard(out: &Path) -> Grab {
         $i = [System.Windows.Forms.Clipboard]::GetImage(); \
         if ($i) { $i.Save($out, [System.Drawing.Imaging.ImageFormat]::Png); Write-Output 'ok'; exit 0 }; \
         Write-Output 'none'";
-    run(crate::proc::command("powershell").args(["-NoProfile", "-STA", "-Command", script]).env("ORCHESTRA_CLIP_OUT", out))
+    run(crate::proc::command("powershell")
+        .args(["-NoProfile", "-STA", "-Command", script])
+        .env("ORCHESTRA_CLIP_OUT", out))
 }
 
 #[cfg(not(any(target_os = "macos", target_os = "windows")))]
 fn read_clipboard(out: &Path) -> Grab {
     // Wayland first, then X11.
-    let tries: [(&str, &[&str]); 2] = [("wl-paste", &["--type", "image/png"]), ("xclip", &["-selection", "clipboard", "-t", "image/png", "-o"])];
+    let tries: [(&str, &[&str]); 2] = [
+        ("wl-paste", &["--type", "image/png"]),
+        (
+            "xclip",
+            &["-selection", "clipboard", "-t", "image/png", "-o"],
+        ),
+    ];
     for (cmd, args) in tries {
-        let Ok(file) = std::fs::File::create(out) else { return Grab::Nothing };
-        if crate::proc::command(cmd).args(args).stdout(file).stderr(Stdio::null()).status().is_ok_and(|s| s.success()) {
+        let Ok(file) = std::fs::File::create(out) else {
+            return Grab::Nothing;
+        };
+        if crate::proc::command(cmd)
+            .args(args)
+            .stdout(file)
+            .stderr(Stdio::null())
+            .status()
+            .is_ok_and(|s| s.success())
+        {
             return Grab::Saved;
         }
     }
@@ -165,7 +196,10 @@ mod tests {
     #[test]
     fn the_tools_answer_is_read() {
         assert_eq!(grab_from("ok\n"), Grab::Saved);
-        assert_eq!(grab_from("file:/Users/ana/Desktop/capture.png\n"), Grab::File(PathBuf::from("/Users/ana/Desktop/capture.png")));
+        assert_eq!(
+            grab_from("file:/Users/ana/Desktop/capture.png\n"),
+            Grab::File(PathBuf::from("/Users/ana/Desktop/capture.png"))
+        );
         assert_eq!(grab_from("none"), Grab::Nothing);
         assert_eq!(grab_from(""), Grab::Nothing);
     }

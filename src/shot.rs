@@ -19,10 +19,25 @@ pub struct Shot {
 
 impl Shot {
     pub fn from_env() -> Option<Shot> {
-        let path = std::env::var("ORCHESTRA_SHOT").ok().filter(|p| p.ends_with(".png"))?;
-        let at_frame = std::env::var("ORCHESTRA_SHOT_FRAME").ok().and_then(|f| f.parse().ok()).unwrap_or(8);
-        let after = std::env::var("ORCHESTRA_SHOT_SECS").ok().and_then(|f| f.parse().ok()).map(|s| (std::time::Instant::now(), s));
-        Some(Shot { path, at_frame, frame: 0, requested: false, done: Arc::new(AtomicBool::new(false)), after })
+        let path = std::env::var("ORCHESTRA_SHOT")
+            .ok()
+            .filter(|p| p.ends_with(".png"))?;
+        let at_frame = std::env::var("ORCHESTRA_SHOT_FRAME")
+            .ok()
+            .and_then(|f| f.parse().ok())
+            .unwrap_or(8);
+        let after = std::env::var("ORCHESTRA_SHOT_SECS")
+            .ok()
+            .and_then(|f| f.parse().ok())
+            .map(|s| (std::time::Instant::now(), s));
+        Some(Shot {
+            path,
+            at_frame,
+            frame: 0,
+            requested: false,
+            done: Arc::new(AtomicBool::new(false)),
+            after,
+        })
     }
 
     /// Call once per frame.
@@ -30,25 +45,36 @@ impl Shot {
         self.frame += 1;
         // ORCHESTRA_SHOT_RESIZE=WxH: the window changes size on frame 30 (to test resizing).
         if self.frame == 30
-            && let Some((w, h)) = std::env::var("ORCHESTRA_SHOT_RESIZE").ok().and_then(|v| v.split_once('x').and_then(|(w, h)| Some((w.parse::<f32>().ok()?, h.parse::<f32>().ok()?)))) {
-                ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(egui::vec2(w, h)));
-            }
+            && let Some((w, h)) = std::env::var("ORCHESTRA_SHOT_RESIZE").ok().and_then(|v| {
+                v.split_once('x')
+                    .and_then(|(w, h)| Some((w.parse::<f32>().ok()?, h.parse::<f32>().ok()?)))
+            })
+        {
+            ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(egui::vec2(w, h)));
+        }
         if self.done.load(Ordering::SeqCst) {
             ctx.send_viewport_cmd(egui::ViewportCommand::Close);
             return;
         }
-        if !self.requested && self.frame >= self.at_frame && self.after.is_none_or(|(t, s)| t.elapsed().as_secs_f32() >= s) {
+        if !self.requested
+            && self.frame >= self.at_frame
+            && self
+                .after
+                .is_none_or(|(t, s)| t.elapsed().as_secs_f32() >= s)
+        {
             self.requested = true;
             let path = self.path.clone();
             let done = self.done.clone();
             let repaint = ctx.clone();
-            ctx.send_viewport_cmd(egui::ViewportCommand::Screenshot(egui::ScreenshotCallback::new(move |img| {
-                if let Err(e) = write_png(&path, img.size[0], img.size[1], &img.pixels) {
-                    eprintln!("orchestra: picture not saved: {e}");
-                }
-                done.store(true, Ordering::SeqCst);
-                repaint.request_repaint();
-            })));
+            ctx.send_viewport_cmd(egui::ViewportCommand::Screenshot(
+                egui::ScreenshotCallback::new(move |img| {
+                    if let Err(e) = write_png(&path, img.size[0], img.size[1], &img.pixels) {
+                        eprintln!("orchestra: picture not saved: {e}");
+                    }
+                    done.store(true, Ordering::SeqCst);
+                    repaint.request_repaint();
+                }),
+            ));
         }
         ctx.request_repaint();
     }
@@ -59,7 +85,11 @@ fn crc32(data: &[u8]) -> u32 {
     for &b in data {
         crc ^= b as u32;
         for _ in 0..8 {
-            crc = if crc & 1 != 0 { (crc >> 1) ^ 0xedb8_8320 } else { crc >> 1 };
+            crc = if crc & 1 != 0 {
+                (crc >> 1) ^ 0xedb8_8320
+            } else {
+                crc >> 1
+            };
         }
     }
     !crc

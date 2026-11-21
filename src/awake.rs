@@ -63,15 +63,28 @@ pub fn command(pid: u32) -> Option<Vec<String>> {
     if cfg!(target_os = "macos") {
         // -i: no idle sleep; -s: no system sleep on mains power (lid closed too);
         // -m: the disk keeps spinning; -w: until Orchestra ends. The screen may still sleep.
-        Some(["caffeinate", "-i", "-s", "-m", "-w"].iter().map(|s| s.to_string()).chain([pid.to_string()]).collect())
+        Some(
+            ["caffeinate", "-i", "-s", "-m", "-w"]
+                .iter()
+                .map(|s| s.to_string())
+                .chain([pid.to_string()])
+                .collect(),
+        )
     } else if cfg!(target_os = "linux") {
         let script = format!("while kill -0 {pid} 2>/dev/null; do sleep 30; done");
         Some(
-            ["systemd-inhibit", "--what=sleep:idle:handle-lid-switch", "--who=Orchestra", "--why=Sessions IA autonomes en cours", "sh", "-c"]
-                .iter()
-                .map(|s| s.to_string())
-                .chain([script])
-                .collect(),
+            [
+                "systemd-inhibit",
+                "--what=sleep:idle:handle-lid-switch",
+                "--who=Orchestra",
+                "--why=Sessions IA autonomes en cours",
+                "sh",
+                "-c",
+            ]
+            .iter()
+            .map(|s| s.to_string())
+            .chain([script])
+            .collect(),
         )
     } else {
         None
@@ -84,7 +97,13 @@ fn may_start(last: Option<Instant>, now: Instant) -> bool {
 
 fn spawn() -> Option<Child> {
     let argv = command(std::process::id())?;
-    crate::proc::command(&argv[0]).args(&argv[1..]).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).spawn().ok()
+    crate::proc::command(&argv[0])
+        .args(&argv[1..])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .ok()
 }
 
 #[cfg(test)]

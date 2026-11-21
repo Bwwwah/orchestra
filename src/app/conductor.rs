@@ -32,7 +32,11 @@ pub struct Shared<T> {
 
 impl<T: Send + 'static> Shared<T> {
     pub fn new(app: T) -> Arc<Self> {
-        Arc::new(Shared { app: Mutex::new(app), last_frame: Mutex::new(Instant::now()), stop: AtomicBool::new(false) })
+        Arc::new(Shared {
+            app: Mutex::new(app),
+            last_frame: Mutex::new(Instant::now()),
+            stop: AtomicBool::new(false),
+        })
     }
 
     /// The app for a frame of the window: the conductor stands back meanwhile.
@@ -53,14 +57,21 @@ impl<T: Send + 'static> Shared<T> {
 
     /// Start the conductor: every `every`, while no frame came for `stale`, `tick` runs on
     /// the app. A frame in progress holds the app: the conductor skips that look.
-    pub fn spawn(self: &Arc<Self>, every: Duration, stale: Duration, mut tick: impl FnMut(&mut T) + Send + 'static) -> std::thread::JoinHandle<()> {
+    pub fn spawn(
+        self: &Arc<Self>,
+        every: Duration,
+        stale: Duration,
+        mut tick: impl FnMut(&mut T) + Send + 'static,
+    ) -> std::thread::JoinHandle<()> {
         let me = self.clone();
         std::thread::Builder::new()
             .name("chef d'orchestre".into())
             .spawn(move || {
                 while !me.stop.load(Ordering::Relaxed) {
                     std::thread::sleep(every);
-                    if me.stop.load(Ordering::Relaxed) || !due(*me.last_frame.lock_or_recover(), Instant::now(), stale) {
+                    if me.stop.load(Ordering::Relaxed)
+                        || !due(*me.last_frame.lock_or_recover(), Instant::now(), stale)
+                    {
                         continue;
                     }
                     match me.app.try_lock() {
@@ -110,7 +121,10 @@ mod tests {
         assert!(alone > 0, "no frame: the conductor drives");
         drawing(200);
         // At most a look that had started before the frames came back.
-        assert!(*shared.app() <= alone + 1, "frames back: the conductor stands back");
+        assert!(
+            *shared.app() <= alone + 1,
+            "frames back: the conductor stands back"
+        );
         shared.stop();
         handle.join().unwrap();
     }
