@@ -510,9 +510,35 @@ fn installed(ai: Ai, path: &str) -> bool {
     match ai {
         Ai::ClaudeCode | Ai::Codex => ai.agent(path).is_some(),
         Ai::Gemini => crate::sync::which("gemini", path).is_some(),
-        Ai::ClaudeDesktop => claude_desktop_config().is_some(),
-        Ai::Cursor => cursor_settings().parent().is_some_and(Path::is_dir),
+        Ai::ClaudeDesktop => claude_desktop_config().is_some() && app_present("Claude"),
+        Ai::Cursor => cursor_settings().parent().is_some_and(Path::is_dir) && app_present("Cursor"),
         Ai::Vibe => crate::sync::which("vibe", path).is_some(),
+    }
+}
+
+/// The folders where macOS apps sit: /Applications and ~/Applications.
+fn app_dirs() -> Vec<PathBuf> {
+    let mut out = vec![PathBuf::from("/Applications")];
+    if let Some(h) = dirs::home_dir() {
+        out.push(h.join("Applications"));
+    }
+    out
+}
+
+/// `name.app` in one of `dirs`.
+fn app_in(dirs: &[PathBuf], name: &str) -> bool {
+    dirs.iter().any(|d| d.join(format!("{name}.app")).is_dir())
+}
+
+/// Whether a desktop app is really there. Its settings folder stays behind once the app is
+/// deleted, so on macOS the app itself is looked for: without it, an old config holding
+/// Orchestra's entry would count it as an AI plugged in (the home page said 4, fewer were
+/// there). Elsewhere the settings folder is all there is to go by.
+fn app_present(name: &str) -> bool {
+    if cfg!(target_os = "macos") {
+        app_in(&app_dirs(), name)
+    } else {
+        true
     }
 }
 
@@ -725,6 +751,25 @@ pub fn summary(r: &Report) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A desktop app counts only when its bundle is there, not from its settings folder.
+    #[test]
+    fn a_desktop_app_counts_only_when_it_is_there() {
+        let base = std::env::temp_dir().join(format!("orch-apps-{}", uuid::Uuid::new_v4().simple()));
+        let (sys, user) = (base.join("sys"), base.join("user"));
+        std::fs::create_dir_all(sys.join("Cursor.app")).unwrap();
+        std::fs::create_dir_all(&user).unwrap();
+        // A file named like an app isn't one.
+        std::fs::write(user.join("Claude.app"), "").unwrap();
+        let dirs = [sys, user.clone()];
+        assert!(app_in(&dirs, "Cursor"));
+        assert!(!app_in(&dirs, "Claude"));
+        std::fs::remove_file(user.join("Claude.app")).unwrap();
+        std::fs::create_dir_all(user.join("Claude.app")).unwrap();
+        assert!(app_in(&dirs, "Claude"));
+        assert!(!app_in(&[], "Claude"));
+        let _ = std::fs::remove_dir_all(&base);
+    }
 
     /// The install offered depends on what the machine has: the tool's command when it is
     /// there, that tool first otherwise, a download page as a last resort.
