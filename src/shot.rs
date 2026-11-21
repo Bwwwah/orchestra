@@ -105,7 +105,7 @@ fn adler32(data: &[u8]) -> u32 {
 }
 
 /// A plain RGBA PNG with uncompressed deflate blocks (no dependency needed).
-fn write_png(path: &str, w: usize, h: usize, pixels: &[egui::Color32]) -> std::io::Result<()> {
+pub(crate) fn write_png(path: &str, w: usize, h: usize, pixels: &[egui::Color32]) -> std::io::Result<()> {
     let mut raw = Vec::with_capacity(h * (w * 4 + 1));
     for y in 0..h {
         raw.push(0u8);

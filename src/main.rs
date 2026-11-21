@@ -15,6 +15,7 @@ mod awake;
 mod clip;
 mod collab;
 mod docs;
+mod drive;
 mod git;
 mod live;
 mod mcp;

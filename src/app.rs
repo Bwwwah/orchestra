@@ -1732,7 +1732,11 @@ impl eframe::App for NotesApp {
 
 /// The window's app, shared with the conductor (see conductor.rs), which moves the
 /// autonomous sessions along while macOS draws no frame.
-pub struct Shell(std::sync::Arc<conductor::Shared<NotesApp>>);
+pub struct Shell(
+    std::sync::Arc<conductor::Shared<NotesApp>>,
+    /// ORCHESTRA_DRIVE: clicks and keys read from a file (developer aid, see drive.rs).
+    Option<crate::drive::Drive>,
+);
 
 impl Shell {
     pub fn new(cc: &eframe::CreationContext<'_>, open: Option<String>) -> Self {
@@ -1741,13 +1745,22 @@ impl Shell {
         shared.spawn(conductor::EVERY, conductor::STALE, move |app| {
             app.conductor_tick(&ctx)
         });
-        Shell(shared)
+        Shell(shared, crate::drive::Drive::from_env())
     }
 }
 
 impl eframe::App for Shell {
     fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
         eframe::App::ui(&mut *self.0.frame(), ui, frame);
+        if let Some(d) = self.1.as_mut() {
+            d.tick(ui.ctx());
+        }
+    }
+
+    fn raw_input_hook(&mut self, ctx: &egui::Context, raw_input: &mut egui::RawInput) {
+        if let Some(d) = self.1.as_mut() {
+            d.feed(ctx, raw_input);
+        }
     }
 
     fn on_exit(&mut self) {
