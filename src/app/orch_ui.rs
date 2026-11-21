@@ -698,7 +698,7 @@ impl NotesApp {
         let five = self.agent_figures(d.agent).five;
         let ceiling = ceiling_choice(ceiling_kept, five, o.default_limit, o.global_limit);
         let mission = super::watch::fix_mission(&req.findings);
-        let n = match self.launch_run(ctx, &req.project, &mission, ceiling, true, None, d.agent, true) {
+        let n = match self.launch_run(ctx, &req.project, &mission, ceiling, true, None, d.agent, true, "") {
             Ok(()) => super::notices::Notice::Info(crate::tr!(
                 "Session de correction lancée sur une branche fix : fusionnez-la une fois vérifiée.",
                 "Fix session started on a fix branch: merge it once checked."
@@ -712,7 +712,8 @@ impl NotesApp {
     }
 
     /// Start an autonomous session on a project. `fix`: a security fix (CVE watch), always on
-    /// a branch of its own named `orchestra/auto-fix-…`, never on `dev`.
+    /// a branch of its own named `orchestra/auto-fix-…`, never on `dev`. `model`: the model
+    /// the AI works with (empty: its own default).
     #[allow(clippy::too_many_arguments)]
     fn launch_run(
         &mut self,
@@ -724,6 +725,7 @@ impl NotesApp {
         endless: Option<crate::model::EndConditions>,
         agent: Agent,
         fix: bool,
+        model: &str,
     ) -> Result<(), String> {
         if self.orch.runs.iter().any(|r| r.project == project) {
             return Err(crate::tr!(
@@ -854,7 +856,7 @@ impl NotesApp {
         let o = &self.ws.settings.orch;
         let cwd = std::path::Path::new(&copy.worktree);
         agent.write_config(cwd, commits, &o.extra_tools)?;
-        let cmd = agent.command(cwd, commits, &o.extra_tools);
+        let cmd = agent.command(cwd, commits, &o.extra_tools, model);
         let c2 = ctx.clone();
         let mut term = Term::spawn_once(
             &crate::trf!("Autonome · {title}", "Autonomous · {title}"),
@@ -897,6 +899,7 @@ impl NotesApp {
             limit,
             ceiling,
             endless: endless.clone(),
+            model: auto::model_arg(model).unwrap_or_default().to_string(),
             ..Default::default()
         };
         // A new session replaces any planned restart of this project.
@@ -1037,7 +1040,7 @@ impl NotesApp {
         {
             let o = &self.ws.settings.orch;
             let l = ceiling_choice(None, self.orch.five, o.default_limit, o.global_limit);
-            if let Err(e) = self.launch_run(ctx, &pid, "", l, true, None, Agent::ClaudeCode, false) {
+            if let Err(e) = self.launch_run(ctx, &pid, "", l, true, None, Agent::ClaudeCode, false, "") {
                 eprintln!("auto-run : {e}");
             }
         }
@@ -1474,7 +1477,7 @@ impl NotesApp {
                 let share = if rec.limit > 0.0 { rec.limit } else { o.default_limit };
                 ceiling_choice(None, five, share, o.global_limit)
             };
-            match self.launch_run(ctx, &rec.project, &rec.mission, ceiling, rec.commits_allowed, rec.endless.clone(), agent, rec.branch.contains("/auto-fix-")) {
+            match self.launch_run(ctx, &rec.project, &rec.mission, ceiling, rec.commits_allowed, rec.endless.clone(), agent, rec.branch.contains("/auto-fix-"), &rec.model) {
                 Ok(()) => self.ws.notify(
                     "info",
                     &rec.project,
@@ -3461,7 +3464,7 @@ impl NotesApp {
             let want = draft_ceiling(&d, running_of(d.agent));
             let ceiling = ceiling_choice(want, five_of(d.agent), o.default_limit, global);
             let endless = if d.endless { Some(d.end.clone()) } else { None };
-            match self.launch_run(ctx, &id, &d.mission, ceiling, d.commits, endless, d.agent, false) {
+            match self.launch_run(ctx, &id, &d.mission, ceiling, d.commits, endless, d.agent, false, "") {
                 Ok(()) => {
                     if let Some(x) = self.orch.drafts.get_mut(&id) {
                         x.pick = false;

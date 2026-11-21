@@ -689,6 +689,10 @@ pub struct RunRecord {
     /// only on one of these conditions (and always on the budgets and quotas).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub endless: Option<EndConditions>,
+    /// The model the AI works with (`--model`); empty: its own default. Kept to start the
+    /// session again with the same one.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub model: String,
 }
 
 /// Days of reports kept as they are in "Rapports des IA"; the older ones are too many.

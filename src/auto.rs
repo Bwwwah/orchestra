@@ -123,8 +123,9 @@ impl Agent {
         std::fs::write(d.join("fresh"), "").map_err(|e| e.to_string())
     }
 
-    /// The command started in the hidden terminal, in the copy `cwd`.
-    pub fn command(self, cwd: &Path, allow_commits: bool, extra: &str) -> String {
+    /// The command started in the hidden terminal, in the copy `cwd`, with `model` (empty:
+    /// the AI's own default; see `model_arg`).
+    pub fn command(self, cwd: &Path, allow_commits: bool, extra: &str, model: &str) -> String {
         match self {
             // Orchestra's MCP server, and only it, on the command line (`codex_command`).
             Agent::Codex => {
@@ -149,7 +150,7 @@ impl Agent {
             }
             Agent::ClaudeCode => {
                 let (allowed, denied) = permissions(allow_commits, extra);
-                claude_command(&allowed, &denied, rtk_binary().as_deref())
+                claude_command(&allowed, &denied, rtk_binary().as_deref(), model)
             }
         }
     }
@@ -483,7 +484,9 @@ fn git_dirs_for(cwd: &Path, own: &Path, common: &Path) -> Vec<PathBuf> {
 /// own Claude Code. Claude Code checks its permissions on the rewritten command, and RTK never
 /// sees the rules given here: so every shell rule is given twice, as written and with `rtk`
 /// in front, or `git push` would become `rtk git push` and get round its refusal.
-fn claude_command(allowed: &[String], denied: &[String], rtk: Option<&Path>) -> String {
+///
+/// With `model`, Claude Code works with it (`--model`) rather than the person's default.
+fn claude_command(allowed: &[String], denied: &[String], rtk: Option<&Path>, model: &str) -> String {
     let q = crate::sessions::shell_quote;
     let (mut allowed, mut denied) = (allowed.to_vec(), denied.to_vec());
     denied.extend(UNUSED_TOOLS.iter().map(|t| t.to_string()));
@@ -514,12 +517,26 @@ fn claude_command(allowed: &[String], denied: &[String], rtk: Option<&Path>) -> 
         let dir = rtk.parent().map(|d| d.display().to_string()).unwrap_or_default();
         prefix = format!("PATH={}:\"$PATH\" RTK_TELEMETRY_DISABLED=1 ", q(&dir));
     }
+    let model = model_arg(model).map(|m| format!(" --model {}", q(m))).unwrap_or_default();
     format!(
-        "{prefix}claude --setting-sources user --strict-mcp-config --mcp-config {}{settings} --permission-mode acceptEdits --allowedTools {} --disallowedTools {}",
+        "{prefix}claude --setting-sources user --strict-mcp-config --mcp-config {}{settings}{model} --permission-mode acceptEdits --allowedTools {} --disallowedTools {}",
         q(&mcp_config()),
         q(&allowed.join(",")),
         q(&denied.join(","))
     )
+}
+
+/// A model name fit for `--model`: a word of letters, digits and `. _ : - [ ]` starting with
+/// a letter or a digit (`opus`, `claude-sonnet-5-5`, `claude-opus-5-5[1m]`). Anything else,
+/// such as a name starting with `-` (another option), is left out and the AI keeps its
+/// default. None: no model chosen.
+pub fn model_arg(model: &str) -> Option<&str> {
+    let m = model.trim();
+    let first = m.chars().next()?;
+    (first.is_ascii_alphanumeric()
+        && m.len() <= 80
+        && m.chars().all(|c| c.is_ascii_alphanumeric() || "._:-[]".contains(c)))
+    .then_some(m)
 }
 
 /// Allowed commands RTK would rewrite into another command rather than `rtk` + the same one
@@ -2967,13 +2984,13 @@ mod tests {
         assert_eq!(slug("Démo — Été 2026!"), "demo-ete-2026");
         assert!(
             Agent::ClaudeCode
-                .command(Path::new("/x"), false, "")
+                .command(Path::new("/x"), false, "", "")
                 .contains("--permission-mode acceptEdits")
         );
-        assert!(!Agent::ClaudeCode.command(Path::new("/x"), false, "").contains("git commit"));
+        assert!(!Agent::ClaudeCode.command(Path::new("/x"), false, "", "").contains("git commit"));
         assert!(
             Agent::ClaudeCode
-                .command(Path::new("/x"), true, "Bash(just:*)")
+                .command(Path::new("/x"), true, "Bash(just:*)", "")
                 .contains("Bash(just:*)")
         );
     }
@@ -2993,7 +3010,7 @@ mod tests {
         for a in [Agent::Codex, Agent::Gemini, Agent::Vibe] {
             assert!(a == Agent::Vibe || !a.ready());
             // Its program, in its strictest mode.
-            let cmd = a.command(Path::new("/x"), true, "");
+            let cmd = a.command(Path::new("/x"), true, "", "");
             // Its program, after the variables pointing to its settings of the session.
             // (Vibe: the loop running its program turn by turn.)
             assert!(
@@ -3313,7 +3330,7 @@ mod tests {
             "{:?}",
             rejected_extra(fine)
         );
-        let cmd = Agent::ClaudeCode.command(Path::new("/x"), false, "");
+        let cmd = Agent::ClaudeCode.command(Path::new("/x"), false, "", "");
         assert!(cmd.contains("--disallowedTools") && cmd.contains("Bash(rm:*)"));
         // Neither the repository's hooks and settings nor its .mcp.json: only Orchestra's server.
         assert!(
@@ -3325,6 +3342,25 @@ mod tests {
         assert_eq!(v["mcpServers"]["orchestra"]["args"][0], "mcp");
     }
 
+    /// The model chosen for a session reaches Claude Code as `--model`, quoted; no model
+    /// adds nothing, and a name that isn't one (an option, shell signs) is left out.
+    #[test]
+    fn the_chosen_model_reaches_claude_code() {
+        let (allowed, denied) = permissions(false, "");
+        let plain = claude_command(&allowed, &denied, None, "");
+        assert!(!plain.contains("--model"), "{plain}");
+        let c = claude_command(&allowed, &denied, None, "claude-sonnet-5-5");
+        assert!(c.contains(" --model claude-sonnet-5-5 --permission-mode "), "{c}");
+        let c = Agent::ClaudeCode.command(Path::new("/x"), false, "", "opus");
+        assert!(c.contains(" --model opus "), "{c}");
+        assert_eq!(model_arg(" claude-opus-5-5[1m] "), Some("claude-opus-5-5[1m]"));
+        for bad in ["", "  ", "--dangerously-skip-permissions", "x; rm -rf ~", "a b", "$(id)"] {
+            assert_eq!(model_arg(bad), None, "{bad}");
+            let c = claude_command(&allowed, &denied, None, bad);
+            assert!(!c.contains("--model"), "{c}");
+        }
+    }
+
     /// With RTK, Claude Code gets its hook on the command line only (not the person's own
     /// settings), finds `rtk` on its PATH, sends no usage report, and every shell rule is also
     /// given behind `rtk`: a rewritten `git push` stays refused, a rewritten `git status`
@@ -3332,7 +3368,7 @@ mod tests {
     #[test]
     fn rtk_shortens_outputs_without_widening_the_rules() {
         let (allowed, denied) = permissions(false, "");
-        let plain = claude_command(&allowed, &denied, None);
+        let plain = claude_command(&allowed, &denied, None, "");
         assert!(plain.starts_with("claude --setting-sources user "), "{plain}");
         assert!(!plain.contains("rtk") && !plain.contains("--settings "), "{plain}");
         // Tools of no use alone are refused, so their definitions don't weigh on each start;
@@ -3347,7 +3383,7 @@ mod tests {
 
         let q = crate::sessions::shell_quote;
         let rtk = "/Applications/Orchestra.app/Contents/MacOS/rtk";
-        let c = claude_command(&allowed, &denied, Some(Path::new(rtk)));
+        let c = claude_command(&allowed, &denied, Some(Path::new(rtk)), "");
         let prefix = format!(
             "PATH={}:\"$PATH\" RTK_TELEMETRY_DISABLED=1 claude --setting-sources user ",
             q("/Applications/Orchestra.app/Contents/MacOS")
@@ -3520,7 +3556,7 @@ mod tests {
     #[test]
     fn codex_stays_in_its_sandbox() {
         // Without commits: no folder outside the copy, whatever the copy.
-        let c = Agent::Codex.command(Path::new("/x"), false, "");
+        let c = Agent::Codex.command(Path::new("/x"), false, "", "");
         assert!(c.starts_with("codex --sandbox workspace-write --ask-for-approval untrusted "));
         assert!(c.contains("network_access=false") && c.contains("web_search=false"));
         assert!(c.contains("shell_environment_policy.inherit=core"));
@@ -3559,7 +3595,7 @@ mod tests {
         assert!(Agent::Codex.config_files(cwd, true, "").is_empty());
 
         // Codex: the whole table of MCP servers replaced on its command line.
-        let c = Agent::Codex.command(cwd, false, "");
+        let c = Agent::Codex.command(cwd, false, "", "");
         assert!(c.contains(" -c 'mcp_servers={orchestra={command=\""), "{c}");
         assert!(c.contains(",args=[\"mcp\"]}}'"), "{c}");
 
@@ -3573,7 +3609,7 @@ mod tests {
         assert_eq!(v["mcpServers"]["orchestra"]["args"][0], "mcp");
         assert_eq!(v["mcpServers"]["orchestra"]["trust"], true);
         assert!(v["tools"]["exclude"].as_array().unwrap().iter().any(|x| x == "run_shell_command(rm)"));
-        let g = Agent::Gemini.command(cwd, false, "");
+        let g = Agent::Gemini.command(cwd, false, "", "");
         assert!(g.starts_with("GEMINI_CLI_SYSTEM_SETTINGS_PATH="), "{g}");
         assert!(g.contains(&path.display().to_string()), "{g}");
         assert!(g.ends_with(" gemini --approval-mode default --allowed-mcp-server-names orchestra"));
@@ -3595,7 +3631,7 @@ mod tests {
         assert!(merged.ends_with(ours));
         assert_eq!(vibe_config("", ours), ours);
         assert!(text.contains("args = [\"mcp\"]\n") && text.contains("[tools.bash]\nallowlist = ["));
-        let v = Agent::Vibe.command(cwd, false, "");
+        let v = Agent::Vibe.command(cwd, false, "", "");
         assert!(v.starts_with("VIBE_HOME=") && v.trim_end_matches('\'').ends_with("/turns.sh"), "{v}");
         // The loop of its turns, written beside its settings: headless runs only (`-p`),
         // the prompt from a file, the same session from the second turn, cut at 25 min,
