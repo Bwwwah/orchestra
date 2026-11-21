@@ -486,6 +486,7 @@ fn git_dirs_for(cwd: &Path, own: &Path, common: &Path) -> Vec<PathBuf> {
 fn claude_command(allowed: &[String], denied: &[String], rtk: Option<&Path>) -> String {
     let q = crate::sessions::shell_quote;
     let (mut allowed, mut denied) = (allowed.to_vec(), denied.to_vec());
+    denied.extend(UNUSED_TOOLS.iter().map(|t| t.to_string()));
     let mut prefix = String::new();
     let mut settings = String::new();
     if let Some(rtk) = rtk {
@@ -549,6 +550,41 @@ fn rtk_config_files(home: &Path) -> Vec<(PathBuf, String)> {
 /// RTK subcommands that run whatever command they are given (`rtk proxy <cmd>`, `rtk run`):
 /// refused in a session, whatever else is allowed.
 const RTK_DENIED: &[&str] = &["Bash(rtk proxy:*)", "Bash(rtk run:*)", "Bash(rtk init:*)"];
+
+/// Claude Code's tools that never serve an autonomous session, refused so their definitions
+/// leave the context loaded at each start (docs/demarrage-leger.md: ~10 k tokens out of ~40 k).
+/// Pages on claude.ai (Artifact: its description alone is several thousand tokens),
+/// subagents, questions typed in the terminal nobody watches (ask_human replaces them),
+/// scheduling and remote sessions, plan mode, worktrees (the session already has its copy),
+/// feedback, skills (their listing is long and none is needed for a step). Claude Code only:
+/// the other agents have none of them.
+const UNUSED_TOOLS: &[&str] = &[
+    "Artifact",
+    "ArtifactComments",
+    "ArtifactData",
+    "Agent",
+    "Task",
+    "AskUserQuestion",
+    "ScheduleWakeup",
+    "CronCreate",
+    "CronDelete",
+    "CronList",
+    "RemoteTrigger",
+    "ListAgents",
+    "SendMessage",
+    "SendToProject",
+    "SendToProjectContext",
+    "PushNotification",
+    "DesignSync",
+    "EnterPlanMode",
+    "ExitPlanMode",
+    "EnterWorktree",
+    "ExitWorktree",
+    "SendFeedback",
+    "ReportFindings",
+    "NotebookEdit",
+    "Skill",
+];
 
 /// The rules, each shell rule followed by its form behind `rtk` (`Bash(git status:*)` →
 /// also `Bash(rtk git status:*)`). The other rules (`Grep`, `mcp__orchestra`…) are kept as is.
@@ -3285,6 +3321,15 @@ mod tests {
         let plain = claude_command(&allowed, &denied, None);
         assert!(plain.starts_with("claude --setting-sources user "), "{plain}");
         assert!(!plain.contains("rtk") && !plain.contains("--settings "), "{plain}");
+        // Tools of no use alone are refused, so their definitions don't weigh on each start;
+        // the tools of the work stay.
+        let refused = plain.split(" --disallowedTools ").nth(1).unwrap_or("");
+        for t in ["Artifact,", "Agent,", "AskUserQuestion,", "Skill"] {
+            assert!(refused.contains(t), "{t} {plain}");
+        }
+        for t in ["Bash,", "Read,", "Edit,", "Write,", "mcp__orchestra", "ToolSearch"] {
+            assert!(!refused.split(['\'', ',']).any(|r| format!("{r},") == t || r == t), "{t} {plain}");
+        }
 
         let q = crate::sessions::shell_quote;
         let rtk = "/Applications/Orchestra.app/Contents/MacOS/rtk";

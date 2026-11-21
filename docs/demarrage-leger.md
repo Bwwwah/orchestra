@@ -59,14 +59,22 @@ Partie propre à la session, au premier message :
   malgré `--strict-mcp-config` : il arrive par les plugins des réglages personnels, chargés
   par `--setting-sources user`.
 
-## Pistes pour l'étape suivante
+## Ce qui a été retiré
 
-1. Ajouter à `--disallowedTools` (`auto::claude_command`) les outils inutiles en autonome :
-   Artifact, Agent, AskUserQuestion, ScheduleWakeup, SendFeedback, ReportFindings,
-   ListAgents. Gain estimé : **10 à 12 k** par session.
-2. Couper les skills en autonome (`--disable-slash-commands`, à vérifier sur la version de
-   Claude Code installée). Gain estimé : **5 à 7 k**.
-3. Vérifier s'il faut garder les plugins personnels (`--setting-sources user` les
-   charge, avec leurs serveurs MCP et leurs skills).
-4. Une fois fait, remesurer avec le tableau ci-dessus (premier `usage` du `.jsonl`) et avec
-   `/context` dans le terminal d'une session.
+- Les outils inutiles en autonome sont refusés par `--disallowedTools` (`auto::UNUSED_TOOLS`,
+  ajoutés par `auto::claude_command`) : Claude Code les retire alors du contexte. Ce sont
+  Artifact (et ses compagnons), Agent, AskUserQuestion, ScheduleWakeup et Cron, les sessions
+  à distance et les messages entre sessions, le mode plan, les worktrees, SendFeedback,
+  ReportFindings, NotebookEdit et **Skill**, qui retire aussi l'usage des skills. Gain
+  attendu : **10 à 15 k** par session.
+- **Pas de `--disable-slash-commands`** : il coupe « toutes les skills et commandes », et
+  Orchestra tape `/clear` (conversation neuve après chaque étape) et `/exit` (fin de
+  session). À essayer seulement après avoir vérifié que ces deux-là restent permises.
+- Les plugins personnels (`--setting-sources user` les charge, avec leurs serveurs MCP
+  comme easel) restent : les retirer demanderait de ne plus lire les réglages personnels,
+  dont la connexion et le modèle choisi.
+
+## À faire
+
+Remesurer sur les prochaines sessions avec le tableau ci-dessus (premier `usage` du
+`.jsonl`) et avec `/context` dans le terminal d'une session (« Regarder »).
