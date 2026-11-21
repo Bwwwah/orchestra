@@ -112,6 +112,10 @@ pub struct LiveRun {
     pub waiting: Option<Wait>,
     /// The screen when the pause began: the answer given in the terminal changes it.
     paused_screen: u64,
+    /// The session's first prompt (mission and rules), given again to each new conversation.
+    first_prompt: String,
+    /// Steps done since the start, as counted at the end of the last turn.
+    steps_done: u32,
 }
 
 impl LiveRun {
@@ -133,6 +137,38 @@ impl LiveRun {
         } else {
             self.term.paste(text);
         }
+    }
+
+    /// Short sessions: once a step is done, the work goes on in a new conversation of the
+    /// agent, started again from the mission (and get_project_state) rather than from a
+    /// history that grows with each step. Claude Code clears its own (`/clear`); a headless
+    /// agent's next run doesn't continue the last one. `note` goes before the mission.
+    fn new_conversation(&mut self, note: &str, now: Instant) {
+        if self.agent.headless() {
+            if let Err(e) = self
+                .agent
+                .new_conversation(std::path::Path::new(&self.worktree))
+            {
+                self.stop = Some(crate::trf!(
+                    "nouvelle conversation impossible avec {} : {e}",
+                    "no new conversation with {}: {e}",
+                    self.agent.label()
+                ));
+            }
+        } else {
+            self.term.paste("/clear");
+            self.term.write(b"\r");
+        }
+        self.reader.new_conversation();
+        self.next = Some(format!("{note}{}", self.first_prompt));
+        // As at the start: the prompt is typed once the agent is ready again.
+        self.phase = Phase::Starting(now);
+        self.screen_changed = now;
+        self.last_line = crate::tr!(
+            "Étape terminée : nouvelle conversation…",
+            "Step done: new conversation…"
+        )
+        .into();
     }
 
     /// Put the session on hold until the person answers.
@@ -803,6 +839,20 @@ impl NotesApp {
         } else {
             mission.trim().to_string()
         };
+        let first_prompt = auto::mission_prompt(
+            &self
+                .ws
+                .page(project)
+                .map(|p| p.display_title())
+                .unwrap_or_default(),
+            project,
+            &copy.branch,
+            &mission,
+            commits,
+        ) + &endless
+            .as_ref()
+            .map(|c| auto::endless_rule(project, !c.when_done))
+            .unwrap_or_default();
         let rec = crate::model::RunRecord {
             id: id.clone(),
             project: project.to_string(),
@@ -833,22 +883,9 @@ impl NotesApp {
             agent,
             term,
             phase: Phase::Starting(Instant::now()),
-            next: Some(
-                auto::mission_prompt(
-                    &self
-                        .ws
-                        .page(project)
-                        .map(|p| p.display_title())
-                        .unwrap_or_default(),
-                    project,
-                    &copy.branch,
-                    &mission,
-                    commits,
-                ) + &endless
-                    .as_ref()
-                    .map(|c| auto::endless_rule(project, !c.when_done))
-                    .unwrap_or_default(),
-            ),
+            next: Some(first_prompt.clone()),
+            first_prompt,
+            steps_done: 0,
             quota_reset: None,
             week_at_turn: None,
             week_turn: 0.0,
@@ -1218,6 +1255,10 @@ impl NotesApp {
                             sig = Signal::Continue;
                         }
                         r.steps_at_turn = steps_now.iter().map(|s| s.id.clone()).collect();
+                        // A step finished during this turn: the next starts a new conversation.
+                        let done_now = steps_since(&r.steps_at_start, &steps_now).done.len() as u32;
+                        let step_finished = done_now > r.steps_done;
+                        r.steps_done = done_now;
                         let five = fig.five;
                         // Started before the window's figure was known: its ceiling now.
                         if r.ceiling.is_none() {
@@ -1297,6 +1338,10 @@ impl NotesApp {
                                 r.stop = Some(why.clone());
                                 r.summarizing = true;
                                 r.send(&auto::summary_prompt(&r.project, &why));
+                            }
+                            None if step_finished => {
+                                r.new_conversation(&new_steps_note(&fresh), now);
+                                continue;
                             }
                             None => {
                                 let next = if r.endless.is_some() {

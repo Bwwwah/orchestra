@@ -115,6 +115,14 @@ impl Agent {
         std::fs::rename(d.join("next.part"), d.join("next.md")).map_err(|e| e.to_string())
     }
 
+    /// The next prompt of a headless agent starts a new conversation rather than going on
+    /// with the last one (`VIBE_TURNS` then leaves out `-c` once).
+    pub fn new_conversation(self, cwd: &Path) -> Result<(), String> {
+        let d = self.config_dir(cwd).join("turn");
+        std::fs::create_dir_all(&d).map_err(|e| e.to_string())?;
+        std::fs::write(d.join("fresh"), "").map_err(|e| e.to_string())
+    }
+
     /// The command started in the hidden terminal, in the copy `cwd`.
     pub fn command(self, cwd: &Path, allow_commits: bool, extra: &str) -> String {
         match self {
@@ -298,6 +306,7 @@ echo "Orchestra : Mistral Vibe attend sa consigne…"
 while :; do
   if [ -f "$d/next.md" ]; then
     mv -f "$d/next.md" "$d/prompt.md"
+    if [ -f "$d/fresh" ]; then rm -f "$d/fresh"; c=; fi
     vibe -p --prompt-file "$d/prompt.md" $c --time-limit 1500 </dev/null >"$d/answer.part"
     code=$?
     cat "$d/answer.part"
@@ -1811,9 +1820,29 @@ pub struct Reader {
     pub exit_code: Option<i32>,
     /// The stamp of that turn's end, so it is read once.
     turn_stamp: u64,
+    /// Tokens of the session's earlier conversations (`new_conversation`): the agents that
+    /// give a conversation's total add theirs to it.
+    tokens_before: u64,
+    /// The earlier conversations of the session (their file, or for Vibe their folder):
+    /// never read again.
+    old: Vec<PathBuf>,
 }
 
 impl Reader {
+    /// The session goes on in a new conversation of the agent (short sessions: one per step
+    /// done): its file is a new one, to be found again; the tokens already used still count.
+    pub fn new_conversation(&mut self) {
+        if let Some(p) = self.path.take() {
+            self.old.push(conversation_root(&p));
+        }
+        self.tokens_before = self.tokens;
+        self.offset = 0;
+        self.carry.clear();
+        self.turn_over = false;
+        self.last_text.clear();
+        self.records = 0;
+    }
+
     /// Read what was added; `since`: session files older than this are not ours.
     pub fn poll(&mut self, agent: Agent, cwd: &Path, since: std::time::SystemTime) {
         self.poll_files(agent, cwd, since);
@@ -1856,7 +1885,9 @@ impl Reader {
     fn poll_files(&mut self, agent: Agent, cwd: &Path, since: std::time::SystemTime) {
         if self.path.is_none() {
             let ext = if agent.appends() { "jsonl" } else { "json" };
-            let files = session_files(&agent.session_dir(cwd), agent.session_depth(), ext, since);
+            let files = session_files(&agent.session_dir(cwd), agent.session_depth(), ext, since)
+                .into_iter()
+                .filter(|p| !self.old.iter().any(|o| p.starts_with(o)));
             self.path = match agent {
                 // One folder of sessions for every project: only one working in `cwd`.
                 Agent::Codex => files.into_iter().find(|p| codex_cwd(p).as_deref() == Some(cwd)),
@@ -1974,7 +2005,7 @@ impl Reader {
                 let u = &p["info"]["total_token_usage"];
                 let n = |k: &str| u[k].as_u64().unwrap_or(0);
                 let total = n("input_tokens").saturating_sub(n("cached_input_tokens")) + n("output_tokens");
-                self.tokens = self.tokens.max(total);
+                self.tokens = self.tokens.max(self.tokens_before + total);
             }
             (Some("event_msg"), Some("agent_message")) => {
                 let text = p["message"].as_str().unwrap_or("");
@@ -2063,7 +2094,7 @@ impl Reader {
                         _ => {}
                     }
                 }
-                self.tokens = self.tokens.max(tokens);
+                self.tokens = self.tokens.max(self.tokens_before + tokens);
             }
             Agent::Vibe if v["format"].as_str().is_some_and(|f| f.starts_with("harness.public-session-state/")) => {
                 self.vibe_state(&v);
@@ -2088,7 +2119,7 @@ impl Reader {
                 let n = |k: &str| s[k].as_u64().unwrap_or(0);
                 self.tokens = self
                     .tokens
-                    .max(n("session_prompt_tokens") + n("session_completion_tokens"));
+                    .max(self.tokens_before + n("session_prompt_tokens") + n("session_completion_tokens"));
             }
             Agent::ClaudeCode | Agent::Codex => {}
         }
@@ -2118,7 +2149,7 @@ impl Reader {
         let n = |k: &str| u[k].as_u64().unwrap_or(0);
         self.tokens = self
             .tokens
-            .max(n("inputTokens").saturating_sub(n("cachedInputTokens")) + n("outputTokens"));
+            .max(self.tokens_before + n("inputTokens").saturating_sub(n("cachedInputTokens")) + n("outputTokens"));
         let turn = &v["latestTurn"];
         if turn["status"] == "failed" {
             let error = &turn["error"];
@@ -2140,6 +2171,17 @@ impl Reader {
 /// The file of Mistral Vibe's public state of a session, in each generation folder:
 /// `logs/session/unified/<session>/generations/<n>/projection-state.json`.
 const VIBE_STATE: &str = "projection-state.json";
+
+/// What holds one conversation of an agent: its file, or for Mistral Vibe's public state
+/// (`unified/<session>/generations/<n>/projection-state.json`) the session's folder.
+fn conversation_root(path: &Path) -> PathBuf {
+    if path.file_name().is_some_and(|n| n == VIBE_STATE)
+        && let Some(root) = path.ancestors().nth(3)
+    {
+        return root.to_path_buf();
+    }
+    path.to_path_buf()
+}
 
 /// The newest state file under a session's `generations` folder.
 fn vibe_state_file(generations: &Path) -> Option<PathBuf> {
@@ -2954,6 +2996,22 @@ mod tests {
         assert!(r.turn_over);
         assert_eq!(r.tokens, 72);
         assert_eq!(signal(&r.last_text), Signal::Continue);
+        // A new conversation (short sessions): the old file is no longer read, even rewritten,
+        // and the tokens already used still count.
+        r.new_conversation();
+        assert!(!r.turn_over && r.last_text.is_empty());
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        std::fs::write(&gf, r#"{"messages":[{"type":"gemini","content":"vieux [[FINI]]","tokens":{"input":900}}]}"#).unwrap();
+        r.poll(Agent::Gemini, &cwd, since);
+        assert!(r.path.is_none() && r.last_text.is_empty());
+        let gf2 = gd.join("session-2.json");
+        std::fs::write(&gf2, r#"{"messages":[{"type":"user","content":"go"},
+            {"type":"gemini","content":[{"text":"neuf [[CONTINUER]]"}],"tokens":{"input":10,"output":3}}]}"#).unwrap();
+        r.poll(Agent::Gemini, &cwd, since);
+        assert_eq!(r.path.as_deref(), Some(gf2.as_path()));
+        assert!(r.turn_over);
+        assert_eq!(r.tokens, 85);
+        assert_eq!(r.last_text, "neuf [[CONTINUER]]");
 
         // Vibe: chat messages, totals in the metadata.
         let vd = Agent::Vibe.session_dir(&cwd);
@@ -3469,6 +3527,9 @@ mod tests {
         assert_eq!(path, &Agent::Vibe.config_dir(cwd).join("turns.sh"));
         assert!(script.contains("vibe -p --prompt-file \"$d/prompt.md\" $c --time-limit 1500 </dev/null"), "{script}");
         assert!(script.contains("c=-c") && script.contains("mv -f \"$d/exit.part\" \"$d/exit\""));
+        // A new conversation asked for (`new_conversation`): that run leaves out `-c`.
+        let fresh = script.find("rm -f \"$d/fresh\"; c=; fi").unwrap();
+        assert!(fresh < script.find("vibe -p").unwrap(), "{script}");
         assert!(!script.contains("auto-approve") && !script.contains("yolo") && !script.contains("--trust"));
         assert!(Agent::Vibe.session_dir(cwd).starts_with(Agent::Vibe.config_dir(cwd)));
     }
