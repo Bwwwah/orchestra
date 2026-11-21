@@ -814,10 +814,10 @@ impl EndConditions {
             parts.push(crate::trf!("{n} tours", "{n} turns"));
         }
         if self.when_done {
-            parts.push(crate::tr!("plus d'étape", "no step left").into());
+            parts.push(crate::tr!("toutes les étapes faites", "all steps done").into());
         }
         if parts.is_empty() {
-            crate::tr!("budget seulement", "budget only").into()
+            crate::tr!("aucune condition", "no condition").into()
         } else {
             parts.join(crate::tr!(" ou ", " or "))
         }

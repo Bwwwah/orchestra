@@ -915,6 +915,14 @@ pub const QUESTION_MAX: usize = 1000;
 /// school work, paperwork or anything else — where the answer stays about its content.
 fn question_prompt(folder: &str, question: &str, code: bool) -> String {
     let mut p = question_prompt_base(folder, question, code);
+    // The person found « about half a day for a person » beside the point: the work is
+    // done by the AIs, so no estimate of time unless asked for.
+    p.push_str(crate::tr!(
+        "\n\nNe donne aucune estimation de durée (heures, jours, « une demi-journée »…), ni pour une \
+         personne ni pour une IA, sauf si la question la demande.",
+        "\n\nGive no estimate of time (hours, days, « half a day »…), neither for a person nor for an AI, \
+         unless the question asks for one."
+    ));
     p.push_str(crate::tr!(
         "\n\nSi la question demande d'ajouter, de créer ou de proposer des étapes au projet, termine ta \
          réponse par un bloc de code ```etapes avec une étape par ligne, au format « Thème : action à \
@@ -980,24 +988,25 @@ fn question_prompt_base(folder: &str, question: &str, code: bool) -> String {
              démarche administrative ou autre). Ne modifie RIEN. Lis les documents du dossier seulement si c'est \
              utile pour répondre juste. Réponds dans la langue de la question, directement, en 150 mots au plus, \
              sans préambule, avec des mots simples et sans jargon technique : un avis franc, et si c'est une \
-             démarche ou une idée, dis si elle vaut le coup, ce qu'elle demanderait et par quoi commencer.\
+             démarche ou une idée, dis si elle vaut le coup, ce qu'il y aurait à faire et par quoi commencer.\
              \n\nQuestion :\n{q}",
             "Quick question about the project in the folder « {folder} » (a project without code: school work, \
              paperwork or anything else). Change NOTHING. Read the folder's documents only if it helps to answer \
              right. Answer in the question's language, directly, in 150 words at most, no preamble, in plain \
              words without technical jargon: a frank opinion, and if it's a task or an idea, say whether it's \
-             worth it, what it would take and where to start.\n\nQuestion:\n{q}"
+             worth it, what there would be to do and where to start.\n\nQuestion:\n{q}"
         );
     }
     crate::trf!(
         "Question rapide sur le projet du dossier « {folder} ». Ne modifie RIEN. Regarde le code ou l'historique \
          seulement si c'est utile pour répondre juste. Réponds dans la langue de la question, directement, \
          en 150 mots au plus, sans préambule : un avis franc, et si c'est une idée de fonctionnalité, \
-         dis si elle vaut le coup, ce qu'elle coûterait et où elle irait dans le code.\n\nQuestion :\n{q}",
+         dis si elle vaut le coup, l'ampleur du changement (petit, moyen, gros : ce qu'il toucherait) et où \
+         elle irait dans le code.\n\nQuestion :\n{q}",
         "Quick question about the project in the folder « {folder} ». Change NOTHING. Look at the code or history \
          only if it helps to answer right. Answer in the question's language, directly, in 150 words at most, \
-         no preamble: a frank opinion, and if it's a feature idea, say whether it's worth it, what it would cost \
-         and where it would go in the code.\n\nQuestion:\n{q}"
+         no preamble: a frank opinion, and if it's a feature idea, say whether it's worth it, how big the change \
+         is (small, medium, large: what it would touch) and where it would go in the code.\n\nQuestion:\n{q}"
     )
 }
 
@@ -1314,6 +1323,9 @@ mod tests {
                 "the question is cut at QUESTION_MAX"
             );
             assert!(p.contains("RIEN") || p.contains("NOTHING"));
+            // No time estimate asked for, and one forbidden unless the question wants it.
+            assert!(!p.contains("coûterait") && !p.contains("demanderait") && !p.contains("would cost"));
+            assert!(p.contains("estimation de durée") || p.contains("estimate of time"));
         }
         // A project without code: no talk of code, its documents instead.
         let p = question_prompt("/tmp/x", "?", false);

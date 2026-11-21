@@ -10,7 +10,7 @@
 
 use serde_json::{Value, json};
 use std::io::{Read, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct Window {
@@ -226,8 +226,10 @@ pub fn read() -> Option<Usage> {
 //   wrote `resets_in_seconds`). Read here, the same windows as Claude Code's.
 // - Gemini CLI: its free or paid quota is a number of requests per day, counted by Google
 //   and never written locally (`/stats` only shows the tokens of the session). Nothing to read.
-// - Mistral Vibe: billed by use on an API key, with no subscription window; its session files
-//   hold tokens and cost, not a limit. Nothing to read.
+// - Mistral Vibe: used with a Le Chat plan (Free, Pro…) or an API key. The share of the plan
+//   left is never written locally, so it has no window and no ceiling; but its caches name the
+//   plan (`planType`, `planName`) and every session's state holds its tokens (`tokenUsage`):
+//   read by `read_vibe` to show how much Vibe was used.
 
 /// The agents whose use of the subscription Orchestra can read (the ceiling of a session
 /// rests on it).
@@ -246,8 +248,8 @@ pub fn unreadable_reason(agent: crate::auto::Agent) -> Option<&'static str> {
             "Quota counted by Google in requests per day, never written on this computer."
         )),
         Agent::Vibe => Some(crate::tr!(
-            "Facturé à l'usage sur une clé d'API Mistral : pas de fenêtre d'abonnement à suivre.",
-            "Billed by use on a Mistral API key: no subscription window to follow."
+            "Mistral n'écrit pas sur cet ordinateur la part du forfait qui reste : Orchestra compte les jetons des sessions de Vibe.",
+            "Mistral doesn't write on this computer how much of the plan is left: Orchestra counts the tokens of Vibe's sessions."
         )),
     }
 }
@@ -260,6 +262,129 @@ pub fn read_for(agent: crate::auto::Agent) -> Option<Usage> {
         Agent::Codex => read_codex(),
         Agent::Gemini | Agent::Vibe => None,
     }
+}
+
+/// How much Mistral Vibe was used on this computer: no share of a limit (Mistral doesn't write
+/// it), the plan and the tokens of its sessions.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct VibeUse {
+    /// "Le Chat Free", "Le Chat Pro"… as Vibe's caches name it; None when they don't.
+    pub plan: Option<String>,
+    /// Tokens of the sessions active in the last 24 hours, and in the last 7 days (a session
+    /// counts whole in the window of its last activity).
+    pub tokens_day: u64,
+    pub tokens_week: u64,
+    /// Last activity of a session (ms), 0 when none this week.
+    pub at: u64,
+}
+
+fn vibe_dir() -> PathBuf {
+    std::env::var_os("VIBE_HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| dirs::home_dir().unwrap_or_default().join(".vibe"))
+}
+
+/// The plan named in one of Vibe's caches: `{"planType": "chat", "planName": "FREE"}` gives
+/// "Le Chat Free".
+fn vibe_plan_in(v: &Value) -> Option<String> {
+    match v {
+        Value::Object(m) => {
+            if let Some(name) = m.get("planName").and_then(Value::as_str).filter(|s| !s.is_empty()) {
+                let mut c = name.to_lowercase();
+                if let Some(f) = c.get_mut(0..1) {
+                    f.make_ascii_uppercase();
+                }
+                return Some(match m.get("planType").and_then(Value::as_str) {
+                    Some("chat") => format!("Le Chat {c}"),
+                    _ => c,
+                });
+            }
+            m.values().find_map(vibe_plan_in)
+        }
+        Value::Array(a) => a.iter().find_map(vibe_plan_in),
+        _ => None,
+    }
+}
+
+/// A session's last activity (ms) and total tokens, from its `projection-state.json`: the
+/// object that holds both `tokenUsage` and `updatedAt`.
+fn vibe_session_tokens(v: &Value) -> Option<(u64, u64)> {
+    match v {
+        Value::Object(m) => {
+            if let (Some(at), Some(tu)) = (m.get("updatedAt").and_then(Value::as_u64), m.get("tokenUsage")) {
+                let total = tu["totalTokens"].as_u64().unwrap_or_else(|| {
+                    tu["inputTokens"].as_u64().unwrap_or(0) + tu["outputTokens"].as_u64().unwrap_or(0)
+                });
+                return Some((at, total));
+            }
+            m.values().find_map(vibe_session_tokens)
+        }
+        Value::Array(a) => a.iter().find_map(vibe_session_tokens),
+        _ => None,
+    }
+}
+
+/// Adds up the sessions (last activity, tokens) into the 24-hour and 7-day totals.
+fn vibe_totals(plan: Option<String>, sessions: &[(u64, u64)], now: u64) -> VibeUse {
+    const DAY: u64 = 24 * 3600 * 1000;
+    let mut u = VibeUse { plan, ..Default::default() };
+    for &(at, tokens) in sessions {
+        if at + 7 * DAY < now {
+            continue;
+        }
+        u.tokens_week += tokens;
+        if at + DAY >= now {
+            u.tokens_day += tokens;
+        }
+        u.at = u.at.max(at);
+    }
+    u
+}
+
+/// Mistral Vibe's use, read from `~/.vibe`; None when Vibe has never run here.
+pub fn read_vibe() -> Option<VibeUse> {
+    let dir = vibe_dir();
+    if !dir.is_dir() {
+        return None;
+    }
+    let plan = ["experiment_held_eval_cache.json", "experiment_eval_cache.json"]
+        .iter()
+        .filter_map(|f| std::fs::read_to_string(dir.join(f)).ok())
+        .filter_map(|t| serde_json::from_str::<Value>(&t).ok())
+        .find_map(|v| vibe_plan_in(&v));
+    let since = std::time::SystemTime::now() - std::time::Duration::from_secs(7 * 24 * 3600);
+    // unified/<session>/generations/<n>/projection-state.json: the newest per session.
+    let mut seen = std::collections::HashSet::new();
+    let mut sessions = Vec::new();
+    for f in crate::auto::session_files(&dir.join("logs/session/unified"), 4, "json", since) {
+        if f.file_name().is_none_or(|n| n != "projection-state.json") {
+            continue;
+        }
+        let Some(session) = f.ancestors().nth(3).map(Path::to_path_buf) else { continue };
+        if !seen.insert(session) {
+            continue;
+        }
+        if let Some(s) = std::fs::read_to_string(&f)
+            .ok()
+            .and_then(|t| serde_json::from_str::<Value>(&t).ok())
+            .and_then(|v| vibe_session_tokens(&v))
+        {
+            sessions.push(s);
+        }
+    }
+    Some(vibe_totals(plan, &sessions, crate::model::now_ms()))
+}
+
+/// "8 k", "1,2 M": a number of tokens in a few characters.
+pub fn tokens_short(n: u64) -> String {
+    let s = if n >= 1_000_000 {
+        format!("{:.1} M", n as f64 / 1e6)
+    } else if n >= 1_000 {
+        format!("{:.0} k", n as f64 / 1e3)
+    } else {
+        n.to_string()
+    };
+    if crate::i18n::en() { s } else { s.replace('.', ",") }
 }
 
 /// Codex's figures, from its most recent session files (whatever their folder: the limits are
@@ -1046,6 +1171,37 @@ mod tests {
         for a in Agent::ALL {
             assert_eq!(unreadable_reason(a).is_none(), reports_usage(a), "{a:?}");
         }
+    }
+
+    #[test]
+    fn vibe_plan_and_tokens() {
+        // The plan, deep in an experiment cache (as Vibe writes it): a Le Chat plan, not an API key.
+        let cache = json!({"k": {"payload": {"attributes": {
+            "organizationKind": "S", "planType": "chat", "planName": "FREE"}, "user_plan": "Free"}}});
+        assert_eq!(vibe_plan_in(&cache).as_deref(), Some("Le Chat Free"));
+        let pro = json!([{"planType": "chat", "planName": "PRO"}]);
+        assert_eq!(vibe_plan_in(&pro).as_deref(), Some("Le Chat Pro"));
+        assert_eq!(vibe_plan_in(&json!({"user_plan": "Free"})), None);
+        // A session's state: its last activity and its tokens.
+        let state = json!({"format": "harness.public-session-state/v1", "session": {
+            "contextUsage": {"totalTokens": 8083},
+            "createdAt": 1_795_247_598_002u64, "id": "93786cc5",
+            "tokenUsage": {"cachedInputTokens": 1408, "inputTokens": 7987, "outputTokens": 96, "totalTokens": 8083},
+            "updatedAt": 1_795_247_602_916u64}});
+        assert_eq!(vibe_session_tokens(&state), Some((1_795_247_602_916, 8083)));
+        let no_total = json!({"tokenUsage": {"inputTokens": 10, "outputTokens": 5}, "updatedAt": 7});
+        assert_eq!(vibe_session_tokens(&no_total), Some((7, 15)));
+        // A session that hasn't answered yet: 0 tokens, still a session.
+        assert_eq!(vibe_session_tokens(&json!({"tokenUsage": null, "updatedAt": 3})), Some((3, 0)));
+        // Totals: today, this week, and too old to count.
+        let now = 30 * 24 * HOUR;
+        let u = vibe_totals(
+            Some("Le Chat Free".into()),
+            &[(now - HOUR, 1000), (now - 3 * 24 * HOUR, 500), (now - 8 * 24 * HOUR, 9999)],
+            now,
+        );
+        assert_eq!((u.tokens_day, u.tokens_week, u.at), (1000, 1500, now - HOUR));
+        assert_eq!(vibe_totals(None, &[], now), VibeUse::default());
     }
 
     #[test]

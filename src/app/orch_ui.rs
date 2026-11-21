@@ -352,6 +352,24 @@ fn share_text(p: f32) -> String {
     if p < 0.05 { "0 %".into() } else { format!("{} %", crate::i18n::dec1(p)) }
 }
 
+/// A launch row's figure, in words so it reads at a glance whatever the state: « pris 4,2 % »
+/// (what its session took) or « peut prendre 13 % » (what it may take once started). A bare
+/// « +13 % » or « 0 % » beside « arrêt à 50 % » left one guessing which was which.
+fn row_figure(taken: Option<f32>, may_take: Option<f32>) -> Option<String> {
+    match (may_take, taken) {
+        (Some(p), _) => Some(crate::trf!("peut prendre {p:.0} %", "may take {p:.0} %")),
+        (None, Some(p)) => Some(crate::trf!("pris {}", "took {}", share_text(p))),
+        (None, None) => None,
+    }
+}
+
+/// The launch card's subtitle: the 5-hour window all its percentages are about, rather than
+/// the name of one AI (each line picks its own).
+fn launch_subtitle(five: Option<f32>) -> String {
+    five.map(|f| crate::trf!("fenêtre de 5 h : {f:.0} %", "5-hour window: {f:.0} %"))
+        .unwrap_or_default()
+}
+
 /// Whether a session can start under the global limit: at least 1 % of the window is left.
 fn room_left(five: Option<f32>, global: f32) -> bool {
     five.is_none_or(|f| global - f >= 1.0)
@@ -486,6 +504,15 @@ fn endless_main_warning() -> &'static str {
     crate::tr!(
         "Attention : mode sans fin avec « sur main » coché. Le travail de chaque session, y compris les étapes que l'IA s'invente, sera fusionné tout seul dans main sans relecture, potentiellement pendant des heures.",
         "Careful: endless mode with « on main » ticked. Each session's work, including the steps the AI makes up, will be merged into main by itself without review, possibly for hours."
+    )
+}
+
+/// The one line of help at the top of « Lancer une session », in sight rather than in
+/// tooltips: what a session does, when it stops, and how to start several.
+fn launch_help() -> &'static str {
+    crate::tr!(
+        "Une session lance une IA sur les étapes ouvertes du projet. Elle s'arrête quand la fenêtre de 5 h atteint son « arrêt à ». Cochez plusieurs projets pour les lancer ensemble.",
+        "A session sets an AI to work on the project's open steps. It stops when the 5-hour window reaches its « stops at ». Tick several projects to start them together."
     )
 }
 
@@ -2636,9 +2663,7 @@ impl NotesApp {
                             ui.add_space(2.0);
                             ui.horizontal(|ui| {
                                 ui.add_space(20.0);
-                                ui.label(
-                                    RichText::new("✦").size(13.0).color(super::projects::BLUE),
-                                );
+                                working_mark(ui, t);
                                 let mut job = egui::text::LayoutJob::default();
                                 job.append(
                                     crate::tr!("En train de s'occuper de ", "Busy with "),
@@ -2895,7 +2920,7 @@ impl NotesApp {
         let mut msg = None;
         let projects: Vec<(String, String, String)> = self
             .ws
-            .projects()
+            .launch_projects()
             .iter()
             .filter_map(|p| {
                 p.project
@@ -2996,9 +3021,13 @@ impl NotesApp {
             super::projects::card_title(
                 ui,
                 crate::tr!("LANCER UNE SESSION", "START A SESSION"),
-                "Claude Code",
+                &launch_subtitle(five_of(Agent::ClaudeCode)),
                 t,
             );
+            if !projects.is_empty() {
+                ui.add(egui::Label::new(RichText::new(launch_help()).size(12.0).color(t.tertiary)).wrap());
+                ui.add_space(6.0);
+            }
             if !plugged {
                 ui.label(
                     RichText::new(crate::tr!(
@@ -3053,18 +3082,21 @@ impl NotesApp {
                             ui.spacing_mut().item_spacing.y = 1.0;
                             ui.horizontal(|ui| {
                                 ui.label(RichText::new(title).font(semibold(14.5)).color(t.text));
-                                let (txt, col) = if busy { (crate::tr!("au travail", "at work").to_string(), super::projects::GREEN) } else if open == 0 { (crate::tr!("aucune étape ouverte", "no open step").to_string(), t.tertiary) } else { ({ let s = crate::i18n::plural(open); crate::trf!("{open} étape{s} ouverte{s}", "{open} open step{s}") }, t.secondary) };
+                                // Its state; when « Lancer » is greyed for the window, why, in sight.
+                                let (txt, col) = if busy { (crate::tr!("au travail", "at work").to_string(), super::projects::GREEN) } else if open == 0 && !d.endless { (crate::tr!("aucune étape ouverte", "no open step").to_string(), t.tertiary) } else if !room_left(five, global) { (crate::tr!("limite de 5 h atteinte", "5-hour limit reached").to_string(), super::projects::ORANGE) } else if open == 0 { (crate::tr!("sans fin", "endless").to_string(), t.secondary) } else { ({ let s = crate::i18n::plural(open); crate::trf!("{open} étape{s} ouverte{s}", "{open} open step{s}") }, t.secondary) };
                                 ui.label(RichText::new(txt).size(12.0).color(col));
                                 // Picked, or its ceiling set by hand (and not running): what its
-                                // session may take, above what is already taken.
-                                if shows_picked_share(d.pick, d.touched, busy) {
+                                // session may take, above what is already taken; else what it took.
+                                let picked = shows_picked_share(d.pick, d.touched, busy).then(|| {
                                     let c = ceiling_choice(draft_ceiling(d, running_at), five, dl, global);
-                                    let p = picked_share(c, five, running_at);
-                                    ui.label(RichText::new(crate::trf!("jusqu'à +{p:.0} %", "up to +{p:.0} %")).size(12.0).color(super::projects::BLUE))
-                                        .on_hover_text(picked_share_text(c, five, running_at));
-                                } else if let Some(p) = row_share(run_pct.get(id).copied(), suspended_endless.contains(id)) {
-                                    ui.label(RichText::new(share_text(p)).size(12.0).color(if busy { super::projects::GREEN } else { t.tertiary }))
-                                        .on_hover_text(crate::tr!("Ce que la session de ce projet a pris de la fenêtre de 5 h depuis son lancement : 0 % tant qu'elle n'est pas lancée.", "What this project's session took from the 5-hour window since it started: 0 % until it is started."));
+                                    (picked_share(c, five, running_at), picked_share_text(c, five, running_at))
+                                });
+                                let taken = row_share(run_pct.get(id).copied(), suspended_endless.contains(id));
+                                if let Some(fig) = row_figure(taken, picked.as_ref().map(|(p, _)| *p)) {
+                                    let col = if picked.is_some() { super::projects::BLUE } else if busy { super::projects::GREEN } else { t.tertiary };
+                                    let hover = picked.map(|(_, h)| h).unwrap_or_else(|| crate::tr!("Ce que la session de ce projet a pris de la fenêtre de 5 h depuis son lancement : 0 % tant qu'elle n'est pas lancée.", "What this project's session took from the 5-hour window since it started: 0 % until it is started.").to_string());
+                                    ui.label(RichText::new("·").size(12.0).color(t.tertiary));
+                                    ui.label(RichText::new(fig).size(12.0).color(col)).on_hover_text(hover);
                                 }
                             });
                             let mut job = egui::text::LayoutJob::single_section(super::projects::tilde(folder), egui::TextFormat::simple(FontId::monospace(11.0), t.tertiary));
@@ -3073,7 +3105,7 @@ impl NotesApp {
                         });
                         if wide {
                             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                                launch_controls(ui, LaunchCx { id, d: &mut *d, busy, plugged, connected: &connected, open, five, running_at, default_share: dl, global, to_main: &mut to_main, start: &mut start, confirm_main: &mut confirm_main, ceilings: &mut ceilings, lk: &lk, t });
+                                launch_controls(ui, LaunchCx { id, d: &mut *d, busy, plugged, open, five, running_at, default_share: dl, global, to_main: &mut to_main, start: &mut start, confirm_main: &mut confirm_main, ceilings: &mut ceilings, t });
                             });
                         }
                     });
@@ -3081,14 +3113,47 @@ impl NotesApp {
                     if !wide {
                         ui.horizontal_wrapped(|ui| {
                             ui.add_space(70.0);
-                            launch_controls(ui, LaunchCx { id, d: &mut *d, busy, plugged, connected: &connected, open, five, running_at, default_share: dl, global, to_main: &mut to_main, start: &mut start, confirm_main: &mut confirm_main, ceilings: &mut ceilings, lk: &lk, t });
+                            launch_controls(ui, LaunchCx { id, d: &mut *d, busy, plugged, open, five, running_at, default_share: dl, global, to_main: &mut to_main, start: &mut start, confirm_main: &mut confirm_main, ceilings: &mut ceilings, t });
                         });
                     }
-                    ui.horizontal(|ui| {
-                        ui.add_space(70.0);
-                        ui.add(egui::TextEdit::singleline(&mut d.mission).hint_text(default_mission()).desired_width(f32::INFINITY).font(FontId::proportional(13.0)).margin(egui::Margin::symmetric(8, 5)));
-                    });
+                    // The rest, set once and kept for the project's next sessions, folded under
+                    // « Options »; what differs from the usual stays in sight beside it.
+                    let opts_key = egui::Id::unique(("launch-options", id));
+                    let mut opened = ui.ctx().data(|m| m.get_temp::<bool>(opts_key)).unwrap_or(false);
                     if !busy {
+                        ui.horizontal_wrapped(|ui| {
+                            ui.add_space(70.0);
+                            let arrow = if opened { "▴" } else { "▾" };
+                            if super::projects::quiet_link(ui, &crate::trf!("Options {arrow}", "Options {arrow}"), t)
+                                .on_hover_text(crate::tr!("L'IA, les commits, la fusion dans main, une consigne et le mode sans fin. Gardés pour les prochaines sessions de ce projet.", "The AI, commits, merging into main, a mission and endless mode. Kept for this project's next sessions."))
+                                .clicked()
+                            {
+                                opened = !opened;
+                                ui.ctx().data_mut(|m| m.insert_temp(opts_key, opened));
+                            }
+                            if !opened {
+                                let s = options_summary(d.agent, d.endless, !d.mission.trim().is_empty(), to_main.get(id).copied(), d.commits);
+                                if !s.is_empty() {
+                                    ui.label(RichText::new(s.join(" · ")).size(12.0).color(t.tertiary));
+                                }
+                            }
+                        });
+                    }
+                    if opened && !busy {
+                        ui.horizontal_wrapped(|ui| {
+                            ui.add_space(70.0);
+                            ui.spacing_mut().item_spacing.x = 6.0;
+                            launch_options(ui, id, d, busy, &connected, &mut to_main, &lk, t);
+                        });
+                        ui.horizontal(|ui| {
+                            ui.add_space(70.0);
+                            ui.label(RichText::new(crate::tr!("Consigne (facultatif)", "Mission (optional)")).size(12.0).color(t.tertiary));
+                            ui.add(egui::TextEdit::singleline(&mut d.mission).hint_text(default_mission()).desired_width(f32::INFINITY).font(FontId::proportional(13.0)).margin(egui::Margin::symmetric(8, 5)))
+                                .on_hover_text(crate::tr!("Ce que l'IA doit faire pendant la session. Vide : la consigne grisée, avancer sur les étapes ouvertes dans l'ordre.", "What the AI should do during the session. Empty: the greyed one, move forward on the open steps in order."));
+                        });
+                    }
+                    if !busy {
+                        if opened {
                         ui.horizontal_wrapped(|ui| {
                             ui.add_space(70.0);
                             ui.spacing_mut().item_spacing.x = 6.0;
@@ -3098,11 +3163,12 @@ impl NotesApp {
                             ));
                             ui.label(RichText::new(crate::tr!("sans fin", "endless")).size(12.0).color(if d.endless { t.text } else { t.tertiary }));
                             if d.endless {
-                                ui.label(RichText::new(crate::tr!("· s'arrête après", "· stops after")).size(12.0).color(t.tertiary));
+                                ui.label(RichText::new(crate::tr!("· s'arrête dès que l'une est atteinte :", "· stops as soon as one is reached:")).size(12.0).color(t.tertiary));
                                 end_conditions(ui, &mut d.end, t);
                             }
                         });
-                        let risky = endless_on_main(d.endless, to_main.get(id).copied().unwrap_or(false));
+                        }
+                        let risky =endless_on_main(d.endless, to_main.get(id).copied().unwrap_or(false));
                         if !risky && confirm_main.as_deref() == Some(id.as_str()) {
                             confirm_main = None;
                         }
@@ -4753,6 +4819,19 @@ fn ring(
     );
 }
 
+/// The mark before « En train de s'occuper de … »: a step in progress, as in the steps card
+/// (a ring with a dot), drawn rather than a glyph (« ✦ » is missing from the app's font and
+/// showed as a stack of lines), in the card's muted grey: the same size as the green dot of
+/// the session's title (radius 4), so the two marks read as one family, the green one alone
+/// carrying colour.
+fn working_mark(ui: &mut egui::Ui, t: &Tone) {
+    let (r, _) = ui.allocate_exact_size(egui::vec2(12.0, 14.0), egui::Sense::hover());
+    let c = r.center();
+    ui.painter()
+        .circle_stroke(c, 4.0, egui::Stroke::new(1.2, t.tertiary));
+    ui.painter().circle_filled(c, 1.6, t.tertiary);
+}
+
 /// A colour per project, stable (from its name).
 fn project_color(title: &str) -> Color32 {
     const HUES: [Color32; 6] = [
@@ -4807,12 +4886,12 @@ fn end_conditions(ui: &mut egui::Ui, c: &mut crate::model::EndConditions, t: &To
     if let Some(n) = c.turns.as_mut() {
         ui.add(egui::DragValue::new(n).range(1..=1000));
     }
-    ui.checkbox(&mut c.when_done, small(crate::tr!("plus d'étape ouverte", "no open step left"))).on_hover_text(crate::tr!(
+    ui.checkbox(&mut c.when_done, small(crate::tr!("toutes les étapes faites", "all steps done"))).on_hover_text(crate::tr!(
         "Coché : la session s'arrête une fois les étapes faites. Décoché : l'IA crée elle-même les étapes suivantes et continue.",
         "Ticked: the session stops once the steps are done. Unticked: the AI creates the next steps itself and goes on."
     ));
     if c.hours.is_none() && c.steps.is_none() && c.turns.is_none() && !c.when_done {
-        ui.label(RichText::new(crate::tr!("(plafond seulement)", "(ceiling only)")).size(12.0).color(super::projects::ORANGE)).on_hover_text(crate::tr!(
+        ui.label(RichText::new(crate::tr!("(aucune : seulement à « arrêt à »)", "(none: only at « stops at »)")).size(12.0).color(t.tertiary)).on_hover_text(crate::tr!(
             "Sans condition, la session tourne jusqu'à son plafond, la limite globale ou la réserve de la semaine (ou deux tours de suite sans rien à faire).",
             "With no condition, the session runs until its ceiling, the global limit or the week's reserve (or two turns in a row with nothing to do)."
         ));
@@ -4901,8 +4980,6 @@ struct LaunchCx<'a> {
     d: &'a mut Draft,
     busy: bool,
     plugged: bool,
-    /// The AIs plugged into Orchestra on this machine (the choice of the AI lists only them).
-    connected: &'a [Agent],
     /// Its open steps: none (and not endless), nothing to start on.
     open: usize,
     /// The 5-hour window's figure, and the settings' default share above it.
@@ -4916,19 +4993,17 @@ struct LaunchCx<'a> {
     confirm_main: &'a mut Option<String>,
     /// Ceilings the person has just changed, to keep in their projects.
     ceilings: &'a mut Vec<(String, f32)>,
-    lk: &'a super::settings::Look,
     t: &'a Tone,
 }
 
-/// A project's controls: start, commits, « sur main », budget. In the order of a
-/// right-to-left layout (start at the far right); left to right, start comes first.
+/// A project's controls: start and its ceiling (the rest is under « Options »). In the order
+/// of a right-to-left layout (start at the far right); left to right, start comes first.
 fn launch_controls(ui: &mut egui::Ui, c: LaunchCx<'_>) {
     let LaunchCx {
         id,
         d,
         busy,
         plugged,
-        connected,
         open,
         five,
         running_at,
@@ -4938,7 +5013,6 @@ fn launch_controls(ui: &mut egui::Ui, c: LaunchCx<'_>) {
         start,
         confirm_main,
         ceilings,
-        lk,
         t,
     } = c;
     let room = room_left(five, global);
@@ -4969,8 +5043,8 @@ fn launch_controls(ui: &mut egui::Ui, c: LaunchCx<'_>) {
         ));
     } else if open == 0 && !d.endless {
         start_button(ui, false, t).on_disabled_hover_text(crate::tr!(
-            "Aucune étape ouverte : la session s'arrêterait tout de suite. Ajoutez des étapes au projet, ou activez « sans fin » pour que l'IA trouve elle-même les suivantes.",
-            "No open step: the session would stop at once. Add steps to the project, or turn on « endless » so the AI finds the next ones itself."
+            "Aucune étape ouverte : la session s'arrêterait tout de suite. Ajoutez des étapes au projet, ou activez « sans fin » (dans Options) pour que l'IA trouve elle-même les suivantes.",
+            "No open step: the session would stop at once. Add steps to the project, or turn on « endless » (in Options) so the AI finds the next ones itself."
         ));
     } else if !room {
         start_button(ui, false, t).on_disabled_hover_text(crate::trf!(
@@ -4985,23 +5059,7 @@ fn launch_controls(ui: &mut egui::Ui, c: LaunchCx<'_>) {
             start.push(id.clone());
         }
     }
-    ui.add_space(4.0);
-    agent_pick(ui, id, d, busy, connected);
-    ui.add_space(6.0);
-    // « commits » and « sur main » only for a code project (`to_main` holds only those): one
-    // without code shows no git words, and its sessions make no commit.
-    if to_main.contains_key(id) {
-        super::settings::switch(ui, &mut d.commits, lk).on_hover_text(crate::tr!("L'IA peut faire des commits sur sa branche (Orchestra l'envoie sur GitHub après chaque tour).\nGardé pour les prochaines sessions de ce projet.", "The AI may commit on its branch (Orchestra pushes it to GitHub after each turn).\nKept for this project's next sessions."));
-        ui.label(RichText::new("commits").size(12.0).color(t.tertiary));
-        ui.add_space(6.0);
-    }
-    if let Some(m) = to_main.get_mut(id) {
-        ui.checkbox(m, RichText::new(crate::tr!("sur main", "on main")).size(12.0).color(t.tertiary)).on_hover_text(crate::tr!(
-            "À la fin de chaque session, son travail est fusionné tout seul dans main (seulement si le dossier du projet est sur main ou master)",
-            "At the end of each session, its work is merged into main by itself (only when the project's folder is on main or master)"
-        ));
-        ui.add_space(6.0);
-    }
+    ui.add_space(8.0);
     // The ceiling chosen stays as it is: it is only shown raised above the window's figure
     // (and again at the start), so a window that rose meanwhile never changes it for good.
     let floor = ceiling_floor(five, global);
@@ -5071,6 +5129,65 @@ fn agent_choices(connected: &[Agent], current: Agent) -> Vec<Agent> {
 /// The AI a project's sessions are started with, among the plugged ones: those wired for
 /// working alone can be picked, the others are listed greyed out with the reason. Kept for
 /// the next sessions.
+/// The settings of a launch row one rarely changes, under « Options »: the AI, then for a
+/// code project « commits » and « sur main » (`to_main` holds only those: one without code
+/// shows no git words, and its sessions make no commit).
+#[allow(clippy::too_many_arguments)]
+fn launch_options(
+    ui: &mut egui::Ui,
+    id: &str,
+    d: &mut Draft,
+    busy: bool,
+    connected: &[Agent],
+    to_main: &mut HashMap<String, bool>,
+    lk: &super::settings::Look,
+    t: &Tone,
+) {
+    ui.label(RichText::new(crate::tr!("IA", "AI")).size(12.0).color(t.tertiary));
+    agent_pick(ui, id, d, busy, connected);
+    ui.add_space(8.0);
+    if to_main.contains_key(id) {
+        super::settings::switch(ui, &mut d.commits, lk).on_hover_text(crate::tr!("L'IA peut faire des commits sur sa branche (Orchestra l'envoie sur GitHub après chaque tour).\nGardé pour les prochaines sessions de ce projet.", "The AI may commit on its branch (Orchestra pushes it to GitHub after each turn).\nKept for this project's next sessions."));
+        ui.label(RichText::new("commits").size(12.0).color(t.tertiary));
+        ui.add_space(8.0);
+    }
+    if let Some(m) = to_main.get_mut(id) {
+        ui.checkbox(m, RichText::new(crate::tr!("sur main", "on main")).size(12.0).color(t.tertiary)).on_hover_text(crate::tr!(
+            "À la fin de chaque session, son travail est fusionné tout seul dans main (seulement si le dossier du projet est sur main ou master)",
+            "At the end of each session, its work is merged into main by itself (only when the project's folder is on main or master)"
+        ));
+    }
+}
+
+/// What « Options » holds that differs from the usual, shown beside it while folded so
+/// nothing set there is forgotten: another AI than Claude Code, endless, a mission of its
+/// own, « sur main », no commits.
+fn options_summary(
+    agent: Agent,
+    endless: bool,
+    mission: bool,
+    on_main: Option<bool>,
+    commits: bool,
+) -> Vec<String> {
+    let mut v = vec![];
+    if agent != Agent::ClaudeCode {
+        v.push(agent.label().to_string());
+    }
+    if endless {
+        v.push(crate::tr!("∞ sans fin", "∞ endless").to_string());
+    }
+    if mission {
+        v.push(crate::tr!("consigne", "mission").to_string());
+    }
+    if on_main == Some(true) {
+        v.push(crate::tr!("sur main", "on main").to_string());
+    }
+    if on_main.is_some() && !commits {
+        v.push(crate::tr!("sans commit", "no commits").to_string());
+    }
+    v
+}
+
 fn agent_pick(ui: &mut egui::Ui, id: &str, d: &mut Draft, busy: bool, connected: &[Agent]) {
     ui.add_enabled_ui(!busy, |ui| {
         egui::ComboBox::from_id_salt(("run-agent", id))
@@ -5300,6 +5417,31 @@ mod tests {
         assert_eq!(share_text(0.0), "0 %");
         assert_eq!(share_text(0.01), "0 %");
         assert!(share_text(2.5) == "2,5 %" || share_text(2.5) == "2.5 %");
+    }
+
+    #[test]
+    fn the_launch_card_explains_itself_in_sight() {
+        let h = super::launch_help();
+        // What a session does, when it stops, how to start several: all in one visible line.
+        assert!(h.contains("5 h"), "{h}");
+        assert!(h.contains("arrêt à") || h.contains("stops at"), "{h}");
+        assert!(h.contains("plusieurs") || h.contains("several"), "{h}");
+    }
+
+    #[test]
+    fn launch_figures_say_what_they_measure() {
+        use super::{launch_subtitle, row_figure};
+        let fr = |s: Option<String>| s.unwrap_or_default();
+        // What it took (0 % before it starts), or what it may take once picked: never a bare number.
+        let took = fr(row_figure(Some(0.0), None));
+        assert!(took == "pris 0 %" || took == "took 0 %", "{took}");
+        let may = fr(row_figure(Some(4.0), Some(13.0)));
+        assert!(may == "peut prendre 13 %" || may == "may take 13 %", "{may}");
+        assert_eq!(row_figure(None, None), None);
+        // The card's subtitle: the window its percentages are about, not an AI's name.
+        let s = launch_subtitle(Some(37.4));
+        assert!(s.contains("5 h") && s.contains("37 %"), "{s}");
+        assert_eq!(launch_subtitle(None), "");
     }
 
     /// Picked, a project shows what its session may take: its ceiling less what the window
@@ -5673,7 +5815,6 @@ mod tests {
             let mut row = 0.0;
             column(width, |ui| {
                 let t = super::tone(false);
-                let lk = super::super::settings::look(false);
                 let id = "p".to_string();
                 let mut d = super::Draft {
                     mission: String::new(),
@@ -5698,7 +5839,6 @@ mod tests {
                                 d: &mut d,
                                 busy: false,
                                 plugged: true,
-                                connected: &[super::Agent::ClaudeCode],
                                 open: 3,
                                 five: Some(37.0),
                                 running_at: None,
@@ -5708,7 +5848,6 @@ mod tests {
                                 start: &mut start,
                                 confirm_main: &mut confirm,
                                 ceilings: &mut vec![],
-                                lk: &lk,
                                 t: &t,
                             },
                         );
@@ -5762,28 +5901,16 @@ mod tests {
                 if code {
                     to_main.insert(id.clone(), false);
                 }
-                let (mut start, mut confirm) = (vec![], None);
                 let r = ui.horizontal(|ui| {
-                    super::launch_controls(
+                    super::launch_options(
                         ui,
-                        super::LaunchCx {
-                            id: &id,
-                            d: &mut d,
-                            busy: false,
-                            plugged: true,
-                            connected: &[super::Agent::ClaudeCode],
-                            open: 3,
-                            five: Some(37.0),
-                            running_at: Some(50.0),
-                            default_share: 20.0,
-                            global: 60.0,
-                            to_main: &mut to_main,
-                            start: &mut start,
-                            confirm_main: &mut confirm,
-                            ceilings: &mut vec![],
-                            lk: &lk,
-                            t: &t,
-                        },
+                        &id,
+                        &mut d,
+                        false,
+                        &[super::Agent::ClaudeCode],
+                        &mut to_main,
+                        &lk,
+                        &t,
                     );
                 });
                 w = r.response.rect.width();
@@ -5793,6 +5920,18 @@ mod tests {
         let (code, nocode) = (width_of(true), width_of(false));
         // The switch, « commits », the box and « sur main »: well over 100 px.
         assert!(code - nocode > 100.0, "code {code} px, sans code {nocode} px");
+    }
+
+    #[test]
+    fn folded_options_still_show_what_differs() {
+        use super::{Agent, options_summary};
+        // All as usual: nothing beside « Options ».
+        assert!(options_summary(Agent::ClaudeCode, false, false, Some(false), true).is_empty());
+        assert!(options_summary(Agent::ClaudeCode, false, false, None, false).is_empty());
+        // Each choice that differs is named, so nothing set there is forgotten.
+        let s = options_summary(Agent::Codex, true, true, Some(true), false);
+        assert_eq!(s.len(), 5, "{s:?}");
+        assert_eq!(s[0], "Codex");
     }
 
     /// The case reported: the 5-hour window already at 75 % when a session starts with a
