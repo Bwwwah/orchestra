@@ -21,6 +21,9 @@ vt100 = "0.18"
 
 [dev-dependencies]
 egui_kittest = "0.37"
+# The app icons are made from assets/logo-source.png by `cargo run --example icons`
+# (the same crate eframe already uses to read PNG files).
+image = { version = "0.25", default-features = false, features = ["png"] }
 
 
 [profile.release]
