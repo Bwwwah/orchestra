@@ -2743,6 +2743,48 @@ pub fn hm(ms: u64) -> String {
 }
 
 /// The report of one work session, in Markdown.
+/// Why no model was written for the session: none of the AI's list could be chosen.
+pub fn default_model_reason() -> &'static str {
+    crate::tr!(
+        "aucune liste de modèles pour cette IA : son réglage par défaut",
+        "no list of models for this AI: its own default"
+    )
+}
+
+/// Why a restarted session has the model it had: it keeps the one first chosen.
+pub fn restart_model_reason() -> &'static str {
+    crate::tr!(
+        "reprise : le modèle choisi au départ de la session",
+        "restart: the model chosen when the session first started"
+    )
+}
+
+/// The model of a session as shown to the person: its name (or « réglage par défaut de
+/// l'IA ») — why it was chosen (difficulty estimated : …). None for an older record that
+/// knows neither the model nor why.
+pub fn model_note(r: &crate::model::RunRecord) -> Option<String> {
+    if r.model.is_empty() && r.model_reason.is_empty() {
+        return None;
+    }
+    let mut s = if r.model.is_empty() {
+        crate::tr!("réglage par défaut de l'IA", "the AI's own default").to_string()
+    } else {
+        format!("`{}`", r.model)
+    };
+    if !r.model_reason.is_empty() {
+        s.push_str(" — ");
+        s.push_str(&r.model_reason);
+    }
+    if !r.difficulty.is_empty() {
+        s.push_str(&crate::trf!(
+            " (difficulté estimée : {})",
+            " (estimated difficulty: {})",
+            r.difficulty
+        ));
+    }
+    Some(s)
+}
+
 pub fn session_report(
     r: &crate::model::RunRecord,
     commits: &[String],
@@ -2761,6 +2803,9 @@ pub fn session_report(
         r.outcome,
         r.branch
     ));
+    if let Some(m) = model_note(r) {
+        s.push_str(&crate::trf!("- **Modèle** : {m}\n", "- **Model**: {m}\n"));
+    }
     s.push_str(crate::tr!(
         "\n## Étapes terminées\n\n",
         "\n## Steps finished\n\n"
@@ -3406,6 +3451,30 @@ mod tests {
 
     /// The model chosen for a session reaches Codex as `--model`, quoted; no model or a name
     /// that isn't one adds nothing.
+    #[test]
+    fn the_model_and_its_reason_are_shown() {
+        use crate::model::RunRecord;
+        // An older record knows neither: nothing shown.
+        assert_eq!(model_note(&RunRecord::default()), None);
+        let r = RunRecord {
+            model: "haiku".into(),
+            model_reason: "le moins cher des modèles léger ou plus".into(),
+            difficulty: "léger · travail court (« commit »)".into(),
+            ..Default::default()
+        };
+        let note = model_note(&r).unwrap();
+        assert!(note.starts_with("`haiku` — le moins cher"), "{note}");
+        assert!(note.ends_with("(difficulté estimée : léger · travail court (« commit »))"));
+        assert!(session_report(&r, &[], 0, "").contains(&format!("- **Modèle** : {note}\n")));
+        // No model written: the AI's default, with why.
+        let d = RunRecord {
+            model_reason: default_model_reason().into(),
+            ..Default::default()
+        };
+        assert!(model_note(&d).unwrap().starts_with("réglage par défaut de l'IA — aucune liste"));
+        assert!(!session_report(&RunRecord::default(), &[], 0, "").contains("Modèle"));
+    }
+
     #[test]
     fn the_chosen_model_reaches_codex() {
         let plain = codex_command(&[], "");

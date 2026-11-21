@@ -872,16 +872,18 @@ impl NotesApp {
         } else {
             None
         };
-        let picked = if let Some(i) = &imposed {
-            Some(i.model.clone())
+        let (picked, model_reason) = if let Some(i) = &imposed {
+            (Some(i.model.clone()), i.reason.clone())
         } else if model.trim().is_empty() {
-            crate::catalog::choose(
+            match crate::catalog::choose(
                 &[(agent, crate::catalog::choosable(agent))],
                 difficulty.tier,
-            )
-            .map(|c| c.model.id)
+            ) {
+                Some(c) => (Some(c.model.id), c.reason),
+                None => (None, auto::default_model_reason().to_string()),
+            }
         } else {
-            None
+            (None, auto::restart_model_reason().to_string())
         };
         let model = picked.as_deref().unwrap_or(model);
         let copy = if fix {
@@ -940,6 +942,7 @@ impl NotesApp {
             endless: endless.clone(),
             model: auto::model_arg(model).unwrap_or_default().to_string(),
             difficulty: format!("{} · {}", difficulty.tier.label(), difficulty.reason),
+            model_reason,
             ..Default::default()
         };
         // A new session replaces any planned restart of this project.
@@ -2704,6 +2707,22 @@ impl NotesApp {
                 Some((r.id.clone(), current_step(steps, &me)?.to_string()))
             })
             .collect();
+        // Each session's model, and why it was chosen (its record, written at launch).
+        let models: HashMap<String, (String, String)> = self
+            .ws
+            .runs
+            .iter()
+            .filter(|x| self.orch.runs.iter().any(|r| r.id == x.id))
+            .filter_map(|x| {
+                let why = auto::model_note(x)?.replace('`', "");
+                let name = if x.model.is_empty() {
+                    crate::tr!("modèle par défaut", "default model").to_string()
+                } else {
+                    x.model.clone()
+                };
+                Some((x.id.clone(), (name, why)))
+            })
+            .collect();
         super::projects::card(ui, t, 0.0, |ui| {
             super::projects::card_title(ui, crate::tr!("EN COURS", "RUNNING"), &n.to_string(), t);
             if awake {
@@ -2797,6 +2816,13 @@ impl NotesApp {
                                 t.tertiary
                             };
                             ui.label(RichText::new(state).size(12.5).color(state_color));
+                            if let Some((name, why)) = models.get(&r.id) {
+                                ui.label(RichText::new(name).size(12.5).color(t.secondary))
+                                    .on_hover_text(crate::trf!(
+                                        "Modèle : {why}",
+                                        "Model: {why}"
+                                    ));
+                            }
                             if let Some(c) = &r.endless {
                                 ui.label(
                                     RichText::new(crate::tr!("∞ sans fin", "∞ endless"))

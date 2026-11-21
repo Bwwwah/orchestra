@@ -697,6 +697,10 @@ pub struct RunRecord {
     /// the tier label and its reason, e.g. « léger · travail court (« commit ») ».
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub difficulty: String,
+    /// Why that model (`model`, or the AI's default when empty), e.g. « le moins cher des
+    /// modèles léger ou plus » or « imposé pour l'étape ».
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub model_reason: String,
 }
 
 /// Days of reports kept as they are in "Rapports des IA"; the older ones are too many.
