@@ -351,6 +351,89 @@ pub fn push(root: &str, has_upstream: bool) -> Result<String, String> {
     .into())
 }
 
+/// The main branch of the repository: "main", else "master" when only that one exists.
+pub fn main_branch(st: &GitState) -> &'static str {
+    let has = |b: &str| st.branches.iter().chain(&st.remote_branches).any(|x| x == b);
+    if !has("main") && has("master") {
+        "master"
+    } else {
+        "main"
+    }
+}
+
+/// GitHub's page to propose merging `branch` into `base` (used without gh).
+pub fn compare_url(github: &str, base: &str, branch: &str) -> String {
+    format!("{}/compare/{base}...{branch}?expand=1", github.trim_end_matches('/'))
+}
+
+/// Ask for the current branch to be merged into `base`: push it, then open a pull request
+/// with gh (or find the one already open). Returns the message and the page to open: the
+/// pull request, or GitHub's comparison page when gh isn't signed in.
+pub fn request_merge(
+    root: &str,
+    branch: &str,
+    base: &str,
+    has_upstream: bool,
+    gh: bool,
+    github: Option<&str>,
+) -> Result<(String, Option<String>), String> {
+    let rd = PathBuf::from(root);
+    if branch == base {
+        return Err(crate::trf!(
+            "vous êtes déjà sur « {base} »",
+            "you're already on « {base} »"
+        ));
+    }
+    if !valid_branch(branch) || !valid_branch(base) {
+        return Err(crate::tr!("nom de branche invalide", "invalid branch name").into());
+    }
+    push(root, has_upstream)?;
+    if !gh {
+        let url = github.map(|g| compare_url(g, base, branch));
+        return Ok((
+            crate::tr!(
+                "Branche envoyée ; finissez la demande de fusion sur GitHub.",
+                "Branch pushed; finish the merge request on GitHub."
+            )
+            .into(),
+            url,
+        ));
+    }
+    // Already open: just show it.
+    if let Ok(out) = run_in(
+        &rd,
+        "gh",
+        &["pr", "view", branch, "--json", "url,state", "-q", "select(.state==\"OPEN\") | .url"],
+    ) && out.trim().starts_with("https://")
+    {
+        return Ok((
+            crate::tr!(
+                "Une demande de fusion est déjà ouverte ; la branche y est à jour.",
+                "A merge request is already open; the branch is up to date in it."
+            )
+            .into(),
+            Some(out.trim().to_string()),
+        ));
+    }
+    let out = run_in(
+        &rd,
+        "gh",
+        &["pr", "create", "--base", base, "--head", branch, "--fill"],
+    )?;
+    let url = out
+        .lines()
+        .map(str::trim)
+        .find(|l| l.starts_with("https://"))
+        .map(str::to_string);
+    Ok((
+        crate::trf!(
+            "Demande de fusion de « {branch} » dans « {base} » ouverte sur GitHub.",
+            "Merge request of « {branch} » into « {base} » opened on GitHub."
+        ),
+        url,
+    ))
+}
+
 /// Work on another branch (`git switch`; a branch only on the remote is fetched and
 /// followed). Uncommitted changes come along when git can carry them, otherwise it refuses.
 pub fn switch(root: &str, branch: &str, create: bool) -> Result<String, String> {
@@ -890,6 +973,24 @@ mod tests {
             Some("https://github.com/bwwwah/orchestra")
         );
         assert_eq!(repo_name("Bind — app mobile"), "bind-app-mobile");
+    }
+
+    #[test]
+    fn merge_request() {
+        let mut st = GitState {
+            branches: vec!["master".into(), "dev".into()],
+            ..Default::default()
+        };
+        assert_eq!(main_branch(&st), "master");
+        st.remote_branches = vec!["main".into()];
+        assert_eq!(main_branch(&st), "main");
+        assert_eq!(
+            compare_url("https://github.com/o/r", "main", "dev"),
+            "https://github.com/o/r/compare/main...dev?expand=1"
+        );
+        // Refused before anything is pushed.
+        assert!(request_merge("/nonexistent", "main", "main", true, false, None).is_err());
+        assert!(request_merge("/nonexistent", "-x", "main", true, false, None).is_err());
     }
 
     #[test]
