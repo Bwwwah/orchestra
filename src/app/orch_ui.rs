@@ -3,7 +3,8 @@
 //! their questions, the ends of their sessions and the reports arrive.
 //!
 //! Each session drives the person's Claude Code in a hidden terminal (see auto.rs for the
-//! engine and its reasons). One loop per frame moves every session along:
+//! engine and its reasons). One loop per frame moves every session along (while the window
+//! isn't drawn, the conductor runs it: see conductor.rs):
 //! start → (trust the folder) → mission → turns → summary → report.
 
 use super::*;
@@ -462,7 +463,9 @@ impl NotesApp {
         ));
     }
 
-    pub(super) fn orch_tick(&mut self, ctx: &egui::Context) {
+    /// `window`: called from a frame of the window; else from the conductor, while the
+    /// window isn't drawn (its input is then from the last frame: closing isn't read).
+    pub(super) fn orch_tick(&mut self, ctx: &egui::Context, window: bool) {
         if !self.orch.started {
             self.orch.started = true;
             // Sessions that were running when Orchestra closed.
@@ -482,10 +485,15 @@ impl NotesApp {
         self.copy_jobs_tick();
         self.resume_tick(ctx);
         self.orch.awake.set(!self.orch.runs.is_empty());
-        self.keep_running_on_close(ctx);
-        // Developer aid: ORCHESTRA_AUTO_RUN=<project id> starts a session once Claude Code is seen.
+        if window {
+            self.keep_running_on_close(ctx);
+        }
+        // Developer aid: ORCHESTRA_AUTO_RUN=<project id> starts a session once Claude Code is
+        // seen, once per launch of Orchestra.
+        static AUTO_RUN_DONE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
         if let Ok(pid) = std::env::var("ORCHESTRA_AUTO_RUN")
-            && !pid.is_empty() && self.orch.runs.is_empty() && !self.ws.runs.iter().any(|r| r.project == pid) && self.ais.plugged().contains(&crate::setup::Ai::ClaudeCode) {
+            && !pid.is_empty() && self.orch.runs.is_empty() && self.ais.plugged().contains(&crate::setup::Ai::ClaudeCode)
+            && !AUTO_RUN_DONE.swap(true, std::sync::atomic::Ordering::Relaxed) {
                 let (l, c) = (self.ws.settings.orch.default_limit, true);
                 if let Err(e) = self.launch_run(ctx, &pid, "", l, c, None) {
                     eprintln!("auto-run : {e}");

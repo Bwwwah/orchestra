@@ -1157,7 +1157,7 @@ impl eframe::App for NotesApp {
         self.review_tick(&ctx);
         self.ai_tick(&ctx);
         self.ais_tick();
-        self.orch_tick(&ctx);
+        self.orch_tick(&ctx, true);
         self.install_tick(&ctx);
         self.update_tick(&ctx);
         self.versions.tick(&ctx);
@@ -1302,6 +1302,44 @@ impl eframe::App for NotesApp {
         // Stopped first: a merge of a copy finishing meanwhile is recorded, then saved.
         self.stop_children();
         self.save_on_exit();
+    }
+}
+
+/// The window's app, shared with the conductor (see conductor.rs), which moves the
+/// autonomous sessions along while macOS draws no frame.
+pub struct Shell(std::sync::Arc<conductor::Shared<NotesApp>>);
+
+impl Shell {
+    pub fn new(cc: &eframe::CreationContext<'_>, open: Option<String>) -> Self {
+        let shared = conductor::Shared::new(NotesApp::new(cc, open));
+        let ctx = cc.egui_ctx.clone();
+        shared.spawn(conductor::EVERY, conductor::STALE, move |app| app.conductor_tick(&ctx));
+        Shell(shared)
+    }
+}
+
+impl eframe::App for Shell {
+    fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
+        eframe::App::ui(&mut *self.0.frame(), ui, frame);
+    }
+
+    fn on_exit(&mut self) {
+        self.0.stop();
+        eframe::App::on_exit(&mut *self.0.app());
+    }
+}
+
+impl NotesApp {
+    /// What the frames do for the autonomous sessions, done by the conductor while none
+    /// comes: read what the AIs wrote (steps, answers), move the sessions along (and start
+    /// again those a quota stopped), save.
+    fn conductor_tick(&mut self, ctx: &egui::Context) {
+        self.poll_file();
+        self.orch_tick(ctx, false);
+        if let Some(t) = self.dirty_since
+            && t.elapsed() > Duration::from_millis(400) {
+                self.save_now();
+            }
     }
 }
 
@@ -2126,6 +2164,7 @@ mod versions;
 mod side;
 mod live_ui;
 mod orch_ui;
+mod conductor;
 mod settings;
 mod slash;
 use settings::SettingsTab;
