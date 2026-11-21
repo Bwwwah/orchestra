@@ -468,7 +468,10 @@ impl NotesApp {
                 agent.label()
             ));
         }
-        let copy = auto::make_copy(&folder, &title, !pr.commit_to_main)?;
+        let code = crate::project::code_kind(&folder, pr.code);
+        let copy = auto::make_copy(&folder, &title, !pr.commit_to_main, code)?;
+        // No git (a project without code, in its own folder): no commit to allow.
+        let commits = commits && !copy.branch.is_empty();
         let o = &self.ws.settings.orch;
         let cwd = std::path::Path::new(&copy.worktree);
         agent.write_config(cwd, commits, &o.extra_tools)?;
@@ -1245,6 +1248,10 @@ impl NotesApp {
         rec.turns = turns;
         rec.steps_done = newly;
         rec.resume_at = resume_at;
+        // No copy (a project without git): nothing to merge nor discard, the work is there.
+        if auto::in_place(rec) {
+            rec.closed = auto::in_place_note().into();
+        }
         let rec = rec.clone();
         let (commits, dirty) = auto::work_done(&rec, &base);
         auto::push_copy_later(rec.worktree.clone());
@@ -3332,6 +3339,19 @@ fn run_actions(
     asking: Option<&'static str>,
     t: &Tone,
 ) -> Option<&'static str> {
+    if auto::in_place(r) {
+        ui.add_space(4.0);
+        ui.label(
+            RichText::new(crate::trf!(
+                "Pas de copie : {}.",
+                "No copy: {}.",
+                auto::in_place_note()
+            ))
+            .size(12.5)
+            .color(t.tertiary),
+        );
+        return None;
+    }
     if !r.closed.is_empty() {
         ui.add_space(4.0);
         ui.label(

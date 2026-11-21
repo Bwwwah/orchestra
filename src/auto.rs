@@ -861,11 +861,25 @@ fn git(dir: &Path, args: &[&str]) -> Result<String, String> {
     }
 }
 
+/// Where a session works. A copy of the repository on a branch of its own; or, for a
+/// project without code that has no git repository, the project's folder itself (`branch`
+/// and `base` empty: nothing to merge, discard or commit).
 pub struct Copy {
     pub root: String,
     pub worktree: String,
     pub branch: String,
     pub base: String,
+}
+
+/// A session that works right in the project's folder (no git repository): its record has
+/// no branch.
+pub fn in_place(r: &crate::model::RunRecord) -> bool {
+    r.branch.is_empty()
+}
+
+/// The folder is inside a git repository.
+pub fn is_git_repo(folder: &str) -> bool {
+    git(&crate::project::normalize_folder(folder), &["rev-parse", "--show-toplevel"]).is_ok()
 }
 
 fn slug(s: &str) -> String {
@@ -913,7 +927,28 @@ fn is_busy(copy: &Path) -> bool {
 /// A new worktree of the project's repository. `on_dev`: on the shared branch `dev`
 /// (made from HEAD the first time); otherwise, or when `dev` can't be taken (open in the
 /// person's folder, or in a copy still in use), on a branch of its own, from HEAD.
-pub fn make_copy(folder: &str, title: &str, on_dev: bool) -> Result<Copy, String> {
+///
+/// `code`: a code project. One without code (school work, paperwork…) and without a git
+/// repository is worked on right in its folder; a code project still needs a repository
+/// (its copy is what keeps the person's folder safe).
+pub fn make_copy(folder: &str, title: &str, on_dev: bool, code: bool) -> Result<Copy, String> {
+    if !code && !is_git_repo(folder) {
+        let dir = crate::project::normalize_folder(folder);
+        if !dir.is_dir() {
+            return Err(crate::tr!(
+                "le dossier du projet est introuvable",
+                "the project's folder can't be found"
+            )
+            .into());
+        }
+        let d = dir.display().to_string();
+        return Ok(Copy {
+            root: d.clone(),
+            worktree: d,
+            branch: String::new(),
+            base: String::new(),
+        });
+    }
     let copies = crate::store::data_dir().join("worktrees");
     if on_dev {
         match dev_copy_in(&copies, folder, title) {
@@ -1063,6 +1098,9 @@ fn dev_copy_in(copies: &Path, folder: &str, title: &str) -> Result<Copy, String>
 /// End of a session on `dev`: its work stays on the branch (committed if it wasn't, sent
 /// to the remote), and the copy goes, so `dev` can be opened in the project's folder.
 pub fn park(r: &crate::model::RunRecord) -> Result<String, String> {
+    if in_place(r) {
+        return Ok(in_place_note().into());
+    }
     let wt = PathBuf::from(&r.worktree);
     if wt.is_dir()
         && !git(&wt, &["status", "--porcelain"])
@@ -1220,6 +1258,9 @@ fn delete_remote_later(root: String, branch: String) {
 
 /// Bring the session's work into the branch checked out in the project's folder.
 pub fn merge(r: &crate::model::RunRecord) -> Result<String, String> {
+    if in_place(r) {
+        return Ok(in_place_note().into());
+    }
     let wt = PathBuf::from(&r.worktree);
     if wt.is_dir()
         && !git(&wt, &["status", "--porcelain"])
@@ -1280,6 +1321,9 @@ pub fn merge(r: &crate::model::RunRecord) -> Result<String, String> {
 /// Merge the session's work by itself, but only when the project's folder is on its
 /// main branch (main or master): the person allowed commits on main, not elsewhere.
 pub fn merge_into_main(r: &crate::model::RunRecord) -> Result<String, String> {
+    if in_place(r) {
+        return Ok(in_place_note().into());
+    }
     let rd = PathBuf::from(&r.root);
     let into = git(&rd, &["rev-parse", "--abbrev-ref", "HEAD"])
         .unwrap_or_default()
@@ -1296,6 +1340,14 @@ pub fn merge_into_main(r: &crate::model::RunRecord) -> Result<String, String> {
 
 /// Throw the session's copy and branch away.
 pub fn discard(r: &crate::model::RunRecord) -> Result<String, String> {
+    if in_place(r) {
+        // Never a folder of the person's to delete: there is no copy.
+        return Err(crate::tr!(
+            "sans dépôt git, le travail est déjà dans le dossier du projet : rien à abandonner",
+            "without a git repository, the work is already in the project's folder: nothing to discard"
+        )
+        .into());
+    }
     let rd = PathBuf::from(&r.root);
     let _ = git(&rd, &["worktree", "remove", "--force", &r.worktree]);
     let _ = git(&rd, &["worktree", "prune"]);
@@ -1310,6 +1362,14 @@ pub fn discard(r: &crate::model::RunRecord) -> Result<String, String> {
     git(&rd, &["branch", "-D", &r.branch])?;
     delete_remote_later(r.root.clone(), r.branch.clone());
     Ok(crate::tr!("Copie et branche supprimées.", "Copy and branch deleted.").into())
+}
+
+/// What becomes of a session's work in a project without git.
+pub fn in_place_note() -> &'static str {
+    crate::tr!(
+        "travail fait directement dans le dossier du projet (pas de dépôt git)",
+        "work done right in the project's folder (no git repository)"
+    )
 }
 
 // ------------------------------------------------------------------ history
@@ -1694,7 +1754,25 @@ fn mission_text(
     mission: &str,
     commits: bool,
 ) -> String {
-    let commit_rule = if commits {
+    // Where it works: its own copy of the repository, or (no git) the project's folder itself.
+    let intro = if branch.is_empty() {
+        crate::tr!(
+            "Ce dossier est le dossier même du projet (pas de dépôt git) : tes modifications y sont faites directement, sans copie ni retour en arrière possible. Travaille uniquement ici, et ne supprime ni n'écrase aucun document existant sans que l'étape le demande.",
+            "This folder is the project's own folder (no git repository): your changes are made right there, with no copy and no way back. Work only here, and delete or overwrite no existing document unless the step asks for it."
+        )
+        .to_string()
+    } else {
+        crate::trf!(
+            "Ce dossier est une copie dédiée du dépôt, sur la branche {branch} : travaille uniquement ici, ne change pas de branche.",
+            "This folder is a dedicated copy of the repository, on the branch {branch}: work only here, don't switch branches."
+        )
+    };
+    let commit_rule = if branch.is_empty() {
+        crate::tr!(
+            "Il n'y a pas de git ici : aucune commande git, aucun commit.",
+            "There is no git here: no git command, no commit."
+        )
+    } else if commits {
         crate::tr!(
             "Après chaque étape terminée, fais un commit clair (git add -A puis git commit -m « … »). Ne fais jamais de git push.",
             "After each finished step, make a clear commit (git add -A then git commit -m « … »). Never git push."
@@ -1707,7 +1785,7 @@ fn mission_text(
     };
     crate::trf!(
         "Tu travailles en autonomie pour Orchestra sur le projet « {title} » (id {project_id}). \
-         Ce dossier est une copie dédiée du dépôt, sur la branche {branch} : travaille uniquement ici, ne change pas de branche.\n\
+         {intro}\n\
          1. Appelle get_project_state avec project = « {project_id} » pour l'état des lieux et les étapes.\n\
          2. Mission : {mission}\n\
          3. Prends les étapes ouvertes une par une : passe-la « doing » avec update_step, fais le travail, vérifie-le \
@@ -1723,7 +1801,7 @@ fn mission_text(
          [[CONTINUER]] s'il reste une étape ouverte que tu peux avancer, [[FINI]] s'il n'en reste aucune, \
          [[BLOQUÉ]] seulement si aucune étape ouverte ne peut plus avancer (une question posée avec ask_human n'est pas un blocage tant qu'il reste d'autres étapes).",
         "You are working autonomously for Orchestra on the project « {title} » (id {project_id}). \
-         This folder is a dedicated copy of the repository, on the branch {branch}: work only here, don't switch branches.\n\
+         {intro}\n\
          1. Call get_project_state with project = « {project_id} » for the current state and the steps.\n\
          2. Mission: {mission}\n\
          3. Take the open steps one by one: set it to « doing » with update_step, do the work, check it \
@@ -2523,6 +2601,47 @@ mod tests {
         let v: Value = serde_json::from_str(&mcp_config()).unwrap();
         assert_eq!(v["mcpServers"].as_object().unwrap().len(), 1);
         assert_eq!(v["mcpServers"]["orchestra"]["args"][0], "mcp");
+    }
+
+    #[test]
+    fn a_project_without_code_nor_git_is_worked_on_in_its_folder() {
+        let dir = std::env::temp_dir().join(format!("orch-nocode-{}", uuid::Uuid::new_v4().simple()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("dossier.txt"), "brouillon").unwrap();
+        let folder = dir.display().to_string();
+        if is_git_repo(&folder) {
+            // The temporary folder sits inside a repository on this machine: nothing to test.
+            let _ = std::fs::remove_dir_all(&dir);
+            return;
+        }
+        // A code project still needs a repository.
+        assert!(make_copy(&folder, "Code", false, true).is_err());
+        // Without code: the folder itself, no branch, nothing copied.
+        let c = make_copy(&folder, "Inscription", true, false).unwrap();
+        assert_eq!(c.worktree, crate::project::normalize_folder(&folder).display().to_string());
+        assert!(c.branch.is_empty() && c.base.is_empty());
+        let rec = crate::model::RunRecord {
+            title: "Inscription".into(),
+            root: c.root.clone(),
+            worktree: c.worktree.clone(),
+            branch: c.branch.clone(),
+            ..Default::default()
+        };
+        assert!(in_place(&rec));
+        // Nothing to merge; never anything deleted.
+        assert!(merge(&rec).is_ok() && merge_into_main(&rec).is_ok() && park(&rec).is_ok());
+        assert!(discard(&rec).is_err());
+        assert_eq!(std::fs::read_to_string(dir.join("dossier.txt")).unwrap(), "brouillon");
+        assert_eq!(work_done(&rec, ""), (vec![], 0));
+        // The AI is told where it works, and that there is no git.
+        let p = mission_prompt("Inscription", "p1", "", "Avancer", true);
+        assert!(p.contains("pas de dépôt git") || p.contains("no git repository"), "{p}");
+        assert!(!p.contains("git commit") && !p.contains("branche  ") && !p.contains("branch :"), "{p}");
+        let p = mission_prompt("Code", "p1", "dev", "Avancer", true);
+        assert!(p.contains("git commit") && p.contains("dev"), "{p}");
+        // A folder that isn't there: refused.
+        assert!(make_copy("/nulle/part/orch", "X", false, false).is_err());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
