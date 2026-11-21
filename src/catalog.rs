@@ -456,6 +456,19 @@ pub fn choose(candidates: &[(Agent, Vec<ModelInfo>)], need: Tier) -> Option<Choi
     })
 }
 
+/// The model for short, well-framed work (a commit message, a version and its notes, a text
+/// split into tasks): the cheapest light model of `models` within the plan. None when the
+/// list has no light model: the AI then keeps the person's default, never a dearer one.
+pub fn light(models: &[ModelInfo]) -> Option<&ModelInfo> {
+    models
+        .iter()
+        .filter(|m| m.tier == Tier::Light && !m.needs_higher_plan)
+        .fold(None, |best: Option<&ModelInfo>, m| match best {
+            Some(b) if b.cost_cents <= m.cost_cents => Some(b),
+            _ => Some(m),
+        })
+}
+
 /// The models Orchestra may choose from for `agent`. Vibe without a list of its own on this
 /// computer gives none: the written name would only replace the person's own setting.
 pub fn choosable(agent: Agent) -> Vec<ModelInfo> {
@@ -669,5 +682,28 @@ mod tests {
         // Nothing to choose from.
         assert!(choose(&[], Tier::Light).is_none());
         assert!(choose(&[(Agent::Vibe, Vec::new())], Tier::Light).is_none());
+    }
+
+    #[test]
+    fn light_work_takes_the_cheapest_light_model_or_none() {
+        // Claude Code: Haiku, never Sonnet nor Opus.
+        assert_eq!(
+            light(&builtin(Agent::ClaudeCode)).map(|m| m.id.as_str()),
+            Some("haiku")
+        );
+        // Codex without a light model in its list: none, it keeps the person's default.
+        assert!(light(&builtin(Agent::Codex)).is_none());
+        let codex = vec![
+            ModelInfo::new("gpt-5.2-codex", "GPT-5.2 Codex"),
+            ModelInfo::new("gpt-5.2-mini", "GPT-5.2 mini"),
+            ModelInfo::new("gpt-5.2-nano", "GPT-5.2 nano"),
+        ];
+        assert_eq!(light(&codex).map(|m| m.id.as_str()), Some("gpt-5.2-nano"));
+        // Outside the plan: left out.
+        let mut nano = ModelInfo::new("gpt-5.2-nano", "nano");
+        nano.needs_higher_plan = true;
+        let codex = vec![nano, ModelInfo::new("gpt-5.2-mini", "mini")];
+        assert_eq!(light(&codex).map(|m| m.id.as_str()), Some("gpt-5.2-mini"));
+        assert!(light(&[]).is_none());
     }
 }

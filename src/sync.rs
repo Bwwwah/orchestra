@@ -706,7 +706,7 @@ pub fn ask_tasks(
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Weight {
     /// Putting given material into shape (a text into tasks, a diff into a commit message,
-    /// commits into release notes): a lighter model does it as well, for fewer tokens.
+    /// commits into release notes): a light model (Haiku…) does it as well, for less.
     Light,
     /// Reading and judging a project (filling it in, proposing steps, an outside view, a
     /// search): the person's own default model.
@@ -715,7 +715,8 @@ pub enum Weight {
 
 /// The command line for one question to an agent. Images: Codex takes them with `--image`;
 /// Claude Code reads them itself, from their folders added with `--add-dir`. A light
-/// question runs on Sonnet (Claude Code) or with low reasoning effort (Codex).
+/// question runs on `light_model` (the agent's cheapest light model, see `light_model`),
+/// and with low reasoning effort on Codex; without one the agent keeps its default.
 fn ask_args(
     tool: Tool,
     prompt: String,
@@ -723,7 +724,11 @@ fn ask_args(
     max_turns: u32,
     images: &[String],
     weight: Weight,
+    light_model: Option<&str>,
 ) -> Vec<String> {
+    let model = light_model
+        .filter(|_| weight == Weight::Light)
+        .and_then(crate::auto::model_arg);
     match tool {
         Tool::ClaudeCode => {
             let mut a: Vec<String> = vec![
@@ -736,9 +741,9 @@ fn ask_args(
                 "--allowedTools".into(),
                 claude_tools.into(),
             ];
-            if weight == Weight::Light {
+            if let Some(m) = model {
                 a.push("--model".into());
-                a.push("sonnet".into());
+                a.push(m.into());
             }
             let mut dirs: Vec<String> = vec![];
             for i in images {
@@ -768,6 +773,10 @@ fn ask_args(
                 a.push("-c".into());
                 a.push("model_reasoning_effort=\"low\"".into());
             }
+            if let Some(m) = model {
+                a.push("--model".into());
+                a.push(m.into());
+            }
             for i in images {
                 a.push(format!("--image={i}"));
             }
@@ -776,6 +785,16 @@ fn ask_args(
             a
         }
     }
+}
+
+/// The model a light question runs on: the cheapest light model `tool` can be started with
+/// (Claude Code: Haiku; Codex: a mini model of its own list). None: it keeps its default.
+fn light_model(tool: Tool) -> Option<String> {
+    let agent = match tool {
+        Tool::ClaudeCode => crate::auto::Agent::ClaudeCode,
+        Tool::Codex => crate::auto::Agent::Codex,
+    };
+    crate::catalog::light(&crate::catalog::available(agent)).map(|m| m.id.clone())
 }
 
 /// The image files a person may join to a text (by their extension).
@@ -930,7 +949,18 @@ fn ask_full(
             "Neither Claude Code nor Codex was found on this computer."
         ))?;
     let prompt_copy = prompt.clone();
-    let args = ask_args(agent.tool, prompt, claude_tools, max_turns, images, weight);
+    let light = (weight == Weight::Light)
+        .then(|| light_model(agent.tool))
+        .flatten();
+    let args = ask_args(
+        agent.tool,
+        prompt,
+        claude_tools,
+        max_turns,
+        images,
+        weight,
+        light.as_deref(),
+    );
     let res = run_agent(
         agent,
         folder,
@@ -1292,14 +1322,30 @@ mod tests {
     #[test]
     fn images_reach_the_agents() {
         let imgs = vec!["/tmp/x/a.png".to_string(), "/tmp/x/b.jpg".to_string()];
-        let c = ask_args(Tool::ClaudeCode, "p".into(), "Read", 5, &imgs, Weight::Full);
+        let c = ask_args(
+            Tool::ClaudeCode,
+            "p".into(),
+            "Read",
+            5,
+            &imgs,
+            Weight::Full,
+            None,
+        );
         // Claude reads them itself: their folder is added once.
         assert_eq!(c.iter().filter(|a| *a == "--add-dir").count(), 1);
         assert!(
             c.windows(2)
                 .any(|w| w[0] == "--add-dir" && w[1] == "/tmp/x")
         );
-        let x = ask_args(Tool::Codex, "p".into(), "Read", 5, &imgs, Weight::Full);
+        let x = ask_args(
+            Tool::Codex,
+            "p".into(),
+            "Read",
+            5,
+            &imgs,
+            Weight::Full,
+            None,
+        );
         assert!(
             x.contains(&"--image=/tmp/x/a.png".to_string())
                 && x.contains(&"--image=/tmp/x/b.jpg".to_string())
@@ -1307,8 +1353,16 @@ mod tests {
         assert_eq!(x.last().map(String::as_str), Some("p"));
         // Without images, nothing changes.
         assert!(
-            !ask_args(Tool::ClaudeCode, "p".into(), "Read", 5, &[], Weight::Full)
-                .contains(&"--add-dir".to_string())
+            !ask_args(
+                Tool::ClaudeCode,
+                "p".into(),
+                "Read",
+                5,
+                &[],
+                Weight::Full,
+                None
+            )
+            .contains(&"--add-dir".to_string())
         );
         assert!(
             is_image(Path::new("/a/B.PNG"))
@@ -1320,27 +1374,79 @@ mod tests {
 
     #[test]
     fn light_questions_use_a_lighter_model() {
-        let c = ask_args(Tool::ClaudeCode, "p".into(), "Read", 3, &[], Weight::Light);
-        assert!(c.windows(2).any(|w| w[0] == "--model" && w[1] == "sonnet"));
-        let x = ask_args(Tool::Codex, "p".into(), "Read", 3, &[], Weight::Light);
+        // Commit messages, versions and tasks: Claude Code's light model, Haiku.
+        let haiku = crate::catalog::light(&crate::catalog::builtin(crate::auto::Agent::ClaudeCode))
+            .map(|m| m.id.clone());
+        assert_eq!(haiku.as_deref(), Some("haiku"));
+        let c = ask_args(
+            Tool::ClaudeCode,
+            "p".into(),
+            "Read",
+            3,
+            &[],
+            Weight::Light,
+            haiku.as_deref(),
+        );
+        assert!(c.windows(2).any(|w| w[0] == "--model" && w[1] == "haiku"));
+        let x = ask_args(
+            Tool::Codex,
+            "p".into(),
+            "Read",
+            3,
+            &[],
+            Weight::Light,
+            Some("gpt-5.2-mini"),
+        );
         assert!(
             x.windows(2)
                 .any(|w| w[0] == "-c" && w[1] == "model_reasoning_effort=\"low\"")
+        );
+        assert!(
+            x.windows(2)
+                .any(|w| w[0] == "--model" && w[1] == "gpt-5.2-mini")
         );
         assert_eq!(
             x.last().map(String::as_str),
             Some("p"),
             "the prompt stays last, after « -- »"
         );
+        // Codex without a light model of its own: its default, with low effort only.
+        let x = ask_args(Tool::Codex, "p".into(), "Read", 3, &[], Weight::Light, None);
+        assert!(!x.contains(&"--model".to_string()) && x.contains(&"-c".to_string()));
+        // A name that could be another option is left out.
+        let c = ask_args(
+            Tool::ClaudeCode,
+            "p".into(),
+            "Read",
+            3,
+            &[],
+            Weight::Light,
+            Some("--x"),
+        );
+        assert!(!c.contains(&"--model".to_string()));
         // A full question keeps the person's own default model.
         assert!(
-            !ask_args(Tool::ClaudeCode, "p".into(), "Read", 3, &[], Weight::Full)
-                .contains(&"--model".to_string())
+            !ask_args(
+                Tool::ClaudeCode,
+                "p".into(),
+                "Read",
+                3,
+                &[],
+                Weight::Full,
+                Some("haiku")
+            )
+            .contains(&"--model".to_string())
         );
-        assert!(
-            !ask_args(Tool::Codex, "p".into(), "Read", 3, &[], Weight::Full)
-                .contains(&"-c".to_string())
+        let x = ask_args(
+            Tool::Codex,
+            "p".into(),
+            "Read",
+            3,
+            &[],
+            Weight::Full,
+            Some("gpt-5.2-mini"),
         );
+        assert!(!x.contains(&"-c".to_string()) && !x.contains(&"--model".to_string()));
     }
 
     #[test]
