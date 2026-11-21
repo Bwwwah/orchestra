@@ -555,6 +555,7 @@ pub(super) fn accent_of(title: &str) -> Color32 {
             Color32::from_rgb(204, 120, 92)
         }
         "VERSIONS" | "PROJETS" | "PROJECTS" => BLUE,
+        "VEILLE · CVE" | "WATCH · CVE" => Color32::from_rgb(224, 62, 62),
         "POUR COMMENCER" | "TO GET GOING" => GREEN,
         "PAGES" | "CONTENU" | "CONTENTS" | "PAGES RÉCENTES" | "RECENT PAGES" => {
             Color32::from_rgb(160, 160, 160)
@@ -1036,6 +1037,8 @@ enum CardKind {
     Sessions,
     Pages,
     Versions,
+    /// Known vulnerabilities of the dependencies (code projects).
+    Watch,
     Questions,
 }
 
@@ -1045,7 +1048,7 @@ fn draw(ui: &mut egui::Ui, cx: &mut Cx, k: CardKind, extra: f32) -> f32 {
         CardKind::Summary(_) => 0.0,
         CardKind::Steps | CardKind::Questions => 1.0,
         CardKind::NewSession | CardKind::Sessions | CardKind::Pages => 2.0,
-        CardKind::Versions => 3.0,
+        CardKind::Versions | CardKind::Watch => 3.0,
     };
     let t0: f64 = ui
         .ctx()
@@ -1086,6 +1089,10 @@ fn draw_card(ui: &mut egui::Ui, cx: &mut Cx, k: CardKind, extra: f32) -> f32 {
         CardKind::Sessions => sessions_card(ui, cx, extra),
         CardKind::Pages => pages_card(ui, cx, extra),
         CardKind::Questions => questions_card(ui, cx, extra),
+        CardKind::Watch => {
+            let folder = cx.pr.folder.trim().to_string();
+            super::watch::watch_card(ui, &folder, cx.t, extra)
+        }
         CardKind::Versions => {
             let folder = cx.pr.folder.trim().to_string();
             let prefer = cx.live.first().map(|s| s.tool);
@@ -1105,6 +1112,7 @@ fn card_key(page_id: &str, k: CardKind) -> egui::Id {
         CardKind::Sessions => "sessions",
         CardKind::Pages => "pages",
         CardKind::Versions => "versions",
+        CardKind::Watch => "watch",
         CardKind::Questions => "questions",
     };
     egui::Id::unique(("card-h", page_id, name))
@@ -1381,9 +1389,9 @@ pub(super) fn project_panel(ui: &mut egui::Ui, cx: &mut Cx) -> Option<super::not
     } else {
         &[Questions]
     };
-    // The git card (Versions) only for code projects.
+    // The git card (Versions) and the vulnerability watch only for code projects.
     let vers: &[CardKind] = if shows_git(ui.ctx(), cx.pr) {
-        &[Versions]
+        &[Versions, Watch]
     } else {
         &[]
     };
@@ -2098,6 +2106,7 @@ mod card_layout_tests {
                         CardKind::Sessions => "sessions",
                         CardKind::Pages => "pages",
                         CardKind::Versions => "versions",
+                        CardKind::Watch => "watch",
                         CardKind::Questions => "questions",
                     })
                     .collect()

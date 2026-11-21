@@ -2812,6 +2812,7 @@ mod slash;
 mod term_ui;
 mod update_ui;
 mod versions;
+mod watch;
 use settings::SettingsTab;
 mod database;
 mod icons;
