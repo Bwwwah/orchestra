@@ -21,6 +21,26 @@ use std::time::{Duration, Instant};
 /// dashboard never get them, so they use the account the person logged in with.
 pub const API_KEY_VARS: [&str; 3] = ["ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "OPENAI_API_KEY"];
 
+/// What a Claude Code session puts in the environment of the programs it runs. Orchestra
+/// started from one (`cargo run` in a Claude Code terminal) would hand them down: a Claude
+/// Code started with them takes itself for that session's child and saves no transcript,
+/// so an autonomous session never sees its turns end. Never passed on; the person's own
+/// settings (CLAUDE_CONFIG_DIR, CLAUDE_CODE_USE_BEDROCK…) are.
+pub const HOST_SESSION_VARS: [&str; 12] = [
+    "CLAUDECODE",
+    "CLAUDE_CODE_ENTRYPOINT",
+    "CLAUDE_CODE_SESSION_ID",
+    "CLAUDE_CODE_CHILD_SESSION",
+    "CLAUDE_CODE_CHILD_NOTES_DIR",
+    "CLAUDE_CODE_SESSION_ATTENDED",
+    "CLAUDE_CODE_MESSAGING_SOCKET",
+    "CLAUDE_CODE_MESSAGING_TOKEN",
+    "CLAUDE_CODE_EXECPATH",
+    "CLAUDE_PID",
+    "CLAUDE_EFFORT",
+    "AI_AGENT",
+];
+
 /// Longest a single project may take before the agent is stopped.
 const PER_PROJECT: Duration = Duration::from_secs(8 * 60);
 
@@ -185,7 +205,7 @@ fn run_agent(agent: &Agent, folder: &str, args: Vec<String>, path: &str, cancel:
         return Err(crate::tr!("dossier introuvable", "folder not found").into());
     }
     let mut cmd = crate::proc::command(&agent.bin);
-    for k in API_KEY_VARS {
+    for k in API_KEY_VARS.iter().chain(&HOST_SESSION_VARS) {
         cmd.env_remove(k);
     }
     let mut child = cmd

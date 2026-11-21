@@ -93,6 +93,10 @@ impl Term {
         c.env("COLORTERM", "truecolor");
         c.env("PATH", path());
         c.env("TERM_PROGRAM", "orchestra");
+        // Not the marks of a Claude Code session Orchestra was started from (see sync.rs).
+        for k in crate::sync::HOST_SESSION_VARS {
+            c.env_remove(k);
+        }
         if cmd.is_some() {
             // The agents use the account the person logged in with, not stray API keys.
             for k in crate::sync::API_KEY_VARS {
@@ -426,6 +430,25 @@ pub fn palette(i: u8, dark: bool) -> (u8, u8, u8) {
 mod tests {
     use super::*;
     use egui_keys::Key;
+
+    /// Orchestra started from a Claude Code session: the programs of its terminals don't
+    /// get that session's marks (Claude Code would save no transcript), the rest stays.
+    #[cfg(not(windows))]
+    #[test]
+    fn terminals_lose_the_marks_of_a_claude_code_session_around_orchestra() {
+        // SAFETY: no other test reads or writes these variables.
+        unsafe {
+            std::env::set_var("CLAUDE_CODE_CHILD_SESSION", "1");
+            std::env::set_var("ORCHESTRA_TEST_KEPT", "garde");
+        }
+        let t = Term::spawn_once("env", "", "echo \"[${CLAUDE_CODE_CHILD_SESSION-absente}] [${ORCHESTRA_TEST_KEPT-perdue}]\"; sleep 1", || {}).unwrap();
+        let end = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while !t.text().contains("] [") && std::time::Instant::now() < end {
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        let text = t.text();
+        assert!(text.contains("[absente] [garde]"), "{text}");
+    }
 
     #[test]
     fn keys() {
