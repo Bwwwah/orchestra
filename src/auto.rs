@@ -8,8 +8,9 @@
 //! the instructions, reads the session file to know when a turn is over, and starts the next
 //! one until the work is done, a limit is reached or it is stopped.
 //!
-//! What depends on the agent is in `Agent` (command, session files). Codex, Gemini CLI and
-//! Mistral Vibe are listed there, but only Claude Code is wired so far (`Agent::ready`).
+//! What depends on the agent is in `Agent` (command, session files) and `Reader` (the format
+//! of its sessions). Codex, Gemini CLI and Mistral Vibe have theirs, but are not started alone
+//! until their permissions and MCP server are wired too (`Agent::ready`).
 
 use crate::LockOrRecover;
 use serde_json::Value;
@@ -73,16 +74,12 @@ impl Agent {
     /// The command started in the hidden terminal.
     pub fn command(self, allow_commits: bool, extra: &str) -> String {
         match self {
-            // Not wired yet (see `ready`): never start an agent without its permissions,
-            // the terminal only says so and closes.
-            Agent::Codex | Agent::Gemini | Agent::Vibe => {
-                let msg = crate::trf!(
-                    "Le travail autonome n'est pas encore possible avec {}.",
-                    "Autonomous work isn't possible yet with {}.",
-                    self.label()
-                );
-                format!("echo {}; exit 1", crate::sessions::shell_quote(&msg))
-            }
+            // The strictest mode of each: every command (Codex, Gemini) or every tool (Vibe)
+            // waits for a yes. The list of allowed tools is not translated for them yet (the
+            // « Permissions » steps), so they are not `ready` and never started alone.
+            Agent::Codex => "codex --sandbox workspace-write --ask-for-approval untrusted".into(),
+            Agent::Gemini => "gemini --approval-mode default".into(),
+            Agent::Vibe => "vibe".into(),
             Agent::ClaudeCode => {
                 let (allowed, denied) = permissions(allow_commits, extra);
                 // The repository's own settings (.claude/settings*.json: hooks, permissions)
@@ -114,16 +111,93 @@ impl Agent {
                     .collect();
                 root.join("projects").join(enc)
             }
-            // Their own folders; the session format of each is read at a later step.
+            // Codex: `sessions/YYYY/MM/DD/rollout-….jsonl`, for every folder (the folder is in
+            // the first record, `session_meta`).
             Agent::Codex => std::env::var_os("CODEX_HOME")
                 .map(PathBuf::from)
                 .unwrap_or_else(|| dirs::home_dir().unwrap_or_default().join(".codex"))
                 .join("sessions"),
-            Agent::Gemini => dirs::home_dir().unwrap_or_default().join(".gemini").join("tmp"),
+            // Gemini CLI: `tmp/<sha256 of the folder>/chats/session-….json`.
+            Agent::Gemini => {
+                use sha2::Digest;
+                let hash = sha2::Sha256::digest(cwd.display().to_string().as_bytes());
+                let hex: String = hash.iter().map(|b| format!("{b:02x}")).collect();
+                std::env::var_os("GEMINI_CLI_HOME")
+                    .map(PathBuf::from)
+                    .unwrap_or_else(|| dirs::home_dir().unwrap_or_default())
+                    .join(".gemini")
+                    .join("tmp")
+                    .join(hex)
+                    .join("chats")
+            }
+            // Mistral Vibe: `logs/session/session_….json`, for every folder.
             Agent::Vibe => std::env::var_os("VIBE_HOME")
                 .map(PathBuf::from)
-                .unwrap_or_else(|| dirs::home_dir().unwrap_or_default().join(".vibe")),
+                .unwrap_or_else(|| dirs::home_dir().unwrap_or_default().join(".vibe"))
+                .join("logs")
+                .join("session"),
         }
+    }
+
+    /// Its session files: one JSON record per line, appended (Claude Code, Codex), or one
+    /// JSON document rewritten after each message (Gemini, Vibe).
+    fn appends(self) -> bool {
+        matches!(self, Agent::ClaudeCode | Agent::Codex)
+    }
+
+    /// How deep its session files are under `session_dir`.
+    fn session_depth(self) -> usize {
+        match self {
+            Agent::Codex => 4,
+            _ => 1,
+        }
+    }
+}
+
+/// The session files under `dir` (down to `depth` levels) changed since `since`, newest first.
+fn session_files(dir: &Path, depth: usize, ext: &str, since: std::time::SystemTime) -> Vec<PathBuf> {
+    fn walk(dir: &Path, depth: usize, ext: &str, out: &mut Vec<(std::time::SystemTime, PathBuf)>) {
+        for e in std::fs::read_dir(dir).into_iter().flatten().flatten() {
+            let p = e.path();
+            let Ok(meta) = e.metadata() else { continue };
+            if meta.is_dir() {
+                if depth > 1 {
+                    walk(&p, depth - 1, ext, out);
+                }
+            } else if p.extension().is_some_and(|x| x == ext)
+                && let Ok(m) = meta.modified()
+            {
+                out.push((m, p));
+            }
+        }
+    }
+    let mut found = Vec::new();
+    walk(dir, depth, ext, &mut found);
+    found.retain(|(m, _)| *m >= since);
+    found.sort_by_key(|(m, _)| std::cmp::Reverse(*m));
+    found.into_iter().map(|(_, p)| p).collect()
+}
+
+/// The folder a Codex session works in, from its first record.
+fn codex_cwd(path: &Path) -> Option<PathBuf> {
+    use std::io::BufRead;
+    let f = std::fs::File::open(path).ok()?;
+    let mut line = String::new();
+    std::io::BufReader::new(f.take(64 * 1024)).read_line(&mut line).ok()?;
+    let v: Value = serde_json::from_str(line.trim()).ok()?;
+    (v["type"] == "session_meta").then(|| PathBuf::from(v["payload"]["cwd"].as_str().unwrap_or("")))
+}
+
+/// The text of a message whose content is a string or a list of parts with a `text`.
+fn content_text(c: &Value) -> String {
+    match c {
+        Value::String(s) => s.clone(),
+        Value::Array(a) => a
+            .iter()
+            .filter_map(|p| p["text"].as_str())
+            .collect::<Vec<_>>()
+            .join("\n"),
+        _ => String::new(),
     }
 }
 
@@ -1026,20 +1100,20 @@ impl Reader {
     /// Read what was added; `since`: session files older than this are not ours.
     pub fn poll(&mut self, agent: Agent, cwd: &Path, since: std::time::SystemTime) {
         if self.path.is_none() {
-            let dir = agent.session_dir(cwd);
-            let newest = std::fs::read_dir(&dir)
-                .ok()
-                .into_iter()
-                .flatten()
-                .flatten()
-                .filter(|e| e.path().extension().is_some_and(|x| x == "jsonl"))
-                .filter_map(|e| Some((e.metadata().ok()?.modified().ok()?, e.path())))
-                .filter(|(m, _)| *m >= since)
-                .max_by_key(|(m, _)| *m);
-            self.path = newest.map(|(_, p)| p);
+            let ext = if agent.appends() { "jsonl" } else { "json" };
+            let files = session_files(&agent.session_dir(cwd), agent.session_depth(), ext, since);
+            self.path = match agent {
+                // One folder of sessions for every project: only one working in `cwd`.
+                Agent::Codex => files.into_iter().find(|p| codex_cwd(p).as_deref() == Some(cwd)),
+                _ => files.into_iter().next(),
+            };
         }
-        let Some(path) = &self.path else { return };
-        let Ok(mut f) = std::fs::File::open(path) else {
+        let Some(path) = self.path.clone() else { return };
+        if !agent.appends() {
+            self.poll_document(agent, &path);
+            return;
+        }
+        let Ok(mut f) = std::fs::File::open(&path) else {
             return;
         };
         let len = f.metadata().map(|m| m.len()).unwrap_or(0);
@@ -1063,6 +1137,10 @@ impl Reader {
                 continue;
             };
             self.records += 1;
+            if agent == Agent::Codex {
+                self.codex_record(&v);
+                continue;
+            }
             match v["type"].as_str() {
                 Some("assistant") => {
                     let m = &v["message"];
@@ -1106,6 +1184,131 @@ impl Reader {
                 }
                 _ => {}
             }
+        }
+    }
+
+    /// One record of a Codex session (`{"type": …, "payload": {…}}`).
+    fn codex_record(&mut self, v: &Value) {
+        let p = &v["payload"];
+        match (v["type"].as_str(), p["type"].as_str()) {
+            (Some("event_msg"), Some("token_count")) => {
+                // Totals of the session so far; cached input is not billed in full.
+                let u = &p["info"]["total_token_usage"];
+                let n = |k: &str| u[k].as_u64().unwrap_or(0);
+                let total = n("input_tokens").saturating_sub(n("cached_input_tokens")) + n("output_tokens");
+                self.tokens = self.tokens.max(total);
+            }
+            (Some("event_msg"), Some("agent_message")) => {
+                let text = p["message"].as_str().unwrap_or("");
+                if !text.trim().is_empty() {
+                    self.last_text = text.to_string();
+                }
+            }
+            (Some("event_msg"), Some("task_complete")) => {
+                if let Some(text) = p["last_agent_message"].as_str().filter(|t| !t.trim().is_empty()) {
+                    self.last_text = text.to_string();
+                }
+                self.turn_over = true;
+            }
+            (Some("event_msg"), Some("error")) => {
+                let text = p["message"].as_str().unwrap_or("").to_string();
+                if is_limit_message(&text) {
+                    self.limit_hit = Some(text);
+                    self.turn_over = true;
+                }
+            }
+            (Some("event_msg"), Some("task_started" | "user_message")) => self.turn_over = false,
+            // An answer of the model: the end of the turn unless a tool call follows.
+            (Some("response_item"), Some("message")) if p["role"] == "assistant" => {
+                let text = content_text(&p["content"]);
+                if !text.trim().is_empty() {
+                    self.last_text = text;
+                }
+                self.turn_over = true;
+            }
+            (Some("response_item"), Some("function_call" | "function_call_output" | "custom_tool_call" | "local_shell_call")) => {
+                self.turn_over = false
+            }
+            _ => {}
+        }
+    }
+
+    /// A session written as one JSON document, rewritten after each message (Gemini, Vibe):
+    /// read again whole whenever it changes.
+    fn poll_document(&mut self, agent: Agent, path: &Path) {
+        let Ok(meta) = std::fs::metadata(path) else { return };
+        let stamp = meta
+            .modified()
+            .ok()
+            .and_then(|m| m.duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|d| d.as_millis() as u64 ^ meta.len().rotate_left(40))
+            .unwrap_or(meta.len());
+        if stamp == self.offset {
+            return;
+        }
+        let Ok(text) = std::fs::read_to_string(path) else { return };
+        // Caught while being rewritten: read it at the next poll.
+        let Ok(v) = serde_json::from_str::<Value>(&text) else { return };
+        self.offset = stamp;
+        self.last_growth = Some(std::time::Instant::now());
+        let empty = Vec::new();
+        let messages = v["messages"].as_array().unwrap_or(&empty);
+        self.records = messages.len();
+        self.turn_over = false;
+        match agent {
+            Agent::Gemini => {
+                // Messages {type: user|gemini|info|error, content, toolCalls, tokens}.
+                let mut tokens = 0;
+                for m in messages {
+                    let t = &m["tokens"];
+                    let n = |k: &str| t[k].as_u64().unwrap_or(0);
+                    tokens += n("input").saturating_sub(n("cached")) + n("output") + n("thoughts");
+                    let text = content_text(&m["content"]);
+                    match m["type"].as_str() {
+                        Some("gemini") => {
+                            if !text.trim().is_empty() {
+                                self.last_text = text.clone();
+                            }
+                            // After its tools have run the model answers again.
+                            let calls = m["toolCalls"].as_array().is_some_and(|a| !a.is_empty());
+                            self.turn_over = !calls && !text.trim().is_empty();
+                        }
+                        Some("error") => {
+                            let low = text.to_lowercase();
+                            if is_limit_message(&text) || low.contains("quota exceeded") || low.contains("resource_exhausted") {
+                                self.limit_hit = Some(text);
+                                self.turn_over = true;
+                            }
+                        }
+                        Some("user") => self.turn_over = false,
+                        _ => {}
+                    }
+                }
+                self.tokens = self.tokens.max(tokens);
+            }
+            Agent::Vibe => {
+                // Messages {role: user|assistant|tool, content, tool_calls}; totals in metadata.
+                for m in messages {
+                    match m["role"].as_str() {
+                        Some("assistant") => {
+                            let text = content_text(&m["content"]);
+                            let calls = m["tool_calls"].as_array().is_some_and(|a| !a.is_empty());
+                            if !text.trim().is_empty() {
+                                self.last_text = text.clone();
+                            }
+                            self.turn_over = !calls && !text.trim().is_empty();
+                        }
+                        Some("user" | "tool") => self.turn_over = false,
+                        _ => {}
+                    }
+                }
+                let s = &v["metadata"]["stats"];
+                let n = |k: &str| s[k].as_u64().unwrap_or(0);
+                self.tokens = self
+                    .tokens
+                    .max(n("session_prompt_tokens") + n("session_completion_tokens"));
+            }
+            Agent::ClaudeCode | Agent::Codex => {}
         }
     }
 }
@@ -1744,11 +1947,91 @@ mod tests {
         assert!(Agent::ClaudeCode.ready());
         for a in [Agent::Codex, Agent::Gemini, Agent::Vibe] {
             assert!(!a.ready());
-            // Not wired: its program is never started, the terminal just says so.
+            // Its program, in its strictest mode (no tool list translated yet).
             let cmd = a.command(true, "");
-            assert!(cmd.starts_with("echo ") && cmd.ends_with("exit 1"), "{cmd}");
+            assert!(cmd.starts_with(a.bin()), "{cmd}");
+            assert!(!cmd.contains("yolo") && !cmd.contains("never") && !cmd.contains("danger"), "{cmd}");
             assert_ne!(a.session_dir(Path::new("/x")), Agent::ClaudeCode.session_dir(Path::new("/x")));
         }
+        // Gemini keeps a folder per project.
+        assert_ne!(
+            Agent::Gemini.session_dir(Path::new("/x")),
+            Agent::Gemini.session_dir(Path::new("/y"))
+        );
+    }
+
+    #[test]
+    fn reader_reads_codex_gemini_and_vibe() {
+        let dir = std::env::temp_dir().join(format!("orch-agents-{}", uuid::Uuid::new_v4().simple()));
+        let cwd = dir.join("wt");
+        let since = std::time::SystemTime::now() - std::time::Duration::from_secs(5);
+        unsafe {
+            std::env::set_var("CODEX_HOME", dir.join("codex"));
+            std::env::set_var("GEMINI_CLI_HOME", dir.join("gemini"));
+            std::env::set_var("VIBE_HOME", dir.join("vibe"));
+        }
+        // Codex: dated folders; a session of another project is not ours.
+        let day = Agent::Codex.session_dir(&cwd).join("2026/11/21");
+        std::fs::create_dir_all(&day).unwrap();
+        let meta = |c: &Path| format!("{{\"type\":\"session_meta\",\"payload\":{{\"cwd\":{}}}}}\n", serde_json::json!(c.display().to_string()));
+        std::fs::write(day.join("rollout-other.jsonl"), meta(&dir.join("other"))).unwrap();
+        let ours = day.join("rollout-ours.jsonl");
+        std::fs::write(&ours, meta(&cwd) + concat!(
+            "{\"type\":\"event_msg\",\"payload\":{\"type\":\"user_message\",\"message\":\"go\"}}\n",
+            "{\"type\":\"response_item\",\"payload\":{\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"je regarde\"}]}}\n",
+            "{\"type\":\"response_item\",\"payload\":{\"type\":\"function_call\",\"name\":\"shell\"}}\n",
+        )).unwrap();
+        let mut r = Reader::default();
+        r.poll(Agent::Codex, &cwd, since);
+        assert_eq!(r.path.as_deref(), Some(ours.as_path()));
+        assert!(!r.turn_over);
+        let mut f = std::fs::OpenOptions::new().append(true).open(&ours).unwrap();
+        std::io::Write::write_all(&mut f, concat!(
+            "{\"type\":\"event_msg\",\"payload\":{\"type\":\"token_count\",\"info\":{\"total_token_usage\":{\"input_tokens\":100,\"cached_input_tokens\":60,\"output_tokens\":7}}}}\n",
+            "{\"type\":\"event_msg\",\"payload\":{\"type\":\"task_complete\",\"last_agent_message\":\"fait [[FINI]]\"}}\n",
+        ).as_bytes()).unwrap();
+        r.poll(Agent::Codex, &cwd, since);
+        assert!(r.turn_over);
+        assert_eq!(r.tokens, 47);
+        assert_eq!(signal(&r.last_text), Signal::Done);
+
+        // Gemini: one document, rewritten.
+        let gd = Agent::Gemini.session_dir(&cwd);
+        std::fs::create_dir_all(&gd).unwrap();
+        let gf = gd.join("session-1.json");
+        std::fs::write(&gf, r#"{"messages":[{"type":"user","content":"go"},
+            {"type":"gemini","content":"","toolCalls":[{"name":"ls"}],"tokens":{"input":50,"cached":10,"output":5,"thoughts":5}}]}"#).unwrap();
+        let mut r = Reader::default();
+        r.poll(Agent::Gemini, &cwd, since);
+        assert!(!r.turn_over);
+        assert_eq!(r.tokens, 50);
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        std::fs::write(&gf, r#"{"messages":[{"type":"user","content":"go"},
+            {"type":"gemini","content":"","toolCalls":[{"name":"ls"}],"tokens":{"input":50,"cached":10,"output":5,"thoughts":5}},
+            {"type":"gemini","content":[{"text":"ok [[CONTINUER]]"}],"tokens":{"input":20,"output":2}}]}"#).unwrap();
+        r.poll(Agent::Gemini, &cwd, since);
+        assert!(r.turn_over);
+        assert_eq!(r.tokens, 72);
+        assert_eq!(signal(&r.last_text), Signal::Continue);
+
+        // Vibe: chat messages, totals in the metadata.
+        let vd = Agent::Vibe.session_dir(&cwd);
+        std::fs::create_dir_all(&vd).unwrap();
+        std::fs::write(vd.join("session_1.json"), r#"{"metadata":{"stats":{"session_prompt_tokens":30,"session_completion_tokens":4}},
+            "messages":[{"role":"user","content":"go"},{"role":"assistant","content":"","tool_calls":[{"id":"1"}]},
+            {"role":"tool","content":"x"},{"role":"assistant","content":"bloqué [[BLOQUÉ]]"}]}"#).unwrap();
+        let mut r = Reader::default();
+        r.poll(Agent::Vibe, &cwd, since);
+        assert!(r.turn_over);
+        assert_eq!(r.tokens, 34);
+        assert_eq!(signal(&r.last_text), Signal::Blocked);
+
+        unsafe {
+            std::env::remove_var("CODEX_HOME");
+            std::env::remove_var("GEMINI_CLI_HOME");
+            std::env::remove_var("VIBE_HOME");
+        }
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]
