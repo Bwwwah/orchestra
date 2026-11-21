@@ -115,6 +115,26 @@ pub struct LiveRun {
 }
 
 impl LiveRun {
+    /// Give the AI its next prompt: typed into its terminal, or for an agent driven turn by
+    /// turn in headless mode (Mistral Vibe), handed to the loop running its turns
+    /// (`Agent::send_turn`), which starts the run at once (no Enter to press).
+    fn send(&mut self, text: &str) {
+        if self.agent.headless() {
+            if let Err(e) = self
+                .agent
+                .send_turn(std::path::Path::new(&self.worktree), text)
+            {
+                self.stop = Some(crate::trf!(
+                    "consigne non transmise à {} : {e}",
+                    "prompt not handed to {}: {e}",
+                    self.agent.label()
+                ));
+            }
+        } else {
+            self.term.paste(text);
+        }
+    }
+
     /// Put the session on hold until the person answers.
     fn pause(&mut self, why: Wait) {
         self.waiting = Some(why);
@@ -179,8 +199,11 @@ impl LiveRun {
             }
             Wait::Question => {
                 match &self.endless {
-                    Some(c) => self.term.paste(auto::endless_prompt(!c.when_done)),
-                    None => self.term.paste(auto::continue_prompt()),
+                    Some(c) => {
+                        let p = auto::endless_prompt(!c.when_done);
+                        self.send(p)
+                    }
+                    None => self.send(auto::continue_prompt()),
                 }
                 self.phase = Phase::Typed(now);
             }
@@ -975,7 +998,7 @@ impl NotesApp {
                 finished.push((
                     i,
                     r.stop.clone().unwrap_or_else(|| {
-                        crate::tr!("Claude Code s'est arrêté", "Claude Code stopped").into()
+                        crate::trf!("{} s'est arrêté", "{} stopped", r.agent.label())
                     }),
                     String::new(),
                 ));
@@ -995,7 +1018,13 @@ impl NotesApp {
                     } else if t0.elapsed() > Duration::from_secs(3)
                         && idle > Duration::from_millis(2500)
                     {
-                        match auto::read_screen(&screen) {
+                        // A headless agent's loop asks nothing: its screen is never a question.
+                        let seen = if r.agent.headless() {
+                            Screen::Other
+                        } else {
+                            auto::read_screen(&screen)
+                        };
+                        match seen {
                             Screen::Trust if auto::folder_trusted(&r.root) => {
                                 // The person already trusts this repository in Claude Code;
                                 // the copy is the same repository, in a new folder.
@@ -1019,7 +1048,7 @@ impl NotesApp {
                             }
                             _ => {
                                 if let Some(text) = r.next.take() {
-                                    r.term.paste(&text);
+                                    r.send(&text);
                                     r.phase = Phase::Typed(now);
                                 }
                             }
@@ -1028,7 +1057,9 @@ impl NotesApp {
                 }
                 Phase::Typed(t) => {
                     if t.elapsed() > Duration::from_millis(500) {
-                        r.term.write(b"\r");
+                        if !r.agent.headless() {
+                            r.term.write(b"\r");
+                        }
                         r.reader.turn_over = false;
                         r.nudged = false;
                         r.week_at_turn = fig.week;
@@ -1046,7 +1077,7 @@ impl NotesApp {
                 }
                 Phase::Denied(t) => {
                     if t.elapsed() > Duration::from_millis(1500) {
-                        r.term.paste(auto::denied_prompt());
+                        r.send(auto::denied_prompt());
                         r.phase = Phase::Typed(now);
                     }
                 }
@@ -1084,9 +1115,12 @@ impl NotesApp {
                         && r.reader
                             .last_growth
                             .is_none_or(|g| g.elapsed() > Duration::from_secs(180));
-                    if (auto::read_screen(&screen) == Screen::Permission
-                        && idle > Duration::from_millis(800))
-                        || frozen
+                    // A headless agent refuses by itself what needs an approval, and its screen
+                    // stays still while it works (its answer is shown at the end of the run).
+                    if !r.agent.headless()
+                        && ((auto::read_screen(&screen) == Screen::Permission
+                            && idle > Duration::from_millis(800))
+                            || frozen)
                     {
                         if pause {
                             r.pause(Wait::Permission);
@@ -1105,6 +1139,7 @@ impl NotesApp {
                     }
                     // The prompt didn't go: press Enter once more.
                     if !r.nudged
+                        && !r.agent.headless()
                         && t.elapsed() > Duration::from_secs(60)
                         && r.reader
                             .last_growth
@@ -1118,11 +1153,31 @@ impl NotesApp {
                         .last_growth
                         .is_some_and(|g| g.elapsed() > Duration::from_secs(2));
                     let over = r.reader.turn_over && quiet && idle > Duration::from_millis(1500);
+                    // A headless run cuts itself at 25 min (`--time-limit`): Orchestra steps in
+                    // only past that, with Ctrl-C, should it not have stopped.
+                    let headless = r.agent.headless();
+                    let max_turn = if headless { 30 * 60 } else { 25 * 60 };
                     let too_long =
-                        t.elapsed() > Duration::from_secs(if summary { 300 } else { 25 * 60 });
+                        t.elapsed() > Duration::from_secs(if summary { 300 } else { max_turn });
                     if over || too_long {
                         if too_long {
-                            r.term.write(b"\x1b");
+                            r.term.write(if headless { b"\x03" } else { b"\x1b" });
+                        }
+                        // The headless run failed without an answer (not signed in, Vibe
+                        // missing or broken…): the next prompts would fail the same way.
+                        if over
+                            && headless
+                            && r.reader.last_text.trim().is_empty()
+                            && let Some(code) = r.reader.exit_code.filter(|c| *c != 0 && *c != 3)
+                        {
+                            let why = crate::trf!(
+                                "{} s'est arrêté sans réponse (code {code}) ; voir son terminal",
+                                "{} stopped without an answer (code {code}); see its terminal",
+                                r.agent.label()
+                            );
+                            r.stop = Some(why.clone());
+                            finished.push((i, why, String::new()));
+                            continue;
                         }
                         if summary {
                             let text = if over {
@@ -1241,7 +1296,7 @@ impl NotesApp {
                             Some(why) => {
                                 r.stop = Some(why.clone());
                                 r.summarizing = true;
-                                r.term.paste(&auto::summary_prompt(&r.project, &why));
+                                r.send(&auto::summary_prompt(&r.project, &why));
                             }
                             None => {
                                 let next = if r.endless.is_some() {
@@ -1251,7 +1306,7 @@ impl NotesApp {
                                 } else {
                                     auto::continue_prompt()
                                 };
-                                r.term.paste(&format!("{}{next}", new_steps_note(&fresh)));
+                                r.send(&format!("{}{next}", new_steps_note(&fresh)));
                             }
                         }
                         r.phase = Phase::Typed(now);
@@ -1545,8 +1600,13 @@ impl NotesApp {
         } else {
             why.to_string()
         };
-        r.term.paste("/exit");
-        r.term.write(b"\r");
+        if r.agent.headless() {
+            // Its loop reads no keyboard: Ctrl-C ends it (and a run still going).
+            r.term.write(b"\x03");
+        } else {
+            r.term.paste("/exit");
+            r.term.write(b"\r");
+        }
         r.phase = Phase::Closing(Instant::now());
         let (id, project, base, pct, tokens, turns) = (
             r.id.clone(),
@@ -5426,11 +5486,10 @@ mod tests {
             assert_eq!(agent_unavailable(a).is_none(), a.ready(), "{a:?}");
         }
         // Gemini: the reason names what's missing, the % behind « arrêt à ». Mistral Vibe
-        // gives it now (its monthly budget): only its autonomous work is left to check.
+        // gives it (its monthly budget) and its turns are driven: it can be picked.
         let why = agent_unavailable(Agent::Gemini).unwrap();
         assert!(why.contains("arrêt à") || why.contains("stop at"), "{why}");
-        let why = agent_unavailable(Agent::Vibe).unwrap();
-        assert!(!why.contains("arrêt à") && !why.contains("stop at"), "{why}");
+        assert_eq!(agent_unavailable(Agent::Vibe).is_none(), cfg!(unix));
         // Only the plugged AIs are listed, in the usual order, plus the one already chosen.
         use super::agent_choices;
         let plugged = [Agent::Vibe, Agent::ClaudeCode];

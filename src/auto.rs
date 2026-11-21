@@ -78,12 +78,41 @@ impl Agent {
     }
 
     /// Autonomous work is wired for it: its command (with permissions), its session files
-    /// and the reading of its turns. Only Claude Code so far; the others are listed so the
-    /// rest of the program can name them, and are never started alone until this is true.
-    /// Never true for an agent whose use Orchestra can't read (`usage::reports_usage`): its
-    /// sessions could not be stopped at their ceiling.
+    /// and the reading of its turns. Claude Code, and Mistral Vibe driven turn by turn in its
+    /// headless mode (`headless`; a POSIX shell runs its turns, so not on Windows); Codex and
+    /// Gemini are listed so the rest of the program can name them, and are never started
+    /// alone until this is true. Never true for an agent whose use Orchestra can't read
+    /// (`usage::reports_usage`): its sessions could not be stopped at their ceiling.
     pub fn ready(self) -> bool {
-        matches!(self, Agent::ClaudeCode) && crate::usage::reports_usage(self)
+        let wired = match self {
+            Agent::ClaudeCode => true,
+            Agent::Vibe => cfg!(unix),
+            Agent::Codex | Agent::Gemini => false,
+        };
+        wired && crate::usage::reports_usage(self)
+    }
+
+    /// Its turns are separate runs of its headless mode rather than prompts typed into one
+    /// interactive program: Mistral Vibe (`vibe -p`), which refuses by itself every tool call
+    /// needing an approval (« needs approval, which a headless run cannot give »), where its
+    /// interactive mode would wait for an answer nobody gives. Orchestra hands each prompt
+    /// over with `send_turn`; the loop of `VIBE_TURNS` runs it and leaves the answer and the
+    /// exit code in the session's `turn` folder, read by `Reader`.
+    pub fn headless(self) -> bool {
+        self == Agent::Vibe
+    }
+
+    /// Hand the next prompt to a headless agent's loop (`VIBE_TURNS`): the previous turn's
+    /// answer and exit code are removed first, so its end isn't taken for this one's, and the
+    /// prompt appears whole (written aside, then renamed).
+    pub fn send_turn(self, cwd: &Path, text: &str) -> Result<(), String> {
+        let d = self.config_dir(cwd).join("turn");
+        std::fs::create_dir_all(&d).map_err(|e| e.to_string())?;
+        for f in ["exit", "answer.txt"] {
+            let _ = std::fs::remove_file(d.join(f));
+        }
+        std::fs::write(d.join("next.part"), text).map_err(|e| e.to_string())?;
+        std::fs::rename(d.join("next.part"), d.join("next.md")).map_err(|e| e.to_string())
     }
 
     /// The command started in the hidden terminal, in the copy `cwd`.
@@ -100,11 +129,16 @@ impl Agent {
                 "GEMINI_CLI_SYSTEM_SETTINGS_PATH={} gemini --approval-mode default --allowed-mcp-server-names orchestra",
                 crate::sessions::shell_quote(&self.config_dir(cwd).join("settings.json").display().to_string())
             ),
-            // A home of its own for the session (`config_files`): its settings and sessions.
-            Agent::Vibe => format!(
-                "VIBE_HOME={} vibe",
-                crate::sessions::shell_quote(&self.config_dir(cwd).display().to_string())
-            ),
+            // A home of its own for the session (`config_files`): its settings, its sessions
+            // and the loop running its turns in headless mode (`VIBE_TURNS`).
+            Agent::Vibe => {
+                let dir = self.config_dir(cwd);
+                format!(
+                    "VIBE_HOME={} sh {}",
+                    crate::sessions::shell_quote(&dir.display().to_string()),
+                    crate::sessions::shell_quote(&dir.join("turns.sh").display().to_string())
+                )
+            }
             Agent::ClaudeCode => {
                 let (allowed, denied) = permissions(allow_commits, extra);
                 claude_command(&allowed, &denied, rtk_binary().as_deref())
@@ -200,7 +234,10 @@ impl Agent {
                 ours.push('\n');
                 ours.push_str(&self.rules_config(allow_commits, extra));
                 let own = std::fs::read_to_string(vibe_own_home().join("config.toml")).unwrap_or_default();
-                vec![(dir.join("config.toml"), vibe_config(&own, &ours))]
+                vec![
+                    (dir.join("config.toml"), vibe_config(&own, &ours)),
+                    (dir.join("turns.sh"), VIBE_TURNS.to_string()),
+                ]
             }
         }
     }
@@ -208,6 +245,10 @@ impl Agent {
     /// Write the files of `config_files` before the agent starts. For Mistral Vibe, its own
     /// home also gets a link to the person's sign-in (`~/.vibe/.env`), never a copy of it.
     pub fn write_config(self, cwd: &Path, allow_commits: bool, extra: &str) -> Result<(), String> {
+        // A headless agent's turns of an earlier session in this copy: not this one's.
+        if self.headless() {
+            let _ = std::fs::remove_dir_all(self.config_dir(cwd).join("turn"));
+        }
         for (path, text) in self.config_files(cwd, allow_commits, extra) {
             if let Some(d) = path.parent() {
                 std::fs::create_dir_all(d).map_err(|e| e.to_string())?;
@@ -241,6 +282,34 @@ impl Agent {
         }
     }
 }
+
+/// The loop of a Mistral Vibe session, run in the hidden terminal with VIBE_HOME set to the
+/// session's own home: for each prompt Orchestra leaves in `turn/next.md` (`send_turn`), one
+/// headless run of Vibe (`-p`, the prompt read from a file: never on a command line), which
+/// goes on with the same session from the second turn (`-c`; its home holds only this
+/// session) and is cut after 25 min (`--time-limit`, as the turns of Claude Code). Its answer
+/// (standard output) goes to `turn/answer.txt` and is shown, then its exit code to
+/// `turn/exit`, the end of the turn for `Reader`; both appear whole (written aside, renamed).
+const VIBE_TURNS: &str = r#"# Orchestra : un tour de Mistral Vibe pour chaque consigne déposée dans turn/next.md
+d="$VIBE_HOME/turn"
+mkdir -p "$d"
+c=
+echo "Orchestra : Mistral Vibe attend sa consigne…"
+while :; do
+  if [ -f "$d/next.md" ]; then
+    mv -f "$d/next.md" "$d/prompt.md"
+    vibe -p --prompt-file "$d/prompt.md" $c --time-limit 1500 </dev/null >"$d/answer.part"
+    code=$?
+    cat "$d/answer.part"
+    mv -f "$d/answer.part" "$d/answer.txt"
+    echo "$code" >"$d/exit.part"
+    mv -f "$d/exit.part" "$d/exit"
+    echo "Orchestra : tour fini (code $code)"
+    if [ -n "$(ls -A "$VIBE_HOME/logs/session/unified" 2>/dev/null)" ]; then c=-c; fi
+  fi
+  sleep 1
+done
+"#;
 
 /// The person's own home of Mistral Vibe (its settings and sign-in).
 fn vibe_own_home() -> PathBuf {
@@ -1737,11 +1806,54 @@ pub struct Reader {
     /// Claude Code answered with its own "usage limit reached" message: no more turn will
     /// go through before the quota resets. Its text, to read the reset time from.
     pub limit_hit: Option<String>,
+    /// A headless agent's last turn is over (`Agent::headless`): its exit code (None while
+    /// it runs, or unreadable).
+    pub exit_code: Option<i32>,
+    /// The stamp of that turn's end, so it is read once.
+    turn_stamp: u64,
 }
 
 impl Reader {
     /// Read what was added; `since`: session files older than this are not ours.
     pub fn poll(&mut self, agent: Agent, cwd: &Path, since: std::time::SystemTime) {
+        self.poll_files(agent, cwd, since);
+        if agent.headless() {
+            self.headless_turn(&agent.config_dir(cwd).join("turn"));
+        }
+    }
+
+    /// A headless agent's turn (`VIBE_TURNS`): over once its exit code is written, its answer
+    /// beside it. Its session file says what it used and whether its maker refused it, but
+    /// not when the run ends (it may look idle between two steps) nor, for Vibe 3.1, the text
+    /// of its answers (left out of its public state).
+    fn headless_turn(&mut self, dir: &Path) {
+        let exit = dir.join("exit");
+        let Ok(code) = std::fs::read_to_string(&exit) else {
+            self.turn_over = self.limit_hit.is_some();
+            self.exit_code = None;
+            self.turn_stamp = 0;
+            return;
+        };
+        let stamp = std::fs::metadata(&exit)
+            .and_then(|m| m.modified())
+            .ok()
+            .and_then(|m| m.duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|d| d.as_nanos() as u64)
+            .unwrap_or(1);
+        if stamp != self.turn_stamp {
+            self.turn_stamp = stamp;
+            self.last_growth = Some(std::time::Instant::now());
+            self.exit_code = code.trim().parse().ok();
+            let answer = std::fs::read_to_string(dir.join("answer.txt")).unwrap_or_default();
+            self.last_text = answer.trim().to_string();
+            if self.exit_code != Some(0) && self.limit_hit.is_none() && is_limit_message(&answer) {
+                self.limit_hit = Some(self.last_text.clone());
+            }
+        }
+        self.turn_over = true;
+    }
+
+    fn poll_files(&mut self, agent: Agent, cwd: &Path, since: std::time::SystemTime) {
         if self.path.is_none() {
             let ext = if agent.appends() { "jsonl" } else { "json" };
             let files = session_files(&agent.session_dir(cwd), agent.session_depth(), ext, since);
@@ -1915,6 +2027,8 @@ impl Reader {
         let Ok(text) = std::fs::read_to_string(path) else { return };
         // Caught while being rewritten: read it at the next poll.
         let Ok(v) = serde_json::from_str::<Value>(&text) else { return };
+        // Vibe 3.1 wraps its public state: `{projection_state_version, snapshot: {format, …}}`.
+        let v = if v["snapshot"].is_object() { v["snapshot"].clone() } else { v };
         self.offset = stamp;
         self.last_growth = Some(std::time::Instant::now());
         let empty = Vec::new();
@@ -2701,7 +2815,7 @@ mod tests {
     }
 
     #[test]
-    fn agents_match_the_setup_list_and_only_claude_runs_alone() {
+    fn agents_match_the_setup_list_and_only_claude_and_vibe_run_alone() {
         for a in Agent::ALL {
             assert_eq!(Agent::from_ai(a.ai()), Some(a));
             assert_eq!(a.ai().launch(), Some(a.bin()));
@@ -2709,12 +2823,20 @@ mod tests {
         }
         assert_eq!(Agent::from_ai(crate::setup::Ai::Cursor), None);
         assert!(Agent::ClaudeCode.ready());
+        // Mistral Vibe, turn by turn in headless mode (a POSIX shell runs its turns).
+        assert_eq!(Agent::Vibe.ready(), cfg!(unix));
+        assert!(Agent::Vibe.headless() && !Agent::ClaudeCode.headless());
         for a in [Agent::Codex, Agent::Gemini, Agent::Vibe] {
-            assert!(!a.ready());
+            assert!(a == Agent::Vibe || !a.ready());
             // Its program, in its strictest mode.
             let cmd = a.command(Path::new("/x"), true, "");
             // Its program, after the variables pointing to its settings of the session.
-            assert!(cmd.split_whitespace().any(|w| w == a.bin()), "{cmd}");
+            // (Vibe: the loop running its program turn by turn.)
+            assert!(
+                cmd.split_whitespace()
+                    .any(|w| w == a.bin() || (a.headless() && w.trim_end_matches('\'').ends_with("/turns.sh"))),
+                "{cmd}"
+            );
             assert!(!cmd.contains("yolo") && !cmd.contains("never") && !cmd.contains("danger"), "{cmd}");
             assert_ne!(a.session_dir(Path::new("/x")), Agent::ClaudeCode.session_dir(Path::new("/x")));
         }
@@ -2787,7 +2909,8 @@ mod tests {
             {"role":"tool","content":"x"},{"role":"assistant","content":"bloqué [[BLOQUÉ]]"}]}"#).unwrap();
         let mut r = Reader::default();
         r.poll(Agent::Vibe, &cwd, since);
-        assert!(r.turn_over);
+        // Driven in headless mode: its turn ends with the run (`VIBE_TURNS`), not before.
+        assert!(!r.turn_over);
         assert_eq!(r.tokens, 34);
         assert_eq!(signal(&r.last_text), Signal::Blocked);
 
@@ -2824,9 +2947,36 @@ mod tests {
               {"type":"message","role":"assistant","outcome":{"type":"discarded","cause":"x"},"content":[{"type":"text","text":"jeté"}]}]}}"#);
         r.poll(Agent::Vibe, &cwd, since);
         assert!(r.path.as_ref().unwrap().to_string_lossy().contains("0000000000000531"));
-        assert!(r.turn_over && r.limit_hit.is_none());
+        // Idle between two steps of the run: not over until the run has ended.
+        assert!(!r.turn_over && r.limit_hit.is_none());
         assert_eq!(r.tokens, 1100);
         assert_eq!(signal(&r.last_text), Signal::Continue);
+        // The run ends (`VIBE_TURNS`): its exit code, its answer from its standard output.
+        let turn = Agent::Vibe.config_dir(&cwd).join("turn");
+        std::fs::create_dir_all(&turn).unwrap();
+        std::fs::write(turn.join("answer.txt"), "Étape faite.\n[[FINI]]\n").unwrap();
+        std::fs::write(turn.join("exit"), "0\n").unwrap();
+        r.poll(Agent::Vibe, &cwd, since);
+        assert!(r.turn_over);
+        assert_eq!(r.exit_code, Some(0));
+        assert_eq!(signal(&r.last_text), Signal::Done);
+        assert!(r.last_growth.is_some());
+        // The next prompt: the last run's end is gone, so the new turn isn't taken as over.
+        Agent::Vibe.send_turn(&cwd, "Continue.").unwrap();
+        assert_eq!(std::fs::read_to_string(turn.join("next.md")).unwrap(), "Continue.");
+        assert!(!turn.join("next.part").exists());
+        r.turn_over = false;
+        r.poll(Agent::Vibe, &cwd, since);
+        assert!(!r.turn_over && r.exit_code.is_none());
+        // A run that fails on Mistral's refusal written on its output: the limit is seen.
+        std::fs::write(turn.join("answer.txt"), "Error: rate limit exceeded\n").unwrap();
+        std::fs::write(turn.join("exit"), "1\n").unwrap();
+        r.poll(Agent::Vibe, &cwd, since);
+        assert!(r.turn_over && r.exit_code == Some(1));
+        assert_eq!(r.limit_hit.as_deref(), Some("Error: rate limit exceeded"));
+        r.limit_hit = None;
+        Agent::Vibe.send_turn(&cwd, "Continue.").unwrap();
+        r.poll(Agent::Vibe, &cwd, since);
         // Mistral refuses past the plan's budget: the limit is seen, the turn is over.
         state(600, r#"{"format":"harness.public-session-state/v1",
             "session":{"id":"5894fe73","status":{"type":"idle"}},
@@ -2836,6 +2986,19 @@ mod tests {
         r.poll(Agent::Vibe, &cwd, since);
         assert!(r.turn_over);
         assert_eq!(r.limit_hit.as_deref(), Some("Vibe budget exhausted"));
+        // Vibe 3.1.4 as written for real: the state wrapped in `snapshot`, no message in it
+        // (the answer comes from the run's output), its tokens all the same.
+        state(700, r#"{"projection_state_version":1,"session_id":"5894fe73","snapshot_sequence":63,
+            "snapshot":{"format":"harness.public-session-state/v1","history":{"entries":[],"range":"latest"},
+              "latestTurn":{"id":"t3","status":"completed","stopReason":null},
+              "session":{"id":"5894fe73","status":{"type":"idle"},
+                "tokenUsage":{"cachedInputTokens":13824,"inputTokens":32442,"outputTokens":126,"totalTokens":32568}}}}"#);
+        let mut real = Reader::default();
+        real.poll(Agent::Vibe, &cwd, since);
+        assert!(real.path.as_ref().unwrap().to_string_lossy().contains("0000000000000700"));
+        assert_eq!(real.tokens, 32442 - 13824 + 126);
+        assert!(!real.turn_over && real.limit_hit.is_none());
+        let _ = std::fs::remove_dir_all(Agent::Vibe.config_dir(&cwd));
         // Still running a turn, or waiting for an approval: not over.
         let mut busy = Reader::default();
         busy.vibe_state(&serde_json::json!({"session": {"status": {"type": "blocked"}},
@@ -3244,7 +3407,15 @@ mod tests {
         assert_eq!(vibe_config("", ours), ours);
         assert!(text.contains("args = [\"mcp\"]\n") && text.contains("[tools.bash]\nallowlist = ["));
         let v = Agent::Vibe.command(cwd, false, "");
-        assert!(v.starts_with("VIBE_HOME=") && v.ends_with(" vibe"), "{v}");
+        assert!(v.starts_with("VIBE_HOME=") && v.trim_end_matches('\'').ends_with("/turns.sh"), "{v}");
+        // The loop of its turns, written beside its settings: headless runs only (`-p`),
+        // the prompt from a file, the same session from the second turn, cut at 25 min,
+        // and never a flag approving everything.
+        let (path, script) = &files[1];
+        assert_eq!(path, &Agent::Vibe.config_dir(cwd).join("turns.sh"));
+        assert!(script.contains("vibe -p --prompt-file \"$d/prompt.md\" $c --time-limit 1500 </dev/null"), "{script}");
+        assert!(script.contains("c=-c") && script.contains("mv -f \"$d/exit.part\" \"$d/exit\""));
+        assert!(!script.contains("auto-approve") && !script.contains("yolo") && !script.contains("--trust"));
         assert!(Agent::Vibe.session_dir(cwd).starts_with(Agent::Vibe.config_dir(cwd)));
     }
 
