@@ -2282,6 +2282,20 @@ fn mission_text(
     )
 }
 
+/// Put before the mission when a session goes on in a new conversation (short sessions:
+/// one per step done): the AI has none of the earlier turns, and is told where the state of
+/// the work is rather than left to guess or redo it.
+pub fn fresh_conversation_note() -> &'static str {
+    crate::tr!(
+        "Nouvelle conversation de la même session : l'étape précédente est terminée et tu n'as pas l'historique des tours d'avant. \
+         Ne t'appuie que sur get_project_state (étapes, état des lieux, questions posées) et, s'il le faut, sur git log et git status. \
+         Ne refais pas une étape déjà « done » ; une étape restée « doing » que get_project_state ne dit pas réservée par un autre ordinateur est la tienne : reprends-la d'abord.\n\n",
+        "New conversation of the same session: the previous step is finished and you don't have the earlier turns. \
+         Rely only on get_project_state (steps, state of play, questions asked) and, if needed, on git log and git status. \
+         Don't redo a step already « done »; a step left « doing » that get_project_state doesn't say is reserved by another computer is yours: take it up first.\n\n"
+    )
+}
+
 pub fn continue_prompt() -> &'static str {
     crate::tr!(
         "Continue la mission avec les mêmes règles : l'étape suivante, une seule (relis get_project_state pour les réponses à tes questions). Termine par [[CONTINUER]], [[FINI]] ou [[BLOQUÉ]].",
@@ -2856,6 +2870,10 @@ mod tests {
                 && on.contains("p1")
                 && on.contains(&SELF_STEPS_MAX.to_string())
         );
+        // A new conversation starts from the project's state, not from a history it lacks.
+        let fresh = fresh_conversation_note();
+        assert!(fresh.contains("get_project_state") && fresh.contains("« doing »"));
+        assert!(fresh.ends_with("\n\n"));
         assert!(endless_prompt(true).contains("add_steps"));
         // Asked to stop once the steps are done: it adds none.
         assert!(!endless_prompt(false).contains("add_steps"));

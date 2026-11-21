@@ -142,7 +142,9 @@ impl LiveRun {
     /// Short sessions: once a step is done, the work goes on in a new conversation of the
     /// agent, started again from the mission (and get_project_state) rather than from a
     /// history that grows with each step. Claude Code clears its own (`/clear`); a headless
-    /// agent's next run doesn't continue the last one. `note` goes before the mission.
+    /// agent's next run doesn't continue the last one. It is told it has no history and to
+    /// start from get_project_state (`fresh_conversation_note`); `note` follows, then the
+    /// mission.
     fn new_conversation(&mut self, note: &str, now: Instant) {
         if self.agent.headless() {
             if let Err(e) = self
@@ -160,7 +162,11 @@ impl LiveRun {
             self.term.write(b"\r");
         }
         self.reader.new_conversation();
-        self.next = Some(format!("{note}{}", self.first_prompt));
+        self.next = Some(format!(
+            "{}{note}{}",
+            auto::fresh_conversation_note(),
+            self.first_prompt
+        ));
         // As at the start: the prompt is typed once the agent is ready again.
         self.phase = Phase::Starting(now);
         self.screen_changed = now;
