@@ -1534,6 +1534,17 @@ fn summary_card(ui: &mut egui::Ui, cx: &mut Cx, folded_h: f32, extra: f32) -> f3
         };
         let shown_rect = egui::Rect::from_min_size(top, egui::vec2(w, shown));
         ui.allocate_rect(shown_rect, egui::Sense::hover());
+        // Folded, the lines past the fold can't be selected: a mouse selection begun in the
+        // text that reaches the fold unfolds the card, so it can go on to the last line.
+        if overflows && !open {
+            let reach = ui.input(|i| {
+                (i.pointer.primary_down(), i.pointer.press_origin(), i.pointer.interact_pos())
+            });
+            if selection_reaches_fold(reach.0, reach.1, reach.2, shown_rect) {
+                toggle_flag(ui, key);
+                ui.ctx().request_repaint();
+            }
+        }
         if overflows && !open {
             // Fade the last lines into the card.
             let fade = egui::Rect::from_min_max(
@@ -1563,6 +1574,31 @@ fn summary_card(ui: &mut egui::Ui, cx: &mut Cx, folded_h: f32, extra: f32) -> f3
             toggle_flag(ui, key);
         }
     })
+}
+
+/// A drag (button `down`, begun at `origin`) in a folded text shown in `shown`, whose pointer
+/// is now at `pos`, near or past the fold.
+fn selection_reaches_fold(
+    down: bool,
+    origin: Option<egui::Pos2>,
+    pos: Option<egui::Pos2>,
+    shown: egui::Rect,
+) -> bool {
+    down
+        && origin.is_some_and(|p| shown.contains(p))
+        && pos.is_some_and(|p| p.y > shown.bottom() - 12.0)
+}
+
+#[test]
+fn a_selection_reaching_the_fold_unfolds_the_state_of_play() {
+    let shown = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(400.0, 200.0));
+    let (inside, near, past) = (egui::pos2(20.0, 10.0), egui::pos2(30.0, 195.0), egui::pos2(30.0, 260.0));
+    assert!(selection_reaches_fold(true, Some(inside), Some(near), shown));
+    assert!(selection_reaches_fold(true, Some(inside), Some(past), shown));
+    // Still in the visible lines, button up, or a drag begun elsewhere: stays folded.
+    assert!(!selection_reaches_fold(true, Some(inside), Some(egui::pos2(30.0, 100.0)), shown));
+    assert!(!selection_reaches_fold(false, Some(inside), Some(past), shown));
+    assert!(!selection_reaches_fold(true, Some(egui::pos2(30.0, 300.0)), Some(past), shown));
 }
 
 fn steps_focus_key() -> egui::Id {
