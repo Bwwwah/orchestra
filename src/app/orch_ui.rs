@@ -329,6 +329,8 @@ pub struct Orch {
     /// When the 5-hour and the weekly windows start again (ms since epoch).
     pub five_reset: Option<u64>,
     pub week_reset: Option<u64>,
+    /// Since when (ms) Claude Code's 5-hour window can't be read; None while it can.
+    unmeasured_since: Option<u64>,
     /// The 5-hour windows of the last 24 hours, added up.
     pub day_total: Option<f32>,
     /// What went from the week in the last 24 hours, and over how long the readings go back.
@@ -1121,6 +1123,11 @@ impl NotesApp {
             self.orch.five_reset,
             self.orch.week_reset,
         ) = (f.five, f.week, f.five_reset, f.week_reset);
+        if u.as_ref().is_some_and(|u| u.five().is_some()) {
+            self.orch.unmeasured_since = None;
+        } else {
+            self.orch.unmeasured_since.get_or_insert(now);
+        }
         let Some(u) = u else { return };
         if self.orch.history_at != u.at {
             self.orch.history_at = u.at;
@@ -1507,6 +1514,33 @@ impl NotesApp {
 
     /// The permission is missing: what it's for, and the two ways to give it back. Read
     /// again every few seconds while the page is open (a cheap call, no dialog).
+    /// An alert while the subscription's use can't be read (see `measure_alert`).
+    fn measure_card(&self, ui: &mut egui::Ui, t: &Tone) {
+        let running = self.orch.runs.iter().any(|r| r.agent == Agent::ClaudeCode);
+        let now = crate::model::now_ms();
+        let Some((title, text)) =
+            measure_alert(self.orch.unmeasured_since, self.orch.five, running, now)
+        else {
+            if self.orch.unmeasured_since.is_some() {
+                // To show it once the grace is over, even with nothing else moving.
+                ui.ctx().request_repaint_after(Duration::from_secs(5));
+            }
+            return;
+        };
+        ui.ctx().request_repaint_after(Duration::from_secs(30));
+        egui::Frame::new()
+            .fill(super::projects::ORANGE.gamma_multiply(0.07))
+            .stroke(egui::Stroke::new(1.0, super::projects::ORANGE.gamma_multiply(0.45)))
+            .corner_radius(12.0)
+            .inner_margin(egui::Margin::symmetric(18, 14))
+            .show(ui, |ui| {
+                ui.set_width(ui.available_width());
+                ui.label(RichText::new(title).font(semibold(14.0)).color(super::projects::ORANGE));
+                ui.add(egui::Label::new(RichText::new(text).size(12.5).color(t.secondary)).wrap());
+            });
+        ui.add_space(14.0);
+    }
+
     fn screen_card(&mut self, ui: &mut egui::Ui, t: &Tone) {
         if !cfg!(target_os = "macos") || self.orch.screen_dismissed {
             return;
@@ -1598,6 +1632,7 @@ impl NotesApp {
                 ui.label(RichText::new(crate::tr!("Des IA qui avancent seules sur vos projets, chacune dans une copie à part, dans les limites de votre abonnement.", "AIs that move your projects forward on their own, each in a separate copy, within your subscription's limits.")).color(t.secondary));
                 ui.add_space(14.0);
                 self.screen_card(ui, &t);
+                self.measure_card(ui, &t);
                 self.week_bar(ui, &t);
                 ui.add_space(14.0);
                 self.stats_row(ui, &t);
@@ -1829,6 +1864,11 @@ impl NotesApp {
         let five = self.orch.five;
         let week = self.orch.week;
         let day = self.orch.day_total;
+        // The figure shown is the one kept from the last reading (see `measure_alert`).
+        let stale = self
+            .orch
+            .unmeasured_since
+            .is_some_and(|s| crate::model::now_ms().saturating_sub(s) >= MEASURE_GRACE_MS);
         let global = self.ws.settings.orch.global_limit;
         let now_ms = crate::model::now_ms();
         let five_left = self
@@ -1908,6 +1948,11 @@ impl NotesApp {
                     five.map(|f| format!("{f:.0} %"))
                         .unwrap_or_else(|| "—".into()),
                     match (five, five_left) {
+                        (Some(_), _) if stale => crate::tr!(
+                            "dernière valeur connue · mesure indisponible",
+                            "last known figure · can't be measured now"
+                        )
+                        .into(),
                         (Some(_), Some(l)) => crate::trf!(
                             "repart dans {} · IA arrêtées à {global:.0} %",
                             "resets in {} · AIs stop at {global:.0} %",
@@ -3610,6 +3655,44 @@ fn new_steps_note(fresh: &[String]) -> String {
     )
 }
 
+/// How long a failed reading of the subscription goes unsaid (readings are taken every 3 s,
+/// and one can miss while Claude Code rewrites its files).
+const MEASURE_GRACE_MS: u64 = 20_000;
+
+/// The alert (title, text) shown while Claude Code's 5-hour window can't be read: since when
+/// (`since`), the figure kept from the last reading (`kept`), whether sessions are running.
+/// None while it is read, during a short grace, or when nothing rests on it (no session
+/// running and no figure kept: the tile already says « unknown for now »).
+fn measure_alert(
+    since: Option<u64>,
+    kept: Option<f32>,
+    running: bool,
+    now: u64,
+) -> Option<(String, String)> {
+    let since = since?;
+    let gone = now.saturating_sub(since);
+    if gone < MEASURE_GRACE_MS || (!running && kept.is_none()) {
+        return None;
+    }
+    let title = crate::trf!(
+        "Mesure de l'abonnement indisponible depuis {}",
+        "Subscription use unavailable for {}",
+        crate::usage::left_text(gone)
+    );
+    let text = match kept {
+        Some(k) => crate::trf!(
+            "La dernière valeur connue ({k:.0} %) est gardée jusqu'à la réinitialisation de la fenêtre : elle n'est jamais prise pour 0 % et les plafonds continuent d'arrêter les IA, mais elle ne voit pas ce qui a été utilisé depuis. Une session jamais mesurée s'arrêtera à son deuxième tour. Orchestra réessaie toutes les 3 s ; vérifiez que la ligne d'état de Claude Code mène bien à Orchestra.",
+            "The last known figure ({k:.0} %) is kept until the window resets: it is never taken for 0 % and the limits still stop the AIs, but it doesn't see what has been used since. A session never measured stops at its second turn. Orchestra tries again every 3 s; check that Claude Code's status line leads to Orchestra."
+        ),
+        None => crate::tr!(
+            "Aucune valeur connue : aucun plafond ne peut être vérifié, donc les sessions qui n'ont pas été mesurées s'arrêteront à leur deuxième tour plutôt que de tourner sans limite. Orchestra réessaie toutes les 3 s ; vérifiez que Claude Code est à jour et que sa ligne d'état mène bien à Orchestra.",
+            "No known figure: no limit can be checked, so sessions that weren't measured stop at their second turn rather than run without a limit. Orchestra tries again every 3 s; check that Claude Code is up to date and that its status line leads to Orchestra."
+        )
+        .into(),
+    };
+    Some((title, text))
+}
+
 /// What a session's turn ended on, to choose whether it stops.
 struct TurnEnd {
     /// A stop already asked (by the person, or a limit seen during the turn).
@@ -5251,6 +5334,25 @@ mod tests {
         // The next reading that succeeds wins, even lower (the window started again).
         let fresh = Figures { five: Some(2.0), five_reset: Some(now + 18_000_000), ..Default::default() };
         assert_eq!(last.merged(Some(fresh), now).five, Some(2.0));
+    }
+
+    #[test]
+    fn an_unavailable_measure_is_told_clearly() {
+        use super::{MEASURE_GRACE_MS, measure_alert};
+        let since = 1_000_000;
+        let later = since + MEASURE_GRACE_MS;
+        // Read fine, or only just missed: nothing said.
+        assert!(measure_alert(None, Some(40.0), true, later).is_none());
+        assert!(measure_alert(Some(since), Some(40.0), true, later - 1).is_none());
+        // Nothing rests on it (no session, no figure kept): the tile says « unknown » already.
+        assert!(measure_alert(Some(since), None, false, later).is_none());
+        // A figure kept: said, with that figure, never as 0 %.
+        let (title, text) = measure_alert(Some(since), Some(42.4), false, later).unwrap();
+        assert!(title.contains("indisponible") || title.contains("unavailable"), "{title}");
+        assert!(text.contains("(42 %)"), "{text}");
+        // Sessions running with no figure at all: they stop rather than run without a limit.
+        let (_, text) = measure_alert(Some(since), None, true, later + 120_000).unwrap();
+        assert!(text.contains("deuxième tour") || text.contains("second turn"), "{text}");
     }
 
     #[test]
