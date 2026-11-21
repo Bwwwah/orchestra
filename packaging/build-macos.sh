@@ -22,19 +22,22 @@ lipo -create -output "$APP/Contents/MacOS/orchestra" \
   target/aarch64-apple-darwin/release/orchestra \
   target/x86_64-apple-darwin/release/orchestra
 
+# RTK (rtk-oss, Apache-2.0, without its BUSL engine), next to the program: Orchestra's
+# autonomous sessions shorten the AI's command outputs with it. Skipped with ORCHESTRA_NO_RTK=1.
+if [ "${ORCHESTRA_NO_RTK:-0}" != "1" ]; then
+  sh packaging/build-rtk.sh aarch64-apple-darwin x86_64-apple-darwin
+  lipo -create -output "$APP/Contents/MacOS/rtk" \
+    target/rtk/aarch64-apple-darwin/rtk \
+    target/rtk/x86_64-apple-darwin/rtk
+  cp packaging/licenses/LICENCES-TIERCES.txt packaging/licenses/rtk-LICENSE.txt "$APP/Contents/Resources/"
+fi
+
 sed "s/__VERSION__/$VERSION/g" packaging/Info.plist > "$APP/Contents/Info.plist"
 printf 'APPL????' > "$APP/Contents/PkgInfo"
 
-# Icon: every size macOS asks for, from the 1024 px picture.
-ICONSET="dist/AppIcon.iconset"
-mkdir -p "$ICONSET"
-for s in 16 32 128 256 512; do
-  sips -z $s $s packaging/icon-1024.png --out "$ICONSET/icon_${s}x${s}.png" >/dev/null
-  d=$((s * 2))
-  sips -z $d $d packaging/icon-1024.png --out "$ICONSET/icon_${s}x${s}@2x.png" >/dev/null
-done
-iconutil -c icns "$ICONSET" -o "$APP/Contents/Resources/AppIcon.icns"
-rm -rf "$ICONSET"
+# Icon: every size macOS asks for, made from the logo by `cargo run --example icons`
+# (assets/logo-source.png → assets/AppIcon.icns).
+cp assets/AppIcon.icns "$APP/Contents/Resources/AppIcon.icns"
 
 cp packaging/LISEZMOI.txt "dist/Orchestra/LISEZMOI.txt"
 

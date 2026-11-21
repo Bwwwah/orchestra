@@ -7,6 +7,13 @@
 use super::icons::{self, Icon};
 use super::*;
 
+/// The attributions and licences of the software shipped with Orchestra, shown in Settings ›
+/// General: the same files the packages put next to the program.
+const THIRD_PARTY_TEXTS: &[&str] = &[
+    include_str!("../../packaging/licenses/LICENCES-TIERCES.txt"),
+    include_str!("../../packaging/licenses/rtk-LICENSE.txt"),
+];
+
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum SettingsTab {
     Preferences,
@@ -980,6 +987,47 @@ impl NotesApp {
             },
         );
         self.update_settings(ui, t, l);
+        self.third_party(ui, t, l);
+    }
+
+    /// « Licences tierces »: the software shipped with Orchestra, its licence and where it
+    /// comes from (packaging/licenses, the same text shipped next to the program).
+    fn third_party(&mut self, ui: &mut egui::Ui, t: &Tone, l: &Look) {
+        section(ui, crate::tr!("Licences tierces", "Third-party licences"), t, l);
+        let open_key = egui::Id::unique("third-party-open");
+        let mut open: bool = ui.ctx().data(|d| d.get_temp(open_key)).unwrap_or(false);
+        row(
+            ui,
+            "RTK (rtk-oss) 0.49.0",
+            crate::tr!(
+                "© 2026 RTK AI Labs · Apache License 2.0 · github.com/rtk-ai/rtk. Raccourcit la sortie des commandes dans les sessions autonomes ; livré sans son moteur sous licence BUSL-1.1.",
+                "© 2026 RTK AI Labs · Apache License 2.0 · github.com/rtk-ai/rtk. Shortens the output of commands in autonomous sessions; shipped without its BUSL-1.1 engine."
+            ),
+            t,
+            |ui| {
+                let label = if open {
+                    crate::tr!("Masquer la licence", "Hide the licence")
+                } else {
+                    crate::tr!("Lire la licence", "Read the licence")
+                };
+                if button(ui, label, t, l).clicked() {
+                    open = !open;
+                    ui.ctx().data_mut(|d| d.insert_temp(open_key, open));
+                }
+            },
+        );
+        if open {
+            egui::ScrollArea::vertical()
+                .id_salt("third-party-text")
+                .max_height(320.0)
+                .show(ui, |ui| {
+                    ui.style_mut().interaction.selectable_labels = true;
+                    for text in THIRD_PARTY_TEXTS {
+                        ui.label(RichText::new(*text).monospace().size(11.5).color(t.secondary));
+                        ui.add_space(12.0);
+                    }
+                });
+        }
     }
 
     fn tab_sidebar(&mut self, ui: &mut egui::Ui, t: &Tone, l: &Look) {
@@ -1828,5 +1876,28 @@ impl NotesApp {
                 .size(13.0)
                 .color(t.tertiary),
         );
+    }
+}
+
+#[cfg(test)]
+mod third_party_tests {
+    /// The licences shown in Settings › General are those shipped: RTK's Apache-2.0 text, and
+    /// an attribution naming the very version packaging/build-rtk.sh builds, without its engine.
+    #[test]
+    fn the_shipped_rtk_is_attributed() {
+        let [notes, licence] = super::THIRD_PARTY_TEXTS else { panic!() };
+        assert!(licence.trim_start().starts_with("Apache License"));
+        assert!(licence.contains("Version 2.0, January 2004"));
+        let script = include_str!("../../packaging/build-rtk.sh");
+        let rev = script
+            .lines()
+            .find_map(|l| l.strip_prefix("RTK_REV=\""))
+            .and_then(|r| r.strip_suffix('"'))
+            .unwrap();
+        assert!(notes.contains(rev), "attribution for another RTK version than {rev}");
+        assert!(script.contains("--no-default-features"));
+        for w in ["Apache License 2.0", "RTK AI Labs", "rtk-LICENSE.txt", "BUSL-1.1"] {
+            assert!(notes.contains(w), "{w}");
+        }
     }
 }

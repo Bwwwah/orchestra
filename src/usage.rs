@@ -248,8 +248,8 @@ pub fn unreadable_reason(agent: crate::auto::Agent) -> Option<&'static str> {
             "Quota counted by Google in requests per day, never written on this computer."
         )),
         Agent::Vibe => Some(crate::tr!(
-            "Mistral n'écrit pas sur cet ordinateur la part du forfait qui reste : Orchestra compte les jetons des sessions de Vibe.",
-            "Mistral doesn't write on this computer how much of the plan is left: Orchestra counts the tokens of Vibe's sessions."
+            "Pas de pourcentage comme pour Claude ou Codex : Mistral n'écrit nulle part sur cet ordinateur la part du forfait qui reste (Claude et Codex, eux, la notent dans leurs fichiers). Orchestra compte à la place les jetons des sessions de Vibe.",
+            "No percentage as for Claude or Codex: Mistral writes nowhere on this computer how much of the plan is left (Claude and Codex note it in their files). Orchestra counts the tokens of Vibe's sessions instead."
         )),
     }
 }

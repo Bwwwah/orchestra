@@ -250,7 +250,7 @@ fn run_agent(
     path: &str,
     cancel: &AtomicBool,
     limit: Duration,
-) -> Result<(String, String), String> {
+) -> Result<(String, String, Option<String>), String> {
     let dir = crate::project::normalize_folder(folder);
     if !dir.is_dir() {
         return Err(crate::tr!("dossier introuvable", "folder not found").into());
@@ -330,6 +330,11 @@ fn run_agent(
             ));
         }
         let turns = v.get("num_turns").and_then(|x| x.as_u64()).unwrap_or(0);
+        let session = v
+            .get("session_id")
+            .and_then(|x| x.as_str())
+            .filter(|s| is_session_id(s))
+            .map(String::from);
         return Ok((
             result,
             crate::trf!(
@@ -337,12 +342,19 @@ fn run_agent(
                 "done in {} s, {turns} exchanges",
                 start.elapsed().as_secs()
             ),
+            session,
         ));
     }
     if status.success() {
+        let session = if agent.tool == Tool::Codex {
+            codex_session_id(&err).or_else(|| codex_session_id(&out))
+        } else {
+            None
+        };
         Ok((
             out.trim().to_string(),
             crate::trf!("terminé en {} s", "done in {} s", start.elapsed().as_secs()),
+            session,
         ))
     } else {
         Err(last_line(&err)
@@ -387,7 +399,36 @@ fn run_one(agent: &Agent, folder: &str, path: &str, cancel: &AtomicBool) -> Resu
         cancel,
         PER_PROJECT,
     )
-    .map(|(_, report)| report)
+    .map(|(_, report, _)| report)
+}
+
+/// A conversation id an agent gave back, safe to put on a command line: letters, digits
+/// and dashes only (Claude Code and Codex use UUIDs).
+fn is_session_id(s: &str) -> bool {
+    (8..=64).contains(&s.len()) && s.chars().all(|c| c.is_ascii_alphanumeric() || c == '-')
+}
+
+/// The conversation id `codex exec` prints in its header (« session id: … »).
+fn codex_session_id(text: &str) -> Option<String> {
+    text.lines().find_map(|l| {
+        let l = l.trim();
+        let rest = l
+            .strip_prefix("session id:")
+            .or_else(|| l.strip_prefix("session_id:"))?;
+        let id = rest.trim();
+        is_session_id(id).then(|| id.to_string())
+    })
+}
+
+/// The command that reopens an agent's conversation in a terminal, to carry it on.
+pub fn resume_command(tool: Tool, session: &str) -> Option<String> {
+    if !is_session_id(session) {
+        return None;
+    }
+    Some(match tool {
+        Tool::ClaudeCode => format!("claude --resume {session}"),
+        Tool::Codex => format!("codex resume {session}"),
+    })
 }
 
 /// What the agent is asked for the "Regard extérieur" card. `code`: a code project
@@ -864,6 +905,20 @@ pub fn ask_with_images(
     images: &[String],
     weight: Weight,
 ) -> Result<(String, Tool), String> {
+    ask_full(folder, prompt, claude_tools, max_turns, prefer, images, weight)
+        .map(|(answer, tool, _)| (answer, tool))
+}
+
+/// Like `ask_with_images`, with the id of the agent's conversation when it gave one.
+fn ask_full(
+    folder: &str,
+    prompt: String,
+    claude_tools: &str,
+    max_turns: u32,
+    prefer: Option<Tool>,
+    images: &[String],
+    weight: Weight,
+) -> Result<(String, Tool, Option<String>), String> {
     let path = shell_path();
     let agents = detect(&path);
     let agent = agents
@@ -888,7 +943,7 @@ pub fn ask_with_images(
     if matches!(&res, Err(e) if e == AUTH_ERROR)
         && prefer != Some(Tool::Codex)
         && agents.iter().any(|a| a.tool == Tool::Codex)
-        && let Ok(r) = ask_with_images(
+        && let Ok(r) = ask_full(
             folder,
             prompt_copy,
             claude_tools,
@@ -900,11 +955,11 @@ pub fn ask_with_images(
     {
         return Ok(r);
     }
-    let (answer, _) = res?;
+    let (answer, _, session) = res?;
     if answer.trim().is_empty() {
         return Err(crate::tr!("l'IA n'a rien répondu", "the AI answered nothing").into());
     }
-    Ok((answer, agent.tool))
+    Ok((answer, agent.tool, session))
 }
 
 /// The longest quick question sent to an agent (characters).
@@ -1010,13 +1065,31 @@ fn question_prompt_base(folder: &str, question: &str, code: bool) -> String {
     )
 }
 
+/// An agent's conversation that can be carried on: its id, the folder it ran in (where its
+/// session is filed) and the command that reopens it (`claude --resume …`).
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Resume {
+    pub session: String,
+    pub cwd: String,
+    pub cmd: String,
+}
+
+/// The answer to a quick question, and how to carry the conversation on.
+#[derive(Clone, Debug)]
+pub struct QuestionReply {
+    pub answer: String,
+    pub tool: Tool,
+    /// When the agent gave its conversation's id.
+    pub resume: Option<Resume>,
+}
+
 /// A quick question about a project, answered in a few lines by an agent (read-only).
 pub fn ask_question(
     folder: &str,
     question: &str,
     code: Option<bool>,
     prefer: Option<Tool>,
-) -> Result<(String, Tool), String> {
+) -> Result<QuestionReply, String> {
     if question.trim().is_empty() {
         return Err(crate::tr!("question vide", "empty question").into());
     }
@@ -1028,14 +1101,26 @@ pub fn ask_question(
         dirs::home_dir().unwrap_or_default().display().to_string()
     };
     let code = crate::project::code_kind(&dir, code);
-    let (answer, tool) = ask(
+    let (answer, tool, session) = ask_full(
         &dir,
         question_prompt(&dir, question, code),
         "Read,Glob,Grep,Bash(git log:*),Bash(ls:*)",
         12,
         prefer,
+        &[],
+        Weight::Full,
     )?;
-    Ok((answer.trim().to_string(), tool))
+    Ok(QuestionReply {
+        answer: answer.trim().to_string(),
+        tool,
+        resume: session.and_then(|s| {
+            resume_command(tool, &s).map(|cmd| Resume {
+                session: s,
+                cwd: dir,
+                cmd,
+            })
+        }),
+    })
 }
 
 /// Ask an agent for a short outside view of a project (read-only, web search allowed).
@@ -1336,6 +1421,33 @@ mod tests {
             ask_question("/tmp/x", "   ", None, None).is_err(),
             "an empty question never reaches an agent"
         );
+    }
+
+    /// A quick question's conversation can be carried on: the agent's id is read from its
+    /// output, and only a plain id ever reaches the command line.
+    #[test]
+    fn a_quick_question_conversation_can_be_resumed() {
+        let id = "0199a2b3-c4d5-7e6f-8a9b-0c1d2e3f4a5b";
+        let header = format!("OpenAI Codex v0.50\n--------\nworkdir: /tmp\nmodel: gpt-5\nsession id: {id}\n--------\n");
+        assert_eq!(codex_session_id(&header).as_deref(), Some(id));
+        assert_eq!(codex_session_id("pas d'en-tête"), None);
+        assert_eq!(codex_session_id("session id: x; rm -rf ~"), None);
+        assert_eq!(
+            resume_command(Tool::ClaudeCode, id).as_deref(),
+            Some(format!("claude --resume {id}").as_str())
+        );
+        assert_eq!(
+            resume_command(Tool::Codex, id).as_deref(),
+            Some(format!("codex resume {id}").as_str())
+        );
+        for bad in ["", "abc", "a b c d e f g h", "$(touch x)abcdef", "abcdefgh;ls"] {
+            assert_eq!(resume_command(Tool::ClaudeCode, bad), None, "{bad:?}");
+        }
+        // What reopens a saved terminal keeps the same conversation.
+        let cmd = resume_command(Tool::ClaudeCode, id).unwrap();
+        assert_eq!(crate::terminal::restore_cmd(Some(&cmd)), Some(cmd.clone()));
+        let cmd = resume_command(Tool::Codex, id).unwrap();
+        assert_eq!(crate::terminal::restore_cmd(Some(&cmd)), Some(cmd));
     }
 
     #[test]

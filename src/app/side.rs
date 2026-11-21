@@ -9,6 +9,75 @@ use std::sync::Arc;
 
 const BLUE: Color32 = Color32::from_rgb(35, 131, 226);
 
+/// « Poursuivre la conversation » of a quick question: its AI conversation, to show in
+/// this panel (« Conversation IA »), asked from a card deep in the project page.
+#[derive(Clone, Default)]
+pub struct ConversationRequest {
+    pub project: String,
+    /// The terminal tab's title, if the conversation must open in a terminal instead.
+    pub title: String,
+    pub resume: crate::sync::Resume,
+    /// When it was asked (`egui` time): the session list catches up within seconds.
+    pub at: f64,
+}
+
+/// How long to wait for the conversation to appear among the project's sessions before
+/// opening it in a terminal instead.
+const CONVERSATION_WAIT_S: f64 = 15.0;
+
+fn conversation_key() -> egui::Id {
+    egui::Id::unique("side-conversation-request")
+}
+
+fn pending_key() -> egui::Id {
+    egui::Id::unique("side-conversation-pending")
+}
+
+pub fn open_conversation(
+    ctx: &egui::Context,
+    project: &str,
+    title: &str,
+    resume: crate::sync::Resume,
+) {
+    let at = ctx.input(|i| i.time);
+    ctx.data_mut(|d| {
+        d.insert_temp(
+            conversation_key(),
+            ConversationRequest {
+                project: project.into(),
+                title: title.into(),
+                resume,
+                at,
+            },
+        )
+    });
+}
+
+/// What the « Conversation IA » tab does about a conversation asked for and not yet listed
+/// among the project's sessions (`listed`): show it, wait for it, or give up on the panel.
+#[derive(Debug, PartialEq)]
+enum Waiting {
+    Listed,
+    Wait,
+    /// Not listed in time: open it in a terminal.
+    GiveUp,
+    /// Asked long ago (the panel was closed meanwhile): forget it, no terminal by surprise.
+    Expired,
+}
+
+fn waiting(listed: bool, asked_at: f64, now: f64) -> Waiting {
+    let age = now - asked_at;
+    if listed {
+        Waiting::Listed
+    } else if age < CONVERSATION_WAIT_S {
+        Waiting::Wait
+    } else if age < CONVERSATION_WAIT_S + 10.0 {
+        Waiting::GiveUp
+    } else {
+        Waiting::Expired
+    }
+}
+
 /// A steady colour per person, for the round faces.
 fn person_color(name: &str) -> Color32 {
     const COLORS: [Color32; 8] = [
@@ -97,6 +166,18 @@ fn composer(ui: &mut egui::Ui, draft: &mut String, hint: &str, enabled: bool) ->
 }
 
 impl NotesApp {
+    /// Open this panel on the conversation a button asked for, if any.
+    pub(super) fn take_conversation_request(&mut self, ctx: &egui::Context) {
+        let Some(r) = ctx.data_mut(|d| d.remove_temp::<ConversationRequest>(conversation_key()))
+        else {
+            return;
+        };
+        self.side_open = true;
+        self.side_tab = 1;
+        self.ai_session = Some(r.resume.session.clone());
+        ctx.data_mut(|d| d.insert_temp(pending_key(), r));
+    }
+
     /// The right-hand panel, when open and the current page belongs to a project.
     pub(super) fn side_panel(&mut self, ui: &mut egui::Ui, page_fill: Color32) {
         if !self.side_open || self.view != View::Page {
@@ -302,6 +383,48 @@ impl NotesApp {
         t: &Tone,
     ) {
         let live: Vec<SessionInfo> = self.agents.by_project.get(pid).cloned().unwrap_or_default();
+        // A quick question carried on: its session shows up in the list within seconds.
+        let pending = ui
+            .ctx()
+            .data(|d| d.get_temp::<ConversationRequest>(pending_key()))
+            .filter(|r| r.project == pid);
+        if let Some(r) = pending {
+            let listed = live.iter().any(|s| s.id == r.resume.session);
+            match waiting(listed, r.at, ui.input(|i| i.time)) {
+                Waiting::Listed | Waiting::Expired => {
+                    ui.ctx()
+                        .data_mut(|d| d.remove::<ConversationRequest>(pending_key()));
+                }
+                Waiting::Wait => {
+                    ui.add_space(10.0);
+                    ui.horizontal(|ui| {
+                        ui.add(egui::Spinner::new().size(12.0));
+                        ui.label(
+                            RichText::new(crate::tr!(
+                                "La conversation de la question rapide arrive…",
+                                "The quick question's conversation is on its way…"
+                            ))
+                            .size(12.5)
+                            .color(t.tertiary),
+                        );
+                    });
+                    ui.ctx().request_repaint_after(std::time::Duration::from_millis(500));
+                    return;
+                }
+                Waiting::GiveUp => {
+                    // Not found in the project's sessions: carried on in a terminal.
+                    ui.ctx()
+                        .data_mut(|d| d.remove::<ConversationRequest>(pending_key()));
+                    self.ai_session = None;
+                    super::term_ui::request(
+                        ui.ctx(),
+                        &r.title,
+                        &r.resume.cwd,
+                        Some(r.resume.cmd.clone()),
+                    );
+                }
+            }
+        }
         if live.is_empty() {
             ui.add_space(10.0);
             ui.add(
@@ -500,5 +623,19 @@ impl NotesApp {
             );
         });
         let _ = BLUE;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{CONVERSATION_WAIT_S as W, Waiting, waiting};
+
+    #[test]
+    fn a_carried_on_conversation_waits_for_its_session_then_falls_back() {
+        assert_eq!(waiting(true, 0.0, 1.0), Waiting::Listed);
+        assert_eq!(waiting(true, 0.0, 999.0), Waiting::Listed);
+        assert_eq!(waiting(false, 10.0, 11.0), Waiting::Wait);
+        assert_eq!(waiting(false, 10.0, 10.0 + W + 1.0), Waiting::GiveUp);
+        assert_eq!(waiting(false, 10.0, 10.0 + W + 60.0), Waiting::Expired);
     }
 }

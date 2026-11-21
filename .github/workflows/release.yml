@@ -82,6 +82,10 @@ jobs:
         shell: pwsh
         run: |
           cargo build --release
+          # The icon inside orchestra.exe itself (Explorer, taskbar, shortcuts), from
+          # assets/icon.ico (made by `cargo run --example icons`).
+          choco install rcedit -y --no-progress
+          rcedit target/release/orchestra.exe --set-icon assets/icon.ico
           New-Item -ItemType Directory -Force out | Out-Null
           $tag = $env:GITHUB_REF_NAME
           Copy-Item target/release/orchestra.exe "out/Orchestra-$tag-Windows-portable.exe"
@@ -101,7 +105,11 @@ jobs:
         run: |
           sudo apt-get update && sudo apt-get install -y libxkbcommon-dev libwayland-dev libx11-dev libxcursor-dev libxrandr-dev libxi-dev libgl1-mesa-dev
           cargo build --release
+          # RTK (rtk-oss, Apache-2.0, without its BUSL engine) next to the program.
+          sh packaging/build-rtk.sh x86_64-unknown-linux-gnu
           mkdir -p out/orchestra && cp target/release/orchestra out/orchestra/
+          cp target/rtk/x86_64-unknown-linux-gnu/rtk out/orchestra/rtk
+          cp packaging/licenses/LICENCES-TIERCES.txt packaging/licenses/rtk-LICENSE.txt out/orchestra/
           tar -C out -czf out/Orchestra-${GITHUB_REF_NAME}-Linux.tar.gz orchestra
           cargo install cargo-deb --locked
           cargo deb --no-build --output out/Orchestra-${GITHUB_REF_NAME}-Linux.deb || echo "paquet .deb non fabriqué"

@@ -645,17 +645,19 @@ impl NotesApp {
                 }
                 ui.add_space(4.0);
             }
+            // All the settings, from their first page (« Général »); customising the sidebar
+            // is one of their tabs.
             if side_item(
                 ui,
-                SideIcon::Line(Icon::Sliders),
-                crate::tr!("Personnaliser la barre latérale", "Customize the sidebar"),
-                self.settings_tab == Some(SettingsTab::Sidebar),
+                SideIcon::Line(Icon::Gear),
+                crate::tr!("Paramètres", "Settings"),
+                self.settings_tab.is_some(),
                 0.0,
                 &t,
             )
             .clicked()
             {
-                self.open_settings(SettingsTab::Sidebar);
+                self.open_settings(SettingsTab::General);
             }
             if side_item(
                 ui,

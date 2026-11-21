@@ -21,6 +21,9 @@ vt100 = "0.18"
 
 [dev-dependencies]
 egui_kittest = "0.37"
+# The app icons are made from assets/logo-source.png by `cargo run --example icons`
+# (the same crate eframe already uses to read PNG files).
+image = { version = "0.25", default-features = false, features = ["png"] }
 
 
 [profile.release]
@@ -37,4 +40,9 @@ assets = [
     ["target/release/orchestra", "usr/bin/", "755"],
     ["packaging/orchestra.desktop", "usr/share/applications/", "644"],
     ["assets/icon-512.png", "usr/share/icons/hicolor/512x512/apps/orchestra.png", "644"],
+    ["assets/icon-256.png", "usr/share/icons/hicolor/256x256/apps/orchestra.png", "644"],
+    # RTK (rtk-oss, Apache-2.0, without its BUSL engine), made by packaging/build-rtk.sh.
+    ["target/rtk/x86_64-unknown-linux-gnu/rtk", "usr/lib/orchestra/rtk", "755"],
+    ["packaging/licenses/LICENCES-TIERCES.txt", "usr/share/doc/orchestra/", "644"],
+    ["packaging/licenses/rtk-LICENSE.txt", "usr/share/doc/orchestra/", "644"],
 ]
