@@ -212,8 +212,21 @@ pub fn page_to_markdown(ws: &Workspace, page: &Page) -> String {
         format!("{} ", page.icon)
     };
     out.push_str(&format!("# {}{}\n\n", icon, page.display_title()));
+    out.push_str(&blocks_to_markdown(&page.blocks, &|id| {
+        ws.page(id).map(|p| p.display_title())
+    }));
+    if let Some(db) = &page.database {
+        database_to_markdown(db, &mut out);
+    }
+    out
+}
+
+/// Blocks as Markdown, a blank line after each (`title_of`: a linked page's title, None
+/// when it is gone). The whole page's export, and the blocks selected with the mouse.
+pub fn blocks_to_markdown(blocks: &[Block], title_of: &dyn Fn(&str) -> Option<String>) -> String {
+    let mut out = String::new();
     let mut number = 0;
-    for b in &page.blocks {
+    for b in blocks {
         if b.kind == BlockKind::Numbered {
             number += 1
         } else {
@@ -241,9 +254,7 @@ pub fn page_to_markdown(ws: &Workspace, page: &Page) -> String {
             BlockKind::Code => format!("```\n{}\n```", b.text),
             BlockKind::Divider => "---".to_string(),
             BlockKind::PageLink => {
-                let t = ws
-                    .page(&b.extra)
-                    .map(|p| p.display_title())
+                let t = title_of(&b.extra)
                     .unwrap_or_else(|| crate::tr!("Page supprimée", "Deleted page").into());
                 format!("[{}]({}.md)", t, safe_name(&t))
             }
@@ -257,7 +268,12 @@ pub fn page_to_markdown(ws: &Workspace, page: &Page) -> String {
         out.push_str(&line);
         out.push_str("\n\n");
     }
-    if let Some(db) = &page.database {
+    out
+}
+
+/// A database's visible rows as a Markdown table.
+fn database_to_markdown(db: &crate::model::Database, out: &mut String) {
+    {
         out.push_str(&format!(
             "| {} |\n",
             db.columns
@@ -292,7 +308,6 @@ pub fn page_to_markdown(ws: &Workspace, page: &Page) -> String {
         }
         out.push('\n');
     }
-    out
 }
 
 pub fn safe_name(s: &str) -> String {

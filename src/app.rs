@@ -2131,6 +2131,7 @@ fn blocks_view(
     let mut drag_stopped = false;
     let mut rows: Vec<egui::Rect> = Vec::with_capacity(n);
     let pointer = ui.input(|i| i.pointer.hover_pos());
+    let mut select_all_blocks = false;
     ui.spacing_mut().item_spacing.y = 6.0;
     for i in 0..n {
         let prev_id = if i > 0 {
@@ -2318,6 +2319,17 @@ fn blocks_view(
             };
             let is_code = b.kind == BlockKind::Code;
             let has_focus_before = ui.memory(|m| m.has_focus(edit_id));
+            // ⌘A in a block whose text is already all selected (or empty): the whole page.
+            if has_focus_before && ui.input(|i| i.modifiers.command && i.key_pressed(Key::A)) {
+                let len = b.text.chars().count();
+                let all = egui::TextEdit::load_state(ui.ctx(), edit_id)
+                    .and_then(|s| s.cursor.char_range())
+                    .is_some_and(|r| {
+                        let (a, z) = (r.primary.index.0, r.secondary.index.0);
+                        a.min(z) == 0 && a.max(z) >= len
+                    });
+                select_all_blocks |= all || len == 0;
+            }
             if has_focus_before && !is_code {
                 // Tab nests the block under the one above (at most one level deeper), Shift+Tab un-nests.
                 let (tab, untab) = ui.input_mut(|inp| {
@@ -2616,6 +2628,8 @@ fn blocks_view(
         }
     }
 
+    let delete = block_selection(ui, page, &rows, titles, dragging.is_some(), select_all_blocks);
+
     // Drag and drop: where the block would land, a blue line, and the move on release.
     let mut moved: Option<(usize, usize)> = None;
     if let Some(drag_id) = dragging.clone() {
@@ -2733,10 +2747,132 @@ fn blocks_view(
             page.blocks.insert(at, b);
         }
     }
+    if let Some(ids) = delete {
+        page.blocks.retain(|b| !ids.contains(&b.id));
+    }
     if page.blocks.is_empty() && page.database.is_none() {
         page.blocks.push(Block::new(BlockKind::Paragraph, ""));
     }
     (new_focus, focus_used)
+}
+
+/// Selecting whole blocks with the mouse, as in Notion: each block is its own text field, so
+/// a press in one block dragged into another selects every block in between (and the text
+/// field lets go). ⌘C copies them as Markdown, ⌘X too and removes them, ⌫ removes them,
+/// Échap or a click elsewhere lets go; ⌘A in a block whose text is all selected takes the
+/// whole page. Works in a locked page too, except removing. `rows`: this frame's block
+/// rects, in the order of `page.blocks`; `moving`: a block is being moved by its handle.
+/// Returns the ids of the blocks to remove.
+fn block_selection(
+    ui: &mut egui::Ui,
+    page: &Page,
+    rows: &[egui::Rect],
+    titles: &HashMap<String, String>,
+    moving: bool,
+    select_all: bool,
+) -> Option<Vec<String>> {
+    let key = egui::Id::unique(("block-sel", &page.id));
+    let anchor_key = key.with("anchor");
+    let mut sel: Option<(String, String)> = ui.data(|d| d.get_temp(key));
+    let (pressed, origin, down, pos) = ui.input(|i| {
+        (
+            i.pointer.primary_pressed(),
+            i.pointer.press_origin(),
+            i.pointer.primary_down(),
+            i.pointer.interact_pos(),
+        )
+    });
+    let release_focus = |ui: &egui::Ui| {
+        ui.memory_mut(|m| {
+            if let Some(f) = m.focused() {
+                m.surrender_focus(f)
+            }
+        })
+    };
+    if pressed {
+        sel = None;
+        let anchor = origin
+            .and_then(|p| rows.iter().position(|r| r.contains(p)))
+            .and_then(|k| page.blocks.get(k))
+            .map(|b| b.id.clone());
+        ui.data_mut(|d| match anchor {
+            Some(a) => {
+                d.insert_temp(anchor_key, a);
+            }
+            None => d.remove::<String>(anchor_key),
+        });
+    }
+    let anchor: Option<String> = ui.data(|d| d.get_temp(anchor_key));
+    if down
+        && !moving
+        && !rows.is_empty()
+        && let (Some(a), Some(p)) = (&anchor, pos)
+        && let Some(from) = page.blocks.iter().position(|b| &b.id == a)
+    {
+        // The block under the pointer, the first or last one beyond the page's text.
+        let to = rows
+            .iter()
+            .take_while(|r| r.top() <= p.y)
+            .count()
+            .saturating_sub(1)
+            .min(page.blocks.len() - 1);
+        if sel.is_some() || to != from {
+            sel = Some((a.clone(), page.blocks[to].id.clone()));
+            release_focus(ui);
+        }
+    }
+    if !down {
+        ui.data_mut(|d| d.remove::<String>(anchor_key));
+    }
+    if select_all && let (Some(f), Some(l)) = (page.blocks.first(), page.blocks.last()) {
+        sel = Some((f.id.clone(), l.id.clone()));
+        release_focus(ui);
+    }
+    let at = |id: &str| page.blocks.iter().position(|b| b.id == id);
+    let range = sel
+        .as_ref()
+        .and_then(|(a, z)| Some((at(a)?, at(z)?)))
+        .map(|(a, z)| a.min(z)..=a.max(z))
+        .filter(|r| *r.end() < rows.len());
+    let mut delete = None;
+    if let Some(r) = range.clone() {
+        let area = rows[*r.start()].union(rows[*r.end()]).expand2(egui::vec2(2.0, 2.0));
+        // Notion's selection blue, light over the text.
+        let blue = Color32::from_rgba_unmultiplied(ACCENT[0], ACCENT[1], ACCENT[2], 38);
+        ui.painter().rect_filled(area, 4.0, blue);
+        if ui.memory(|m| m.focused().is_none()) {
+            let (copy, cut, erase, esc) = ui.input(|i| {
+                (
+                    i.events.iter().any(|e| matches!(e, egui::Event::Copy)),
+                    i.events.iter().any(|e| matches!(e, egui::Event::Cut)),
+                    i.key_pressed(Key::Backspace) || i.key_pressed(Key::Delete),
+                    i.key_pressed(Key::Escape),
+                )
+            });
+            if copy || cut {
+                let md = crate::store::blocks_to_markdown(&page.blocks[r.clone()], &|id| {
+                    titles.get(id).cloned()
+                });
+                ui.ctx().copy_text(md.trim_end().to_string());
+            }
+            if (cut || erase) && ui.is_enabled() {
+                delete = Some(page.blocks[r].iter().map(|b| b.id.clone()).collect());
+                sel = None;
+            }
+            if esc {
+                sel = None;
+            }
+        }
+    } else {
+        sel = None;
+    }
+    ui.data_mut(|d| match sel {
+        Some(s) => {
+            d.insert_temp(key, s);
+        }
+        None => d.remove::<(String, String)>(key),
+    });
+    delete
 }
 
 /// Make a database sub-page of `page` shown in `view`, and link it at block `at`; returns its id.
@@ -3375,6 +3511,73 @@ mod tests {
 
     fn texts(h: &Harness<Page>) -> Vec<String> {
         h.state().blocks.iter().map(|b| b.text.clone()).collect()
+    }
+
+    fn copied(h: &mut Harness<Page>) -> Vec<String> {
+        h.event(egui::Event::Copy);
+        h.step();
+        h.output()
+            .platform_output
+            .commands
+            .iter()
+            .filter_map(|c| match c {
+                egui::OutputCommand::CopyText(s) => Some(s.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// A press in the text of a block, dragged into another: the blocks in between are
+    /// selected whole and copied as Markdown; ⌫ removes them.
+    #[test]
+    fn dragging_across_blocks_selects_them_to_copy_or_remove() {
+        let mut h = harness();
+        h.run_steps(3);
+        let a = row_rect(&h, &h.state().blocks[0].id.clone());
+        let b = row_rect(&h, &h.state().blocks[1].id.clone());
+        // In the text (right of the gutter), from Alpha down to Beta.
+        drag(&mut h, egui::pos2(a.left() + 90.0, a.center().y), egui::pos2(b.left() + 90.0, b.center().y));
+        assert_eq!(copied(&mut h), ["Alpha\n\nBeta"]);
+        h.key_press(egui::Key::Backspace);
+        h.run_steps(2);
+        assert_eq!(texts(&h), ["Gamma"]);
+    }
+
+    /// Within one block the text field keeps its own selection: no block is selected.
+    #[test]
+    fn dragging_inside_one_block_selects_only_its_text() {
+        let mut h = harness();
+        h.run_steps(3);
+        let a = row_rect(&h, &h.state().blocks[0].id.clone());
+        drag(&mut h, egui::pos2(a.left() + 60.0, a.center().y), egui::pos2(a.left() + 90.0, a.center().y));
+        h.key_press(egui::Key::Backspace);
+        h.run_steps(2);
+        assert_eq!(h.state().blocks.len(), 3);
+    }
+
+    /// ⌘A twice in a block (its text, then the page), then Copy: every block.
+    #[test]
+    fn select_all_twice_takes_the_whole_page() {
+        let mut h = harness();
+        h.run_steps(3);
+        let a = row_rect(&h, &h.state().blocks[0].id.clone());
+        let p = egui::pos2(a.left() + 70.0, a.center().y);
+        h.event(egui::Event::PointerMoved(p));
+        for pressed in [true, false] {
+            h.event(egui::Event::PointerButton {
+                pos: p,
+                button: egui::PointerButton::Primary,
+                pressed,
+                modifiers: Default::default(),
+            });
+            h.run_steps(1);
+        }
+        h.run_steps(2);
+        h.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::A);
+        h.run_steps(2);
+        h.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::A);
+        h.run_steps(2);
+        assert_eq!(copied(&mut h), ["Alpha\n\nBeta\n\nGamma"]);
     }
 
     #[test]
