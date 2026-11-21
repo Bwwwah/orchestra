@@ -853,6 +853,19 @@ impl NotesApp {
             &crate::store::computer_id(),
             crate::model::now_ms(),
         );
+        // No model imposed (a restart keeps the one first chosen): the cheapest able to do
+        // the step, among the models of the AI chosen in the card, whose limits were just
+        // checked. None found (Vibe without its own list): the AI's own default.
+        let picked = if model.trim().is_empty() {
+            crate::catalog::choose(
+                &[(agent, crate::catalog::choosable(agent))],
+                difficulty.tier,
+            )
+            .map(|c| c.model.id)
+        } else {
+            None
+        };
+        let model = picked.as_deref().unwrap_or(model);
         let copy = if fix {
             auto::make_copy(&folder, &format!("fix {title}"), false, code)?
         } else {

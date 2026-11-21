@@ -11,7 +11,7 @@
 //! Claude Code and Gemini CLI keep none: their names are the ones their `--model` option takes,
 //! written here (`builtin`). The same goes for Codex and Vibe while their list isn't there yet.
 
-// Read by the next steps (choosing a model per step); until then only the tests use it.
+// Some of it is only read by the tests until the next steps (display, imposed models).
 #![allow(dead_code)]
 
 use crate::auto::Agent;
@@ -406,6 +406,67 @@ pub fn estimate_session(
     estimate(&text)
 }
 
+/// The model a session is started with, and why.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Choice {
+    pub agent: Agent,
+    pub model: ModelInfo,
+    /// Short French reason, shown with the choice.
+    pub reason: String,
+}
+
+/// The cheapest of `models` (first one on equal cost).
+fn cheapest<'a>(
+    models: impl Iterator<Item = (Agent, &'a ModelInfo)>,
+) -> Option<(Agent, &'a ModelInfo)> {
+    models.fold(None, |best: Option<(Agent, &ModelInfo)>, x| match best {
+        Some(b) if b.1.cost_cents <= x.1.cost_cents => Some(b),
+        _ => Some(x),
+    })
+}
+
+/// The cheapest model able to do work of tier `need`, among the models of the AIs given (the
+/// connected ones). A model outside the account's plan is never chosen. When none reaches the
+/// tier, the most capable one there is (the cheapest of that tier). On equal cost, the first
+/// AI given wins (the one the person chose comes first), then the first model of its list.
+pub fn choose(candidates: &[(Agent, Vec<ModelInfo>)], need: Tier) -> Option<Choice> {
+    let all = || {
+        candidates
+            .iter()
+            .flat_map(|(a, ms)| ms.iter().map(move |m| (*a, m)))
+            .filter(|(_, m)| !m.needs_higher_plan)
+    };
+    if let Some((agent, m)) = cheapest(all().filter(|(_, m)| m.tier >= need)) {
+        return Some(Choice {
+            agent,
+            model: m.clone(),
+            reason: format!("le moins cher des modèles {} ou plus", need.label()),
+        });
+    }
+    let top = all().map(|(_, m)| m.tier).max()?;
+    let (agent, m) = cheapest(all().filter(|(_, m)| m.tier == top))?;
+    Some(Choice {
+        agent,
+        model: m.clone(),
+        reason: format!(
+            "aucun modèle {} disponible : le plus capable ({})",
+            need.label(),
+            top.label()
+        ),
+    })
+}
+
+/// The models Orchestra may choose from for `agent`. Vibe without a list of its own on this
+/// computer gives none: the written name would only replace the person's own setting.
+pub fn choosable(agent: Agent) -> Vec<ModelInfo> {
+    let list = available(agent);
+    if agent == Agent::Vibe && list == builtin(agent) {
+        Vec::new()
+    } else {
+        list
+    }
+}
+
 /// A name safe on a command line and in a TOML string: no space, quote or shell sign.
 fn plain(s: &str) -> bool {
     !s.is_empty()
@@ -562,5 +623,51 @@ mod tests {
             estimate_session(&easy, "Migrer la base", false, "", 0).tier,
             Tier::High
         );
+    }
+
+    #[test]
+    fn the_cheapest_able_model_is_chosen_across_ais() {
+        let m = |id: &str| ModelInfo::new(id, id);
+        let claude = (Agent::ClaudeCode, builtin(Agent::ClaudeCode));
+        let gemini = (Agent::Gemini, builtin(Agent::Gemini));
+        let only = |c: &(Agent, Vec<ModelInfo>), t| choose(std::slice::from_ref(c), t).unwrap();
+        // On Claude alone: Haiku for light work, Sonnet for ordinary, Opus for hard.
+        let c = only(&claude, Tier::Light);
+        assert_eq!((c.agent, c.model.id.as_str()), (Agent::ClaudeCode, "haiku"));
+        assert_eq!(only(&claude, Tier::Mid).model.id, "sonnet");
+        assert_eq!(only(&claude, Tier::High).model.id, "opus");
+        assert!(only(&claude, Tier::Mid).reason.contains("intermédiaire"));
+        // Across AIs: Gemini Flash is cheaper than Sonnet for ordinary work.
+        let c = choose(&[claude.clone(), gemini], Tier::Mid).unwrap();
+        assert_eq!(
+            (c.agent, c.model.id.as_str()),
+            (Agent::Gemini, "gemini-2.5-flash")
+        );
+        // A model outside the plan is never chosen; none reaching the tier: the most capable
+        // there is, and the reason says so.
+        let mut large = m("mistral-large-4-0");
+        large.needs_higher_plan = true;
+        let vibe = (
+            Agent::Vibe,
+            vec![m("devstral-small-2"), large, m("mistral-medium-latest")],
+        );
+        let c = only(&vibe, Tier::High);
+        assert_eq!(c.model.id, "mistral-medium-latest");
+        assert!(
+            c.reason.contains("aucun modèle haut de gamme"),
+            "{}",
+            c.reason
+        );
+        // Equal cost: the first AI given wins.
+        let a = (Agent::ClaudeCode, vec![m("x-one")]);
+        let b = (Agent::Codex, vec![m("x-two")]);
+        assert_eq!(
+            choose(&[a.clone(), b.clone()], Tier::Mid).unwrap().agent,
+            Agent::ClaudeCode
+        );
+        assert_eq!(choose(&[b, a], Tier::Mid).unwrap().agent, Agent::Codex);
+        // Nothing to choose from.
+        assert!(choose(&[], Tier::Light).is_none());
+        assert!(choose(&[(Agent::Vibe, Vec::new())], Tier::Light).is_none());
     }
 }
