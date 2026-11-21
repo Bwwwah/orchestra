@@ -1400,7 +1400,7 @@ pub(super) fn project_panel(ui: &mut egui::Ui, cx: &mut Cx) -> Option<super::not
 /// Whether the project page shows the git card, re-detected every few seconds per folder
 /// (a `git init` or new source files show it without reopening the page).
 /// The person's forced choice (code / non-code) wins.
-fn shows_git(ctx: &egui::Context, pr: &Project) -> bool {
+pub(super) fn shows_git(ctx: &egui::Context, pr: &Project) -> bool {
     pr.code.unwrap_or_else(|| detected_code(ctx, &pr.folder))
 }
 

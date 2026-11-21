@@ -469,7 +469,7 @@ impl NotesApp {
             ));
         }
         let code = crate::project::code_kind(&folder, pr.code);
-        let copy = auto::make_copy(&folder, &title, !pr.commit_to_main, code)?;
+        let copy = auto::make_copy(&folder, &title, !on_main(pr), code)?;
         // No git (a project without code, in its own folder): no commit to allow.
         let commits = commits && !copy.branch.is_empty();
         let o = &self.ws.settings.orch;
@@ -1288,7 +1288,7 @@ impl NotesApp {
             .ws
             .page(&project)
             .and_then(|p| p.project.as_ref())
-            .is_some_and(|p| p.commit_to_main);
+            .is_some_and(on_main);
         // On the shared dev branch: the work stays there and the copy goes, so dev can be
         // opened from the Versions card (unless the session starts again by itself).
         let on_dev = rec.branch == auto::DEV && resume_at == 0;
@@ -2627,16 +2627,13 @@ impl NotesApp {
                 )
             })
             .collect();
+        // « sur main » only for code projects: a project without code (school work,
+        // paperwork…) never shows git words, and its sessions never merge into main.
         let mut to_main: HashMap<String, bool> = projects
             .iter()
-            .map(|(id, _, _)| {
-                (
-                    id.clone(),
-                    self.ws
-                        .page(id)
-                        .and_then(|p| p.project.as_ref())
-                        .is_some_and(|x| x.commit_to_main),
-                )
+            .filter_map(|(id, _, _)| {
+                let pr = self.ws.page(id).and_then(|p| p.project.as_ref())?;
+                super::projects::shows_git(ui.ctx(), pr).then(|| (id.clone(), pr.commit_to_main))
             })
             .collect();
         let to_main_before = to_main.clone();
@@ -4367,6 +4364,12 @@ const WEEK_ONE_LINE: f32 = 520.0;
 /// Below this width, a running session's links go under its title.
 const RUN_ONE_LINE: f32 = 460.0;
 
+/// The project's sessions merge into main by themselves: « sur main » ticked, and a code
+/// project (the box isn't shown for one without code, so an old tick there counts for nothing).
+fn on_main(pr: &crate::project::Project) -> bool {
+    pr.commit_to_main && crate::project::code_kind(&pr.folder, pr.code)
+}
+
 /// Below this width, a project's controls in « Lancer une session » go under it.
 const LAUNCH_ONE_LINE: f32 = 620.0;
 
@@ -4611,6 +4614,22 @@ mod tests {
         assert!(!super::endless_on_main(true, false));
         assert!(!super::endless_on_main(false, true));
         assert!(!super::endless_main_warning().is_empty());
+    }
+
+    #[test]
+    fn a_project_without_code_never_merges_into_main() {
+        let mut pr = crate::project::Project {
+            commit_to_main: true,
+            code: Some(true),
+            ..Default::default()
+        };
+        assert!(super::on_main(&pr));
+        // « sur main » ticked before the project was set as without code: it counts for nothing.
+        pr.code = Some(false);
+        assert!(!super::on_main(&pr));
+        pr.code = Some(true);
+        pr.commit_to_main = false;
+        assert!(!super::on_main(&pr));
     }
 
     /// The Orchestration page shows the waiting questions first, then the recent answers;
