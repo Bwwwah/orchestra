@@ -470,8 +470,9 @@ impl NotesApp {
         }
         let code = crate::project::code_kind(&folder, pr.code);
         let copy = auto::make_copy(&folder, &title, !on_main(pr), code)?;
-        // No git (a project without code, in its own folder): no commit to allow.
-        let commits = commits && !copy.branch.is_empty();
+        // A project without code makes no commit (the switch isn't shown for it), and without
+        // git (worked on in its own folder) there is none to make.
+        let commits = commits && code && !copy.branch.is_empty();
         let o = &self.ws.settings.orch;
         let cwd = std::path::Path::new(&copy.worktree);
         agent.write_config(cwd, commits, &o.extra_tools)?;
@@ -4447,9 +4448,13 @@ fn launch_controls(ui: &mut egui::Ui, c: LaunchCx<'_>) {
         }
     }
     ui.add_space(4.0);
-    super::settings::switch(ui, &mut d.commits, lk).on_hover_text(crate::tr!("L'IA peut faire des commits sur sa branche (Orchestra l'envoie sur GitHub après chaque tour).\nGardé pour les prochaines sessions de ce projet.", "The AI may commit on its branch (Orchestra pushes it to GitHub after each turn).\nKept for this project's next sessions."));
-    ui.label(RichText::new("commits").size(12.0).color(t.tertiary));
-    ui.add_space(6.0);
+    // « commits » and « sur main » only for a code project (`to_main` holds only those): one
+    // without code shows no git words, and its sessions make no commit.
+    if to_main.contains_key(id) {
+        super::settings::switch(ui, &mut d.commits, lk).on_hover_text(crate::tr!("L'IA peut faire des commits sur sa branche (Orchestra l'envoie sur GitHub après chaque tour).\nGardé pour les prochaines sessions de ce projet.", "The AI may commit on its branch (Orchestra pushes it to GitHub after each turn).\nKept for this project's next sessions."));
+        ui.label(RichText::new("commits").size(12.0).color(t.tertiary));
+        ui.add_space(6.0);
+    }
     if let Some(m) = to_main.get_mut(id) {
         ui.checkbox(m, RichText::new(crate::tr!("sur main", "on main")).size(12.0).color(t.tertiary)).on_hover_text(crate::tr!(
             "À la fin de chaque session, son travail est fusionné tout seul dans main (seulement si le dossier du projet est sur main ou master)",
@@ -4942,6 +4947,57 @@ mod tests {
             });
             assert!(row <= width + 0.5, "à {width} px : commandes sur {row} px");
         }
+    }
+
+    /// A project without code (absent from `to_main`) gets neither « commits » nor « sur main »:
+    /// its controls come out narrower than a code project's.
+    #[test]
+    fn a_project_without_code_shows_no_git_switches() {
+        let width_of = |code: bool| {
+            let mut w = 0.0;
+            column(2000.0, |ui| {
+                let t = super::tone(false);
+                let lk = super::super::settings::look(false);
+                let id = "p".to_string();
+                let mut d = super::Draft {
+                    mission: String::new(),
+                    limit: 20.0,
+                    commits: true,
+                    pick: false,
+                    endless: false,
+                    end: Default::default(),
+                };
+                let mut to_main: super::HashMap<String, bool> = super::HashMap::new();
+                if code {
+                    to_main.insert(id.clone(), false);
+                }
+                let (mut start, mut confirm) = (vec![], None);
+                let r = ui.horizontal(|ui| {
+                    super::launch_controls(
+                        ui,
+                        super::LaunchCx {
+                            id: &id,
+                            d: &mut d,
+                            busy: false,
+                            plugged: true,
+                            room: 60.0,
+                            global: 60.0,
+                            to_main: &mut to_main,
+                            start: &mut start,
+                            confirm_main: &mut confirm,
+                            budgets: &mut vec![],
+                            lk: &lk,
+                            t: &t,
+                        },
+                    );
+                });
+                w = r.response.rect.width();
+            });
+            w
+        };
+        let (code, nocode) = (width_of(true), width_of(false));
+        // The switch, « commits », the box and « sur main »: well over 100 px.
+        assert!(code - nocode > 100.0, "code {code} px, sans code {nocode} px");
     }
 
     /// The case reported: the 5-hour window already at 75 % when a session starts with a
