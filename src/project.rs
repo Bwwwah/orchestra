@@ -305,6 +305,11 @@ pub struct Project {
     /// kept from one session to the next, and across restarts (None: the default).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub session_limit: Option<f32>,
+    /// Where the next session stops, in absolute % of the 5-hour window, as chosen on the
+    /// Orchestration page (replaces `session_limit`, a share counted from the session's
+    /// start, no longer asked); kept the same way (None: the default).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_ceiling: Option<f32>,
     /// The other launch choices of the Orchestration page (commits, endless and its end
     /// conditions), kept the same way (None: the defaults).
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -355,6 +360,7 @@ impl Project {
         self.folder.clear();
         self.commit_to_main = false;
         self.session_limit = None;
+        self.session_ceiling = None;
         self.launch = None;
         self.sessions.clear();
         self.sessions_cleared = 0;
@@ -377,6 +383,7 @@ impl Project {
                 self.deleted_steps = o.deleted_steps.clone();
                 self.commit_to_main = o.commit_to_main;
                 self.session_limit = o.session_limit;
+                self.session_ceiling = o.session_ceiling;
                 self.launch = o.launch.clone();
                 self.read_only = o.read_only;
                 self.sessions = o.sessions.clone();

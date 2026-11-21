@@ -192,7 +192,9 @@ impl LiveRun {
 #[derive(Clone)]
 struct Draft {
     mission: String,
-    limit: f32,
+    /// Where the next session stops, in absolute % of the 5-hour window, as chosen (None:
+    /// the default, see `ceiling_choice`).
+    ceiling: Option<f32>,
     commits: bool,
     pick: bool,
     /// Endless mode, and its end conditions as set in the launch card.
@@ -202,15 +204,14 @@ struct Draft {
 
 impl Draft {
     /// A project's line in the launch card, with the choices the person last made for it
-    /// (kept in the project), else the settings' defaults: `limit` and `commits`.
-    fn new(pr: Option<&crate::project::Project>, limit: f32, commits: bool) -> Self {
-        let limit = pr.and_then(|x| x.session_limit).unwrap_or(limit);
+    /// (kept in the project), else the settings' defaults (`commits`).
+    fn new(pr: Option<&crate::project::Project>, commits: bool) -> Self {
         let prefs = pr
             .and_then(|x| x.launch.clone())
             .unwrap_or_else(|| default_prefs(commits));
         Draft {
             mission: String::new(),
-            limit,
+            ceiling: pr.and_then(|x| x.session_ceiling),
             commits: prefs.commits,
             pick: false,
             endless: prefs.endless,
@@ -241,19 +242,23 @@ fn default_prefs(commits: bool) -> crate::project::LaunchPrefs {
     }
 }
 
-/// What is left of the global limit for one project of the launch card: the global limit
-/// less the sessions running and the other projects picked (`own`: this project's budget
-/// when it is picked itself, so it doesn't count against itself). Whole percents.
-fn room_for(global: f32, running_sum: f32, picked_sum: f32, own: Option<f32>) -> f32 {
-    let others = running_sum + picked_sum - own.unwrap_or(0.0);
-    (global - others).floor().max(0.0)
+/// The lowest ceiling a session can start with: a whole percent above the 5-hour window's
+/// figure (`five`), never past the global limit.
+fn ceiling_floor(five: Option<f32>, global: f32) -> f32 {
+    (five.unwrap_or(0.0).floor() + 1.0).min(global)
 }
 
-/// The budget a session gets when it starts: the one chosen, within what is left of the
-/// global limit once `taken` by the sessions running; None when less than 1 % is left.
-fn share_at_start(want: f32, global: f32, taken: f32) -> Option<f32> {
-    let left = (global - taken).floor();
-    (left >= 1.0).then(|| want.min(left).max(1.0))
+/// Where a project's next session stops, in absolute % of the 5-hour window: the ceiling
+/// chosen, else the window's figure plus the settings' default share (`default_share`);
+/// between `ceiling_floor` and the global limit, whole percents.
+fn ceiling_choice(chosen: Option<f32>, five: Option<f32>, default_share: f32, global: f32) -> f32 {
+    let want = chosen.unwrap_or_else(|| five.unwrap_or(0.0) + default_share).round();
+    want.clamp(ceiling_floor(five, global), global.max(1.0))
+}
+
+/// Whether a session can start under the global limit: at least 1 % of the window is left.
+fn room_left(five: Option<f32>, global: f32) -> bool {
+    five.is_none_or(|f| global - f >= 1.0)
 }
 
 /// A session's ceiling in absolute % of the 5-hour window: what the window held without it
@@ -409,7 +414,7 @@ impl NotesApp {
         ctx: &egui::Context,
         project: &str,
         mission: &str,
-        limit: f32,
+        ceiling: f32,
         commits: bool,
         endless: Option<crate::model::EndConditions>,
     ) -> Result<(), String> {
@@ -480,14 +485,20 @@ impl NotesApp {
                 self.ws.settings.orch.global_limit
             ));
         }
-        let taken: f32 = self.orch.runs.iter().map(|r| r.limit).sum();
-        if taken + limit > self.ws.settings.orch.global_limit + 0.01 {
+        // The ceiling is absolute (% of the 5-hour window), never past the global limit; one
+        // already reached would stop the session at its first turn.
+        let ceiling = ceiling.min(self.ws.settings.orch.global_limit);
+        if let Some(f) = self.orch.five
+            && f >= ceiling
+        {
             return Err(crate::trf!(
-                "{limit:.0} % pour ce projet dépasserait la limite globale ({:.0} %), dont {taken:.0} % sont déjà pris",
-                "{limit:.0} % for this project would go past the global limit ({:.0} %), {taken:.0} % of which is already taken",
-                self.ws.settings.orch.global_limit
+                "le plafond choisi ({ceiling:.0} %) est déjà atteint : la fenêtre de 5 h est à {f:.0} %",
+                "the ceiling chosen ({ceiling:.0} %) is already reached: the 5-hour window is at {f:.0} %"
             ));
         }
+        // Its share from its start, for the record and as a second guard (the whole ceiling
+        // while the window's figure is unknown).
+        let limit = (ceiling - self.orch.five.unwrap_or(0.0)).max(1.0);
         if let Some(w) = self.orch.week
             && crate::usage::near_reserve(w, self.ws.settings.orch.week_limit, 0.0)
         {
@@ -557,6 +568,7 @@ impl NotesApp {
             commits_allowed: commits,
             mission: mission.clone(),
             limit,
+            ceiling,
             endless: endless.clone(),
             ..Default::default()
         };
@@ -599,7 +611,7 @@ impl NotesApp {
             root: copy.root,
             worktree: copy.worktree,
             limit,
-            ceiling: ceiling_from(self.orch.five, 0.0, limit, self.ws.settings.orch.global_limit),
+            ceiling: Some(ceiling),
             pct: 0.0,
             tokens_counted: 0,
             turns: 0,
@@ -708,8 +720,9 @@ impl NotesApp {
             && self.ais.plugged().contains(&crate::setup::Ai::ClaudeCode)
             && !AUTO_RUN_DONE.swap(true, std::sync::atomic::Ordering::Relaxed)
         {
-            let (l, c) = (self.ws.settings.orch.default_limit, true);
-            if let Err(e) = self.launch_run(ctx, &pid, "", l, c, None) {
+            let o = &self.ws.settings.orch;
+            let l = ceiling_choice(None, self.orch.five, o.default_limit, o.global_limit);
+            if let Err(e) = self.launch_run(ctx, &pid, "", l, true, None) {
                 eprintln!("auto-run : {e}");
             }
         }
@@ -1085,12 +1098,16 @@ impl NotesApp {
                 x.resume_at = 0;
             }
             self.dirty_since.get_or_insert_with(Instant::now);
-            let limit = if rec.limit > 0.0 {
-                rec.limit
+            // The same ceiling as before (the window has reset since); older records without
+            // one: the same share, from the window's figure now.
+            let o = &self.ws.settings.orch;
+            let ceiling = if rec.ceiling > 0.0 {
+                rec.ceiling
             } else {
-                self.ws.settings.orch.default_limit
+                let share = if rec.limit > 0.0 { rec.limit } else { o.default_limit };
+                ceiling_choice(None, self.orch.five, share, o.global_limit)
             };
-            match self.launch_run(ctx, &rec.project, &rec.mission, limit, rec.commits_allowed, rec.endless.clone()) {
+            match self.launch_run(ctx, &rec.project, &rec.mission, ceiling, rec.commits_allowed, rec.endless.clone()) {
                 Ok(()) => self.ws.notify(
                     "info",
                     &rec.project,
@@ -2160,8 +2177,8 @@ impl NotesApp {
                     ui,
                     crate::tr!("Limite globale", "Global limit"),
                     crate::tr!(
-                        "De la fenêtre de 5 h, votre propre usage compris : aucune session ne va au-delà, tous projets confondus. Chaque session a en plus son budget, compté depuis son lancement.",
-                        "Of the 5-hour window, your own use included: no session goes past it, all projects together. Each session also has its budget, counted from its start."
+                        "De la fenêtre de 5 h, votre propre usage compris : aucune session ne va au-delà, tous projets confondus. Chaque session a en plus son propre plafond, choisi au lancement (« arrêt à »).",
+                        "Of the 5-hour window, your own use included: no session goes past it, all projects together. Each session also has its own ceiling, chosen at its start (« stops at »)."
                     ),
                     &mut |ui| {
                         ui.add(
@@ -2399,8 +2416,8 @@ impl NotesApp {
                                         .color(super::projects::BLUE),
                                 )
                                 .on_hover_text(crate::trf!(
-                                    "S'arrête après : {}, ou sur son budget",
-                                    "Stops after: {}, or on its budget",
+                                    "S'arrête après : {}, ou à son plafond",
+                                    "Stops after: {}, or at its ceiling",
                                     c.describe()
                                 ));
                             }
@@ -2701,7 +2718,7 @@ impl NotesApp {
             self.orch
                 .drafts
                 .entry(id.clone())
-                .or_insert_with(|| Draft::new(pr, dl, dc));
+                .or_insert_with(|| Draft::new(pr, dc));
         }
         let prefs_before: HashMap<String, crate::project::LaunchPrefs> = self
             .orch
@@ -2719,15 +2736,10 @@ impl NotesApp {
             })
             .map(|(id, _, _)| id.clone())
             .collect();
-        let picked_sum: f32 = picked
-            .iter()
-            .filter_map(|id| self.orch.drafts.get(id))
-            .map(|d| d.limit)
-            .sum();
         let global = self.ws.settings.orch.global_limit;
-        // Shares add up: the sessions running and the projects picked together never
-        // get more than the global limit.
-        let running_sum: f32 = self.orch.runs.iter().map(|r| r.limit).sum();
+        // Each session stops at its own ceiling on the 5-hour window (absolute), all under the
+        // global limit: nothing to share out between them.
+        let five = self.orch.five;
         let open_steps: HashMap<String, usize> = projects
             .iter()
             .map(|(id, _, _)| {
@@ -2758,7 +2770,7 @@ impl NotesApp {
         let to_main_before = to_main.clone();
         let lk = super::settings::look(ui.visuals().dark_mode);
         let mut confirm_main = self.orch.confirm_main.clone();
-        let mut budgets: Vec<(String, f32)> = vec![];
+        let mut ceilings: Vec<(String, f32)> = vec![];
         let drafts = &mut self.orch.drafts;
         super::projects::card(ui, t, 0.0, |ui| {
             super::projects::card_title(
@@ -2804,7 +2816,6 @@ impl NotesApp {
                 let busy = running.contains(id);
                 let bg = super::projects::hover_begin(ui);
                 let open = open_steps.get(id).copied().unwrap_or(0);
-                let room = room_for(global, running_sum, picked_sum, d.pick.then_some(d.limit));
                 // Room for the project and its controls on one line (about 620 px).
                 let wide = ui.available_width() >= LAUNCH_ONE_LINE;
                 let row = ui.vertical(|ui| {
@@ -2829,7 +2840,7 @@ impl NotesApp {
                         });
                         if wide {
                             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                                launch_controls(ui, LaunchCx { id, d: &mut *d, busy, plugged, open, room, global, to_main: &mut to_main, start: &mut start, confirm_main: &mut confirm_main, budgets: &mut budgets, lk: &lk, t });
+                                launch_controls(ui, LaunchCx { id, d: &mut *d, busy, plugged, open, five, default_share: dl, global, to_main: &mut to_main, start: &mut start, confirm_main: &mut confirm_main, ceilings: &mut ceilings, lk: &lk, t });
                             });
                         }
                     });
@@ -2837,7 +2848,7 @@ impl NotesApp {
                     if !wide {
                         ui.horizontal_wrapped(|ui| {
                             ui.add_space(70.0);
-                            launch_controls(ui, LaunchCx { id, d: &mut *d, busy, plugged, open, room, global, to_main: &mut to_main, start: &mut start, confirm_main: &mut confirm_main, budgets: &mut budgets, lk: &lk, t });
+                            launch_controls(ui, LaunchCx { id, d: &mut *d, busy, plugged, open, five, default_share: dl, global, to_main: &mut to_main, start: &mut start, confirm_main: &mut confirm_main, ceilings: &mut ceilings, lk: &lk, t });
                         });
                     }
                     ui.horizontal(|ui| {
@@ -2849,8 +2860,8 @@ impl NotesApp {
                             ui.add_space(70.0);
                             ui.spacing_mut().item_spacing.x = 6.0;
                             super::settings::switch(ui, &mut d.endless, &lk).on_hover_text(crate::tr!(
-                                "La session ne s'arrête ni au nombre de tours des réglages ni à la fin des étapes : quand il n'y en a plus, l'IA trouve elle-même les suivantes (3 à la fois au plus) et continue. Elle s'arrête seulement sur les conditions choisies ici, ou sur son budget, la limite globale et la réserve de la semaine.\nCe choix et ses conditions sont gardés pour les prochaines sessions de ce projet.",
-                                "The session stops neither at the settings' number of turns nor when the steps run out: then the AI finds the next ones itself (3 at a time at most) and goes on. It only stops on the conditions chosen here, or on its budget, the global limit and the week's reserve.\nThis choice and its conditions are kept for this project's next sessions."
+                                "La session ne s'arrête ni au nombre de tours des réglages ni à la fin des étapes : quand il n'y en a plus, l'IA trouve elle-même les suivantes (3 à la fois au plus) et continue. Elle s'arrête seulement sur les conditions choisies ici, ou à son plafond, la limite globale et la réserve de la semaine.\nCe choix et ses conditions sont gardés pour les prochaines sessions de ce projet.",
+                                "The session stops neither at the settings' number of turns nor when the steps run out: then the AI finds the next ones itself (3 at a time at most) and goes on. It only stops on the conditions chosen here, or at its ceiling, the global limit and the week's reserve.\nThis choice and its conditions are kept for this project's next sessions."
                             ));
                             ui.label(RichText::new(crate::tr!("sans fin", "endless")).size(12.0).color(if d.endless { t.text } else { t.tertiary }));
                             if d.endless {
@@ -2979,8 +2990,8 @@ impl NotesApp {
                         }
                     }
                     let s = crate::i18n::plural(picked.len());
-                    let note = crate::trf!("{} projet{s} en parallèle · {picked_sum:.0} % au total pour une limite globale de {global:.0} %", "{} project{s} in parallel · {picked_sum:.0} % in total for a global limit of {global:.0} %", picked.len());
-                    ui.label(RichText::new(note).size(12.5).color(if picked_sum > global { super::projects::ORANGE } else { t.tertiary }));
+                    let note = crate::trf!("{} projet{s} en parallèle · chacun s'arrête à son plafond, tous sous la limite globale de {global:.0} %", "{} project{s} in parallel · each stops at its ceiling, all under the global limit of {global:.0} %", picked.len());
+                    ui.label(RichText::new(note).size(12.5).color(t.tertiary));
                 });
             }
         });
@@ -2993,10 +3004,10 @@ impl NotesApp {
             }
             self.dirty_since.get_or_insert_with(Instant::now);
         }
-        // A budget chosen by the person stays for the next sessions, and after a restart.
-        for (id, limit) in budgets {
+        // A ceiling chosen by the person stays for the next sessions, and after a restart.
+        for (id, ceiling) in ceilings {
             if let Some(p) = self.ws.page_mut(&id).and_then(|p| p.project.as_mut()) {
-                p.session_limit = Some(limit);
+                p.session_ceiling = Some(ceiling);
                 self.dirty_since.get_or_insert_with(Instant::now);
             }
         }
@@ -3022,18 +3033,10 @@ impl NotesApp {
                 .page(&id)
                 .map(|p| p.display_title())
                 .unwrap_or_default();
-            let taken: f32 = self.orch.runs.iter().map(|r| r.limit).sum();
-            // The global limit already shared out (by the projects started just before, in
-            // a selection): this one doesn't start on a crumb of it.
-            let Some(limit) = share_at_start(d.limit, global, taken) else {
-                msg = Some(super::notices::Notice::Error(crate::trf!(
-                    "{title} : la limite globale ({global:.0} %) est déjà prise par les autres sessions.",
-                    "{title}: the global limit ({global:.0} %) is already taken by the other sessions."
-                )));
-                continue;
-            };
+            let o = &self.ws.settings.orch;
+            let ceiling = ceiling_choice(d.ceiling, self.orch.five, o.default_limit, global);
             let endless = if d.endless { Some(d.end.clone()) } else { None };
-            match self.launch_run(ctx, &id, &d.mission, limit, d.commits, endless) {
+            match self.launch_run(ctx, &id, &d.mission, ceiling, d.commits, endless) {
                 Ok(()) => {
                     if let Some(x) = self.orch.drafts.get_mut(&id) {
                         x.pick = false;
@@ -4008,12 +4011,19 @@ fn share_row(
             crate::i18n::dec1(pct),
             window_bar(w, pct, limit, ceiling, global).stop
         ),
-        None => crate::trf!(
-            "{} % utilisés sur un budget de {:.0} %",
-            "{} % used of a {:.0} % budget",
-            crate::i18n::dec1(pct),
-            limit
-        ),
+        None => match ceiling {
+            Some(c) => crate::trf!(
+                "{} % utilisés · arrêt à {c:.0} % de la fenêtre de 5 h",
+                "{} % used · stops at {c:.0} % of the 5-hour window",
+                crate::i18n::dec1(pct)
+            ),
+            None => crate::trf!(
+                "{} % utilisés sur {:.0} %",
+                "{} % used of {:.0} %",
+                crate::i18n::dec1(pct),
+                limit
+            ),
+        },
     };
     let font = FontId::proportional(12.5);
     let text_w = ui
@@ -4084,8 +4094,8 @@ fn share_row(
     };
     let label = |ui: &mut egui::Ui| {
         ui.add(egui::Label::new(RichText::new(text.as_str()).font(font.clone()).color(t.secondary)).wrap()).on_hover_text(crate::tr!(
-            "La barre est la fenêtre de 5 h de l'abonnement : en gris ce qui était utilisé avant cette session (ou par d'autres), en vert ce qu'elle a utilisé depuis son lancement. Le trait orange : où elle s'arrête, en % de la fenêtre : ce qui était utilisé à son lancement plus son budget (ex. 37 % + 13 % → 50 %), ou la limite globale si elle vient avant. Les sessions précédentes du projet ne comptent pas dans son budget.",
-            "The bar is the subscription's 5-hour window: in grey what was used before this session (or by others), in green what it used since it started. The orange tick: where it stops, in % of the window: what was used when it started plus its budget (e.g. 37 % + 13 % → 50 %), or the global limit if that comes first. The project's earlier sessions don't count in its budget."
+            "La barre est la fenêtre de 5 h de l'abonnement : en gris ce qui était utilisé avant cette session (ou par d'autres), en vert ce qu'elle a utilisé depuis son lancement. Le trait orange : où elle s'arrête, le plafond choisi à son lancement en % de la fenêtre (ex. 37 % utilisés et un plafond de 50 % : elle peut en prendre 13), ou la limite globale si elle vient avant.",
+            "The bar is the subscription's 5-hour window: in grey what was used before this session (or by others), in green what it used since it started. The orange tick: where it stops, the ceiling chosen at its start in % of the window (e.g. 37 % used and a ceiling of 50 %: it may take 13), or the global limit if that comes first."
         ));
     };
     ui.horizontal(|ui| {
@@ -4556,9 +4566,9 @@ fn end_conditions(ui: &mut egui::Ui, c: &mut crate::model::EndConditions, t: &To
         "Ticked: the session stops once the steps are done. Unticked: the AI creates the next steps itself and goes on."
     ));
     if c.hours.is_none() && c.steps.is_none() && c.turns.is_none() && !c.when_done {
-        ui.label(RichText::new(crate::tr!("(budget seulement)", "(budget only)")).size(12.0).color(super::projects::ORANGE)).on_hover_text(crate::tr!(
-            "Sans condition, la session tourne jusqu'à son budget, la limite globale ou la réserve de la semaine (ou deux tours de suite sans rien à faire).",
-            "With no condition, the session runs until its budget, the global limit or the week's reserve (or two turns in a row with nothing to do)."
+        ui.label(RichText::new(crate::tr!("(plafond seulement)", "(ceiling only)")).size(12.0).color(super::projects::ORANGE)).on_hover_text(crate::tr!(
+            "Sans condition, la session tourne jusqu'à son plafond, la limite globale ou la réserve de la semaine (ou deux tours de suite sans rien à faire).",
+            "With no condition, the session runs until its ceiling, the global limit or the week's reserve (or two turns in a row with nothing to do)."
         ));
     }
 }
@@ -4647,14 +4657,15 @@ struct LaunchCx<'a> {
     plugged: bool,
     /// Its open steps: none (and not endless), nothing to start on.
     open: usize,
-    /// What is left of the global limit for this project.
-    room: f32,
+    /// The 5-hour window's figure, and the settings' default share above it.
+    five: Option<f32>,
+    default_share: f32,
     global: f32,
     to_main: &'a mut HashMap<String, bool>,
     start: &'a mut Vec<String>,
     confirm_main: &'a mut Option<String>,
-    /// Budgets the person has just changed, to keep in their projects.
-    budgets: &'a mut Vec<(String, f32)>,
+    /// Ceilings the person has just changed, to keep in their projects.
+    ceilings: &'a mut Vec<(String, f32)>,
     lk: &'a super::settings::Look,
     t: &'a Tone,
 }
@@ -4668,15 +4679,17 @@ fn launch_controls(ui: &mut egui::Ui, c: LaunchCx<'_>) {
         busy,
         plugged,
         open,
-        room,
+        five,
+        default_share,
         global,
         to_main,
         start,
         confirm_main,
-        budgets,
+        ceilings,
         lk,
         t,
     } = c;
+    let room = room_left(five, global);
     if busy {
         // A pill where the other rows have « Lancer », so the controls stay in line.
         let text = crate::tr!("En cours", "Running");
@@ -4707,10 +4720,10 @@ fn launch_controls(ui: &mut egui::Ui, c: LaunchCx<'_>) {
             "Aucune étape ouverte : la session s'arrêterait tout de suite. Ajoutez des étapes au projet, ou activez « sans fin » pour que l'IA trouve elle-même les suivantes.",
             "No open step: the session would stop at once. Add steps to the project, or turn on « endless » so the AI finds the next ones itself."
         ));
-    } else if room < 1.0 {
+    } else if !room {
         start_button(ui, false, t).on_disabled_hover_text(crate::trf!(
-            "La limite globale ({global:.0} %) est déjà répartie entre les autres projets",
-            "The global limit ({global:.0} %) is already shared among the other projects"
+            "La fenêtre de 5 h a atteint la limite globale ({global:.0} %) : attendez qu'elle reparte à zéro",
+            "The 5-hour window has reached the global limit ({global:.0} %): wait for it to reset"
         ));
     } else if start_button(ui, true, t).clicked() {
         // Endless on main: the warning first, the start once confirmed.
@@ -4735,33 +4748,39 @@ fn launch_controls(ui: &mut egui::Ui, c: LaunchCx<'_>) {
         ));
         ui.add_space(6.0);
     }
-    // The budget chosen stays as it is: it is only shown capped to the room left (and
-    // capped again at the start), so a session running elsewhere never shrinks it for good.
-    let mut shown = if busy {
-        d.limit
-    } else {
-        d.limit.clamp(1.0, room.max(1.0))
+    // The ceiling chosen stays as it is: it is only shown raised above the window's figure
+    // (and again at the start), so a window that rose meanwhile never changes it for good.
+    let floor = ceiling_floor(five, global);
+    let mut shown = ceiling_choice(d.ceiling, five, default_share, global);
+    // Read « arrêt à 50 % » whichever way the controls are laid out.
+    let rtl = ui.layout().prefer_right_to_left();
+    let label = |ui: &mut egui::Ui| {
+        ui.label(RichText::new(crate::tr!("arrêt à", "stops at")).size(12.0).color(t.tertiary));
     };
+    if !rtl {
+        label(ui);
+    }
     let dv = ui.add_enabled(
-        !busy && room >= 1.0,
+        !busy && room,
         egui::DragValue::new(&mut shown)
-            .range(1.0..=room.max(1.0))
+            .range(floor..=global.max(floor))
             .speed(0.5)
             .suffix(" %"),
     );
     if dv.changed() {
-        d.limit = shown;
-        budgets.push((id.clone(), shown));
+        d.ceiling = Some(shown);
+        ceilings.push((id.clone(), shown));
     }
+    let now = five
+        .map(|f| crate::trf!("La fenêtre est à {f:.0} % : ", "The window is at {f:.0} %: "))
+        .unwrap_or_default();
     dv.on_hover_text(crate::trf!(
-        "Budget de la prochaine session de ce projet : elle s'arrête après avoir utilisé cette part de la fenêtre de 5 h de l'abonnement, comptée depuis son lancement. Chaque session a son propre budget : en relancer une repart de zéro. Le budget choisi est gardé pour les prochaines sessions de ce projet, même après un redémarrage.\n{room:.0} % au plus ici, le reste de la limite globale ({global:.0} %) étant pris par les autres.",
-        "Budget of this project's next session: it stops after using this share of the subscription's 5-hour window, counted from its start. Each session has its own budget: starting another one begins again from zero. The budget chosen is kept for this project's next sessions, even after a restart.\n{room:.0} % at most here, the rest of the global limit ({global:.0} %) being taken by the others."
+        "Plafond de la prochaine session de ce projet, en % de la fenêtre de 5 h de l'abonnement, votre propre usage compris : elle s'arrête quand la fenêtre l'atteint (ex. 37 % utilisés et un plafond de 50 % : elle peut en prendre 13). {now}de {floor:.0} à {global:.0} % (la limite globale). Le plafond choisi est gardé pour les prochaines sessions de ce projet, même après un redémarrage.",
+        "Ceiling of this project's next session, in % of the subscription's 5-hour window, your own use included: it stops when the window reaches it (e.g. 37 % used and a ceiling of 50 %: it may take 13). {now}from {floor:.0} to {global:.0} % (the global limit). The ceiling chosen is kept for this project's next sessions, even after a restart."
     ));
-    ui.label(
-        RichText::new(crate::tr!("budget par session", "budget per session"))
-            .size(12.0)
-            .color(t.tertiary),
-    );
+    if rtl {
+        label(ui);
+    }
 }
 
 fn start_button(ui: &mut egui::Ui, enabled: bool, t: &Tone) -> egui::Response {
@@ -4816,16 +4835,17 @@ mod tests {
         use super::{Draft, default_prefs};
         use crate::model::EndConditions;
         use crate::project::{LaunchPrefs, Project};
-        // Never set: the settings' budget and commits, not endless, 4 h when switched on.
-        let d = Draft::new(None, 20.0, true);
+        // Never set: the default ceiling and the settings' commits, not endless, 4 h when
+        // switched on.
+        let d = Draft::new(None, true);
         assert_eq!(
-            (d.limit, d.commits, d.endless, d.pick),
-            (20.0, true, false, false)
+            (d.ceiling, d.commits, d.endless, d.pick),
+            (None, true, false, false)
         );
         assert_eq!(d.end.hours, Some(4.0));
         assert_eq!(d.prefs(), default_prefs(true));
         let fresh = Project::default();
-        assert_eq!(Draft::new(Some(&fresh), 30.0, false).limit, 30.0);
+        assert_eq!(Draft::new(Some(&fresh), false).ceiling, None);
         // Set before: 95 %, no commits, endless for 6 h or 12 turns.
         let kept = LaunchPrefs {
             commits: false,
@@ -4837,53 +4857,49 @@ mod tests {
             },
         };
         let p = Project {
-            session_limit: Some(95.0),
+            session_ceiling: Some(95.0),
             launch: Some(kept.clone()),
             ..Default::default()
         };
-        let d = Draft::new(Some(&p), 20.0, true);
-        assert_eq!((d.limit, d.commits, d.endless), (95.0, false, true));
+        let d = Draft::new(Some(&p), true);
+        assert_eq!((d.ceiling, d.commits, d.endless), (Some(95.0), false, true));
         assert!(d.mission.is_empty());
         assert_eq!(d.prefs(), kept);
-        // Only the budget kept: the rest from the settings.
+        // Only the ceiling kept: the rest from the settings. The old relative budget isn't
+        // taken for a ceiling (20 % of budget isn't « stop at 20 % »).
         let p = Project {
-            session_limit: Some(50.0),
+            session_ceiling: Some(50.0),
+            session_limit: Some(20.0),
             ..Default::default()
         };
-        let d = Draft::new(Some(&p), 20.0, true);
-        assert_eq!((d.limit, d.commits, d.endless), (50.0, true, false));
+        let d = Draft::new(Some(&p), true);
+        assert_eq!((d.ceiling, d.commits, d.endless), (Some(50.0), true, false));
+        let old = Project { session_limit: Some(20.0), ..Default::default() };
+        assert_eq!(Draft::new(Some(&old), true).ceiling, None);
     }
 
-    /// The global limit shared in the launch card: what each project may take.
+    /// Only an absolute ceiling is asked at the start: the one chosen, else the window's
+    /// figure plus the settings' default share; always above the window, never past the
+    /// global limit.
     #[test]
-    fn the_global_limit_is_shared() {
-        use super::{room_for, share_at_start};
-        // Nothing running nor picked: all of it.
-        assert_eq!(room_for(90.0, 0.0, 0.0, None), 90.0);
-        // A session running at 30 %: 60 left, whole percents only.
-        assert_eq!(room_for(90.0, 30.0, 0.0, None), 60.0);
-        assert_eq!(room_for(90.0, 30.5, 0.0, None), 59.0);
-        // Two projects picked, 20 and 25: one not picked sees 45 left; a picked one
-        // doesn't count against itself.
-        assert_eq!(room_for(90.0, 0.0, 45.0, None), 45.0);
-        assert_eq!(room_for(90.0, 0.0, 45.0, Some(20.0)), 65.0);
-        // Over-subscribed: never below zero.
-        assert_eq!(room_for(90.0, 60.0, 95.0, None), 0.0);
-
-        // At the start: the budget chosen when it fits…
-        assert_eq!(share_at_start(20.0, 90.0, 0.0), Some(20.0));
-        // …cut to what is left when it doesn't…
-        assert_eq!(share_at_start(95.0, 95.0, 20.0), Some(75.0));
-        // …at least 1 %…
-        assert_eq!(share_at_start(0.0, 90.0, 0.0), Some(1.0));
-        // …and no start at all when less than 1 % is left.
-        assert_eq!(share_at_start(20.0, 90.0, 89.5), None);
-        assert_eq!(share_at_start(20.0, 90.0, 90.0), None);
-        // A selection of two at 95 % with a global limit of 95 %: the first takes it all,
-        // the second doesn't start on a crumb.
-        let first = share_at_start(95.0, 95.0, 0.0).unwrap();
-        assert_eq!(first, 95.0);
-        assert_eq!(share_at_start(95.0, 95.0, first), None);
+    fn a_session_starts_with_an_absolute_ceiling() {
+        use super::{ceiling_choice, ceiling_floor, room_left};
+        // 37 % used, « stop at 50 % » chosen: 50.
+        assert_eq!(ceiling_choice(Some(50.0), Some(37.0), 20.0, 90.0), 50.0);
+        // Nothing chosen: 37 + 20 = 57; window unknown: 20.
+        assert_eq!(ceiling_choice(None, Some(37.0), 20.0, 90.0), 57.0);
+        assert_eq!(ceiling_choice(None, None, 20.0, 90.0), 20.0);
+        // Never past the global limit…
+        assert_eq!(ceiling_choice(Some(99.0), Some(37.0), 20.0, 90.0), 90.0);
+        assert_eq!(ceiling_choice(None, Some(80.0), 20.0, 90.0), 90.0);
+        // …and always above the window (a ceiling already reached would stop it at once).
+        assert_eq!(ceiling_floor(Some(37.4), 90.0), 38.0);
+        assert_eq!(ceiling_choice(Some(30.0), Some(37.4), 20.0, 90.0), 38.0);
+        assert_eq!(ceiling_floor(None, 90.0), 1.0);
+        // No start once the window is at the global limit (less than 1 % left).
+        assert!(room_left(Some(89.0), 90.0));
+        assert!(!room_left(Some(89.5), 90.0));
+        assert!(room_left(None, 90.0));
     }
 
     #[test]
@@ -5185,7 +5201,7 @@ mod tests {
                 let id = "p".to_string();
                 let mut d = super::Draft {
                     mission: String::new(),
-                    limit: 20.0,
+                    ceiling: Some(50.0),
                     commits: true,
                     pick: false,
                     endless: false,
@@ -5205,12 +5221,13 @@ mod tests {
                                 busy: false,
                                 plugged: true,
                                 open: 3,
-                                room: 60.0,
+                                five: Some(37.0),
+                                default_share: 20.0,
                                 global: 60.0,
                                 to_main: &mut to_main,
                                 start: &mut start,
                                 confirm_main: &mut confirm,
-                                budgets: &mut vec![],
+                                ceilings: &mut vec![],
                                 lk: &lk,
                                 t: &t,
                             },
@@ -5253,7 +5270,7 @@ mod tests {
                 let id = "p".to_string();
                 let mut d = super::Draft {
                     mission: String::new(),
-                    limit: 20.0,
+                    ceiling: Some(50.0),
                     commits: true,
                     pick: false,
                     endless: false,
@@ -5273,12 +5290,13 @@ mod tests {
                             busy: false,
                             plugged: true,
                             open: 3,
-                            room: 60.0,
+                            five: Some(37.0),
+                            default_share: 20.0,
                             global: 60.0,
                             to_main: &mut to_main,
                             start: &mut start,
                             confirm_main: &mut confirm,
-                            budgets: &mut vec![],
+                            ceilings: &mut vec![],
                             lk: &lk,
                             t: &t,
                         },
