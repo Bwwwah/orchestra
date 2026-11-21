@@ -269,6 +269,143 @@ fn vibe_config_models(text: &str) -> Vec<ModelInfo> {
     out
 }
 
+/// How hard a step looks before its session starts: the tier of model it needs, and why
+/// (shown to the person with the choice).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Difficulty {
+    pub tier: Tier,
+    /// Short French reason: the word that decided, or « étape ordinaire ».
+    pub reason: String,
+}
+
+/// Word stems of hard work: design, wide changes, tricky bugs, security, concurrency.
+const HARD: &[&str] = &[
+    "architectur",
+    "concevoir",
+    "conception",
+    "refonte",
+    "refactor",
+    "réécri",
+    "migr",
+    "sécurit",
+    "securit",
+    "cve",
+    "vulnérab",
+    "chiffr",
+    "crypt",
+    "synchronis",
+    "concurren",
+    "parallél",
+    "thread",
+    "race",
+    "intermitten",
+    "plantage",
+    "crash",
+    "fuite",
+    "leak",
+    "deadlock",
+    "performance",
+    "optimis",
+    "algorithm",
+    "protocole",
+    "design",
+];
+
+/// Word stems of short, well-framed work: commit messages, versions, wording, docs.
+const EASY: &[&str] = &[
+    "commit",
+    "version",
+    "changelog",
+    "renomm",
+    "rename",
+    "typo",
+    "faute",
+    "orthograph",
+    "tradu",
+    "translat",
+    "libellé",
+    "wording",
+    "readme",
+    "documentation",
+    "doc",
+    "commentaire",
+    "infobulle",
+    "tooltip",
+    "icône",
+    "couleur",
+];
+
+/// Estimate how hard a session's work is, before it starts, from the text it is given: the
+/// title of the step it will take (and the mission when the person wrote one). A word of hard
+/// work makes it high-end, a word of short work light (unless the text is long: several
+/// things to do), anything else intermediate. A hard word wins over a light one.
+pub fn estimate(text: &str) -> Difficulty {
+    let lower = text.to_lowercase();
+    let words: Vec<&str> = lower
+        .split(|c: char| !c.is_alphanumeric())
+        .filter(|w| !w.is_empty())
+        .collect();
+    let found = |stems: &[&str]| {
+        words
+            .iter()
+            .find(|w| stems.iter().any(|s| w.starts_with(s)))
+            .map(|w| w.to_string())
+    };
+    if let Some(w) = found(HARD) {
+        return Difficulty {
+            tier: Tier::High,
+            reason: format!("travail délicat (« {w} »)"),
+        };
+    }
+    // Long text: several things, or a detailed request: never trusted to a light model.
+    let long = words.len() > 30;
+    if let Some(w) = found(EASY).filter(|_| !long) {
+        return Difficulty {
+            tier: Tier::Light,
+            reason: format!("travail court (« {w} »)"),
+        };
+    }
+    Difficulty {
+        tier: Tier::Mid,
+        reason: if long {
+            "demande longue".into()
+        } else {
+            "étape ordinaire".into()
+        },
+    }
+}
+
+/// The difficulty of the session about to start on `pr`: a fix of the CVE watch is high-end;
+/// else the mission the person wrote, if any, and the step the AI will take first (the one in
+/// progress, else the first to do, skipping those another computer's AI holds). Without
+/// either, intermediate.
+pub fn estimate_session(
+    pr: &crate::project::Project,
+    mission: &str,
+    fix: bool,
+    me: &str,
+    now: u64,
+) -> Difficulty {
+    if fix {
+        return Difficulty {
+            tier: Tier::High,
+            reason: "correctif de sécurité".into(),
+        };
+    }
+    let step = pr
+        .next_step_for(me, now)
+        .map(|s| s.title.as_str())
+        .unwrap_or("");
+    let text = format!("{} {step}", mission.trim());
+    if text.trim().is_empty() {
+        return Difficulty {
+            tier: Tier::Mid,
+            reason: "aucune étape ouverte".into(),
+        };
+    }
+    estimate(&text)
+}
+
 /// A name safe on a command line and in a TOML string: no space, quote or shell sign.
 fn plain(s: &str) -> bool {
     !s.is_empty()
@@ -368,5 +505,62 @@ mod tests {
         }
         assert_eq!(Tier::High.label(), "haut de gamme");
         assert!(Tier::Light < Tier::Mid && Tier::Mid < Tier::High);
+    }
+
+    #[test]
+    fn a_step_is_estimated_from_its_words() {
+        let t = |s: &str| estimate(s).tier;
+        assert_eq!(t("Sync : corriger une fuite de mémoire"), Tier::High);
+        assert_eq!(t("Refonte de la synchronisation des pages"), Tier::High);
+        assert_eq!(
+            t("Barre latérale : le % disparaît de façon intermittente"),
+            Tier::High
+        );
+        assert_eq!(t("Écrire le message de commit"), Tier::Light);
+        assert_eq!(t("Préparer la prochaine version"), Tier::Light);
+        assert_eq!(t("Ajouter une infobulle sur le bouton"), Tier::Light);
+        assert_eq!(
+            t("Paramètres : ajouter un bouton pour relancer le tuto"),
+            Tier::Mid
+        );
+        // A hard word wins over a light one.
+        assert_eq!(t("Corriger la faute du plantage au démarrage"), Tier::High);
+        // A long request is never light.
+        let long = format!(
+            "Mettre à jour la documentation {}",
+            "et encore ceci ".repeat(12)
+        );
+        assert_eq!(estimate(&long).tier, Tier::Mid);
+        assert_eq!(estimate(&long).reason, "demande longue");
+        // Accents and case don't matter; the reason names the word.
+        let d = estimate("SÉCURITÉ : vérifier les droits");
+        assert_eq!(d.tier, Tier::High);
+        assert!(d.reason.contains("sécurité"), "{}", d.reason);
+        // Stems only match the start of a word: « race » inside « tracer » doesn't count,
+        // nor does « comment » (how) mean a code comment.
+        assert_eq!(t("Tracer la courbe"), Tier::Mid);
+        assert_eq!(t("Comment activer la veille ?"), Tier::Mid);
+    }
+
+    #[test]
+    fn a_session_is_estimated_from_its_next_step() {
+        let mut pr = crate::project::Project::new("/tmp/x");
+        assert_eq!(estimate_session(&pr, "", false, "", 0).tier, Tier::Mid);
+        let a = pr.add_step("Corriger la typo du titre", "moi");
+        pr.add_step("Refonte du moteur de synchronisation", "moi");
+        assert_eq!(estimate_session(&pr, "", false, "", 0).tier, Tier::Light);
+        // The first step done: the next one decides.
+        pr.set_step_status(&a, crate::project::StepStatus::Done);
+        assert_eq!(estimate_session(&pr, "", false, "", 0).tier, Tier::High);
+        // A fix of the CVE watch is always high-end.
+        let mut easy = crate::project::Project::new("/tmp/y");
+        easy.add_step("Corriger la typo", "moi");
+        let d = estimate_session(&easy, "", true, "", 0);
+        assert_eq!(d.tier, Tier::High);
+        // The person's mission counts too.
+        assert_eq!(
+            estimate_session(&easy, "Migrer la base", false, "", 0).tier,
+            Tier::High
+        );
     }
 }

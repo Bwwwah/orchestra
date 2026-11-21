@@ -845,6 +845,14 @@ impl NotesApp {
             .collect();
         let steps_at_turn: Vec<String> = steps_at_start.iter().map(|(id, _)| id.clone()).collect();
         let code = crate::project::code_kind(&folder, pr.code);
+        // Estimated before anything starts, from the step the AI will take first.
+        let difficulty = crate::catalog::estimate_session(
+            pr,
+            mission,
+            fix,
+            &crate::store::computer_id(),
+            crate::model::now_ms(),
+        );
         let copy = if fix {
             auto::make_copy(&folder, &format!("fix {title}"), false, code)?
         } else {
@@ -900,6 +908,7 @@ impl NotesApp {
             ceiling,
             endless: endless.clone(),
             model: auto::model_arg(model).unwrap_or_default().to_string(),
+            difficulty: format!("{} · {}", difficulty.tier.label(), difficulty.reason),
             ..Default::default()
         };
         // A new session replaces any planned restart of this project.

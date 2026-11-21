@@ -693,6 +693,10 @@ pub struct RunRecord {
     /// session again with the same one.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub model: String,
+    /// How hard the work looked before the session started (`catalog::estimate_session`):
+    /// the tier label and its reason, e.g. « léger · travail court (« commit ») ».
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub difficulty: String,
 }
 
 /// Days of reports kept as they are in "Rapports des IA"; the older ones are too many.
