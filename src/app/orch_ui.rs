@@ -4523,7 +4523,9 @@ pub(super) fn question_list(
         );
         job.wrap.max_width = ui.available_width();
         job.wrap.max_rows = 3;
-        ui.label(ui.fonts_mut(|f| f.layout_job(job)));
+        // Selectable, to copy it (the app's other labels are not: a click acts on them).
+        let galley = ui.fonts_mut(|f| f.layout_job(job));
+        ui.add(egui::Label::new(galley).selectable(true));
         ui.add_space(4.0);
         if let Some(text) = answer_box(ui, m, accent, t) {
             out = Some((m.id.clone(), text));

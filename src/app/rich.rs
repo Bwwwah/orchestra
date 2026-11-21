@@ -130,11 +130,14 @@ pub(super) fn inline_job(
 }
 
 /// A wrapped paragraph that uses exactly the width left on the line.
+/// A paragraph of read text. Selectable with the mouse (drag over it, then ⌘C / Ctrl+C), unlike
+/// the app's other labels, which a click acts on: every text shown here (state of play,
+/// outside view, answers, discussions, release notes) is meant to be read and copied.
 fn wrapped(ui: &mut egui::Ui, job: egui::text::LayoutJob) {
     let w = ui.available_width().max(40.0);
     ui.vertical(|ui| {
         ui.set_max_width(w);
-        ui.add(egui::Label::new(job).wrap());
+        ui.add(egui::Label::new(job).wrap().selectable(true));
     });
 }
 
@@ -276,7 +279,8 @@ pub(super) fn markdown(ui: &mut egui::Ui, md: &str, size: f32, t: &Tone) {
                                             .font(FontId::monospace(size * 0.85))
                                             .color(t.text),
                                     )
-                                    .extend(),
+                                    .extend()
+                                    .selectable(true),
                                 );
                             });
                     });
@@ -308,7 +312,8 @@ pub(super) fn markdown(ui: &mut egui::Ui, md: &str, size: f32, t: &Tone) {
                                                 r == 0,
                                                 t,
                                             ))
-                                            .wrap(),
+                                            .wrap()
+                                            .selectable(true),
                                         );
                                     }
                                     ui.end_row();
@@ -331,6 +336,58 @@ pub(super) fn markdown(ui: &mut egui::Ui, md: &str, size: f32, t: &Tone) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The text of a box (state of play, answer…) can be selected with the mouse and copied:
+    /// a drag over it, then Copy, gives the words dragged over.
+    #[test]
+    fn a_box_text_can_be_selected_and_copied() {
+        use egui_kittest::Harness;
+        use egui_kittest::kittest::Queryable;
+        let t = super::super::tone(false);
+        let mut h = Harness::builder().with_size([500.0, 200.0]).build_ui(move |ui| {
+            markdown(ui, "Bonjour tout le monde", 14.0, &t);
+        });
+        h.run();
+        let r = h.get_by_label("Bonjour tout le monde").rect();
+        let (from, to) = (
+            egui::pos2(r.left() + 1.0, (r.top() + r.bottom()) / 2.0),
+            egui::pos2(r.right() - 1.0, (r.top() + r.bottom()) / 2.0),
+        );
+        h.event(egui::Event::PointerMoved(from));
+        h.event(egui::Event::PointerButton {
+            pos: from,
+            button: egui::PointerButton::Primary,
+            pressed: true,
+            modifiers: Default::default(),
+        });
+        h.run();
+        h.event(egui::Event::PointerMoved(to));
+        h.run();
+        h.event(egui::Event::PointerButton {
+            pos: to,
+            button: egui::PointerButton::Primary,
+            pressed: false,
+            modifiers: Default::default(),
+        });
+        h.run();
+        h.event(egui::Event::Copy);
+        // One frame: the copy is in that frame's output.
+        h.step();
+        let copied: Vec<String> = h
+            .output()
+            .platform_output
+            .commands
+            .iter()
+            .filter_map(|c| match c {
+                egui::OutputCommand::CopyText(s) => Some(s.clone()),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            copied.iter().any(|s| s.contains("tout le")),
+            "{copied:?}"
+        );
+    }
 
     fn show(text: &str) -> String {
         runs(text)
