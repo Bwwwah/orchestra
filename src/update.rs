@@ -182,6 +182,20 @@ fn install_to(target: &Path, repo: &str, rel: &Release) -> Result<PathBuf, Strin
         }
     })
     .ok_or(crate::tr!("le fichier téléchargé ne contient pas l'app", "the downloaded file doesn't contain the app"))?;
+    // Signature: once the installed app is signed with a Developer ID, the new one must be
+    // validly signed by the same Apple team (docs/permissions-macos.md).
+    if cfg!(target_os = "macos") {
+        let current = signing_team(&target);
+        let got = if current.is_some() { verified_team(&new) } else { None };
+        if !signature_allows(current.as_deref(), got.as_deref()) {
+            let _ = std::fs::remove_dir_all(&tmp);
+            return Err(crate::tr!(
+                "la nouvelle version n'est pas signée par le même développeur Apple que l'app installée : mise à jour refusée",
+                "the new version isn't signed by the same Apple developer as the installed app: update refused"
+            )
+            .to_string());
+        }
+    }
     // Swap: the old one is renamed first (a running program can be renamed everywhere).
     let old = target.with_file_name(format!("{}.ancienne", target.file_name().unwrap().to_string_lossy()));
     if old.exists() {
@@ -258,6 +272,37 @@ fn sha256_file(path: &Path) -> Result<String, String> {
         h.update(&buf[..n]);
     }
     Ok(h.finalize().iter().map(|b| format!("{b:02x}")).collect())
+}
+
+/// The Apple team that signed `app` (codesign's TeamIdentifier), None when ad hoc or unsigned.
+fn signing_team(app: &Path) -> Option<String> {
+    let o = crate::proc::command("/usr/bin/codesign").arg("-dv").arg(app).stdin(Stdio::null()).output().ok()?;
+    if !o.status.success() {
+        return None;
+    }
+    // codesign -d writes its details on stderr.
+    team_id(&String::from_utf8_lossy(&o.stderr))
+}
+
+/// The signing team of `app`, only when its signature is valid for the whole bundle.
+fn verified_team(app: &Path) -> Option<String> {
+    let ok = crate::proc::command("/usr/bin/codesign").args(["--verify", "--deep", "--strict"]).arg(app).stdin(Stdio::null()).output().ok()?.status.success();
+    if ok { signing_team(app) } else { None }
+}
+
+/// "TeamIdentifier=ABCDE12345" in codesign -dv's output; None for "not set" or missing.
+fn team_id(text: &str) -> Option<String> {
+    let v = text.lines().find_map(|l| l.trim().strip_prefix("TeamIdentifier="))?.trim();
+    (!v.is_empty() && v.bytes().all(|b| b.is_ascii_alphanumeric())).then(|| v.to_string())
+}
+
+/// An installed app without a team (ad hoc) accepts any new version, so the first one signed
+/// with a Developer ID can come in; after that, only the same team.
+fn signature_allows(current: Option<&str>, new: Option<&str>) -> bool {
+    match current {
+        None => true,
+        Some(c) => new == Some(c),
+    }
 }
 
 fn find(dir: &Path, ok: impl Fn(&Path) -> bool + Copy) -> Option<PathBuf> {
@@ -345,6 +390,24 @@ mod tests {
         let e = install_to(&dir.join("orchestra"), "moi/orchestra", &r).unwrap_err();
         assert!(e.contains("invalid") || e.contains("invalide"), "{e}");
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn signing_team_rules() {
+        let out = "Executable=/A/Orchestra.app/Contents/MacOS/orchestra\nIdentifier=app.orchestra.desktop\nTeamIdentifier=ABCDE12345\nSealed Resources version=2\n";
+        assert_eq!(team_id(out).as_deref(), Some("ABCDE12345"));
+        assert_eq!(team_id("Identifier=app.orchestra.desktop\nTeamIdentifier=not set\n"), None);
+        assert_eq!(team_id("Signature=adhoc\n"), None);
+        assert_eq!(team_id("TeamIdentifier=\n"), None);
+        // Ad hoc installed: anything goes, so the first Developer ID version can come in.
+        assert!(signature_allows(None, None));
+        assert!(signature_allows(None, Some("ABCDE12345")));
+        // Developer ID installed: only the same team, validly signed.
+        assert!(signature_allows(Some("ABCDE12345"), Some("ABCDE12345")));
+        assert!(!signature_allows(Some("ABCDE12345"), Some("ZZZZZ99999")));
+        assert!(!signature_allows(Some("ABCDE12345"), None));
+        // A folder that isn't a signed app has no team.
+        assert_eq!(signing_team(&std::env::temp_dir()), None);
     }
 
     #[test]

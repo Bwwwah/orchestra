@@ -262,10 +262,13 @@ back.
 
 * Built with `sh packaging/build-macos.sh` into `dist/Notes-libres-<version>-macOS.zip`.
 * One universal program (Apple chip and Intel) inside "Notes libres.app", with Info.plist
-  (macOS 11+, the local-network message for live collaboration), its own icon, an ad-hoc
-  signature, and LISEZMOI.txt (how to open it the first time, how to work together).
-* It isn't notarised by Apple, so the first launch needs « Ouvrir quand même » in Réglages
-  Système → Confidentialité et sécurité, as LISEZMOI explains.
+  (macOS 11+, the local-network message for live collaboration), its own icon, a signature
+  (packaging/sign-macos.sh), and LISEZMOI.txt (how to open it the first time, how to work together).
+* With a Developer ID certificate and the Apple secrets (docs/permissions-macos.md) it is signed,
+  notarised and stapled: it opens at once. Without them it is signed ad hoc and the first launch
+  needs « Ouvrir quand même » in Réglages Système → Confidentialité et sécurité.
+* Updates: once the installed app has a Developer ID, a new version is installed only if it is
+  validly signed by the same Apple team (update.rs, signature_allows).
 * Started without a terminal (as from Finder), it opens the window: checked.
 
 ## Command line

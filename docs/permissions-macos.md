@@ -113,8 +113,14 @@ une dernière fois à la première version signée).
 Une fois les secrets en place, mettre `MACOS_REQUIRE_IDENTITY: "1"` dans le workflow pour qu'une
 version ne puisse plus partir signée ad hoc par erreur.
 
-Dans les deux premiers cas, `build-macos.sh` doit signer avec `codesign --force --deep
---sign "<nom du certificat>"` au lieu de `--sign -` (plus `--options runtime` pour la notarisation
-avec un Developer ID), et garder le même identifiant de bundle.
 La première version signée avec le certificat demandera la permission une dernière fois ; ensuite elle
 sera conservée.
+
+## Mises à jour : même développeur Apple exigé
+
+Une fois l'app installée signée avec un Developer ID, la mise à jour intégrée (`src/update.rs`,
+`signature_allows`) vérifie la nouvelle version avant de la mettre en place : signature valide pour
+tout le bundle (`codesign --verify --deep --strict`) **et** même identifiant d'équipe
+(`TeamIdentifier`) que l'app installée. Sinon la mise à jour est refusée et l'ancienne app reste.
+Une app installée signée ad hoc accepte encore n'importe quelle version (avec l'empreinte SHA-256),
+pour que la première version signée Developer ID puisse s'installer.
