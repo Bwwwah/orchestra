@@ -88,6 +88,11 @@ compte peut créer.
 1. **Créer le certificat** sur le Mac : Xcode › Réglages › Comptes › (le compte) › Gérer les
    certificats › « + » › *Developer ID Application*. (Ou developer.apple.com › Certificates, avec une
    demande de signature faite dans Trousseaux d'accès.)
+   **Aucun service à cocher** : un Developer ID Application ne demande ni identifiant d'app
+   (*Identifiers*) ni capacités (*Capabilities* : iCloud, Push…). Si la page *Identifiers* propose
+   des services, c'est pour l'App Store : ne rien créer là. Sur *Certificates*, choisir seulement
+   *Developer ID Application* (pas *Installer*, pas *Apple Distribution*) ; si on demande le profil
+   « G2 Sub-CA », garder celui proposé par défaut.
 2. **L'exporter** : Trousseaux d'accès › Mes certificats › clic droit sur
    « Developer ID Application: … » › Exporter… › format .p12, avec un mot de passe.
 3. **Créer un mot de passe pour app** : account.apple.com › Connexion et sécurité › Mots de passe

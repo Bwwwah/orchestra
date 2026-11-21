@@ -869,20 +869,46 @@ impl Workspace {
         welcome.updated = 1;
         welcome.icon = "👋".into();
         welcome.blocks = vec![
-            {
-                let mut b = Block::new(BlockKind::Todo, crate::tr!("Installer Orchestra", "Install Orchestra"));
-                b.checked = true;
-                b
-            },
+            Block::new(BlockKind::Callout, crate::tr!(
+                "Orchestra réunit vos **projets**, les **IA** qui travaillent dessus (Claude Code, Codex, Gemini CLI…) et vos **notes**. Tout reste sur votre ordinateur : pas de compte, pas de serveur.",
+                "Orchestra brings together your **projects**, the **AIs** working on them (Claude Code, Codex, Gemini CLI…) and your **notes**. Everything stays on your computer: no account, no server."
+            )),
+            Block::new(BlockKind::Heading2, crate::tr!("Comment ça marche", "How it works")),
+            Block::new(BlockKind::Numbered, crate::tr!(
+                "**Branchez une IA** : Réglages › IA (MCP). Orchestra s'ajoute de lui-même (par MCP) aux IA installées ; elles peuvent alors lire et écrire ici.",
+                "**Plug in an AI**: Settings › AI (MCP). Orchestra adds itself (through MCP) to the installed AIs; they can then read and write here."
+            )),
+            Block::new(BlockKind::Numbered, crate::tr!(
+                "**Créez un projet** : Projets › Nouveau projet, avec son dossier. L'IA remplit l'état des lieux et propose des étapes.",
+                "**Create a project**: Projects › New project, with its folder. The AI fills in the state of play and proposes steps."
+            )),
+            Block::new(BlockKind::Numbered, crate::tr!(
+                "**Écrivez vos étapes** dans le cadre « Étapes » du projet : une étape par ligne, ce que vous voulez voir fait.",
+                "**Write your steps** in the project's « Steps » box: one step per line, what you want done."
+            )),
+            Block::new(BlockKind::Numbered, crate::tr!(
+                "**Lancez une IA en autonomie** : Orchestration. Elle prend les étapes une à une, dans une copie à part du dossier, sans dépasser le budget fixé.",
+                "**Start an AI on its own**: Orchestration. It takes the steps one by one, in a separate copy of the folder, within the budget you set."
+            )),
+            Block::new(BlockKind::Numbered, crate::tr!(
+                "**Répondez à ses questions** : Boîte de réception. Votre réponse lui parvient à l'étape suivante.",
+                "**Answer its questions**: Inbox. Your answer reaches it at the next step."
+            )),
+            Block::new(BlockKind::Numbered, crate::tr!(
+                "**Gardez son travail** : à la fin de la session, Fusionner ramène la copie dans votre projet, Abandonner la jette.",
+                "**Keep its work**: when the session ends, Merge brings the copy back into your project, Discard throws it away."
+            )),
+            Block::new(BlockKind::Heading2, crate::tr!("Dans la barre de gauche 👈", "In the left sidebar 👈")),
+            Block::new(BlockKind::Bullet, crate::tr!("**Accueil** : ce qui demande votre attention et les pages récentes.", "**Home**: what needs your attention and recent pages.")),
+            Block::new(BlockKind::Bullet, crate::tr!("**Projets** : chaque projet, son état des lieux, ses étapes, ses sessions IA et ses versions (git).", "**Projects**: each project, its state of play, steps, AI sessions and versions (git).")),
+            Block::new(BlockKind::Bullet, crate::tr!("**Orchestration** : lancer, suivre et arrêter les IA autonomes, et régler leurs limites.", "**Orchestration**: start, follow and stop autonomous AIs, and set their limits.")),
+            Block::new(BlockKind::Bullet, crate::tr!("**Boîte de réception** : questions des IA, fins de session, rapports et messages de l'app.", "**Inbox**: AI questions, session ends, reports and app messages.")),
+            Block::new(BlockKind::Bullet, crate::tr!("**Pages privées** : vos notes, comme celle-ci ; elles ne quittent jamais votre ordinateur.", "**Private pages**: your notes, like this one; they never leave your computer.")),
+            Block::new(BlockKind::Heading2, crate::tr!("Écrire dans une page", "Writing in a page")),
             Block::new(BlockKind::Todo, crate::tr!("Cliquez n'importe où et **tapez** `/` pour choisir un bloc : titres, tableaux, cases à cocher…", "Click anywhere and **type** `/` to choose a block: headings, tables, checkboxes…")),
+            Block::new(BlockKind::Todo, crate::tr!("Tapez `/page` pour créer une **sous-page** et y ranger ce que vous voulez", "Type `/page` to create a **subpage** and keep whatever you like in it")),
             {
-                let mut b = Block::new(BlockKind::Todo, crate::tr!("Tapez `/page` pour créer une **sous-page** et y ranger ce que vous voulez", "Type `/page` to create a **subpage** and keep whatever you like in it"));
-                b.indent = 1;
-                b
-            },
-            Block::new(BlockKind::Todo, crate::tr!("**Retrouvez et rangez vos pages** dans la barre latérale à gauche 👈", "**Find and organise your pages** in the sidebar on the left 👈")),
-            {
-                let mut b = Block::new(BlockKind::Toggle, crate::tr!("Ceci est une liste dépliante. Cliquez sur le petit triangle pour d'autres astuces !", "This is a toggle list. Click the small triangle for more tips!"));
+                let mut b = Block::new(BlockKind::Toggle, crate::tr!("Raccourcis utiles (cliquez sur le triangle)", "Handy shortcuts (click the triangle)"));
                 b.extra = crate::tr!("Entrée crée un bloc, Maj+Entrée va à la ligne, Tab décale un bloc vers la droite.\n\
 Glissez la poignée ⋯ à gauche d'un bloc pour le déplacer.\n\
 Cmd/Ctrl+P ou K pour chercher dans toutes les pages.", "Enter creates a block, Shift+Enter breaks the line, Tab indents a block.\n\
@@ -890,8 +916,12 @@ Drag the ⋯ handle left of a block to move it.\n\
 Cmd/Ctrl+P or K to search all pages.").into();
                 b
             },
-            Block::new(BlockKind::Callout, crate::tr!("L'IA passe par MCP : le bouton rond en bas à droite explique comment brancher l'assistant de votre choix.", "AI goes through MCP: the round button at the bottom right explains how to plug in the assistant of your choice.")),
-            Block::new(BlockKind::Callout, crate::tr!("La collaboration passe par un branchement que vous choisissez : en direct, dossier partagé ou votre propre commande.", "Collaboration goes through a connection you choose: live, a shared folder or your own command.")),
+            Block::new(BlockKind::Heading2, crate::tr!("Travailler à plusieurs", "Working together")),
+            Block::new(BlockKind::Paragraph, crate::tr!(
+                "Un projet partagé part chez votre équipe avec ses pages et sa discussion ; le reste reste privé. Le branchement se choisit dans Réglages › Collaboration : en direct (chiffré), dossier partagé ou votre propre commande.",
+                "A shared project goes to your team with its pages and its discussion; everything else stays private. The connection is chosen in Settings › Collaboration: live (encrypted), a shared folder or your own command."
+            )),
+            Block::new(BlockKind::Divider, ""),
         ];
         let welcome_id = welcome.id.clone();
         ws.pages.push(welcome);
@@ -1372,5 +1402,30 @@ mod tests {
         assert!(!ws.inbox[0].answer_seen());
         assert_eq!(ws.mark_answers_seen("p1", 40).len(), 1);
         assert_eq!(ws.inbox[0].seen_at, 40);
+    }
+}
+
+#[cfg(test)]
+mod starter_tests {
+    use super::*;
+
+    /// The welcome page explains the app, keeps fixed ids (shared by two fresh installs that
+    /// sync) and still ends on the link to its "Notes" sub-page.
+    #[test]
+    fn welcome_page_explains_the_app() {
+        let ws = Workspace::starter();
+        let w = ws.page("start-bienvenue").unwrap();
+        let text: String = w.blocks.iter().map(|b| b.text.as_str()).collect::<Vec<_>>().join("\n");
+        let parts: &[(&str, &str)] = &[("Projets", "Projects"), ("Orchestration", "Orchestration"), ("Boîte de réception", "Inbox"), ("Pages privées", "Private pages"), ("Étapes", "Steps"), ("Fusionner", "Merge"), ("MCP", "MCP")];
+        for (fr, en) in parts {
+            assert!(text.contains(fr) || text.contains(en), "{fr}");
+        }
+        assert!(w.blocks.iter().filter(|b| b.kind == BlockKind::Numbered).count() >= 5);
+        let ids: std::collections::HashSet<_> = w.blocks.iter().map(|b| b.id.as_str()).collect();
+        assert_eq!(ids.len(), w.blocks.len());
+        assert!(w.blocks.iter().all(|b| b.id.starts_with("start-")));
+        let last = w.blocks.last().unwrap();
+        assert_eq!((last.kind, last.extra.as_str()), (BlockKind::PageLink, "start-notes"));
+        assert_eq!(Workspace::starter().page("start-bienvenue").unwrap().blocks.len(), w.blocks.len());
     }
 }
