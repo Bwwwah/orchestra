@@ -272,6 +272,12 @@ fn running_ceiling(ceilings: impl IntoIterator<Item = Option<f32>>) -> Option<f3
     ceilings.into_iter().flatten().reduce(f32::max)
 }
 
+/// `running_ceiling` among the sessions of one AI only (`runs`: each one's AI and ceiling):
+/// the ceilings of another AI are on another subscription and never count.
+fn running_ceiling_of(runs: &[(Agent, Option<f32>)], agent: Agent) -> Option<f32> {
+    running_ceiling(runs.iter().filter(|(a, _)| *a == agent).map(|(_, c)| *c))
+}
+
 /// The ceiling a project's next session is offered (before `ceiling_choice` puts it in
 /// bounds): beside a session already running, that session's (« stop at 50 % » for both),
 /// unless the person changed this project's since Orchestra opened; else the one kept.
@@ -563,11 +569,13 @@ impl NotesApp {
                 agent.label()
             ));
         }
-        if let Some(f) = self.orch.five
+        // Every figure below is that of the AI chosen, on its own subscription: never another
+        // AI's (Claude Code's window full doesn't stop a Codex session, nor the reverse).
+        let fig = self.agent_figures(agent);
+        if let Some(f) = fig.five
             && f >= self.ws.settings.orch.global_limit
         {
-            let left = self
-                .orch
+            let left = fig
                 .five_reset
                 .and_then(|r| crate::usage::until(r, crate::model::now_ms()));
             let when = left
@@ -588,7 +596,7 @@ impl NotesApp {
         // The ceiling is absolute (% of the 5-hour window), never past the global limit; one
         // already reached would stop the session at its first turn.
         let ceiling = ceiling.min(self.ws.settings.orch.global_limit);
-        if let Some(f) = self.orch.five
+        if let Some(f) = fig.five
             && f >= ceiling
         {
             return Err(crate::trf!(
@@ -598,8 +606,8 @@ impl NotesApp {
         }
         // Its share from its start, for the record and as a second guard (the whole ceiling
         // while the window's figure is unknown).
-        let limit = (ceiling - self.orch.five.unwrap_or(0.0)).max(1.0);
-        if let Some(w) = self.orch.week
+        let limit = (ceiling - fig.five.unwrap_or(0.0)).max(1.0);
+        if let Some(w) = fig.week
             && crate::usage::near_reserve(w, self.ws.settings.orch.week_limit, 0.0)
         {
             return Err(crate::trf!(
@@ -1192,18 +1200,19 @@ impl NotesApp {
             self.dirty_since.get_or_insert_with(Instant::now);
             // The same ceiling as before (the window has reset since); older records without
             // one: the same share, from the window's figure now.
-            let o = &self.ws.settings.orch;
-            let ceiling = if rec.ceiling > 0.0 {
-                rec.ceiling
-            } else {
-                let share = if rec.limit > 0.0 { rec.limit } else { o.default_limit };
-                ceiling_choice(None, self.orch.five, share, o.global_limit)
-            };
             // The same AI as before (named by its label in the record).
             let agent = Agent::ALL
                 .into_iter()
                 .find(|a| a.label() == rec.tool)
                 .unwrap_or(Agent::ClaudeCode);
+            let five = self.agent_figures(agent).five;
+            let o = &self.ws.settings.orch;
+            let ceiling = if rec.ceiling > 0.0 {
+                rec.ceiling
+            } else {
+                let share = if rec.limit > 0.0 { rec.limit } else { o.default_limit };
+                ceiling_choice(None, five, share, o.global_limit)
+            };
             match self.launch_run(ctx, &rec.project, &rec.mission, ceiling, rec.commits_allowed, rec.endless.clone(), agent) {
                 Ok(()) => self.ws.notify(
                     "info",
@@ -1307,6 +1316,17 @@ impl NotesApp {
                 }
             }
         }
+    }
+
+    /// The figures of one agent's subscription: Claude Code's as followed, another's as last
+    /// read for its running sessions, else read now; none for an agent that tells none.
+    fn agent_figures(&self, agent: Agent) -> Figures {
+        if let Some(f) = self.figures_by_agent().get(&agent) {
+            return *f;
+        }
+        crate::usage::read_for(agent)
+            .map(|u| Figures::of(&u))
+            .unwrap_or_default()
     }
 
     /// The figures each session is measured and stopped on: those of its own agent.
@@ -2401,7 +2421,9 @@ impl NotesApp {
         let mut watch: Option<Option<String>> = None;
         let n = self.orch.runs.len();
         let awake = self.orch.awake.held();
-        let (five, global) = (self.orch.five, self.ws.settings.orch.global_limit);
+        // Each session's bar on the 5-hour window of its own AI's subscription.
+        let figs = self.figures_by_agent();
+        let global = self.ws.settings.orch.global_limit;
         // The step each session is on (« doing », reserved by this computer).
         let me = crate::store::computer_id();
         let working_on: HashMap<String, String> = self
@@ -2532,6 +2554,7 @@ impl NotesApp {
                                 links(ui, r);
                             });
                         }
+                        let five = figs.get(&r.agent).and_then(|f| f.five);
                         share_row(ui, &r.id, r.pct, r.limit, r.ceiling, five, global, t);
                         // The task in hand, as a short sentence.
                         if let Some(step) = working_on.get(&r.id) {
@@ -2836,11 +2859,13 @@ impl NotesApp {
         let global = self.ws.settings.orch.global_limit;
         // Each session stops at its own ceiling on the 5-hour window (absolute), all under the
         // global limit: nothing to share out between them. One started beside them begins
-        // from their ceiling.
-        let five = self.orch.five;
-        let running_at = running_ceiling(
-            self.orch.runs.iter().filter(|r| r.agent == Agent::ClaudeCode).map(|r| r.ceiling),
-        );
+        // from their ceiling. All on the subscription of the AI chosen for each project: its
+        // window, and the ceilings of the sessions running with that same AI only.
+        let figs = self.figures_by_agent();
+        let five_of = |a: Agent| figs.get(&a).and_then(|f| f.five);
+        let ceilings_run: Vec<(Agent, Option<f32>)> =
+            self.orch.runs.iter().map(|r| (r.agent, r.ceiling)).collect();
+        let running_of = |a: Agent| running_ceiling_of(&ceilings_run, a);
         // Each project's share of the window, always shown: its running session's use, else
         // 0 %; none for an endless session suspended until the quota resets.
         let run_pct: HashMap<String, f32> =
@@ -2927,6 +2952,8 @@ impl NotesApp {
             let (order, folded) = launch_order(&rows, show_idle);
             for (id, title, folder) in order.iter().map(|&i| &projects[i]) {
                 let d = drafts.get_mut(id).unwrap();
+                // On the subscription of the AI chosen for this project.
+                let (five, running_at) = (five_of(d.agent), running_of(d.agent));
                 let busy = running.contains(id);
                 let bg = super::projects::hover_begin(ui);
                 let open = open_steps.get(id).copied().unwrap_or(0);
@@ -3161,8 +3188,8 @@ impl NotesApp {
             let o = &self.ws.settings.orch;
             // As shown in the card: the sessions started together in a selection don't change
             // each other's ceiling.
-            let want = draft_ceiling(&d, running_at);
-            let ceiling = ceiling_choice(want, self.orch.five, o.default_limit, global);
+            let want = draft_ceiling(&d, running_of(d.agent));
+            let ceiling = ceiling_choice(want, five_of(d.agent), o.default_limit, global);
             let endless = if d.endless { Some(d.end.clone()) } else { None };
             match self.launch_run(ctx, &id, &d.mission, ceiling, d.commits, endless, d.agent) {
                 Ok(()) => {
@@ -5116,6 +5143,29 @@ mod tests {
         for a in Agent::ALL {
             assert_eq!(agent_unavailable(a).is_none(), a.ready(), "{a:?}");
         }
+    }
+
+    /// A project's ceiling and share are worked out on the subscription of the AI chosen for
+    /// it: its window, and the ceilings of the sessions running with that same AI only.
+    #[test]
+    fn percentages_are_worked_out_on_the_ai_chosen() {
+        use super::{Agent, Draft, ceiling_choice, draft_ceiling, picked_share, running_ceiling_of};
+        let runs = [(Agent::ClaudeCode, Some(50.0)), (Agent::Codex, Some(30.0)), (Agent::Codex, None)];
+        assert_eq!(running_ceiling_of(&runs, Agent::ClaudeCode), Some(50.0));
+        assert_eq!(running_ceiling_of(&runs, Agent::Codex), Some(30.0));
+        assert_eq!(running_ceiling_of(&runs, Agent::Gemini), None);
+        // Claude's window at 45 %, Codex's at 10 %: a Codex project starts from Codex's own
+        // running ceiling (30 %) and counts from Codex's window, not Claude's.
+        let mut d = Draft::new(None, true);
+        d.agent = Agent::Codex;
+        let (five, running) = (Some(10.0), running_ceiling_of(&runs, d.agent));
+        let c = ceiling_choice(draft_ceiling(&d, running), five, 20.0, 90.0);
+        assert_eq!(c, 30.0);
+        assert_eq!(picked_share(c, five, running), 0.0);
+        // The same project on Claude Code: Claude's figures.
+        d.agent = Agent::ClaudeCode;
+        let (five, running) = (Some(45.0), running_ceiling_of(&runs, d.agent));
+        assert_eq!(ceiling_choice(draft_ceiling(&d, running), five, 20.0, 90.0), 50.0);
     }
 
     #[test]
