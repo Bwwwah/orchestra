@@ -1961,8 +1961,12 @@ fn steps_card(ui: &mut egui::Ui, cx: &mut Cx, extra: f32) -> f32 {
                 egui::Stroke::new(1.5, col),
             );
             if adding {
+                // A fixed id: an automatic one follows the widgets drawn above, so a step
+                // added (by Enter, or by an AI), a step done, or the arrival hint fading would
+                // give the field a new id and take its focus away while typing.
                 let edit = ui.add(
                     inline_edit(egui::TextEdit::singleline(new_step))
+                        .id(new_step_edit_id(page_id))
                         .hint_text(if arrived.is_some() {
                             crate::tr!("Votre tâche, puis Entrée", "Your task, then Enter")
                         } else {
@@ -2092,6 +2096,86 @@ mod session_pick_tests {
 }
 
 #[cfg(test)]
+mod new_step_field_tests {
+    use super::*;
+    use egui_kittest::Harness;
+
+    #[derive(Default)]
+    struct S {
+        pr: Project,
+        new_step: String,
+        vers: super::super::versions::Versions,
+        ai: super::super::ai_fill::AiJobs,
+        actions: Vec<Action>,
+        answered: Option<(String, String)>,
+        /// Drawn only once the app's fonts are in (the card's labels need them).
+        draw: bool,
+    }
+
+    fn type_text(h: &mut Harness<S>, s: &str) {
+        h.event(egui::Event::Text(s.into()));
+        h.run();
+    }
+
+    /// The « Ajouter une étape » field keeps the focus while steps are added above it
+    /// (by Enter, or by an AI meanwhile): what is typed goes on landing in it.
+    #[test]
+    fn typing_a_step_is_not_cut_when_the_list_above_changes() {
+        let t = tone(false);
+        let mut h = Harness::builder().with_size([700.0, 700.0]).build_ui_state(
+            move |ui, s: &mut S| {
+                if !s.draw {
+                    return;
+                }
+                let mut cx = Cx {
+                    page_id: "p1",
+                    title: "Projet".into(),
+                    pr: &mut s.pr,
+                    new_step: &mut s.new_step,
+                    t: &t,
+                    live: &[],
+                    pages: &[],
+                    actions: &mut s.actions,
+                    msg: None,
+                    reviewing: false,
+                    peers: vec![],
+                    vers: &mut s.vers,
+                    launchers: vec![],
+                    ai: &mut s.ai,
+                    questions: &[],
+                    answered: &mut s.answered,
+                };
+                steps_card(ui, &mut cx, 0.0);
+            },
+            S::default(),
+        );
+        setup_fonts(&h.ctx);
+        h.run();
+        h.state_mut().draw = true;
+        // Open the field, as a click on « Ajouter une étape » does.
+        h.ctx
+            .data_mut(|d| d.insert_temp(egui::Id::unique(("adding-step", "p1")), true));
+        h.run();
+        type_text(&mut h, "Première");
+        h.key_press(egui::Key::Enter);
+        h.run();
+        assert_eq!(h.state().pr.steps.len(), 1);
+        // Right after Enter, the next step is typed in the same field.
+        type_text(&mut h, "Deux");
+        assert_eq!(h.state().new_step, "Deux");
+        // An AI adds a step above while the person types: the typing goes on.
+        h.state_mut().pr.add_step("Étape d'une IA", "claude-code");
+        h.run();
+        type_text(&mut h, "ième");
+        assert_eq!(h.state().new_step, "Deuxième");
+        h.key_press(egui::Key::Enter);
+        h.run();
+        let titles: Vec<&str> = h.state().pr.steps.iter().map(|s| s.title.as_str()).collect();
+        assert_eq!(titles, ["Première", "Étape d'une IA", "Deuxième"]);
+    }
+}
+
+#[cfg(test)]
 mod card_layout_tests {
     use super::{CardKind, above_sessions};
 
@@ -2178,6 +2262,11 @@ fn inline_row<R>(ui: &mut egui::Ui, add: impl FnOnce(&mut egui::Ui) -> R) -> R {
         },
     )
     .inner
+}
+
+/// The id of a project's « Ajouter une étape » field, the same whatever is drawn above it.
+fn new_step_edit_id(page_id: &str) -> egui::Id {
+    egui::Id::unique(("new-step-edit", page_id))
 }
 
 /// A frameless one-line field, as tall as its row, its text centred vertically.
