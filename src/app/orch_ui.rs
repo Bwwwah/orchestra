@@ -821,7 +821,7 @@ impl NotesApp {
             screen_changed: Instant::now(),
             denials: 0,
             nudged: false,
-            started_wall: crate::model::now_ms(),
+            started_wall: session_start(),
             measured: false,
             endless,
             done_streak: 0,
@@ -1165,7 +1165,7 @@ impl NotesApp {
                                 ));
                             }
                             c.reached(
-                                crate::model::now_ms().saturating_sub(r.started_wall),
+                                crate::model::wall_ms().saturating_sub(r.started_wall),
                                 steps_done,
                                 r.turns,
                                 r.done_streak,
@@ -4128,6 +4128,16 @@ impl Figures {
     }
 }
 
+/// When a session starts, on the computer's real clock: the readings it is measured by are
+/// stamped by the status line, another process, on that clock too. Orchestra's own clock
+/// (`model::now_ms`) can run ahead of it (it did by up to 38 minutes before its lead was
+/// capped, and still does after a time seen from a computer whose clock is ahead): a start
+/// stamped on it came after every reading of a short session, which was then never measured
+/// and stopped at its second turn « impossible à mesurer ».
+fn session_start() -> u64 {
+    crate::model::wall_ms()
+}
+
 /// A new reading of `agent`'s 5-hour window (taken at `at`): its rise since `last` is shared
 /// between that agent's running sessions only, by the tokens each used since then; the
 /// sessions of other agents, on other subscriptions, get nothing of it.
@@ -5933,6 +5943,24 @@ mod tests {
         // The next reading that succeeds wins, even lower (the window started again).
         let fresh = Figures { five: Some(2.0), five_reset: Some(now + 18_000_000), ..Default::default() };
         assert_eq!(last.merged(Some(fresh), now).five, Some(2.0));
+    }
+
+    /// The three sessions stopped « impossible à mesurer » (20 and 21 November): Orchestra's
+    /// clock was 8 to 38 minutes ahead, their start was stamped on it, and every reading of
+    /// the status line (real time) came before it. The start is on the real clock now, so a
+    /// reading taken after it counts even while Orchestra's clock is ahead.
+    #[test]
+    fn a_session_is_measured_while_the_clock_runs_ahead() {
+        use super::session_start;
+        // On the real clock, whatever Orchestra's own clock says (pushing it ahead here would
+        // disturb the other tests, which share it): between two readings of the real time.
+        let before = crate::model::wall_ms();
+        let start = session_start();
+        let after = crate::model::wall_ms();
+        assert!(before <= start && start <= after, "{before} {start} {after}");
+        // The status line stamps its readings on the same clock: one taken after the start
+        // is never before it, so the session is measured.
+        assert!(crate::model::wall_ms() >= start);
     }
 
     /// A session measured, then the readings fail for a while, then come back: as `usage_tick`

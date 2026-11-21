@@ -842,16 +842,15 @@ pub fn statusline_main() {
     let _ = std::io::stdin().read_to_string(&mut input);
     let v: Value = serde_json::from_str(&input).unwrap_or(Value::Null);
     if v.get("rate_limits").is_some_and(|r| r.is_object()) {
-        let out = json!({ "rate_limits": v["rate_limits"], "at": crate::model::now_ms() });
+        // The real time: a session's start is stamped on it too (`orch_ui::session_start`).
+        let at = crate::model::wall_ms();
+        let out = json!({ "rate_limits": v["rate_limits"], "at": at });
         let _ = std::fs::create_dir_all(crate::store::data_dir());
         let _ = crate::store::write_atomic(&captured_file(), out.to_string().as_bytes());
         // The 24-hour figures need every reading, Orchestra open or not.
         let windows = from_rate_limits(&v["rate_limits"]);
         if !windows.is_empty() {
-            record(&Usage {
-                windows,
-                at: crate::model::now_ms(),
-            });
+            record(&Usage { windows, at });
         }
     }
     // The person's own status line, unchanged.
