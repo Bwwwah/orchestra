@@ -171,7 +171,7 @@ fn vibe_config() -> PathBuf {
 
 /// The file cut into its tables: each piece starts at a `[…]` header (the first one may
 /// have none: the top-level keys).
-fn toml_tables(text: &str) -> Vec<String> {
+pub(crate) fn toml_tables(text: &str) -> Vec<String> {
     let mut out: Vec<String> = vec![String::new()];
     for line in text.split_inclusive('\n') {
         if line.trim_start().starts_with('[') && !out.last().is_some_and(|t| t.is_empty()) {

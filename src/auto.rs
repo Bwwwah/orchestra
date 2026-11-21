@@ -185,16 +185,17 @@ impl Agent {
             }
             Agent::Vibe => {
                 let s = mcp_server();
-                let mut text = format!(
+                let mut ours = format!(
                     "[[mcp_servers]]\nname = \"orchestra\"\ntransport = \"stdio\"\ncommand = {}\nargs = [\"mcp\"]\n",
                     toml_string(s["command"].as_str().unwrap_or("orchestra"))
                 );
                 if let Some(d) = s["env"]["ORCHESTRA_DIR"].as_str() {
-                    text.push_str(&format!("env = {{ ORCHESTRA_DIR = {} }}\n", toml_string(d)));
+                    ours.push_str(&format!("env = {{ ORCHESTRA_DIR = {} }}\n", toml_string(d)));
                 }
-                text.push('\n');
-                text.push_str(&self.rules_config(allow_commits, extra));
-                vec![(dir.join("config.toml"), text)]
+                ours.push('\n');
+                ours.push_str(&self.rules_config(allow_commits, extra));
+                let own = std::fs::read_to_string(vibe_own_home().join("config.toml")).unwrap_or_default();
+                vec![(dir.join("config.toml"), vibe_config(&own, &ours))]
             }
         }
     }
@@ -210,10 +211,7 @@ impl Agent {
         }
         #[cfg(unix)]
         if self == Agent::Vibe {
-            let own = std::env::var_os("VIBE_HOME")
-                .map(PathBuf::from)
-                .unwrap_or_else(|| dirs::home_dir().unwrap_or_default().join(".vibe"))
-                .join(".env");
+            let own = vibe_own_home().join(".env");
             let link = self.config_dir(cwd).join(".env");
             if own.is_file() && std::fs::symlink_metadata(&link).is_err() {
                 std::os::unix::fs::symlink(&own, &link).map_err(|e| e.to_string())?;
@@ -234,6 +232,37 @@ impl Agent {
             Agent::Codex => 4,
             _ => 1,
         }
+    }
+}
+
+/// The person's own home of Mistral Vibe (its settings and sign-in).
+fn vibe_own_home() -> PathBuf {
+    std::env::var_os("VIBE_HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| dirs::home_dir().unwrap_or_default().join(".vibe"))
+}
+
+/// Vibe's settings for the session: the person's own (model, providers…), less their MCP
+/// servers and their tool permissions, then Orchestra's (`ours`: its MCP server and the
+/// rules). Tables are dropped whole: TOML refuses a table defined twice, and the person's
+/// `[tools.bash]` must not loosen the session's rules.
+fn vibe_config(own: &str, ours: &str) -> String {
+    let kept: String = crate::setup::toml_tables(own)
+        .into_iter()
+        .filter(|t| {
+            let head = t.trim_start();
+            let name = head
+                .strip_prefix("[[")
+                .or_else(|| head.strip_prefix('['))
+                .map(|h| h.trim_start());
+            !name.is_some_and(|n| n.starts_with("mcp_servers") || n.starts_with("tools"))
+        })
+        .collect();
+    let kept = kept.trim_end();
+    if kept.is_empty() {
+        ours.to_string()
+    } else {
+        format!("{kept}\n\n{ours}")
     }
 }
 
@@ -2279,11 +2308,7 @@ mod tests {
             // Its program, in its strictest mode.
             let cmd = a.command(Path::new("/x"), true, "");
             // Its program, after the variables pointing to its settings of the session.
-            let bin = format!("' {}", a.bin());
-            assert!(
-                cmd.starts_with(a.bin()) || cmd.contains(&format!("{bin} ")) || cmd.ends_with(&bin),
-                "{cmd}"
-            );
+            assert!(cmd.split_whitespace().any(|w| w == a.bin()), "{cmd}");
             assert!(!cmd.contains("yolo") && !cmd.contains("never") && !cmd.contains("danger"), "{cmd}");
             assert_ne!(a.session_dir(Path::new("/x")), Agent::ClaudeCode.session_dir(Path::new("/x")));
         }
@@ -2566,7 +2591,17 @@ mod tests {
         let (path, text) = &files[0];
         assert_eq!(path, &Agent::Vibe.config_dir(cwd).join("config.toml"));
         assert_eq!(text.matches("[[mcp_servers]]").count(), 1);
-        assert!(text.starts_with("[[mcp_servers]]\nname = \"orchestra\"\ntransport = \"stdio\"\ncommand = \""));
+        assert!(text.contains("[[mcp_servers]]\nname = \"orchestra\"\ntransport = \"stdio\"\ncommand = \""));
+        // The person's own settings come along, less their MCP servers and tool permissions.
+        let own = "# mes réglages\nactive_model = \"devstral\"\n\n[[mcp_servers]]\nname = \"fetch\"\ntransport = \"stdio\"\ncommand = \"uvx\"\n\n[tools.bash]\npermission = \"always\"\n\n[[providers]]\nname = \"mistral\"\n";
+        let ours = "[[mcp_servers]]\nname = \"orchestra\"\n\n[tools.bash]\nallowlist = [\"ls\"]\n";
+        let merged = vibe_config(own, ours);
+        assert!(merged.starts_with("# mes réglages\nactive_model = \"devstral\"\n"), "{merged}");
+        assert!(merged.contains("[[providers]]\nname = \"mistral\"\n"), "{merged}");
+        assert!(!merged.contains("fetch") && !merged.contains("permission = \"always\""), "{merged}");
+        assert_eq!(merged.matches("[tools.bash]").count(), 1);
+        assert!(merged.ends_with(ours));
+        assert_eq!(vibe_config("", ours), ours);
         assert!(text.contains("args = [\"mcp\"]\n") && text.contains("[tools.bash]\nallowlist = ["));
         let v = Agent::Vibe.command(cwd, false, "");
         assert!(v.starts_with("VIBE_HOME=") && v.ends_with(" vibe"), "{v}");
