@@ -1922,9 +1922,10 @@ impl NotesApp {
                         .color(t.tertiary),
                 );
                 let used = match week {
+                    // Claude Code's subscription only: another AI's week is on its own.
                     Some(w) => crate::trf!(
-                        "{w:.0} % de l'abonnement utilisés",
-                        "{w:.0} % of the subscription used"
+                        "{w:.0} % de l'abonnement Claude Code utilisés",
+                        "{w:.0} % of the Claude Code subscription used"
                     ),
                     None => crate::tr!(
                         "utilisation inconnue pour l'instant",
@@ -2082,7 +2083,8 @@ impl NotesApp {
             // Each figure once on the page: the week (and the day's pace) in the bar above, the
             // 5-hour window here (the one the sessions stop at), counts in the other tiles.
             let label = [
-                crate::tr!("FENÊTRE DE 5 H", "5-HOUR WINDOW"),
+                // Claude Code's: each AI's sessions stop on their own subscription's window.
+                crate::tr!("FENÊTRE DE 5 H · CLAUDE CODE", "5-HOUR WINDOW · CLAUDE CODE"),
                 crate::tr!("IA AU TRAVAIL", "AIS AT WORK"),
                 crate::tr!("AUJOURD'HUI", "TODAY"),
             ][i];
@@ -3849,8 +3851,8 @@ fn measure_alert(
         return None;
     }
     let title = crate::trf!(
-        "Mesure de l'abonnement indisponible depuis {}",
-        "Subscription use unavailable for {}",
+        "Mesure de l'abonnement Claude Code indisponible depuis {}",
+        "Claude Code subscription use unavailable for {}",
         crate::usage::left_text(gone)
     );
     let text = match kept {
@@ -5856,6 +5858,8 @@ mod tests {
         // A figure kept: said, with that figure, never as 0 %.
         let (title, text) = measure_alert(Some(since), Some(42.4), false, later).unwrap();
         assert!(title.contains("indisponible") || title.contains("unavailable"), "{title}");
+        // It names the AI whose figures are missing: another AI's are on their own.
+        assert!(title.contains("Claude Code"), "{title}");
         assert!(text.contains("(42 %)"), "{text}");
         // Sessions running with no figure at all: they stop rather than run without a limit.
         let (_, text) = measure_alert(Some(since), None, true, later + 120_000).unwrap();
