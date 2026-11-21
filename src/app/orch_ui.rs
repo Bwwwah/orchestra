@@ -76,6 +76,9 @@ pub struct LiveRun {
     /// The project's repository (the copy's origin), for its trust in Claude Code.
     root: String,
     pub limit: f32,
+    /// Where it stops, in absolute % of the 5-hour window (37 % used at its start and a
+    /// budget of 13 %: 50 %); None until the window's figure is known (see `ceiling_from`).
+    pub ceiling: Option<f32>,
     pub pct: f32,
     tokens_counted: u64,
     pub turns: u32,
@@ -251,6 +254,13 @@ fn room_for(global: f32, running_sum: f32, picked_sum: f32, own: Option<f32>) ->
 fn share_at_start(want: f32, global: f32, taken: f32) -> Option<f32> {
     let left = (global - taken).floor();
     (left >= 1.0).then(|| want.min(left).max(1.0))
+}
+
+/// A session's ceiling in absolute % of the 5-hour window: what the window held without it
+/// (its figure `five` less the session's own use `pct`, 0 at its start) plus its budget,
+/// never past the global limit. None while the window's figure is unknown.
+fn ceiling_from(five: Option<f32>, pct: f32, budget: f32, global: f32) -> Option<f32> {
+    five.map(|f| ((f - pct).max(0.0) + budget).min(global).clamp(0.0, 100.0))
 }
 
 /// What to do with a finished session's copy.
@@ -589,6 +599,7 @@ impl NotesApp {
             root: copy.root,
             worktree: copy.worktree,
             limit,
+            ceiling: ceiling_from(self.orch.five, 0.0, limit, self.ws.settings.orch.global_limit),
             pct: 0.0,
             tokens_counted: 0,
             turns: 0,
@@ -914,6 +925,10 @@ impl NotesApp {
                         }
                         r.steps_at_turn = steps_now.iter().map(|s| s.id.clone()).collect();
                         let five = fig.five;
+                        // Started before the window's figure was known: its ceiling now.
+                        if r.ceiling.is_none() {
+                            r.ceiling = ceiling_from(five, r.pct, r.limit, global);
+                        }
                         r.done_streak = if sig == Signal::Done {
                             r.done_streak + 1
                         } else {
@@ -952,6 +967,7 @@ impl NotesApp {
                             endless: r.endless.is_some(),
                             pct: r.pct,
                             limit: r.limit,
+                            ceiling: r.ceiling,
                             five,
                             global,
                             week: fig.week,
@@ -2402,7 +2418,7 @@ impl NotesApp {
                                 links(ui, r);
                             });
                         }
-                        share_row(ui, &r.id, r.pct, r.limit, five, global, t);
+                        share_row(ui, &r.id, r.pct, r.limit, r.ceiling, five, global, t);
                         // The task in hand, as a short sentence.
                         if let Some(step) = working_on.get(&r.id) {
                             ui.add_space(2.0);
@@ -3705,6 +3721,8 @@ struct TurnEnd {
     /// The session's use of the 5-hour window, and its budget.
     pct: f32,
     limit: f32,
+    /// Where it stops, in absolute % of the 5-hour window (`LiveRun::ceiling`).
+    ceiling: Option<f32>,
     /// The 5-hour window, and the global limit.
     five: Option<f32>,
     global: f32,
@@ -3726,6 +3744,8 @@ enum Stop {
     MissionDone,
     Blocked,
     Budget(f32),
+    /// The session's own ceiling on the 5-hour window (absolute %), under the global limit.
+    Ceiling(f32),
     GlobalLimit(f32),
     /// The week's reserve (in %) is near.
     WeekReserve(f32),
@@ -3763,6 +3783,10 @@ impl Stop {
             Stop::Budget(l) => crate::trf!(
                 "limite du projet atteinte ({l:.0} %)",
                 "project limit reached ({l:.0} %)"
+            ),
+            Stop::Ceiling(c) => crate::trf!(
+                "plafond de la session atteint ({c:.0} % de la fenêtre de 5 h)",
+                "session ceiling reached ({c:.0} % of the 5-hour window)"
             ),
             Stop::GlobalLimit(g) => crate::trf!(
                 "limite globale atteinte ({g:.0} %)",
@@ -3802,6 +3826,13 @@ fn stop_reason(t: &TurnEnd) -> Option<Stop> {
         Stop::MissionDone
     } else if t.signal == Signal::Blocked {
         Stop::Blocked
+    } else if let Some(c) = t.ceiling
+        && c < t.global
+        && t.five.is_some_and(|f| f >= c)
+    {
+        // At the global limit itself, the global limit's stop says it (and starts the
+        // session again once the window resets).
+        Stop::Ceiling(c)
     } else if t.pct >= t.limit {
         Stop::Budget(t.limit)
     } else if t.five.is_some_and(|f| f >= t.global) {
@@ -3938,13 +3969,18 @@ struct WindowBar {
     stop: f32,
 }
 
-fn window_bar(window: f32, pct: f32, limit: f32, global: f32) -> WindowBar {
+/// `ceiling`: the session's own (absolute), else worked out from its budget.
+fn window_bar(window: f32, pct: f32, limit: f32, ceiling: Option<f32>, global: f32) -> WindowBar {
     let window = window.clamp(0.0, 100.0);
     let before = (window - pct.max(0.0)).max(0.0);
     WindowBar {
         before,
         window,
-        stop: (before + limit).min(global).clamp(0.0, 100.0),
+        stop: ceiling
+            .unwrap_or(before + limit)
+            .min(before + limit)
+            .min(global)
+            .clamp(0.0, 100.0),
     }
 }
 
@@ -3954,20 +3990,23 @@ fn window_bar(window: f32, pct: f32, limit: f32, global: f32) -> WindowBar {
 /// With the 5-hour window's figure (`window`), the bar is that window: the use before the
 /// session, the session's own, and a tick where it stops. Without it, the session's
 /// share of its budget only.
+#[allow(clippy::too_many_arguments)]
 fn share_row(
     ui: &mut egui::Ui,
     id: &str,
     pct: f32,
     limit: f32,
+    ceiling: Option<f32>,
     window: Option<f32>,
     global: f32,
     t: &Tone,
 ) {
     let text = match window {
         Some(w) => crate::trf!(
-            "fenêtre de 5 h : {w:.0} % · cette session : {} % (budget {limit:.0} %)",
-            "5-hour window: {w:.0} % · this session: {} % (budget {limit:.0} %)",
-            crate::i18n::dec1(pct)
+            "fenêtre de 5 h : {w:.0} % · cette session : {} % · arrêt à {:.0} %",
+            "5-hour window: {w:.0} % · this session: {} % · stops at {:.0} %",
+            crate::i18n::dec1(pct),
+            window_bar(w, pct, limit, ceiling, global).stop
         ),
         None => crate::trf!(
             "{} % utilisés sur un budget de {:.0} %",
@@ -3997,7 +4036,7 @@ fn share_row(
         let x = |v: f32| bar.left() + bar.width() * (v / 100.0).clamp(0.0, 1.0);
         match window {
             Some(w) => {
-                let b = window_bar(w, pct, limit, global);
+                let b = window_bar(w, pct, limit, ceiling, global);
                 let end = super::projects::smooth(ui, ("run-window", id), b.window);
                 let near = b.window >= b.stop - (b.stop - b.before) * 0.15;
                 let p = ui.painter();
@@ -4045,8 +4084,8 @@ fn share_row(
     };
     let label = |ui: &mut egui::Ui| {
         ui.add(egui::Label::new(RichText::new(text.as_str()).font(font.clone()).color(t.secondary)).wrap()).on_hover_text(crate::tr!(
-            "La barre est la fenêtre de 5 h de l'abonnement : en gris ce qui était utilisé avant cette session (ou par d'autres), en vert ce qu'elle a utilisé depuis son lancement. Le trait orange : où elle s'arrête, sur son budget ou sur la limite globale si elle vient avant. Les sessions précédentes du projet ne comptent pas dans son budget.",
-            "The bar is the subscription's 5-hour window: in grey what was used before this session (or by others), in green what it used since it started. The orange tick: where it stops, on its budget or on the global limit if that comes first. The project's earlier sessions don't count in its budget."
+            "La barre est la fenêtre de 5 h de l'abonnement : en gris ce qui était utilisé avant cette session (ou par d'autres), en vert ce qu'elle a utilisé depuis son lancement. Le trait orange : où elle s'arrête, en % de la fenêtre : ce qui était utilisé à son lancement plus son budget (ex. 37 % + 13 % → 50 %), ou la limite globale si elle vient avant. Les sessions précédentes du projet ne comptent pas dans son budget.",
+            "The bar is the subscription's 5-hour window: in grey what was used before this session (or by others), in green what it used since it started. The orange tick: where it stops, in % of the window: what was used when it started plus its budget (e.g. 37 % + 13 % → 50 %), or the global limit if that comes first. The project's earlier sessions don't count in its budget."
         ));
     };
     ui.horizontal(|ui| {
@@ -5050,7 +5089,7 @@ mod tests {
             .inner_margin(egui::Margin::same(12))
             .show(ui, |ui| {
                 ui.set_width(ui.available_width());
-                super::share_row(ui, "run", 0.0, 20.0, Some(75.0), 90.0, &t);
+                super::share_row(ui, "run", 0.0, 20.0, Some(90.0), Some(75.0), 90.0, &t);
             });
     }
 
@@ -5106,7 +5145,7 @@ mod tests {
                 column(width, |ui| {
                     ui.scope(|ui| {
                         let t = super::tone(false);
-                        super::share_row(ui, "run", pct, limit, window, 90.0, &t);
+                        super::share_row(ui, "run", pct, limit, None, window, 90.0, &t);
                         row = ui.min_rect().width();
                     });
                 });
@@ -5286,7 +5325,7 @@ mod tests {
     fn a_session_bar_is_the_five_hour_window() {
         use super::{WindowBar, window_bar};
         assert_eq!(
-            window_bar(80.0, 5.0, 90.0, 90.0),
+            window_bar(80.0, 5.0, 90.0, None, 90.0),
             WindowBar {
                 before: 75.0,
                 window: 80.0,
@@ -5295,7 +5334,7 @@ mod tests {
         );
         // A small budget stops it first.
         assert_eq!(
-            window_bar(80.0, 5.0, 10.0, 90.0),
+            window_bar(80.0, 5.0, 10.0, None, 90.0),
             WindowBar {
                 before: 75.0,
                 window: 80.0,
@@ -5304,14 +5343,44 @@ mod tests {
         );
         // Its share can't start below zero, nor anything go past 100.
         assert_eq!(
-            window_bar(3.0, 5.0, 20.0, 100.0),
+            window_bar(3.0, 5.0, 20.0, None, 100.0),
             WindowBar {
                 before: 0.0,
                 window: 3.0,
                 stop: 20.0
             }
         );
-        assert_eq!(window_bar(120.0, 5.0, 50.0, 200.0).stop, 100.0);
+        assert_eq!(window_bar(120.0, 5.0, 50.0, None, 200.0).stop, 100.0);
+        // Its own ceiling (absolute): 37 % at its start and a budget of 13 %: the tick at
+        // 50 %, even when others made the window rise (40 %, 3 % of it its own).
+        assert_eq!(window_bar(40.0, 3.0, 13.0, Some(50.0), 90.0).stop, 50.0);
+    }
+
+    /// The ceiling of a session is absolute: what the window held at its start plus its
+    /// budget (37 % + 13 % → 50 %), never past the global limit; it stops the session when
+    /// the window gets there, whoever used it.
+    #[test]
+    fn a_session_stops_at_its_absolute_ceiling() {
+        use super::{Stop, ceiling_from, stop_reason};
+        assert_eq!(ceiling_from(Some(37.0), 0.0, 13.0, 90.0), Some(50.0));
+        assert_eq!(ceiling_from(Some(85.0), 0.0, 13.0, 90.0), Some(90.0));
+        assert_eq!(ceiling_from(None, 0.0, 13.0, 90.0), None);
+        // Figure known only later: what it used meanwhile is its own, not « before ».
+        assert_eq!(ceiling_from(Some(41.0), 4.0, 13.0, 90.0), Some(50.0));
+        let mut t = calm();
+        (t.ceiling, t.pct, t.limit, t.global) = (Some(50.0), 5.0, 13.0, 90.0);
+        t.five = Some(49.0);
+        assert_eq!(stop_reason(&t), None);
+        // Another session pushed the window to 50 %: this one stops too, under its budget.
+        t.five = Some(50.0);
+        assert_eq!(stop_reason(&t), Some(Stop::Ceiling(50.0)));
+        assert!(Stop::Ceiling(50.0).text().contains("50 %"));
+        // A ceiling at the global limit: the global limit's stop (restarted after the reset).
+        (t.ceiling, t.global, t.five) = (Some(90.0), 90.0, Some(90.0));
+        assert_eq!(stop_reason(&t), Some(Stop::GlobalLimit(90.0)));
+        // Unknown window: its budget still stops it.
+        (t.ceiling, t.five, t.pct) = (None, None, 13.0);
+        assert_eq!(stop_reason(&t), Some(Stop::Budget(13.0)));
     }
 
     #[test]
@@ -5463,6 +5532,7 @@ mod tests {
             endless: false,
             pct: 2.0,
             limit: 20.0,
+            ceiling: None,
             five: Some(30.0),
             global: 60.0,
             week: Some(40.0),
