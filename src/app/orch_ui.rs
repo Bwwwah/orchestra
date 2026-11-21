@@ -855,7 +855,7 @@ impl NotesApp {
         let commits = commits && code && !copy.branch.is_empty();
         let o = &self.ws.settings.orch;
         let cwd = std::path::Path::new(&copy.worktree);
-        agent.write_config(cwd, commits, &o.extra_tools)?;
+        agent.write_config(cwd, commits, &o.extra_tools, model)?;
         let cmd = agent.command(cwd, commits, &o.extra_tools, model);
         let c2 = ctx.clone();
         let mut term = Term::spawn_once(

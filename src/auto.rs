@@ -223,8 +223,9 @@ impl Agent {
     ///   `tools` rules.
     /// - Mistral Vibe: `config.toml` of its own home: the rules and one `[[mcp_servers]]`
     ///   table. Its sign-in (`.env`) stays in the person's home, linked by `write_config`.
+    ///   With `model` (see `model_arg`), its `active_model` rather than the person's.
     /// - Claude Code and Codex: none, everything is on their command line.
-    pub fn config_files(self, cwd: &Path, allow_commits: bool, extra: &str) -> Vec<(PathBuf, String)> {
+    pub fn config_files(self, cwd: &Path, allow_commits: bool, extra: &str, model: &str) -> Vec<(PathBuf, String)> {
         let dir = self.config_dir(cwd);
         match self {
             // Claude Code: its settings on its command line; RTK's for its hook, if shipped.
@@ -252,7 +253,7 @@ impl Agent {
                 ours.push_str(&self.rules_config(allow_commits, extra));
                 let own = std::fs::read_to_string(vibe_own_home().join("config.toml")).unwrap_or_default();
                 vec![
-                    (dir.join("config.toml"), vibe_config(&own, &ours)),
+                    (dir.join("config.toml"), vibe_config(&own, &ours, model)),
                     (dir.join("turns.sh"), VIBE_TURNS.to_string()),
                 ]
             }
@@ -261,12 +262,12 @@ impl Agent {
 
     /// Write the files of `config_files` before the agent starts. For Mistral Vibe, its own
     /// home also gets a link to the person's sign-in (`~/.vibe/.env`), never a copy of it.
-    pub fn write_config(self, cwd: &Path, allow_commits: bool, extra: &str) -> Result<(), String> {
+    pub fn write_config(self, cwd: &Path, allow_commits: bool, extra: &str, model: &str) -> Result<(), String> {
         // A headless agent's turns of an earlier session in this copy: not this one's.
         if self.headless() {
             let _ = std::fs::remove_dir_all(self.config_dir(cwd).join("turn"));
         }
-        for (path, text) in self.config_files(cwd, allow_commits, extra) {
+        for (path, text) in self.config_files(cwd, allow_commits, extra, model) {
             if let Some(d) = path.parent() {
                 std::fs::create_dir_all(d).map_err(|e| e.to_string())?;
             }
@@ -339,9 +340,22 @@ fn vibe_own_home() -> PathBuf {
 /// Vibe's settings for the session: the person's own (model, providers…), less their MCP
 /// servers and their tool permissions, then Orchestra's (`ours`: its MCP server and the
 /// rules). Tables are dropped whole: TOML refuses a table defined twice, and the person's
-/// `[tools.bash]` must not loosen the session's rules.
-fn vibe_config(own: &str, ours: &str) -> String {
-    let kept: String = crate::setup::toml_tables(own)
+/// `[tools.bash]` must not loosen the session's rules. With `model` (see `model_arg`), the
+/// session's `active_model` is it, in place of the person's (a key before any table).
+fn vibe_config(own: &str, ours: &str, model: &str) -> String {
+    let mut tables = crate::setup::toml_tables(own);
+    if let Some(m) = model_arg(model) {
+        // The keys before the first table: the person's `active_model` gives way to ours.
+        let top = if tables[0].trim_start().starts_with('[') { String::new() } else { tables.remove(0) };
+        let top: String = top
+            .split_inclusive('\n')
+            .filter(|l| l.split('=').next().map(str::trim) != Some("active_model"))
+            .collect();
+        let top = top.trim_end();
+        let line = format!("active_model = {}\n", toml_string(m));
+        tables.insert(0, if top.is_empty() { format!("{line}\n") } else { format!("{top}\n{line}\n") });
+    }
+    let kept: String = tables
         .into_iter()
         .filter(|t| {
             let head = t.trim_start();
@@ -3636,8 +3650,8 @@ mod tests {
             assert_ne!(a.config_dir(cwd), a.config_dir(Path::new("/w/other")));
         }
         assert_ne!(Agent::Gemini.config_dir(cwd), Agent::Vibe.config_dir(cwd));
-        assert!(Agent::ClaudeCode.config_files(cwd, true, "").is_empty());
-        assert!(Agent::Codex.config_files(cwd, true, "").is_empty());
+        assert!(Agent::ClaudeCode.config_files(cwd, true, "", "").is_empty());
+        assert!(Agent::Codex.config_files(cwd, true, "", "").is_empty());
 
         // Codex: the whole table of MCP servers replaced on its command line.
         let c = Agent::Codex.command(cwd, false, "", "");
@@ -3645,7 +3659,7 @@ mod tests {
         assert!(c.contains(",args=[\"mcp\"]}}'"), "{c}");
 
         // Gemini: its system settings, with Orchestra trusted and the rules.
-        let files = Agent::Gemini.config_files(cwd, false, "");
+        let files = Agent::Gemini.config_files(cwd, false, "", "");
         assert_eq!(files.len(), 1);
         let (path, text) = &files[0];
         let v: Value = serde_json::from_str(text).unwrap();
@@ -3660,7 +3674,7 @@ mod tests {
         assert!(g.ends_with(" gemini --approval-mode default --allowed-mcp-server-names orchestra"));
 
         // Vibe: its own home, with one MCP table and the rules; its sessions are read there.
-        let files = Agent::Vibe.config_files(cwd, false, "");
+        let files = Agent::Vibe.config_files(cwd, false, "", "");
         let (path, text) = &files[0];
         assert_eq!(path, &Agent::Vibe.config_dir(cwd).join("config.toml"));
         assert_eq!(text.matches("[[mcp_servers]]").count(), 1);
@@ -3668,13 +3682,27 @@ mod tests {
         // The person's own settings come along, less their MCP servers and tool permissions.
         let own = "# mes réglages\nactive_model = \"devstral\"\n\n[[mcp_servers]]\nname = \"fetch\"\ntransport = \"stdio\"\ncommand = \"uvx\"\n\n[tools.bash]\npermission = \"always\"\n\n[[providers]]\nname = \"mistral\"\n";
         let ours = "[[mcp_servers]]\nname = \"orchestra\"\n\n[tools.bash]\nallowlist = [\"ls\"]\n";
-        let merged = vibe_config(own, ours);
+        let merged = vibe_config(own, ours, "");
         assert!(merged.starts_with("# mes réglages\nactive_model = \"devstral\"\n"), "{merged}");
         assert!(merged.contains("[[providers]]\nname = \"mistral\"\n"), "{merged}");
         assert!(!merged.contains("fetch") && !merged.contains("permission = \"always\""), "{merged}");
         assert_eq!(merged.matches("[tools.bash]").count(), 1);
         assert!(merged.ends_with(ours));
-        assert_eq!(vibe_config("", ours), ours);
+        assert_eq!(vibe_config("", ours, ""), ours);
+        // A model chosen: the session's `active_model`, in place of the person's, before any
+        // table; without settings of their own, alone before ours.
+        let chosen = vibe_config(own, ours, "codestral");
+        assert!(chosen.starts_with("# mes réglages\nactive_model = \"codestral\"\n\n[[providers]]"), "{chosen}");
+        assert_eq!(chosen.matches("active_model").count(), 1);
+        assert!(chosen.ends_with(ours));
+        assert_eq!(vibe_config("", ours, "local"), format!("active_model = \"local\"\n\n{ours}"));
+        let tables_only = "[[providers]]\nname = \"mistral\"\n";
+        let t = vibe_config(tables_only, ours, "local");
+        assert!(t.starts_with("active_model = \"local\"\n\n[[providers]]"), "{t}");
+        // A name unfit for a model leaves the person's.
+        assert!(vibe_config(own, ours, "x\"\nevil = 1").contains("active_model = \"devstral\"\n"));
+        let f = Agent::Vibe.config_files(cwd, false, "", "codestral");
+        assert!(f[0].1.contains("active_model = \"codestral\"\n"), "{}", f[0].1);
         assert!(text.contains("args = [\"mcp\"]\n") && text.contains("[tools.bash]\nallowlist = ["));
         let v = Agent::Vibe.command(cwd, false, "", "");
         assert!(v.starts_with("VIBE_HOME=") && v.trim_end_matches('\'').ends_with("/turns.sh"), "{v}");
