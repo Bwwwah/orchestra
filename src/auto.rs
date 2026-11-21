@@ -23,7 +23,8 @@ use std::process::Stdio;
 // Codex, Gemini and Vibe are chosen from the « Sessions IA » card once it has its list of
 // AIs (a later step); until then only the tests name them.
 #[allow(dead_code)]
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum Agent {
     ClaudeCode,
     Codex,

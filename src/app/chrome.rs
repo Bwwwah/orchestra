@@ -1511,7 +1511,7 @@ impl NotesApp {
                     let steps = [
                         (crate::tr!("Brancher une IA", "Plug in an AI"), crate::tr!("Paramètres › IA : installez et branchez Claude Code, Codex, Gemini CLI ou Mistral Vibe.", "Settings › AI: install and plug in Claude Code, Codex, Gemini CLI or Mistral Vibe."), HomeGo::Ais),
                         (crate::tr!("Créer un projet", "Create a project"), crate::tr!("Donnez son dossier de code ; l'IA remplit l'état des lieux et propose des étapes.", "Give its code folder; the AI fills in the state of play and proposes steps."), HomeGo::Projects),
-                        (crate::tr!("Lancer une IA en autonomie", "Start an AI on its own"), crate::tr!("Orchestration : elle avance étape par étape dans une copie à part, avec un budget.", "Orchestration: it goes step by step in a separate copy, within a budget."), HomeGo::Orchestra),
+                        (crate::tr!("Lancer une IA en autonomie", "Start an AI on its own"), crate::tr!("Orchestration : elle avance étape par étape dans une copie à part, jusqu'au plafond choisi.", "Orchestration: it goes step by step in a separate copy, up to the ceiling chosen."), HomeGo::Orchestra),
                         (crate::tr!("Répondre à ses questions", "Answer its questions"), crate::tr!("Boîte de réception : votre réponse lui parvient au prochain état des lieux.", "Inbox: your answer reaches it at the next state of play."), HomeGo::Inbox),
                     ];
                     for (i, ((title, what, target), ok)) in steps.into_iter().zip(done).enumerate() {

@@ -637,6 +637,10 @@ pub(crate) fn is_zero(x: &u64) -> bool {
     *x == 0
 }
 
+fn is_zero_f32(x: &f32) -> bool {
+    *x == 0.0
+}
+
 /// An autonomous work session of an AI on a project, in its own copy of the repository.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Default)]
 pub struct RunRecord {
@@ -675,6 +679,9 @@ pub struct RunRecord {
     pub mission: String,
     #[serde(default)]
     pub limit: f32,
+    /// Where it stopped, in absolute % of the 5-hour window (0: not known, older records).
+    #[serde(default, skip_serializing_if = "is_zero_f32")]
+    pub ceiling: f32,
     /// Stopped by a quota: starts again by itself at this time (ms); 0 = no.
     #[serde(default, skip_serializing_if = "is_zero")]
     pub resume_at: u64,

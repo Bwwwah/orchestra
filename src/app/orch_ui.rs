@@ -76,6 +76,9 @@ pub struct LiveRun {
     /// The project's repository (the copy's origin), for its trust in Claude Code.
     root: String,
     pub limit: f32,
+    /// Where it stops, in absolute % of the 5-hour window (37 % used at its start and a
+    /// budget of 13 %: 50 %); None until the window's figure is known (see `ceiling_from`).
+    pub ceiling: Option<f32>,
     pub pct: f32,
     tokens_counted: u64,
     pub turns: u32,
@@ -189,29 +192,37 @@ impl LiveRun {
 #[derive(Clone)]
 struct Draft {
     mission: String,
-    limit: f32,
+    /// Where the next session stops, in absolute % of the 5-hour window, as chosen (None:
+    /// the default, see `ceiling_choice`).
+    ceiling: Option<f32>,
+    /// The ceiling was changed in the launch card since Orchestra opened: it then wins over
+    /// that of a session already running (see `draft_ceiling`).
+    touched: bool,
     commits: bool,
     pick: bool,
     /// Endless mode, and its end conditions as set in the launch card.
     endless: bool,
     end: crate::model::EndConditions,
+    /// The AI the session is started with.
+    agent: Agent,
 }
 
 impl Draft {
     /// A project's line in the launch card, with the choices the person last made for it
-    /// (kept in the project), else the settings' defaults: `limit` and `commits`.
-    fn new(pr: Option<&crate::project::Project>, limit: f32, commits: bool) -> Self {
-        let limit = pr.and_then(|x| x.session_limit).unwrap_or(limit);
+    /// (kept in the project), else the settings' defaults (`commits`).
+    fn new(pr: Option<&crate::project::Project>, commits: bool) -> Self {
         let prefs = pr
             .and_then(|x| x.launch.clone())
             .unwrap_or_else(|| default_prefs(commits));
         Draft {
             mission: String::new(),
-            limit,
+            ceiling: pr.and_then(|x| x.session_ceiling),
+            touched: false,
             commits: prefs.commits,
             pick: false,
             endless: prefs.endless,
             end: prefs.end,
+            agent: prefs.agent.unwrap_or(Agent::ClaudeCode),
         }
     }
 
@@ -221,6 +232,8 @@ impl Draft {
             commits: self.commits,
             endless: self.endless,
             end: self.end.clone(),
+            // Claude Code, the default, isn't written.
+            agent: (self.agent != Agent::ClaudeCode).then_some(self.agent),
         }
     }
 }
@@ -235,22 +248,120 @@ fn default_prefs(commits: bool) -> crate::project::LaunchPrefs {
             hours: Some(4.0),
             ..Default::default()
         },
+        agent: None,
     }
 }
 
-/// What is left of the global limit for one project of the launch card: the global limit
-/// less the sessions running and the other projects picked (`own`: this project's budget
-/// when it is picked itself, so it doesn't count against itself). Whole percents.
-fn room_for(global: f32, running_sum: f32, picked_sum: f32, own: Option<f32>) -> f32 {
-    let others = running_sum + picked_sum - own.unwrap_or(0.0);
-    (global - others).floor().max(0.0)
+/// The lowest ceiling a session can start with: a whole percent above the 5-hour window's
+/// figure (`five`), never past the global limit.
+fn ceiling_floor(five: Option<f32>, global: f32) -> f32 {
+    (five.unwrap_or(0.0).floor() + 1.0).min(global)
 }
 
-/// The budget a session gets when it starts: the one chosen, within what is left of the
-/// global limit once `taken` by the sessions running; None when less than 1 % is left.
-fn share_at_start(want: f32, global: f32, taken: f32) -> Option<f32> {
-    let left = (global - taken).floor();
-    (left >= 1.0).then(|| want.min(left).max(1.0))
+/// Where a project's next session stops, in absolute % of the 5-hour window: the ceiling
+/// chosen, else the window's figure plus the settings' default share (`default_share`);
+/// between `ceiling_floor` and the global limit, whole percents.
+fn ceiling_choice(chosen: Option<f32>, five: Option<f32>, default_share: f32, global: f32) -> f32 {
+    let want = chosen.unwrap_or_else(|| five.unwrap_or(0.0) + default_share).round();
+    want.clamp(ceiling_floor(five, global), global.max(1.0))
+}
+
+/// The ceiling of the sessions already running on the subscription (the highest, if they
+/// differ): where a session started beside them begins (see `draft_ceiling`).
+fn running_ceiling(ceilings: impl IntoIterator<Item = Option<f32>>) -> Option<f32> {
+    ceilings.into_iter().flatten().reduce(f32::max)
+}
+
+/// `running_ceiling` among the sessions of one AI only (`runs`: each one's AI and ceiling):
+/// the ceilings of another AI are on another subscription and never count.
+fn running_ceiling_of(runs: &[(Agent, Option<f32>)], agent: Agent) -> Option<f32> {
+    running_ceiling(runs.iter().filter(|(a, _)| *a == agent).map(|(_, c)| *c))
+}
+
+/// The ceiling a project's next session is offered (before `ceiling_choice` puts it in
+/// bounds): beside a session already running, that session's (« stop at 50 % » for both),
+/// unless the person changed this project's since Orchestra opened; else the one kept.
+fn draft_ceiling(d: &Draft, running: Option<f32>) -> Option<f32> {
+    if d.touched { d.ceiling } else { running.or(d.ceiling) }
+}
+
+/// What the ceiling of a session started beside running ones (`running`: theirs) means,
+/// for the launch card's tooltip: empty with none running. `chosen`: this one's ceiling,
+/// `touched`: changed by the person (higher or lower than theirs, for this one only).
+fn parallel_note(running: Option<f32>, chosen: f32, touched: bool) -> String {
+    let Some(r) = running else { return String::new() };
+    if !touched || (chosen - r).abs() < 0.5 {
+        crate::trf!(
+            "Une session tourne déjà avec un plafond de {r:.0} % : celle-ci part du même ; vous pouvez le monter (ex. {:.0} %) pour celle-ci seulement. ",
+            "A session is already running with a ceiling of {r:.0} %: this one starts from the same; you may raise it (e.g. {:.0} %) for this one only. ",
+            (r + 10.0).min(100.0)
+        )
+    } else {
+        crate::trf!(
+            "Celle-ci s'arrêtera à {chosen:.0} %, celle déjà en cours garde son plafond ({r:.0} %). ",
+            "This one will stop at {chosen:.0} %, the one already running keeps its ceiling ({r:.0} %). "
+        )
+    }
+}
+
+/// A project's share of the 5-hour window in the launch card, always shown: its running
+/// session's own use (`running`), else 0 %; None for an endless session suspended until the
+/// quota resets (shown with the suspended ones instead).
+fn row_share(running: Option<f32>, suspended_endless: bool) -> Option<f32> {
+    match running {
+        Some(p) => Some(p.max(0.0)),
+        None if suspended_endless => None,
+        None => Some(0.0),
+    }
+}
+
+/// What a picked project's session may take from the 5-hour window, in percentage points:
+/// its ceiling less what is already taken, that is what the window holds (`five`) or, when
+/// higher, the ceiling of a session already running (`running`: the room up to it is that
+/// session's too). Never below zero.
+fn picked_share(ceiling: f32, five: Option<f32>, running: Option<f32>) -> f32 {
+    let taken = five.unwrap_or(0.0).max(running.unwrap_or(0.0));
+    (ceiling - taken).max(0.0)
+}
+
+/// Whether a launch row shows what its session may take (`picked_share`) rather than its
+/// base share: once picked, or once its ceiling was set by hand in the card; never while
+/// its session runs (its own use is shown then).
+fn shows_picked_share(picked: bool, set_by_hand: bool, busy: bool) -> bool {
+    (picked || set_by_hand) && !busy
+}
+
+/// How `picked_share` was worked out, for its tooltip.
+fn picked_share_text(ceiling: f32, five: Option<f32>, running: Option<f32>) -> String {
+    let p = picked_share(ceiling, five, running);
+    let f = five.unwrap_or(0.0);
+    match running {
+        Some(r) if r > f => crate::trf!(
+            "La part de la fenêtre de 5 h que cette session pourra prendre en propre : son plafond ({ceiling:.0} %) moins celui de la session déjà en cours ({r:.0} %), soit {p:.0} %. Jusqu'à {r:.0} %, la place est partagée avec elle (la fenêtre est à {f:.0} %).",
+            "The share of the 5-hour window this session may take for itself: its ceiling ({ceiling:.0} %) less that of the session already running ({r:.0} %), that is {p:.0} %. Up to {r:.0} %, the room is shared with it (the window is at {f:.0} %)."
+        ),
+        _ => crate::trf!(
+            "La part de la fenêtre de 5 h que cette session pourra prendre : son plafond ({ceiling:.0} %) moins ce que la fenêtre contient déjà ({f:.0} %).",
+            "The share of the 5-hour window this session may take: its ceiling ({ceiling:.0} %) less what the window already holds ({f:.0} %)."
+        ),
+    }
+}
+
+/// A share as the launch card shows it: « 0 % » at the start, then to a tenth (« 2,5 % »).
+fn share_text(p: f32) -> String {
+    if p < 0.05 { "0 %".into() } else { format!("{} %", crate::i18n::dec1(p)) }
+}
+
+/// Whether a session can start under the global limit: at least 1 % of the window is left.
+fn room_left(five: Option<f32>, global: f32) -> bool {
+    five.is_none_or(|f| global - f >= 1.0)
+}
+
+/// A session's ceiling in absolute % of the 5-hour window: what the window held without it
+/// (its figure `five` less the session's own use `pct`, 0 at its start) plus its budget,
+/// never past the global limit. None while the window's figure is unknown.
+fn ceiling_from(five: Option<f32>, pct: f32, budget: f32, global: f32) -> Option<f32> {
+    five.map(|f| ((f - pct).max(0.0) + budget).min(global).clamp(0.0, 100.0))
 }
 
 /// What to do with a finished session's copy.
@@ -286,6 +397,32 @@ pub struct Figures {
     pub week_reset: Option<u64>,
 }
 
+impl Figures {
+    /// A new reading (`new`, None when it failed) laid over the last known figures: a window
+    /// the reading misses keeps its last figure as long as its reset time is still ahead,
+    /// so a failed or partial reading never passes for 0 % (nor lifts the ceilings). A window
+    /// that has reset, or whose reset time is unknown, is forgotten. Readings are taken again
+    /// every few seconds: the next one that succeeds replaces what was kept.
+    fn merged(self, new: Option<Figures>, now: u64) -> Figures {
+        let new = new.unwrap_or_default();
+        let keep = |pct: Option<f32>, reset: Option<u64>| match (pct, reset) {
+            (Some(p), Some(r)) if r > now => (Some(p), Some(r)),
+            _ => (None, None),
+        };
+        let (five, five_reset) = if new.five.is_some() {
+            (new.five, new.five_reset)
+        } else {
+            keep(self.five, self.five_reset)
+        };
+        let (week, week_reset) = if new.week.is_some() {
+            (new.week, new.week_reset)
+        } else {
+            keep(self.week, self.week_reset)
+        };
+        Figures { five, week, five_reset, week_reset }
+    }
+}
+
 #[derive(Default)]
 pub struct Orch {
     pub runs: Vec<LiveRun>,
@@ -303,6 +440,8 @@ pub struct Orch {
     /// When the 5-hour and the weekly windows start again (ms since epoch).
     pub five_reset: Option<u64>,
     pub week_reset: Option<u64>,
+    /// Since when (ms) Claude Code's 5-hour window can't be read; None while it can.
+    unmeasured_since: Option<u64>,
     /// The 5-hour windows of the last 24 hours, added up.
     pub day_total: Option<f32>,
     /// What went from the week in the last 24 hours, and over how long the readings go back.
@@ -366,14 +505,16 @@ fn hash(s: &str) -> u64 {
 
 impl NotesApp {
     /// Start an autonomous session on a project.
+    #[allow(clippy::too_many_arguments)]
     fn launch_run(
         &mut self,
         ctx: &egui::Context,
         project: &str,
         mission: &str,
-        limit: f32,
+        ceiling: f32,
         commits: bool,
         endless: Option<crate::model::EndConditions>,
+        agent: Agent,
     ) -> Result<(), String> {
         if self.orch.runs.iter().any(|r| r.project == project) {
             return Err(crate::tr!(
@@ -413,18 +554,28 @@ impl NotesApp {
             )
             .into());
         }
-        if !self.ais.plugged().contains(&crate::setup::Ai::ClaudeCode) {
-            return Err(crate::tr!(
-                "Claude Code n'est pas branché (Réglages › IA)",
-                "Claude Code isn't plugged in (Settings › AI)"
-            )
-            .into());
+        // The AI chosen: wired for working alone, and plugged in.
+        if !agent.ready() {
+            return Err(crate::trf!(
+                "le travail autonome n'est pas encore possible avec {}",
+                "autonomous work isn't possible yet with {}",
+                agent.label()
+            ));
         }
-        if let Some(f) = self.orch.five
+        if !self.ais.plugged().contains(&agent.ai()) {
+            return Err(crate::trf!(
+                "{} n'est pas branché (Réglages › IA)",
+                "{} isn't plugged in (Settings › AI)",
+                agent.label()
+            ));
+        }
+        // Every figure below is that of the AI chosen, on its own subscription: never another
+        // AI's (Claude Code's window full doesn't stop a Codex session, nor the reverse).
+        let fig = self.agent_figures(agent);
+        if let Some(f) = fig.five
             && f >= self.ws.settings.orch.global_limit
         {
-            let left = self
-                .orch
+            let left = fig
                 .five_reset
                 .and_then(|r| crate::usage::until(r, crate::model::now_ms()));
             let when = left
@@ -442,15 +593,21 @@ impl NotesApp {
                 self.ws.settings.orch.global_limit
             ));
         }
-        let taken: f32 = self.orch.runs.iter().map(|r| r.limit).sum();
-        if taken + limit > self.ws.settings.orch.global_limit + 0.01 {
+        // The ceiling is absolute (% of the 5-hour window), never past the global limit; one
+        // already reached would stop the session at its first turn.
+        let ceiling = ceiling.min(self.ws.settings.orch.global_limit);
+        if let Some(f) = fig.five
+            && f >= ceiling
+        {
             return Err(crate::trf!(
-                "{limit:.0} % pour ce projet dépasserait la limite globale ({:.0} %), dont {taken:.0} % sont déjà pris",
-                "{limit:.0} % for this project would go past the global limit ({:.0} %), {taken:.0} % of which is already taken",
-                self.ws.settings.orch.global_limit
+                "le plafond choisi ({ceiling:.0} %) est déjà atteint : la fenêtre de 5 h est à {f:.0} %",
+                "the ceiling chosen ({ceiling:.0} %) is already reached: the 5-hour window is at {f:.0} %"
             ));
         }
-        if let Some(w) = self.orch.week
+        // Its share from its start, for the record and as a second guard (the whole ceiling
+        // while the window's figure is unknown).
+        let limit = (ceiling - fig.five.unwrap_or(0.0)).max(1.0);
+        if let Some(w) = fig.week
             && crate::usage::near_reserve(w, self.ws.settings.orch.week_limit, 0.0)
         {
             return Err(crate::trf!(
@@ -462,7 +619,7 @@ impl NotesApp {
         // The limits are checked with Claude Code's own figures: they come through the status line.
         // Not only in place: working (a status line left by an Orchestra since moved or
         // deleted measures nothing, and the session would stop as unmeasured).
-        if !crate::usage::tracking_works() {
+        if agent == Agent::ClaudeCode && !crate::usage::tracking_works() {
             crate::usage::start_tracking(&std::env::current_exe().unwrap_or_default())?;
             self.ais.tracking = true;
         }
@@ -476,14 +633,6 @@ impl NotesApp {
             .map(|s| (s.id.clone(), s.status == crate::project::StepStatus::Done))
             .collect();
         let steps_at_turn: Vec<String> = steps_at_start.iter().map(|(id, _)| id.clone()).collect();
-        let agent = Agent::ClaudeCode;
-        if !agent.ready() {
-            return Err(crate::trf!(
-                "le travail autonome n'est pas encore possible avec {}",
-                "autonomous work isn't possible yet with {}",
-                agent.label()
-            ));
-        }
         let code = crate::project::code_kind(&folder, pr.code);
         let copy = auto::make_copy(&folder, &title, !on_main(pr), code)?;
         // A project without code makes no commit (the switch isn't shown for it), and without
@@ -519,6 +668,7 @@ impl NotesApp {
             commits_allowed: commits,
             mission: mission.clone(),
             limit,
+            ceiling,
             endless: endless.clone(),
             ..Default::default()
         };
@@ -561,13 +711,14 @@ impl NotesApp {
             root: copy.root,
             worktree: copy.worktree,
             limit,
+            ceiling: Some(ceiling),
             pct: 0.0,
             tokens_counted: 0,
             turns: 0,
             max_turns: o.max_turns.max(1),
             stop: None,
             summarizing: false,
-            last_line: crate::tr!("Démarrage de Claude Code…", "Starting Claude Code…").into(),
+            last_line: crate::trf!("Démarrage de {}…", "Starting {}…", agent.label()),
             steps_at_start,
             screen_hash: 0,
             screen_changed: Instant::now(),
@@ -669,8 +820,9 @@ impl NotesApp {
             && self.ais.plugged().contains(&crate::setup::Ai::ClaudeCode)
             && !AUTO_RUN_DONE.swap(true, std::sync::atomic::Ordering::Relaxed)
         {
-            let (l, c) = (self.ws.settings.orch.default_limit, true);
-            if let Err(e) = self.launch_run(ctx, &pid, "", l, c, None) {
+            let o = &self.ws.settings.orch;
+            let l = ceiling_choice(None, self.orch.five, o.default_limit, o.global_limit);
+            if let Err(e) = self.launch_run(ctx, &pid, "", l, true, None, Agent::ClaudeCode) {
                 eprintln!("auto-run : {e}");
             }
         }
@@ -886,6 +1038,10 @@ impl NotesApp {
                         }
                         r.steps_at_turn = steps_now.iter().map(|s| s.id.clone()).collect();
                         let five = fig.five;
+                        // Started before the window's figure was known: its ceiling now.
+                        if r.ceiling.is_none() {
+                            r.ceiling = ceiling_from(five, r.pct, r.limit, global);
+                        }
                         r.done_streak = if sig == Signal::Done {
                             r.done_streak + 1
                         } else {
@@ -924,6 +1080,7 @@ impl NotesApp {
                             endless: r.endless.is_some(),
                             pct: r.pct,
                             limit: r.limit,
+                            ceiling: r.ceiling,
                             five,
                             global,
                             week: fig.week,
@@ -1041,12 +1198,22 @@ impl NotesApp {
                 x.resume_at = 0;
             }
             self.dirty_since.get_or_insert_with(Instant::now);
-            let limit = if rec.limit > 0.0 {
-                rec.limit
+            // The same ceiling as before (the window has reset since); older records without
+            // one: the same share, from the window's figure now.
+            // The same AI as before (named by its label in the record).
+            let agent = Agent::ALL
+                .into_iter()
+                .find(|a| a.label() == rec.tool)
+                .unwrap_or(Agent::ClaudeCode);
+            let five = self.agent_figures(agent).five;
+            let o = &self.ws.settings.orch;
+            let ceiling = if rec.ceiling > 0.0 {
+                rec.ceiling
             } else {
-                self.ws.settings.orch.default_limit
+                let share = if rec.limit > 0.0 { rec.limit } else { o.default_limit };
+                ceiling_choice(None, five, share, o.global_limit)
             };
-            match self.launch_run(ctx, &rec.project, &rec.mission, limit, rec.commits_allowed, rec.endless.clone()) {
+            match self.launch_run(ctx, &rec.project, &rec.mission, ceiling, rec.commits_allowed, rec.endless.clone(), agent) {
                 Ok(()) => self.ws.notify(
                     "info",
                     &rec.project,
@@ -1077,33 +1244,38 @@ impl NotesApp {
         }
         self.orch.usage_polled = Some(Instant::now());
         self.other_agents_tick();
-        // A window that has reset is dropped by read(): forget its old figure too, so a
-        // limit reached before the reset doesn't block what follows.
-        let Some(u) = crate::usage::read() else {
-            (
-                self.orch.five,
-                self.orch.week,
-                self.orch.five_reset,
-                self.orch.week_reset,
-            ) = (None, None, None, None);
-            return;
+        // A window that has reset is dropped by read(): its old figure is forgotten too, so a
+        // limit reached before the reset doesn't block what follows. A reading that fails
+        // keeps the last figures until their reset (never taken for 0 %); tried again in 3 s.
+        let u = crate::usage::read();
+        let now = crate::model::now_ms();
+        let last = Figures {
+            five: self.orch.five,
+            week: self.orch.week,
+            five_reset: self.orch.five_reset,
+            week_reset: self.orch.week_reset,
         };
+        let f = last.merged(u.as_ref().map(Figures::of), now);
+        (
+            self.orch.five,
+            self.orch.week,
+            self.orch.five_reset,
+            self.orch.week_reset,
+        ) = (f.five, f.week, f.five_reset, f.week_reset);
+        if u.as_ref().is_some_and(|u| u.five().is_some()) {
+            self.orch.unmeasured_since = None;
+        } else {
+            self.orch.unmeasured_since.get_or_insert(now);
+        }
+        let Some(u) = u else { return };
         if self.orch.history_at != u.at {
             self.orch.history_at = u.at;
             let h = crate::usage::record(&u);
-            let now = crate::model::now_ms();
             self.orch.day_total = crate::usage::day_total(&h, now);
             self.orch.day_week = crate::usage::day_week_used(&h, now);
         }
-        let five = u.five().cloned();
-        self.orch.week = u.week().map(|w| w.pct);
-        self.orch.week_reset = u.week().and_then(|w| w.resets_at);
-        self.orch.five_reset = five.as_ref().and_then(|w| w.resets_at);
-        let Some(five) = five else {
-            self.orch.five = None;
-            return;
-        };
-        self.orch.five = Some(five.pct);
+        // Only a fresh figure is shared between the sessions.
+        let Some(five) = u.five().cloned() else { return };
         apply_reading(
             &mut self.orch.runs,
             Agent::ClaudeCode,
@@ -1124,13 +1296,18 @@ impl NotesApp {
             }
         }
         self.orch.others.retain(|a, _| agents.contains(a));
+        let now = crate::model::now_ms();
         for a in agents {
-            let Some(u) = crate::usage::read_for(a) else {
-                // Reset or never seen: forget the old figures (as for Claude Code).
+            // As for Claude Code: a failed reading keeps the last figures until their reset.
+            let u = crate::usage::read_for(a);
+            let last = self.orch.others.get(&a).copied().unwrap_or_default();
+            let f = last.merged(u.as_ref().map(Figures::of), now);
+            if f == Figures::default() {
                 self.orch.others.remove(&a);
-                continue;
-            };
-            self.orch.others.insert(a, Figures::of(&u));
+            } else {
+                self.orch.others.insert(a, f);
+            }
+            let Some(u) = u else { continue };
             if let Some(five) = u.five() {
                 let mut last = self.orch.others_reading.get(&a).copied();
                 apply_reading(&mut self.orch.runs, a, &mut last, u.at, five);
@@ -1139,6 +1316,17 @@ impl NotesApp {
                 }
             }
         }
+    }
+
+    /// The figures of one agent's subscription: Claude Code's as followed, another's as last
+    /// read for its running sessions, else read now; none for an agent that tells none.
+    fn agent_figures(&self, agent: Agent) -> Figures {
+        if let Some(f) = self.figures_by_agent().get(&agent) {
+            return *f;
+        }
+        crate::usage::read_for(agent)
+            .map(|u| Figures::of(&u))
+            .unwrap_or_default()
     }
 
     /// The figures each session is measured and stopped on: those of its own agent.
@@ -1476,6 +1664,33 @@ impl NotesApp {
 
     /// The permission is missing: what it's for, and the two ways to give it back. Read
     /// again every few seconds while the page is open (a cheap call, no dialog).
+    /// An alert while the subscription's use can't be read (see `measure_alert`).
+    fn measure_card(&self, ui: &mut egui::Ui, t: &Tone) {
+        let running = self.orch.runs.iter().any(|r| r.agent == Agent::ClaudeCode);
+        let now = crate::model::now_ms();
+        let Some((title, text)) =
+            measure_alert(self.orch.unmeasured_since, self.orch.five, running, now)
+        else {
+            if self.orch.unmeasured_since.is_some() {
+                // To show it once the grace is over, even with nothing else moving.
+                ui.ctx().request_repaint_after(Duration::from_secs(5));
+            }
+            return;
+        };
+        ui.ctx().request_repaint_after(Duration::from_secs(30));
+        egui::Frame::new()
+            .fill(super::projects::ORANGE.gamma_multiply(0.07))
+            .stroke(egui::Stroke::new(1.0, super::projects::ORANGE.gamma_multiply(0.45)))
+            .corner_radius(12.0)
+            .inner_margin(egui::Margin::symmetric(18, 14))
+            .show(ui, |ui| {
+                ui.set_width(ui.available_width());
+                ui.label(RichText::new(title).font(semibold(14.0)).color(super::projects::ORANGE));
+                ui.add(egui::Label::new(RichText::new(text).size(12.5).color(t.secondary)).wrap());
+            });
+        ui.add_space(14.0);
+    }
+
     fn screen_card(&mut self, ui: &mut egui::Ui, t: &Tone) {
         if !cfg!(target_os = "macos") || self.orch.screen_dismissed {
             return;
@@ -1567,6 +1782,7 @@ impl NotesApp {
                 ui.label(RichText::new(crate::tr!("Des IA qui avancent seules sur vos projets, chacune dans une copie à part, dans les limites de votre abonnement.", "AIs that move your projects forward on their own, each in a separate copy, within your subscription's limits.")).color(t.secondary));
                 ui.add_space(14.0);
                 self.screen_card(ui, &t);
+                self.measure_card(ui, &t);
                 self.week_bar(ui, &t);
                 ui.add_space(14.0);
                 self.stats_row(ui, &t);
@@ -1706,9 +1922,10 @@ impl NotesApp {
                         .color(t.tertiary),
                 );
                 let used = match week {
+                    // Claude Code's subscription only: another AI's week is on its own.
                     Some(w) => crate::trf!(
-                        "{w:.0} % de l'abonnement utilisés",
-                        "{w:.0} % of the subscription used"
+                        "{w:.0} % de l'abonnement Claude Code utilisés",
+                        "{w:.0} % of the Claude Code subscription used"
                     ),
                     None => crate::tr!(
                         "utilisation inconnue pour l'instant",
@@ -1798,6 +2015,11 @@ impl NotesApp {
         let five = self.orch.five;
         let week = self.orch.week;
         let day = self.orch.day_total;
+        // The figure shown is the one kept from the last reading (see `measure_alert`).
+        let stale = self
+            .orch
+            .unmeasured_since
+            .is_some_and(|s| crate::model::now_ms().saturating_sub(s) >= MEASURE_GRACE_MS);
         let global = self.ws.settings.orch.global_limit;
         let now_ms = crate::model::now_ms();
         let five_left = self
@@ -1861,7 +2083,8 @@ impl NotesApp {
             // Each figure once on the page: the week (and the day's pace) in the bar above, the
             // 5-hour window here (the one the sessions stop at), counts in the other tiles.
             let label = [
-                crate::tr!("FENÊTRE DE 5 H", "5-HOUR WINDOW"),
+                // Claude Code's: each AI's sessions stop on their own subscription's window.
+                crate::tr!("FENÊTRE DE 5 H · CLAUDE CODE", "5-HOUR WINDOW · CLAUDE CODE"),
                 crate::tr!("IA AU TRAVAIL", "AIS AT WORK"),
                 crate::tr!("AUJOURD'HUI", "TODAY"),
             ][i];
@@ -1877,6 +2100,11 @@ impl NotesApp {
                     five.map(|f| format!("{f:.0} %"))
                         .unwrap_or_else(|| "—".into()),
                     match (five, five_left) {
+                        (Some(_), _) if stale => crate::tr!(
+                            "dernière valeur connue · mesure indisponible",
+                            "last known figure · can't be measured now"
+                        )
+                        .into(),
                         (Some(_), Some(l)) => crate::trf!(
                             "repart dans {} · IA arrêtées à {global:.0} %",
                             "resets in {} · AIs stop at {global:.0} %",
@@ -2068,8 +2296,8 @@ impl NotesApp {
                     ui,
                     crate::tr!("Limite globale", "Global limit"),
                     crate::tr!(
-                        "De la fenêtre de 5 h, votre propre usage compris : aucune session ne va au-delà, tous projets confondus. Chaque session a en plus son budget, compté depuis son lancement.",
-                        "Of the 5-hour window, your own use included: no session goes past it, all projects together. Each session also has its budget, counted from its start."
+                        "De la fenêtre de 5 h, votre propre usage compris : aucune session ne va au-delà, tous projets confondus. Chaque session a en plus son propre plafond, choisi au lancement (« arrêt à »).",
+                        "Of the 5-hour window, your own use included: no session goes past it, all projects together. Each session also has its own ceiling, chosen at its start (« stops at »)."
                     ),
                     &mut |ui| {
                         ui.add(
@@ -2195,7 +2423,9 @@ impl NotesApp {
         let mut watch: Option<Option<String>> = None;
         let n = self.orch.runs.len();
         let awake = self.orch.awake.held();
-        let (five, global) = (self.orch.five, self.ws.settings.orch.global_limit);
+        // Each session's bar on the 5-hour window of its own AI's subscription.
+        let figs = self.figures_by_agent();
+        let global = self.ws.settings.orch.global_limit;
         // The step each session is on (« doing », reserved by this computer).
         let me = crate::store::computer_id();
         let working_on: HashMap<String, String> = self
@@ -2307,8 +2537,8 @@ impl NotesApp {
                                         .color(super::projects::BLUE),
                                 )
                                 .on_hover_text(crate::trf!(
-                                    "S'arrête après : {}, ou sur son budget",
-                                    "Stops after: {}, or on its budget",
+                                    "S'arrête après : {}, ou à son plafond",
+                                    "Stops after: {}, or at its ceiling",
                                     c.describe()
                                 ));
                             }
@@ -2326,7 +2556,8 @@ impl NotesApp {
                                 links(ui, r);
                             });
                         }
-                        share_row(ui, &r.id, r.pct, r.limit, five, global, t);
+                        let five = figs.get(&r.agent).and_then(|f| f.five);
+                        share_row(ui, &r.id, r.pct, r.limit, r.ceiling, five, global, t);
                         // The task in hand, as a short sentence.
                         if let Some(step) = working_on.get(&r.id) {
                             ui.add_space(2.0);
@@ -2609,7 +2840,7 @@ impl NotesApp {
             self.orch
                 .drafts
                 .entry(id.clone())
-                .or_insert_with(|| Draft::new(pr, dl, dc));
+                .or_insert_with(|| Draft::new(pr, dc));
         }
         let prefs_before: HashMap<String, crate::project::LaunchPrefs> = self
             .orch
@@ -2627,15 +2858,29 @@ impl NotesApp {
             })
             .map(|(id, _, _)| id.clone())
             .collect();
-        let picked_sum: f32 = picked
-            .iter()
-            .filter_map(|id| self.orch.drafts.get(id))
-            .map(|d| d.limit)
-            .sum();
         let global = self.ws.settings.orch.global_limit;
-        // Shares add up: the sessions running and the projects picked together never
-        // get more than the global limit.
-        let running_sum: f32 = self.orch.runs.iter().map(|r| r.limit).sum();
+        // Each session stops at its own ceiling on the 5-hour window (absolute), all under the
+        // global limit: nothing to share out between them. One started beside them begins
+        // from their ceiling. All on the subscription of the AI chosen for each project: its
+        // window, and the ceilings of the sessions running with that same AI only.
+        let figs = self.figures_by_agent();
+        let five_of = |a: Agent| figs.get(&a).and_then(|f| f.five);
+        let ceilings_run: Vec<(Agent, Option<f32>)> =
+            self.orch.runs.iter().map(|r| (r.agent, r.ceiling)).collect();
+        let running_of = |a: Agent| running_ceiling_of(&ceilings_run, a);
+        // Each project's share of the window, always shown: its running session's use, else
+        // 0 %; none for an endless session suspended until the quota resets.
+        let run_pct: HashMap<String, f32> =
+            self.orch.runs.iter().map(|r| (r.project.clone(), r.pct)).collect();
+        let suspended_endless: Vec<String> = {
+            let names: Vec<&str> = running.iter().map(String::as_str).collect();
+            crate::model::suspended_runs(&self.ws.runs, crate::model::wall_ms(), &names)
+                .into_iter()
+                .map(|i| &self.ws.runs[i])
+                .filter(|r| r.endless.is_some())
+                .map(|r| r.project.clone())
+                .collect()
+        };
         let open_steps: HashMap<String, usize> = projects
             .iter()
             .map(|(id, _, _)| {
@@ -2666,7 +2911,7 @@ impl NotesApp {
         let to_main_before = to_main.clone();
         let lk = super::settings::look(ui.visuals().dark_mode);
         let mut confirm_main = self.orch.confirm_main.clone();
-        let mut budgets: Vec<(String, f32)> = vec![];
+        let mut ceilings: Vec<(String, f32)> = vec![];
         let drafts = &mut self.orch.drafts;
         super::projects::card(ui, t, 0.0, |ui| {
             super::projects::card_title(
@@ -2709,10 +2954,11 @@ impl NotesApp {
             let (order, folded) = launch_order(&rows, show_idle);
             for (id, title, folder) in order.iter().map(|&i| &projects[i]) {
                 let d = drafts.get_mut(id).unwrap();
+                // On the subscription of the AI chosen for this project.
+                let (five, running_at) = (five_of(d.agent), running_of(d.agent));
                 let busy = running.contains(id);
                 let bg = super::projects::hover_begin(ui);
                 let open = open_steps.get(id).copied().unwrap_or(0);
-                let room = room_for(global, running_sum, picked_sum, d.pick.then_some(d.limit));
                 // Room for the project and its controls on one line (about 620 px).
                 let wide = ui.available_width() >= LAUNCH_ONE_LINE;
                 let row = ui.vertical(|ui| {
@@ -2730,6 +2976,17 @@ impl NotesApp {
                                 ui.label(RichText::new(title).font(semibold(14.5)).color(t.text));
                                 let (txt, col) = if busy { (crate::tr!("au travail", "at work").to_string(), super::projects::GREEN) } else if open == 0 { (crate::tr!("aucune étape ouverte", "no open step").to_string(), t.tertiary) } else { ({ let s = crate::i18n::plural(open); crate::trf!("{open} étape{s} ouverte{s}", "{open} open step{s}") }, t.secondary) };
                                 ui.label(RichText::new(txt).size(12.0).color(col));
+                                // Picked, or its ceiling set by hand (and not running): what its
+                                // session may take, above what is already taken.
+                                if shows_picked_share(d.pick, d.touched, busy) {
+                                    let c = ceiling_choice(draft_ceiling(d, running_at), five, dl, global);
+                                    let p = picked_share(c, five, running_at);
+                                    ui.label(RichText::new(crate::trf!("jusqu'à +{p:.0} %", "up to +{p:.0} %")).size(12.0).color(super::projects::BLUE))
+                                        .on_hover_text(picked_share_text(c, five, running_at));
+                                } else if let Some(p) = row_share(run_pct.get(id).copied(), suspended_endless.contains(id)) {
+                                    ui.label(RichText::new(share_text(p)).size(12.0).color(if busy { super::projects::GREEN } else { t.tertiary }))
+                                        .on_hover_text(crate::tr!("Ce que la session de ce projet a pris de la fenêtre de 5 h depuis son lancement : 0 % tant qu'elle n'est pas lancée.", "What this project's session took from the 5-hour window since it started: 0 % until it is started."));
+                                }
                             });
                             let mut job = egui::text::LayoutJob::single_section(super::projects::tilde(folder), egui::TextFormat::simple(FontId::monospace(11.0), t.tertiary));
                             job.wrap = egui::text::TextWrapping::truncate_at_width(if wide { (ui.available_width() - 250.0).max(80.0) } else { ui.available_width().max(40.0) });
@@ -2737,7 +2994,7 @@ impl NotesApp {
                         });
                         if wide {
                             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                                launch_controls(ui, LaunchCx { id, d: &mut *d, busy, plugged, open, room, global, to_main: &mut to_main, start: &mut start, confirm_main: &mut confirm_main, budgets: &mut budgets, lk: &lk, t });
+                                launch_controls(ui, LaunchCx { id, d: &mut *d, busy, plugged, open, five, running_at, default_share: dl, global, to_main: &mut to_main, start: &mut start, confirm_main: &mut confirm_main, ceilings: &mut ceilings, lk: &lk, t });
                             });
                         }
                     });
@@ -2745,7 +3002,7 @@ impl NotesApp {
                     if !wide {
                         ui.horizontal_wrapped(|ui| {
                             ui.add_space(70.0);
-                            launch_controls(ui, LaunchCx { id, d: &mut *d, busy, plugged, open, room, global, to_main: &mut to_main, start: &mut start, confirm_main: &mut confirm_main, budgets: &mut budgets, lk: &lk, t });
+                            launch_controls(ui, LaunchCx { id, d: &mut *d, busy, plugged, open, five, running_at, default_share: dl, global, to_main: &mut to_main, start: &mut start, confirm_main: &mut confirm_main, ceilings: &mut ceilings, lk: &lk, t });
                         });
                     }
                     ui.horizontal(|ui| {
@@ -2757,8 +3014,8 @@ impl NotesApp {
                             ui.add_space(70.0);
                             ui.spacing_mut().item_spacing.x = 6.0;
                             super::settings::switch(ui, &mut d.endless, &lk).on_hover_text(crate::tr!(
-                                "La session ne s'arrête ni au nombre de tours des réglages ni à la fin des étapes : quand il n'y en a plus, l'IA trouve elle-même les suivantes (3 à la fois au plus) et continue. Elle s'arrête seulement sur les conditions choisies ici, ou sur son budget, la limite globale et la réserve de la semaine.\nCe choix et ses conditions sont gardés pour les prochaines sessions de ce projet.",
-                                "The session stops neither at the settings' number of turns nor when the steps run out: then the AI finds the next ones itself (3 at a time at most) and goes on. It only stops on the conditions chosen here, or on its budget, the global limit and the week's reserve.\nThis choice and its conditions are kept for this project's next sessions."
+                                "La session ne s'arrête ni au nombre de tours des réglages ni à la fin des étapes : quand il n'y en a plus, l'IA trouve elle-même les suivantes (3 à la fois au plus) et continue. Elle s'arrête seulement sur les conditions choisies ici, ou à son plafond, la limite globale et la réserve de la semaine.\nCe choix et ses conditions sont gardés pour les prochaines sessions de ce projet.",
+                                "The session stops neither at the settings' number of turns nor when the steps run out: then the AI finds the next ones itself (3 at a time at most) and goes on. It only stops on the conditions chosen here, or at its ceiling, the global limit and the week's reserve.\nThis choice and its conditions are kept for this project's next sessions."
                             ));
                             ui.label(RichText::new(crate::tr!("sans fin", "endless")).size(12.0).color(if d.endless { t.text } else { t.tertiary }));
                             if d.endless {
@@ -2887,8 +3144,8 @@ impl NotesApp {
                         }
                     }
                     let s = crate::i18n::plural(picked.len());
-                    let note = crate::trf!("{} projet{s} en parallèle · {picked_sum:.0} % au total pour une limite globale de {global:.0} %", "{} project{s} in parallel · {picked_sum:.0} % in total for a global limit of {global:.0} %", picked.len());
-                    ui.label(RichText::new(note).size(12.5).color(if picked_sum > global { super::projects::ORANGE } else { t.tertiary }));
+                    let note = crate::trf!("{} projet{s} en parallèle · chacun s'arrête à son plafond, tous sous la limite globale de {global:.0} %", "{} project{s} in parallel · each stops at its ceiling, all under the global limit of {global:.0} %", picked.len());
+                    ui.label(RichText::new(note).size(12.5).color(t.tertiary));
                 });
             }
         });
@@ -2901,10 +3158,10 @@ impl NotesApp {
             }
             self.dirty_since.get_or_insert_with(Instant::now);
         }
-        // A budget chosen by the person stays for the next sessions, and after a restart.
-        for (id, limit) in budgets {
+        // A ceiling chosen by the person stays for the next sessions, and after a restart.
+        for (id, ceiling) in ceilings {
             if let Some(p) = self.ws.page_mut(&id).and_then(|p| p.project.as_mut()) {
-                p.session_limit = Some(limit);
+                p.session_ceiling = Some(ceiling);
                 self.dirty_since.get_or_insert_with(Instant::now);
             }
         }
@@ -2930,18 +3187,13 @@ impl NotesApp {
                 .page(&id)
                 .map(|p| p.display_title())
                 .unwrap_or_default();
-            let taken: f32 = self.orch.runs.iter().map(|r| r.limit).sum();
-            // The global limit already shared out (by the projects started just before, in
-            // a selection): this one doesn't start on a crumb of it.
-            let Some(limit) = share_at_start(d.limit, global, taken) else {
-                msg = Some(super::notices::Notice::Error(crate::trf!(
-                    "{title} : la limite globale ({global:.0} %) est déjà prise par les autres sessions.",
-                    "{title}: the global limit ({global:.0} %) is already taken by the other sessions."
-                )));
-                continue;
-            };
+            let o = &self.ws.settings.orch;
+            // As shown in the card: the sessions started together in a selection don't change
+            // each other's ceiling.
+            let want = draft_ceiling(&d, running_of(d.agent));
+            let ceiling = ceiling_choice(want, five_of(d.agent), o.default_limit, global);
             let endless = if d.endless { Some(d.end.clone()) } else { None };
-            match self.launch_run(ctx, &id, &d.mission, limit, d.commits, endless) {
+            match self.launch_run(ctx, &id, &d.mission, ceiling, d.commits, endless, d.agent) {
                 Ok(()) => {
                     if let Some(x) = self.orch.drafts.get_mut(&id) {
                         x.pick = false;
@@ -3579,6 +3831,44 @@ fn new_steps_note(fresh: &[String]) -> String {
     )
 }
 
+/// How long a failed reading of the subscription goes unsaid (readings are taken every 3 s,
+/// and one can miss while Claude Code rewrites its files).
+const MEASURE_GRACE_MS: u64 = 20_000;
+
+/// The alert (title, text) shown while Claude Code's 5-hour window can't be read: since when
+/// (`since`), the figure kept from the last reading (`kept`), whether sessions are running.
+/// None while it is read, during a short grace, or when nothing rests on it (no session
+/// running and no figure kept: the tile already says « unknown for now »).
+fn measure_alert(
+    since: Option<u64>,
+    kept: Option<f32>,
+    running: bool,
+    now: u64,
+) -> Option<(String, String)> {
+    let since = since?;
+    let gone = now.saturating_sub(since);
+    if gone < MEASURE_GRACE_MS || (!running && kept.is_none()) {
+        return None;
+    }
+    let title = crate::trf!(
+        "Mesure de l'abonnement Claude Code indisponible depuis {}",
+        "Claude Code subscription use unavailable for {}",
+        crate::usage::left_text(gone)
+    );
+    let text = match kept {
+        Some(k) => crate::trf!(
+            "La dernière valeur connue ({k:.0} %) est gardée jusqu'à la réinitialisation de la fenêtre : elle n'est jamais prise pour 0 % et les plafonds continuent d'arrêter les IA, mais elle ne voit pas ce qui a été utilisé depuis. Une session jamais mesurée s'arrêtera à son deuxième tour. Orchestra réessaie toutes les 3 s ; vérifiez que la ligne d'état de Claude Code mène bien à Orchestra.",
+            "The last known figure ({k:.0} %) is kept until the window resets: it is never taken for 0 % and the limits still stop the AIs, but it doesn't see what has been used since. A session never measured stops at its second turn. Orchestra tries again every 3 s; check that Claude Code's status line leads to Orchestra."
+        ),
+        None => crate::tr!(
+            "Aucune valeur connue : aucun plafond ne peut être vérifié, donc les sessions qui n'ont pas été mesurées s'arrêteront à leur deuxième tour plutôt que de tourner sans limite. Orchestra réessaie toutes les 3 s ; vérifiez que Claude Code est à jour et que sa ligne d'état mène bien à Orchestra.",
+            "No known figure: no limit can be checked, so sessions that weren't measured stop at their second turn rather than run without a limit. Orchestra tries again every 3 s; check that Claude Code is up to date and that its status line leads to Orchestra."
+        )
+        .into(),
+    };
+    Some((title, text))
+}
+
 /// What a session's turn ended on, to choose whether it stops.
 struct TurnEnd {
     /// A stop already asked (by the person, or a limit seen during the turn).
@@ -3591,6 +3881,8 @@ struct TurnEnd {
     /// The session's use of the 5-hour window, and its budget.
     pct: f32,
     limit: f32,
+    /// Where it stops, in absolute % of the 5-hour window (`LiveRun::ceiling`).
+    ceiling: Option<f32>,
     /// The 5-hour window, and the global limit.
     five: Option<f32>,
     global: f32,
@@ -3612,6 +3904,8 @@ enum Stop {
     MissionDone,
     Blocked,
     Budget(f32),
+    /// The session's own ceiling on the 5-hour window (absolute %), under the global limit.
+    Ceiling(f32),
     GlobalLimit(f32),
     /// The week's reserve (in %) is near.
     WeekReserve(f32),
@@ -3649,6 +3943,10 @@ impl Stop {
             Stop::Budget(l) => crate::trf!(
                 "limite du projet atteinte ({l:.0} %)",
                 "project limit reached ({l:.0} %)"
+            ),
+            Stop::Ceiling(c) => crate::trf!(
+                "plafond de la session atteint ({c:.0} % de la fenêtre de 5 h)",
+                "session ceiling reached ({c:.0} % of the 5-hour window)"
             ),
             Stop::GlobalLimit(g) => crate::trf!(
                 "limite globale atteinte ({g:.0} %)",
@@ -3688,6 +3986,13 @@ fn stop_reason(t: &TurnEnd) -> Option<Stop> {
         Stop::MissionDone
     } else if t.signal == Signal::Blocked {
         Stop::Blocked
+    } else if let Some(c) = t.ceiling
+        && c < t.global
+        && t.five.is_some_and(|f| f >= c)
+    {
+        // At the global limit itself, the global limit's stop says it (and starts the
+        // session again once the window resets).
+        Stop::Ceiling(c)
     } else if t.pct >= t.limit {
         Stop::Budget(t.limit)
     } else if t.five.is_some_and(|f| f >= t.global) {
@@ -3728,12 +4033,7 @@ fn apply_reading(
     at: u64,
     five: &crate::usage::Window,
 ) {
-    let prev = *last;
-    if prev.is_some_and(|(a, _, _)| a == at) {
-        return;
-    }
-    *last = Some((at, five.pct, five.resets_at));
-    let rise = window_rise(prev.map(|(_, p, r)| (p, r)), five.pct, five.resets_at);
+    let Some(rise) = next_rise(last, at, five) else { return };
     let sessions: Vec<(Agent, u64)> = runs
         .iter()
         .map(|r| (r.agent, r.reader.tokens.saturating_sub(r.tokens_counted)))
@@ -3767,6 +4067,23 @@ fn agent_shares(sessions: &[(Agent, u64)], agent: Agent, rise: f32) -> Vec<Optio
 fn last_lines(screen: &str, n: usize) -> String {
     let lines: Vec<&str> = screen.lines().filter(|l| !l.trim().is_empty()).collect();
     lines[lines.len().saturating_sub(n)..].join("\n")
+}
+
+/// The rise of the 5-hour window that a new reading (taken at `at`) brings since `last`,
+/// which it then becomes; None for the reading already counted. A failed reading never gets
+/// here and leaves `last` as it was: what was used meanwhile is counted whole by the next
+/// reading that succeeds, so a measure that fails for a while loses nothing of a budget.
+fn next_rise(
+    last: &mut Option<(u64, f32, Option<u64>)>,
+    at: u64,
+    five: &crate::usage::Window,
+) -> Option<f32> {
+    let prev = *last;
+    if prev.is_some_and(|(a, _, _)| a == at) {
+        return None;
+    }
+    *last = Some((at, five.pct, five.resets_at));
+    Some(window_rise(prev.map(|(_, p, r)| (p, r)), five.pct, five.resets_at))
 }
 
 /// How much the 5-hour window rose since the last reading (`prev`: its figure and reset
@@ -3812,13 +4129,18 @@ struct WindowBar {
     stop: f32,
 }
 
-fn window_bar(window: f32, pct: f32, limit: f32, global: f32) -> WindowBar {
+/// `ceiling`: the session's own (absolute), else worked out from its budget.
+fn window_bar(window: f32, pct: f32, limit: f32, ceiling: Option<f32>, global: f32) -> WindowBar {
     let window = window.clamp(0.0, 100.0);
     let before = (window - pct.max(0.0)).max(0.0);
     WindowBar {
         before,
         window,
-        stop: (before + limit).min(global).clamp(0.0, 100.0),
+        stop: ceiling
+            .unwrap_or(before + limit)
+            .min(before + limit)
+            .min(global)
+            .clamp(0.0, 100.0),
     }
 }
 
@@ -3828,27 +4150,37 @@ fn window_bar(window: f32, pct: f32, limit: f32, global: f32) -> WindowBar {
 /// With the 5-hour window's figure (`window`), the bar is that window: the use before the
 /// session, the session's own, and a tick where it stops. Without it, the session's
 /// share of its budget only.
+#[allow(clippy::too_many_arguments)]
 fn share_row(
     ui: &mut egui::Ui,
     id: &str,
     pct: f32,
     limit: f32,
+    ceiling: Option<f32>,
     window: Option<f32>,
     global: f32,
     t: &Tone,
 ) {
     let text = match window {
         Some(w) => crate::trf!(
-            "fenêtre de 5 h : {w:.0} % · cette session : {} % (budget {limit:.0} %)",
-            "5-hour window: {w:.0} % · this session: {} % (budget {limit:.0} %)",
-            crate::i18n::dec1(pct)
-        ),
-        None => crate::trf!(
-            "{} % utilisés sur un budget de {:.0} %",
-            "{} % used of a {:.0} % budget",
+            "fenêtre de 5 h : {w:.0} % · cette session : {} % · arrêt à {:.0} %",
+            "5-hour window: {w:.0} % · this session: {} % · stops at {:.0} %",
             crate::i18n::dec1(pct),
-            limit
+            window_bar(w, pct, limit, ceiling, global).stop
         ),
+        None => match ceiling {
+            Some(c) => crate::trf!(
+                "{} % utilisés · arrêt à {c:.0} % de la fenêtre de 5 h",
+                "{} % used · stops at {c:.0} % of the 5-hour window",
+                crate::i18n::dec1(pct)
+            ),
+            None => crate::trf!(
+                "{} % utilisés sur {:.0} %",
+                "{} % used of {:.0} %",
+                crate::i18n::dec1(pct),
+                limit
+            ),
+        },
     };
     let font = FontId::proportional(12.5);
     let text_w = ui
@@ -3871,7 +4203,7 @@ fn share_row(
         let x = |v: f32| bar.left() + bar.width() * (v / 100.0).clamp(0.0, 1.0);
         match window {
             Some(w) => {
-                let b = window_bar(w, pct, limit, global);
+                let b = window_bar(w, pct, limit, ceiling, global);
                 let end = super::projects::smooth(ui, ("run-window", id), b.window);
                 let near = b.window >= b.stop - (b.stop - b.before) * 0.15;
                 let p = ui.painter();
@@ -3919,8 +4251,8 @@ fn share_row(
     };
     let label = |ui: &mut egui::Ui| {
         ui.add(egui::Label::new(RichText::new(text.as_str()).font(font.clone()).color(t.secondary)).wrap()).on_hover_text(crate::tr!(
-            "La barre est la fenêtre de 5 h de l'abonnement : en gris ce qui était utilisé avant cette session (ou par d'autres), en vert ce qu'elle a utilisé depuis son lancement. Le trait orange : où elle s'arrête, sur son budget ou sur la limite globale si elle vient avant. Les sessions précédentes du projet ne comptent pas dans son budget.",
-            "The bar is the subscription's 5-hour window: in grey what was used before this session (or by others), in green what it used since it started. The orange tick: where it stops, on its budget or on the global limit if that comes first. The project's earlier sessions don't count in its budget."
+            "La barre est la fenêtre de 5 h de l'abonnement : en gris ce qui était utilisé avant cette session (ou par d'autres), en vert ce qu'elle a utilisé depuis son lancement. Le trait orange : où elle s'arrête, le plafond choisi à son lancement en % de la fenêtre (ex. 37 % utilisés et un plafond de 50 % : elle peut en prendre 13), ou la limite globale si elle vient avant.",
+            "The bar is the subscription's 5-hour window: in grey what was used before this session (or by others), in green what it used since it started. The orange tick: where it stops, the ceiling chosen at its start in % of the window (e.g. 37 % used and a ceiling of 50 %: it may take 13), or the global limit if that comes first."
         ));
     };
     ui.horizontal(|ui| {
@@ -4391,9 +4723,9 @@ fn end_conditions(ui: &mut egui::Ui, c: &mut crate::model::EndConditions, t: &To
         "Ticked: the session stops once the steps are done. Unticked: the AI creates the next steps itself and goes on."
     ));
     if c.hours.is_none() && c.steps.is_none() && c.turns.is_none() && !c.when_done {
-        ui.label(RichText::new(crate::tr!("(budget seulement)", "(budget only)")).size(12.0).color(super::projects::ORANGE)).on_hover_text(crate::tr!(
-            "Sans condition, la session tourne jusqu'à son budget, la limite globale ou la réserve de la semaine (ou deux tours de suite sans rien à faire).",
-            "With no condition, the session runs until its budget, the global limit or the week's reserve (or two turns in a row with nothing to do)."
+        ui.label(RichText::new(crate::tr!("(plafond seulement)", "(ceiling only)")).size(12.0).color(super::projects::ORANGE)).on_hover_text(crate::tr!(
+            "Sans condition, la session tourne jusqu'à son plafond, la limite globale ou la réserve de la semaine (ou deux tours de suite sans rien à faire).",
+            "With no condition, the session runs until its ceiling, the global limit or the week's reserve (or two turns in a row with nothing to do)."
         ));
     }
 }
@@ -4482,14 +4814,17 @@ struct LaunchCx<'a> {
     plugged: bool,
     /// Its open steps: none (and not endless), nothing to start on.
     open: usize,
-    /// What is left of the global limit for this project.
-    room: f32,
+    /// The 5-hour window's figure, and the settings' default share above it.
+    five: Option<f32>,
+    /// The ceiling of the sessions already running (`running_ceiling`).
+    running_at: Option<f32>,
+    default_share: f32,
     global: f32,
     to_main: &'a mut HashMap<String, bool>,
     start: &'a mut Vec<String>,
     confirm_main: &'a mut Option<String>,
-    /// Budgets the person has just changed, to keep in their projects.
-    budgets: &'a mut Vec<(String, f32)>,
+    /// Ceilings the person has just changed, to keep in their projects.
+    ceilings: &'a mut Vec<(String, f32)>,
     lk: &'a super::settings::Look,
     t: &'a Tone,
 }
@@ -4503,15 +4838,18 @@ fn launch_controls(ui: &mut egui::Ui, c: LaunchCx<'_>) {
         busy,
         plugged,
         open,
-        room,
+        five,
+        running_at,
+        default_share,
         global,
         to_main,
         start,
         confirm_main,
-        budgets,
+        ceilings,
         lk,
         t,
     } = c;
+    let room = room_left(five, global);
     if busy {
         // A pill where the other rows have « Lancer », so the controls stay in line.
         let text = crate::tr!("En cours", "Running");
@@ -4542,10 +4880,10 @@ fn launch_controls(ui: &mut egui::Ui, c: LaunchCx<'_>) {
             "Aucune étape ouverte : la session s'arrêterait tout de suite. Ajoutez des étapes au projet, ou activez « sans fin » pour que l'IA trouve elle-même les suivantes.",
             "No open step: the session would stop at once. Add steps to the project, or turn on « endless » so the AI finds the next ones itself."
         ));
-    } else if room < 1.0 {
+    } else if !room {
         start_button(ui, false, t).on_disabled_hover_text(crate::trf!(
-            "La limite globale ({global:.0} %) est déjà répartie entre les autres projets",
-            "The global limit ({global:.0} %) is already shared among the other projects"
+            "La fenêtre de 5 h a atteint la limite globale ({global:.0} %) : attendez qu'elle reparte à zéro",
+            "The 5-hour window has reached the global limit ({global:.0} %): wait for it to reset"
         ));
     } else if start_button(ui, true, t).clicked() {
         // Endless on main: the warning first, the start once confirmed.
@@ -4556,6 +4894,8 @@ fn launch_controls(ui: &mut egui::Ui, c: LaunchCx<'_>) {
         }
     }
     ui.add_space(4.0);
+    agent_pick(ui, id, d, busy);
+    ui.add_space(6.0);
     // « commits » and « sur main » only for a code project (`to_main` holds only those): one
     // without code shows no git words, and its sessions make no commit.
     if to_main.contains_key(id) {
@@ -4570,33 +4910,90 @@ fn launch_controls(ui: &mut egui::Ui, c: LaunchCx<'_>) {
         ));
         ui.add_space(6.0);
     }
-    // The budget chosen stays as it is: it is only shown capped to the room left (and
-    // capped again at the start), so a session running elsewhere never shrinks it for good.
-    let mut shown = if busy {
-        d.limit
-    } else {
-        d.limit.clamp(1.0, room.max(1.0))
+    // The ceiling chosen stays as it is: it is only shown raised above the window's figure
+    // (and again at the start), so a window that rose meanwhile never changes it for good.
+    let floor = ceiling_floor(five, global);
+    let mut shown = ceiling_choice(draft_ceiling(d, running_at), five, default_share, global);
+    // Read « arrêt à 50 % » whichever way the controls are laid out.
+    let rtl = ui.layout().prefer_right_to_left();
+    let label = |ui: &mut egui::Ui| {
+        ui.label(RichText::new(crate::tr!("arrêt à", "stops at")).size(12.0).color(t.tertiary));
     };
+    if !rtl {
+        label(ui);
+    }
     let dv = ui.add_enabled(
-        !busy && room >= 1.0,
+        !busy && room,
         egui::DragValue::new(&mut shown)
-            .range(1.0..=room.max(1.0))
+            .range(floor..=global.max(floor))
             .speed(0.5)
             .suffix(" %"),
     );
     if dv.changed() {
-        d.limit = shown;
-        budgets.push((id.clone(), shown));
+        d.ceiling = Some(shown);
+        d.touched = true;
+        ceilings.push((id.clone(), shown));
+    }
+    let mut now = five
+        .map(|f| crate::trf!("La fenêtre est à {f:.0} % : ", "The window is at {f:.0} %: "))
+        .unwrap_or_default();
+    if !busy {
+        now = parallel_note(running_at, shown, d.touched) + &now;
     }
     dv.on_hover_text(crate::trf!(
-        "Budget de la prochaine session de ce projet : elle s'arrête après avoir utilisé cette part de la fenêtre de 5 h de l'abonnement, comptée depuis son lancement. Chaque session a son propre budget : en relancer une repart de zéro. Le budget choisi est gardé pour les prochaines sessions de ce projet, même après un redémarrage.\n{room:.0} % au plus ici, le reste de la limite globale ({global:.0} %) étant pris par les autres.",
-        "Budget of this project's next session: it stops after using this share of the subscription's 5-hour window, counted from its start. Each session has its own budget: starting another one begins again from zero. The budget chosen is kept for this project's next sessions, even after a restart.\n{room:.0} % at most here, the rest of the global limit ({global:.0} %) being taken by the others."
+        "Plafond de la prochaine session de ce projet, en % de la fenêtre de 5 h de l'abonnement, votre propre usage compris : elle s'arrête quand la fenêtre l'atteint (ex. 37 % utilisés et un plafond de 50 % : elle peut en prendre 13). {now}de {floor:.0} à {global:.0} % (la limite globale). Le plafond choisi est gardé pour les prochaines sessions de ce projet, même après un redémarrage.",
+        "Ceiling of this project's next session, in % of the subscription's 5-hour window, your own use included: it stops when the window reaches it (e.g. 37 % used and a ceiling of 50 %: it may take 13). {now}from {floor:.0} to {global:.0} % (the global limit). The ceiling chosen is kept for this project's next sessions, even after a restart."
     ));
-    ui.label(
-        RichText::new(crate::tr!("budget par session", "budget per session"))
-            .size(12.0)
-            .color(t.tertiary),
-    );
+    if rtl {
+        label(ui);
+    }
+}
+
+/// Why an AI can't be chosen for a session started alone, if it can't (None: it can).
+fn agent_unavailable(agent: Agent) -> Option<&'static str> {
+    if agent.ready() {
+        None
+    } else if !crate::usage::reports_usage(agent) {
+        Some(crate::tr!(
+            "Pas encore possible : Orchestra ne peut pas lire l'usage de son abonnement, donc ne pourrait pas l'arrêter à son plafond.",
+            "Not possible yet: Orchestra can't read its subscription's use, so couldn't stop it at its ceiling."
+        ))
+    } else {
+        Some(crate::tr!(
+            "Pas encore possible : son travail autonome n'est pas encore vérifié sur cet ordinateur.",
+            "Not possible yet: its autonomous work isn't checked on this computer yet."
+        ))
+    }
+}
+
+/// The AI a project's sessions are started with: those wired for working alone can be
+/// picked, the others are listed greyed out with the reason. Kept for the next sessions.
+fn agent_pick(ui: &mut egui::Ui, id: &str, d: &mut Draft, busy: bool) {
+    ui.add_enabled_ui(!busy, |ui| {
+        egui::ComboBox::from_id_salt(("run-agent", id))
+            .selected_text(RichText::new(d.agent.label()).size(12.5))
+            .width(110.0)
+            .show_ui(ui, |ui| {
+                for a in Agent::ALL {
+                    let why = agent_unavailable(a);
+                    let r = ui.add_enabled(
+                        why.is_none(),
+                        egui::Button::selectable(d.agent == a, a.label()),
+                    );
+                    if r.clicked() {
+                        d.agent = a;
+                    }
+                    if let Some(w) = why {
+                        r.on_disabled_hover_text(w);
+                    }
+                }
+            })
+            .response
+            .on_hover_text(crate::tr!(
+                "L'IA qui travaille sur ce projet. Gardée pour les prochaines sessions de ce projet.",
+                "The AI working on this project. Kept for this project's next sessions."
+            ));
+    });
 }
 
 fn start_button(ui: &mut egui::Ui, enabled: bool, t: &Tone) -> egui::Response {
@@ -4651,16 +5048,17 @@ mod tests {
         use super::{Draft, default_prefs};
         use crate::model::EndConditions;
         use crate::project::{LaunchPrefs, Project};
-        // Never set: the settings' budget and commits, not endless, 4 h when switched on.
-        let d = Draft::new(None, 20.0, true);
+        // Never set: the default ceiling and the settings' commits, not endless, 4 h when
+        // switched on.
+        let d = Draft::new(None, true);
         assert_eq!(
-            (d.limit, d.commits, d.endless, d.pick),
-            (20.0, true, false, false)
+            (d.ceiling, d.commits, d.endless, d.pick),
+            (None, true, false, false)
         );
         assert_eq!(d.end.hours, Some(4.0));
         assert_eq!(d.prefs(), default_prefs(true));
         let fresh = Project::default();
-        assert_eq!(Draft::new(Some(&fresh), 30.0, false).limit, 30.0);
+        assert_eq!(Draft::new(Some(&fresh), false).ceiling, None);
         // Set before: 95 %, no commits, endless for 6 h or 12 turns.
         let kept = LaunchPrefs {
             commits: false,
@@ -4670,55 +5068,195 @@ mod tests {
                 turns: Some(12),
                 ..Default::default()
             },
+            agent: None,
         };
         let p = Project {
-            session_limit: Some(95.0),
+            session_ceiling: Some(95.0),
             launch: Some(kept.clone()),
             ..Default::default()
         };
-        let d = Draft::new(Some(&p), 20.0, true);
-        assert_eq!((d.limit, d.commits, d.endless), (95.0, false, true));
+        let d = Draft::new(Some(&p), true);
+        assert_eq!((d.ceiling, d.commits, d.endless), (Some(95.0), false, true));
         assert!(d.mission.is_empty());
         assert_eq!(d.prefs(), kept);
-        // Only the budget kept: the rest from the settings.
+        // Only the ceiling kept: the rest from the settings. The old relative budget isn't
+        // taken for a ceiling (20 % of budget isn't « stop at 20 % »).
         let p = Project {
-            session_limit: Some(50.0),
+            session_ceiling: Some(50.0),
+            session_limit: Some(20.0),
             ..Default::default()
         };
-        let d = Draft::new(Some(&p), 20.0, true);
-        assert_eq!((d.limit, d.commits, d.endless), (50.0, true, false));
+        let d = Draft::new(Some(&p), true);
+        assert_eq!((d.ceiling, d.commits, d.endless), (Some(50.0), true, false));
+        let old = Project { session_limit: Some(20.0), ..Default::default() };
+        assert_eq!(Draft::new(Some(&old), true).ceiling, None);
     }
 
-    /// The global limit shared in the launch card: what each project may take.
+    /// Only an absolute ceiling is asked at the start: the one chosen, else the window's
+    /// figure plus the settings' default share; always above the window, never past the
+    /// global limit.
     #[test]
-    fn the_global_limit_is_shared() {
-        use super::{room_for, share_at_start};
-        // Nothing running nor picked: all of it.
-        assert_eq!(room_for(90.0, 0.0, 0.0, None), 90.0);
-        // A session running at 30 %: 60 left, whole percents only.
-        assert_eq!(room_for(90.0, 30.0, 0.0, None), 60.0);
-        assert_eq!(room_for(90.0, 30.5, 0.0, None), 59.0);
-        // Two projects picked, 20 and 25: one not picked sees 45 left; a picked one
-        // doesn't count against itself.
-        assert_eq!(room_for(90.0, 0.0, 45.0, None), 45.0);
-        assert_eq!(room_for(90.0, 0.0, 45.0, Some(20.0)), 65.0);
-        // Over-subscribed: never below zero.
-        assert_eq!(room_for(90.0, 60.0, 95.0, None), 0.0);
+    fn a_session_starts_with_an_absolute_ceiling() {
+        use super::{ceiling_choice, ceiling_floor, room_left};
+        // 37 % used, « stop at 50 % » chosen: 50.
+        assert_eq!(ceiling_choice(Some(50.0), Some(37.0), 20.0, 90.0), 50.0);
+        // Nothing chosen: 37 + 20 = 57; window unknown: 20.
+        assert_eq!(ceiling_choice(None, Some(37.0), 20.0, 90.0), 57.0);
+        assert_eq!(ceiling_choice(None, None, 20.0, 90.0), 20.0);
+        // Never past the global limit…
+        assert_eq!(ceiling_choice(Some(99.0), Some(37.0), 20.0, 90.0), 90.0);
+        assert_eq!(ceiling_choice(None, Some(80.0), 20.0, 90.0), 90.0);
+        // …and always above the window (a ceiling already reached would stop it at once).
+        assert_eq!(ceiling_floor(Some(37.4), 90.0), 38.0);
+        assert_eq!(ceiling_choice(Some(30.0), Some(37.4), 20.0, 90.0), 38.0);
+        assert_eq!(ceiling_floor(None, 90.0), 1.0);
+        // No start once the window is at the global limit (less than 1 % left).
+        assert!(room_left(Some(89.0), 90.0));
+        assert!(!room_left(Some(89.5), 90.0));
+        assert!(room_left(None, 90.0));
+    }
 
-        // At the start: the budget chosen when it fits…
-        assert_eq!(share_at_start(20.0, 90.0, 0.0), Some(20.0));
-        // …cut to what is left when it doesn't…
-        assert_eq!(share_at_start(95.0, 95.0, 20.0), Some(75.0));
-        // …at least 1 %…
-        assert_eq!(share_at_start(0.0, 90.0, 0.0), Some(1.0));
-        // …and no start at all when less than 1 % is left.
-        assert_eq!(share_at_start(20.0, 90.0, 89.5), None);
-        assert_eq!(share_at_start(20.0, 90.0, 90.0), None);
-        // A selection of two at 95 % with a global limit of 95 %: the first takes it all,
-        // the second doesn't start on a crumb.
-        let first = share_at_start(95.0, 95.0, 0.0).unwrap();
-        assert_eq!(first, 95.0);
-        assert_eq!(share_at_start(95.0, 95.0, first), None);
+    /// A session started beside one already running begins from its ceiling (« stop at
+    /// 50 % » for both), not from the window plus a share, nor from the one kept, unless the
+    /// person changed it in the card since Orchestra opened.
+    /// The next session may get a higher ceiling than the one running (« stop at 60 % »
+    /// beside 50 %): offered, accepted, and each stops at its own.
+    /// Every project of the launch card shows its share of the window: 0 % until its
+    /// session starts, then that session's own use; none for an endless session suspended
+    /// until the quota resets.
+    /// The AI of a project's sessions: Claude Code by default, kept in the project once
+    /// another is chosen; only those wired for working alone can be picked.
+    #[test]
+    fn a_session_starts_with_the_ai_chosen() {
+        use super::{Agent, Draft, agent_unavailable};
+        let d = Draft::new(None, true);
+        assert_eq!(d.agent, Agent::ClaudeCode);
+        // Claude Code, the default, isn't written in the project.
+        assert_eq!(d.prefs().agent, None);
+        let mut d2 = d.clone();
+        d2.agent = Agent::Codex;
+        let kept = crate::project::Project { launch: Some(d2.prefs()), ..Default::default() };
+        assert_eq!(Draft::new(Some(&kept), true).agent, Agent::Codex);
+        // Written and read back by name.
+        let json = serde_json::to_string(&d2.prefs()).unwrap();
+        assert!(json.contains("\"codex\""), "{json}");
+        // Claude Code can be picked; an AI not wired yet says why.
+        assert!(agent_unavailable(Agent::ClaudeCode).is_none());
+        for a in Agent::ALL {
+            assert_eq!(agent_unavailable(a).is_none(), a.ready(), "{a:?}");
+        }
+    }
+
+    /// A project's ceiling and share are worked out on the subscription of the AI chosen for
+    /// it: its window, and the ceilings of the sessions running with that same AI only.
+    #[test]
+    fn percentages_are_worked_out_on_the_ai_chosen() {
+        use super::{Agent, Draft, ceiling_choice, draft_ceiling, picked_share, running_ceiling_of};
+        let runs = [(Agent::ClaudeCode, Some(50.0)), (Agent::Codex, Some(30.0)), (Agent::Codex, None)];
+        assert_eq!(running_ceiling_of(&runs, Agent::ClaudeCode), Some(50.0));
+        assert_eq!(running_ceiling_of(&runs, Agent::Codex), Some(30.0));
+        assert_eq!(running_ceiling_of(&runs, Agent::Gemini), None);
+        // Claude's window at 45 %, Codex's at 10 %: a Codex project starts from Codex's own
+        // running ceiling (30 %) and counts from Codex's window, not Claude's.
+        let mut d = Draft::new(None, true);
+        d.agent = Agent::Codex;
+        let (five, running) = (Some(10.0), running_ceiling_of(&runs, d.agent));
+        let c = ceiling_choice(draft_ceiling(&d, running), five, 20.0, 90.0);
+        assert_eq!(c, 30.0);
+        assert_eq!(picked_share(c, five, running), 0.0);
+        // The same project on Claude Code: Claude's figures.
+        d.agent = Agent::ClaudeCode;
+        let (five, running) = (Some(45.0), running_ceiling_of(&runs, d.agent));
+        assert_eq!(ceiling_choice(draft_ceiling(&d, running), five, 20.0, 90.0), 50.0);
+    }
+
+    #[test]
+    fn a_base_share_of_zero_is_always_shown() {
+        use super::{row_share, share_text};
+        assert_eq!(row_share(None, false), Some(0.0));
+        assert_eq!(row_share(Some(4.2), false), Some(4.2));
+        assert_eq!(row_share(None, true), None);
+        // Running again after its suspension: shown.
+        assert_eq!(row_share(Some(0.0), true), Some(0.0));
+        assert_eq!(share_text(0.0), "0 %");
+        assert_eq!(share_text(0.01), "0 %");
+        assert!(share_text(2.5) == "2,5 %" || share_text(2.5) == "2.5 %");
+    }
+
+    /// Picked, a project shows what its session may take: its ceiling less what the window
+    /// holds (37 % used, « stop at 50 % »: up to +13 %).
+    #[test]
+    fn a_picked_session_shows_what_it_may_take() {
+        use super::{Draft, ceiling_choice, draft_ceiling, picked_share, picked_share_text};
+        assert_eq!(picked_share(50.0, Some(37.0), None), 13.0);
+        assert_eq!(picked_share(50.0, None, None), 50.0);
+        assert_eq!(picked_share(50.0, Some(55.0), None), 0.0);
+        // As the card works it out: from the draft's ceiling, in bounds.
+        let mut d = Draft::new(None, true);
+        (d.ceiling, d.touched) = (Some(50.0), true);
+        let c = ceiling_choice(draft_ceiling(&d, None), Some(37.0), 20.0, 90.0);
+        assert_eq!(picked_share(c, Some(37.0), None), 13.0);
+        // A session already running up to 50 %, the window at 42 %: « stop at 60 % » takes
+        // 10 for itself; at the same 50 %, nothing of its own (the room is shared).
+        assert_eq!(picked_share(60.0, Some(42.0), Some(50.0)), 10.0);
+        assert_eq!(picked_share(50.0, Some(42.0), Some(50.0)), 0.0);
+        // The window already past the running ceiling: counted from the window.
+        assert_eq!(picked_share(60.0, Some(55.0), Some(50.0)), 5.0);
+        let t = picked_share_text(60.0, Some(42.0), Some(50.0));
+        assert!(t.contains("50 %") && t.contains("10 %"), "{t}");
+        // Shown once picked, and also once the ceiling is set by hand; not while running.
+        use super::shows_picked_share;
+        assert!(!shows_picked_share(false, false, false));
+        assert!(shows_picked_share(true, false, false));
+        assert!(shows_picked_share(false, true, false));
+        assert!(!shows_picked_share(true, true, true));
+    }
+
+    #[test]
+    fn the_next_session_may_stop_higher() {
+        use super::{Draft, Stop, ceiling_choice, draft_ceiling, parallel_note, stop_reason};
+        let mut d = Draft::new(None, true);
+        (d.ceiling, d.touched) = (Some(60.0), true);
+        let c = ceiling_choice(draft_ceiling(&d, Some(50.0)), Some(42.0), 20.0, 90.0);
+        assert_eq!(c, 60.0);
+        // Nothing shares the global limit out any more: 60 beside 50 is fine.
+        // The window at 55 %: the first stops at its 50 %, the second goes on to 60 %.
+        let at = |ceiling: f32, five: f32| {
+            let mut t = calm();
+            (t.ceiling, t.five, t.pct, t.limit, t.global) = (Some(ceiling), Some(five), 5.0, 90.0, 90.0);
+            stop_reason(&t)
+        };
+        assert_eq!(at(50.0, 55.0), Some(Stop::Ceiling(50.0)));
+        assert_eq!(at(60.0, 55.0), None);
+        assert_eq!(at(60.0, 60.0), Some(Stop::Ceiling(60.0)));
+        // What the tooltip says: the offer, then the outcome once raised.
+        assert!(parallel_note(None, 60.0, true).is_empty());
+        assert!(parallel_note(Some(50.0), 50.0, false).contains("60 %"));
+        let n = parallel_note(Some(50.0), 60.0, true);
+        assert!(n.contains("60 %") && n.contains("50 %"), "{n}");
+    }
+
+    #[test]
+    fn a_parallel_session_starts_from_the_running_ceiling() {
+        use super::{Draft, ceiling_choice, draft_ceiling, running_ceiling};
+        assert_eq!(running_ceiling([]), None);
+        assert_eq!(running_ceiling([None, Some(50.0)]), Some(50.0));
+        assert_eq!(running_ceiling([Some(45.0), Some(50.0), None]), Some(50.0));
+        let kept = crate::project::Project { session_ceiling: Some(70.0), ..Default::default() };
+        let mut d = Draft::new(Some(&kept), true);
+        // Nothing running: the one kept.
+        assert_eq!(draft_ceiling(&d, None), Some(70.0));
+        // 50 % running, the window at 42 %: 50 for this one too.
+        assert_eq!(draft_ceiling(&d, Some(50.0)), Some(50.0));
+        assert_eq!(ceiling_choice(draft_ceiling(&d, Some(50.0)), Some(42.0), 20.0, 90.0), 50.0);
+        // Nothing kept either: still the running one, not 42 + 20.
+        let fresh = Draft::new(None, true);
+        assert_eq!(ceiling_choice(draft_ceiling(&fresh, Some(50.0)), Some(42.0), 20.0, 90.0), 50.0);
+        // Changed in the card (to 60 %): the person's choice wins.
+        (d.ceiling, d.touched) = (Some(60.0), true);
+        assert_eq!(draft_ceiling(&d, Some(50.0)), Some(60.0));
+        // The running ceiling already reached by the window: raised just above it.
+        assert_eq!(ceiling_choice(draft_ceiling(&fresh, Some(50.0)), Some(50.2), 20.0, 90.0), 51.0);
     }
 
     #[test]
@@ -4924,7 +5462,7 @@ mod tests {
             .inner_margin(egui::Margin::same(12))
             .show(ui, |ui| {
                 ui.set_width(ui.available_width());
-                super::share_row(ui, "run", 0.0, 20.0, Some(75.0), 90.0, &t);
+                super::share_row(ui, "run", 0.0, 20.0, Some(90.0), Some(75.0), 90.0, &t);
             });
     }
 
@@ -4980,7 +5518,7 @@ mod tests {
                 column(width, |ui| {
                     ui.scope(|ui| {
                         let t = super::tone(false);
-                        super::share_row(ui, "run", pct, limit, window, 90.0, &t);
+                        super::share_row(ui, "run", pct, limit, None, window, 90.0, &t);
                         row = ui.min_rect().width();
                     });
                 });
@@ -5020,11 +5558,13 @@ mod tests {
                 let id = "p".to_string();
                 let mut d = super::Draft {
                     mission: String::new(),
-                    limit: 20.0,
+                    ceiling: Some(50.0),
+                    touched: false,
                     commits: true,
                     pick: false,
                     endless: false,
                     end: Default::default(),
+                    agent: super::Agent::ClaudeCode,
                 };
                 let mut to_main: super::HashMap<String, bool> =
                     [(id.clone(), false)].into_iter().collect();
@@ -5040,12 +5580,14 @@ mod tests {
                                 busy: false,
                                 plugged: true,
                                 open: 3,
-                                room: 60.0,
+                                five: Some(37.0),
+                                running_at: None,
+                                default_share: 20.0,
                                 global: 60.0,
                                 to_main: &mut to_main,
                                 start: &mut start,
                                 confirm_main: &mut confirm,
-                                budgets: &mut vec![],
+                                ceilings: &mut vec![],
                                 lk: &lk,
                                 t: &t,
                             },
@@ -5088,11 +5630,13 @@ mod tests {
                 let id = "p".to_string();
                 let mut d = super::Draft {
                     mission: String::new(),
-                    limit: 20.0,
+                    ceiling: Some(50.0),
+                    touched: false,
                     commits: true,
                     pick: false,
                     endless: false,
                     end: Default::default(),
+                    agent: super::Agent::ClaudeCode,
                 };
                 let mut to_main: super::HashMap<String, bool> = super::HashMap::new();
                 if code {
@@ -5108,12 +5652,14 @@ mod tests {
                             busy: false,
                             plugged: true,
                             open: 3,
-                            room: 60.0,
+                            five: Some(37.0),
+                            running_at: Some(50.0),
+                            default_share: 20.0,
                             global: 60.0,
                             to_main: &mut to_main,
                             start: &mut start,
                             confirm_main: &mut confirm,
-                            budgets: &mut vec![],
+                            ceilings: &mut vec![],
                             lk: &lk,
                             t: &t,
                         },
@@ -5160,7 +5706,7 @@ mod tests {
     fn a_session_bar_is_the_five_hour_window() {
         use super::{WindowBar, window_bar};
         assert_eq!(
-            window_bar(80.0, 5.0, 90.0, 90.0),
+            window_bar(80.0, 5.0, 90.0, None, 90.0),
             WindowBar {
                 before: 75.0,
                 window: 80.0,
@@ -5169,7 +5715,7 @@ mod tests {
         );
         // A small budget stops it first.
         assert_eq!(
-            window_bar(80.0, 5.0, 10.0, 90.0),
+            window_bar(80.0, 5.0, 10.0, None, 90.0),
             WindowBar {
                 before: 75.0,
                 window: 80.0,
@@ -5178,14 +5724,146 @@ mod tests {
         );
         // Its share can't start below zero, nor anything go past 100.
         assert_eq!(
-            window_bar(3.0, 5.0, 20.0, 100.0),
+            window_bar(3.0, 5.0, 20.0, None, 100.0),
             WindowBar {
                 before: 0.0,
                 window: 3.0,
                 stop: 20.0
             }
         );
-        assert_eq!(window_bar(120.0, 5.0, 50.0, 200.0).stop, 100.0);
+        assert_eq!(window_bar(120.0, 5.0, 50.0, None, 200.0).stop, 100.0);
+        // Its own ceiling (absolute): 37 % at its start and a budget of 13 %: the tick at
+        // 50 %, even when others made the window rise (40 %, 3 % of it its own).
+        assert_eq!(window_bar(40.0, 3.0, 13.0, Some(50.0), 90.0).stop, 50.0);
+    }
+
+    /// The ceiling of a session is absolute: what the window held at its start plus its
+    /// budget (37 % + 13 % → 50 %), never past the global limit; it stops the session when
+    /// the window gets there, whoever used it.
+    #[test]
+    fn a_session_stops_at_its_absolute_ceiling() {
+        use super::{Stop, ceiling_from, stop_reason};
+        assert_eq!(ceiling_from(Some(37.0), 0.0, 13.0, 90.0), Some(50.0));
+        assert_eq!(ceiling_from(Some(85.0), 0.0, 13.0, 90.0), Some(90.0));
+        assert_eq!(ceiling_from(None, 0.0, 13.0, 90.0), None);
+        // Figure known only later: what it used meanwhile is its own, not « before ».
+        assert_eq!(ceiling_from(Some(41.0), 4.0, 13.0, 90.0), Some(50.0));
+        let mut t = calm();
+        (t.ceiling, t.pct, t.limit, t.global) = (Some(50.0), 5.0, 13.0, 90.0);
+        t.five = Some(49.0);
+        assert_eq!(stop_reason(&t), None);
+        // Another session pushed the window to 50 %: this one stops too, under its budget.
+        t.five = Some(50.0);
+        assert_eq!(stop_reason(&t), Some(Stop::Ceiling(50.0)));
+        assert!(Stop::Ceiling(50.0).text().contains("50 %"));
+        // A ceiling at the global limit: the global limit's stop (restarted after the reset).
+        (t.ceiling, t.global, t.five) = (Some(90.0), 90.0, Some(90.0));
+        assert_eq!(stop_reason(&t), Some(Stop::GlobalLimit(90.0)));
+        // Unknown window: its budget still stops it.
+        (t.ceiling, t.five, t.pct) = (None, None, 13.0);
+        assert_eq!(stop_reason(&t), Some(Stop::Budget(13.0)));
+    }
+
+    #[test]
+    fn a_failed_reading_keeps_the_last_figures_until_their_reset() {
+        use super::{Figures, Stop, stop_reason};
+        let now = 1_000_000;
+        let last = Figures {
+            five: Some(58.0),
+            week: Some(40.0),
+            five_reset: Some(now + 3_600_000),
+            week_reset: Some(now + 86_400_000),
+        };
+        // The reading fails: the last figures stay (never 0 %), and the ceiling still stops.
+        let kept = last.merged(None, now);
+        assert_eq!(kept, last);
+        let mut t = calm();
+        (t.five, t.week, t.global) = (kept.five, kept.week, 50.0);
+        assert_eq!(stop_reason(&t), Some(Stop::GlobalLimit(50.0)));
+        // A partial reading: what it brings replaces, what it misses is kept.
+        let part = Figures { five: Some(62.0), five_reset: Some(now + 3_000_000), ..Default::default() };
+        let m = last.merged(Some(part), now);
+        assert_eq!((m.five, m.five_reset), (Some(62.0), Some(now + 3_000_000)));
+        assert_eq!((m.week, m.week_reset), (last.week, last.week_reset));
+        // Once a window has reset, its old figure is forgotten, not kept.
+        let later = now + 4_000_000;
+        let m = last.merged(None, later);
+        assert_eq!((m.five, m.five_reset), (None, None));
+        assert_eq!(m.week, Some(40.0));
+        // Without a reset time, nothing tells when it goes stale: forgotten.
+        let no_reset = Figures { five: Some(30.0), ..Default::default() };
+        assert_eq!(no_reset.merged(None, now), Figures::default());
+        // The next reading that succeeds wins, even lower (the window started again).
+        let fresh = Figures { five: Some(2.0), five_reset: Some(now + 18_000_000), ..Default::default() };
+        assert_eq!(last.merged(Some(fresh), now).five, Some(2.0));
+    }
+
+    /// A session measured, then the readings fail for a while, then come back: as `usage_tick`
+    /// goes (figures merged with the last known ones, the rise counted from the last reading
+    /// that succeeded, the stop decided on both).
+    #[test]
+    fn a_failed_measure_neither_stops_the_session_nor_lets_it_pass_the_ceiling() {
+        use super::{Figures, Stop, next_rise, stop_reason};
+        let reset = 10_000_000;
+        let win = |pct: f32| crate::usage::Window { label: "5h".into(), pct, resets_at: Some(reset) };
+        let fig = |pct: f32| Figures { five: Some(pct), five_reset: Some(reset), ..Default::default() };
+        let mut last = None;
+        let mut shown = Figures::default();
+        let mut pct = 0.0; // the session's own use (it is alone: every rise is its own)
+        let mut take = |at: u64, reading: Option<f32>, shown: &mut Figures, pct: &mut f32| {
+            *shown = shown.merged(reading.map(fig), at);
+            if let Some(p) = reading
+                && let Some(rise) = next_rise(&mut last, at, &win(p))
+            {
+                *pct += rise;
+            }
+        };
+        let turn = |shown: &Figures, pct: f32, turns: u32| {
+            let mut t = calm();
+            (t.five, t.week, t.pct, t.limit, t.global, t.turns) = (shown.five, None, pct, 20.0, 60.0, turns);
+            stop_reason(&t)
+        };
+        // Started at 30 %, measured up to 38 %.
+        take(1_000, Some(30.0), &mut shown, &mut pct);
+        take(2_000, Some(38.0), &mut shown, &mut pct);
+        assert!((pct - 8.0).abs() < 0.01);
+        // The readings fail over several turns: the session goes on, on the last known figure.
+        for (i, at) in (3_000..60_000).step_by(3_000).enumerate() {
+            take(at, None, &mut shown, &mut pct);
+            assert_eq!(shown.five, Some(38.0), "never 0 %");
+            assert_eq!(turn(&shown, pct, 3 + i as u32), None, "a failed measure doesn't stop it");
+        }
+        // Meanwhile the window went to 52 %: the next reading counts all of it, so the
+        // budget (20 % of the window) stops the session, nothing lost while it failed.
+        take(61_000, Some(52.0), &mut shown, &mut pct);
+        assert!((pct - 22.0).abs() < 0.01, "{pct}");
+        assert_eq!(turn(&shown, pct, 30), Some(Stop::Budget(20.0)));
+        // And the global limit holds on the kept figure alone, readings failing.
+        let mut t = calm();
+        let kept = fig(61.0).merged(None, 70_000);
+        (t.five, t.pct) = (kept.five, 1.0);
+        assert_eq!(stop_reason(&t), Some(Stop::GlobalLimit(60.0)));
+    }
+
+    #[test]
+    fn an_unavailable_measure_is_told_clearly() {
+        use super::{MEASURE_GRACE_MS, measure_alert};
+        let since = 1_000_000;
+        let later = since + MEASURE_GRACE_MS;
+        // Read fine, or only just missed: nothing said.
+        assert!(measure_alert(None, Some(40.0), true, later).is_none());
+        assert!(measure_alert(Some(since), Some(40.0), true, later - 1).is_none());
+        // Nothing rests on it (no session, no figure kept): the tile says « unknown » already.
+        assert!(measure_alert(Some(since), None, false, later).is_none());
+        // A figure kept: said, with that figure, never as 0 %.
+        let (title, text) = measure_alert(Some(since), Some(42.4), false, later).unwrap();
+        assert!(title.contains("indisponible") || title.contains("unavailable"), "{title}");
+        // It names the AI whose figures are missing: another AI's are on their own.
+        assert!(title.contains("Claude Code"), "{title}");
+        assert!(text.contains("(42 %)"), "{text}");
+        // Sessions running with no figure at all: they stop rather than run without a limit.
+        let (_, text) = measure_alert(Some(since), None, true, later + 120_000).unwrap();
+        assert!(text.contains("deuxième tour") || text.contains("second turn"), "{text}");
     }
 
     #[test]
@@ -5237,6 +5915,7 @@ mod tests {
             endless: false,
             pct: 2.0,
             limit: 20.0,
+            ceiling: None,
             five: Some(30.0),
             global: 60.0,
             week: Some(40.0),
