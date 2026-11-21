@@ -2668,7 +2668,20 @@ impl NotesApp {
                     .italics(),
                 );
             }
-            for (id, title, folder) in &projects {
+            // What can start first: the running sessions, then the projects with open steps;
+            // those with nothing to do (no open step, not endless) folded under a link.
+            let rows: Vec<LaunchRow> = projects
+                .iter()
+                .map(|(id, _, _)| LaunchRow {
+                    busy: running.contains(id),
+                    open: open_steps.get(id).copied().unwrap_or(0),
+                    keep: drafts.get(id).is_some_and(|d| d.endless || d.pick),
+                })
+                .collect();
+            let idle_key = egui::Id::unique("orch-show-idle");
+            let show_idle = ui.ctx().data(|d| d.get_temp::<bool>(idle_key)).unwrap_or(false);
+            let (order, folded) = launch_order(&rows, show_idle);
+            for (id, title, folder) in order.iter().map(|&i| &projects[i]) {
                 let d = drafts.get_mut(id).unwrap();
                 let busy = running.contains(id);
                 let bg = super::projects::hover_begin(ui);
@@ -2698,7 +2711,7 @@ impl NotesApp {
                         });
                         if wide {
                             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                                launch_controls(ui, LaunchCx { id, d: &mut *d, busy, plugged, room, global, to_main: &mut to_main, start: &mut start, confirm_main: &mut confirm_main, budgets: &mut budgets, lk: &lk, t });
+                                launch_controls(ui, LaunchCx { id, d: &mut *d, busy, plugged, open, room, global, to_main: &mut to_main, start: &mut start, confirm_main: &mut confirm_main, budgets: &mut budgets, lk: &lk, t });
                             });
                         }
                     });
@@ -2706,7 +2719,7 @@ impl NotesApp {
                     if !wide {
                         ui.horizontal_wrapped(|ui| {
                             ui.add_space(70.0);
-                            launch_controls(ui, LaunchCx { id, d: &mut *d, busy, plugged, room, global, to_main: &mut to_main, start: &mut start, confirm_main: &mut confirm_main, budgets: &mut budgets, lk: &lk, t });
+                            launch_controls(ui, LaunchCx { id, d: &mut *d, busy, plugged, open, room, global, to_main: &mut to_main, start: &mut start, confirm_main: &mut confirm_main, budgets: &mut budgets, lk: &lk, t });
                         });
                     }
                     ui.horizontal(|ui| {
@@ -2768,6 +2781,27 @@ impl NotesApp {
                     t,
                 );
                 ui.add_space(10.0);
+            }
+            let idle = rows.iter().filter(|r| r.idle()).count();
+            if idle > 0 {
+                let s = crate::i18n::plural(idle);
+                let text = if folded > 0 {
+                    crate::trf!(
+                        "{idle} projet{s} sans étape ouverte ▾",
+                        "{idle} project{s} with no open step ▾"
+                    )
+                } else {
+                    crate::tr!("Replier les projets sans étape ouverte ▴", "Fold the projects with no open step ▴").to_string()
+                };
+                if super::projects::action_link(ui, &text)
+                    .on_hover_text(crate::tr!(
+                        "Une session sur un projet sans étape ouverte s'arrête tout de suite, sauf en mode sans fin : ajoutez-lui des étapes d'abord.",
+                        "A session on a project with no open step stops at once, unless endless: add steps to it first."
+                    ))
+                    .clicked()
+                {
+                    ui.ctx().data_mut(|d| d.insert_temp(idle_key, !show_idle));
+                }
             }
             if !picked.is_empty() {
                 ui.add_space(4.0);
@@ -4371,6 +4405,45 @@ fn on_main(pr: &crate::project::Project) -> bool {
     pr.commit_to_main && crate::project::code_kind(&pr.folder, pr.code)
 }
 
+/// A project's line in « Lancer une session », for its place in the list.
+#[derive(Clone, Copy, Debug, Default)]
+struct LaunchRow {
+    /// A session runs on it.
+    busy: bool,
+    /// Its steps not done.
+    open: usize,
+    /// Kept in view even with nothing open: endless (the AI finds its steps), or picked.
+    keep: bool,
+}
+
+impl LaunchRow {
+    /// Nothing to start on: a session would stop at once.
+    fn idle(&self) -> bool {
+        !self.busy && self.open == 0 && !self.keep
+    }
+}
+
+/// The order of the lines (indices into `rows`): running first, then those with open steps,
+/// then the idle ones — left out unless `show_idle`, and counted (the second value).
+fn launch_order(rows: &[LaunchRow], show_idle: bool) -> (Vec<usize>, usize) {
+    let rank = |r: &LaunchRow| {
+        if r.busy {
+            0
+        } else if r.idle() {
+            2
+        } else {
+            1
+        }
+    };
+    let mut order: Vec<usize> = (0..rows.len()).collect();
+    order.sort_by_key(|&i| rank(&rows[i]));
+    let folded = if show_idle { 0 } else { rows.iter().filter(|r| r.idle()).count() };
+    if !show_idle {
+        order.retain(|&i| !rows[i].idle());
+    }
+    (order, folded)
+}
+
 /// Below this width, a project's controls in « Lancer une session » go under it.
 const LAUNCH_ONE_LINE: f32 = 620.0;
 
@@ -4380,6 +4453,8 @@ struct LaunchCx<'a> {
     d: &'a mut Draft,
     busy: bool,
     plugged: bool,
+    /// Its open steps: none (and not endless), nothing to start on.
+    open: usize,
     /// What is left of the global limit for this project.
     room: f32,
     global: f32,
@@ -4400,6 +4475,7 @@ fn launch_controls(ui: &mut egui::Ui, c: LaunchCx<'_>) {
         d,
         busy,
         plugged,
+        open,
         room,
         global,
         to_main,
@@ -4433,6 +4509,11 @@ fn launch_controls(ui: &mut egui::Ui, c: LaunchCx<'_>) {
         start_button(ui, false, t).on_disabled_hover_text(crate::tr!(
             "Branchez d'abord Claude Code",
             "Plug in Claude Code first"
+        ));
+    } else if open == 0 && !d.endless {
+        start_button(ui, false, t).on_disabled_hover_text(crate::tr!(
+            "Aucune étape ouverte : la session s'arrêterait tout de suite. Ajoutez des étapes au projet, ou activez « sans fin » pour que l'IA trouve elle-même les suivantes.",
+            "No open step: the session would stop at once. Add steps to the project, or turn on « endless » so the AI finds the next ones itself."
         ));
     } else if room < 1.0 {
         start_button(ui, false, t).on_disabled_hover_text(crate::trf!(
@@ -4931,6 +5012,7 @@ mod tests {
                                 d: &mut d,
                                 busy: false,
                                 plugged: true,
+                                open: 3,
                                 room: 60.0,
                                 global: 60.0,
                                 to_main: &mut to_main,
@@ -4947,6 +5029,24 @@ mod tests {
             });
             assert!(row <= width + 0.5, "à {width} px : commandes sur {row} px");
         }
+    }
+
+    #[test]
+    fn what_can_start_comes_first_and_idle_projects_fold() {
+        use super::{LaunchRow, launch_order};
+        let r = |busy, open, keep| LaunchRow { busy, open, keep };
+        let rows = [
+            r(false, 0, false), // 0: nothing to do
+            r(false, 2, false), // 1: open steps
+            r(true, 0, false),  // 2: running
+            r(false, 0, true),  // 3: endless, no step yet
+            r(false, 5, false), // 4: open steps
+        ];
+        // Running, then those that can start (in their own order), idle ones folded.
+        assert_eq!(launch_order(&rows, false), (vec![2, 1, 3, 4], 1));
+        // Unfolded: the idle ones last.
+        assert_eq!(launch_order(&rows, true), (vec![2, 1, 3, 4, 0], 0));
+        assert_eq!(launch_order(&[], false), (vec![], 0));
     }
 
     /// A project without code (absent from `to_main`) gets neither « commits » nor « sur main »:
@@ -4980,6 +5080,7 @@ mod tests {
                             d: &mut d,
                             busy: false,
                             plugged: true,
+                            open: 3,
                             room: 60.0,
                             global: 60.0,
                             to_main: &mut to_main,
