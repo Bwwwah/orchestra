@@ -319,6 +319,31 @@ fn five_reset_in(u: &crate::usage::Usage, now: u64) -> Option<String> {
 mod reset_tests {
     use crate::usage::{Usage, Window};
 
+    /// The Mistral tile says on itself why it has no percentage, in one line that fits the
+    /// narrowest sidebar (220 px, less its margins and the text's indent).
+    #[test]
+    fn the_mistral_tile_says_why_it_has_no_percentage_in_one_line() {
+        let ctx = eframe::egui::Context::default();
+        super::super::setup_fonts(&ctx);
+        let mut width = 0.0;
+        for _ in 0..2 {
+            ctx.begin_pass(Default::default());
+            width = ctx.fonts_mut(|f| {
+                f.layout_no_wrap(
+                    super::vibe_no_pct_note().to_string(),
+                    eframe::egui::FontId::proportional(10.5),
+                    eframe::egui::Color32::WHITE,
+                )
+                .size()
+                .x
+            });
+            ctx.end_pass().textures_delta.clear();
+        }
+        assert!(width > 0.0 && width <= 220.0 - 20.0 - 24.0, "{width}");
+        let why = crate::usage::unreadable_reason(crate::auto::Agent::Vibe).unwrap();
+        assert!(why.contains("Claude") && why.contains("Codex"), "{why}");
+    }
+
     #[test]
     fn header_shows_time_left_before_the_five_hour_reset() {
         let now = 1_000_000_000u64;
@@ -551,6 +576,11 @@ pub(super) fn vibe_details(ui: &mut egui::Ui, v: &crate::usage::VibeUse, t: &Ton
     ui.add_space(2.0);
 }
 
+/// The Mistral tile's last line: why no percentage (the hover says more).
+fn vibe_no_pct_note() -> &'static str {
+    crate::tr!("pas de % : Mistral ne le donne pas", "no %: Mistral doesn't give it")
+}
+
 /// A plugged AI other than Claude Code, in the sidebar: its windows (5 h, week) when Orchestra
 /// reads them, "en attente…" until a first reading, or "non lisible" with the reason on hover.
 fn other_usage_tile(
@@ -568,7 +598,7 @@ fn other_usage_tile(
         .map(|u| u.windows.iter().take(2).cloned().collect())
         .unwrap_or_default();
     let h = if shown.is_empty() && vibe.is_some() {
-        46.0
+        62.0
     } else if shown.is_empty() {
         28.0
     } else {
@@ -615,6 +645,14 @@ fn other_usage_tile(
             ),
             FontId::proportional(11.5),
             t.secondary,
+        );
+        // Why there is no percentage like Claude's, said on the tile, not only on hover.
+        p.text(
+            egui::pos2(rect.left() + 12.0, rect.top() + 49.0),
+            egui::Align2::LEFT_CENTER,
+            vibe_no_pct_note(),
+            FontId::proportional(10.5),
+            t.tertiary,
         );
     }
     p.text(
