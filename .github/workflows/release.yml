@@ -105,7 +105,11 @@ jobs:
         run: |
           sudo apt-get update && sudo apt-get install -y libxkbcommon-dev libwayland-dev libx11-dev libxcursor-dev libxrandr-dev libxi-dev libgl1-mesa-dev
           cargo build --release
+          # RTK (rtk-oss, Apache-2.0, without its BUSL engine) next to the program.
+          sh packaging/build-rtk.sh x86_64-unknown-linux-gnu
           mkdir -p out/orchestra && cp target/release/orchestra out/orchestra/
+          cp target/rtk/x86_64-unknown-linux-gnu/rtk out/orchestra/rtk
+          cp target/rtk/LICENSE out/orchestra/LICENSE-rtk.txt
           tar -C out -czf out/Orchestra-${GITHUB_REF_NAME}-Linux.tar.gz orchestra
           cargo install cargo-deb --locked
           cargo deb --no-build --output out/Orchestra-${GITHUB_REF_NAME}-Linux.deb || echo "paquet .deb non fabriqué"

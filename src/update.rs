@@ -326,6 +326,18 @@ fn install_to(target: &Path, repo: &str, rel: &Release) -> Result<PathBuf, Strin
     if !cfg!(target_os = "macos") {
         use std::os::unix::fs::PermissionsExt;
         let _ = std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o755));
+        // RTK, shipped next to the program in the Linux archive (macOS: inside the .app,
+        // replaced with it): placed beside it too, best effort (the sessions run without it).
+        if let (Some(src), Some(dir)) = (new.parent().map(|d| d.join("rtk")), target.parent())
+            && src.is_file()
+        {
+            let dst = dir.join("rtk");
+            let tmp_dst = dir.join("rtk.nouveau");
+            if std::fs::copy(&src, &tmp_dst).is_ok() {
+                let _ = std::fs::set_permissions(&tmp_dst, std::fs::Permissions::from_mode(0o755));
+                let _ = std::fs::rename(&tmp_dst, &dst);
+            }
+        }
     }
     if cfg!(target_os = "macos") {
         let _ = run(

@@ -107,16 +107,7 @@ impl Agent {
             ),
             Agent::ClaudeCode => {
                 let (allowed, denied) = permissions(allow_commits, extra);
-                // The repository's own settings (.claude/settings*.json: hooks, permissions)
-                // and MCP servers (.mcp.json) are not loaded: a repository could otherwise run
-                // its code or grant itself rights as soon as the AI starts. Only the person's
-                // own settings, and Orchestra's MCP server.
-                format!(
-                    "claude --setting-sources user --strict-mcp-config --mcp-config {} --permission-mode acceptEdits --allowedTools {} --disallowedTools {}",
-                    crate::sessions::shell_quote(&mcp_config()),
-                    crate::sessions::shell_quote(&allowed.join(",")),
-                    crate::sessions::shell_quote(&denied.join(","))
-                )
+                claude_command(&allowed, &denied, rtk_binary().as_deref())
             }
         }
     }
@@ -185,6 +176,8 @@ impl Agent {
     pub fn config_files(self, cwd: &Path, allow_commits: bool, extra: &str) -> Vec<(PathBuf, String)> {
         let dir = self.config_dir(cwd);
         match self {
+            // Claude Code: its settings on its command line; RTK's for its hook, if shipped.
+            Agent::ClaudeCode if rtk_binary().is_some() => rtk_config_files(&rtk_home()),
             Agent::ClaudeCode | Agent::Codex => Vec::new(),
             Agent::Gemini => {
                 let mut v: Value =
@@ -396,6 +389,124 @@ fn git_dirs_for(cwd: &Path, own: &Path, common: &Path) -> Vec<PathBuf> {
     dirs.retain(|d| !d.starts_with(cwd));
     dirs.dedup();
     dirs
+}
+
+/// Claude Code's command line for an autonomous session, with these rules.
+///
+/// The repository's own settings (.claude/settings*.json: hooks, permissions) and MCP servers
+/// (.mcp.json) are not loaded: a repository could otherwise run its code or grant itself
+/// rights as soon as the AI starts. Only the person's own settings, and Orchestra's MCP server.
+///
+/// With `rtk` (see `rtk_binary`), the outputs of the AI's shell commands are shortened by RTK
+/// before they reach it (fewer tokens): its hook, given on the command line, rewrites
+/// `git status` into `rtk git status`. Only Orchestra's sessions get it, never the person's
+/// own Claude Code. Claude Code checks its permissions on the rewritten command, and RTK never
+/// sees the rules given here: so every shell rule is given twice, as written and with `rtk`
+/// in front, or `git push` would become `rtk git push` and get round its refusal.
+fn claude_command(allowed: &[String], denied: &[String], rtk: Option<&Path>) -> String {
+    let q = crate::sessions::shell_quote;
+    let (mut allowed, mut denied) = (allowed.to_vec(), denied.to_vec());
+    let mut prefix = String::new();
+    let mut settings = String::new();
+    if let Some(rtk) = rtk {
+        allowed = with_rtk_rules(&allowed);
+        denied = with_rtk_rules(&denied);
+        // RTK's own ways of running any command, never needed by a rewrite of the allowed ones.
+        for r in RTK_DENIED {
+            denied.push(r.to_string());
+        }
+        // The hook reads its settings from a home of its own (`rtk_config_files`), never the
+        // person's RTK settings.
+        let home = rtk_home();
+        let hook_cmd = format!(
+            "HOME={} XDG_CONFIG_HOME={} RTK_TELEMETRY_DISABLED=1 {} hook claude",
+            q(&home.display().to_string()),
+            q(&home.join(".config").display().to_string()),
+            q(&rtk.display().to_string())
+        );
+        let hook = serde_json::json!({ "hooks": { "PreToolUse": [{
+            "matcher": "Bash",
+            "hooks": [{ "type": "command", "command": hook_cmd }]
+        }]}});
+        settings = format!(" --settings {}", q(&hook.to_string()));
+        // The rewritten commands call `rtk` by its name; no usage report ever leaves.
+        let dir = rtk.parent().map(|d| d.display().to_string()).unwrap_or_default();
+        prefix = format!("PATH={}:\"$PATH\" RTK_TELEMETRY_DISABLED=1 ", q(&dir));
+    }
+    format!(
+        "{prefix}claude --setting-sources user --strict-mcp-config --mcp-config {}{settings} --permission-mode acceptEdits --allowedTools {} --disallowedTools {}",
+        q(&mcp_config()),
+        q(&allowed.join(",")),
+        q(&denied.join(","))
+    )
+}
+
+/// Allowed commands RTK would rewrite into another command rather than `rtk` + the same one
+/// (`npm run lint` → `rtk lint`, which runs ESLint, not the project's script): left as they
+/// are, so they stay under their rule.
+const RTK_EXCLUDED: &[&str] = &["npm run lint", "pnpm run lint", "yarn lint"];
+
+/// The home the RTK hook of the sessions reads its settings from (HOME and XDG_CONFIG_HOME),
+/// apart from the person's own RTK settings.
+fn rtk_home() -> PathBuf {
+    crate::store::data_dir().join("rtk-home")
+}
+
+/// RTK's settings for the sessions' hook, at both places RTK looks for them (macOS: Library/
+/// Application Support/rtk; Linux: .config/rtk), under `home`.
+fn rtk_config_files(home: &Path) -> Vec<(PathBuf, String)> {
+    let list: Vec<String> = RTK_EXCLUDED.iter().map(|c| toml_string(c)).collect();
+    let text = format!(
+        "# Written by Orchestra for the hook of its autonomous sessions.\n[hooks]\nexclude_commands = [{}]\n",
+        list.join(", ")
+    );
+    ["Library/Application Support/rtk", ".config/rtk"]
+        .iter()
+        .map(|d| (home.join(d).join("config.toml"), text.clone()))
+        .collect()
+}
+
+/// RTK subcommands that run whatever command they are given (`rtk proxy <cmd>`, `rtk run`):
+/// refused in a session, whatever else is allowed.
+const RTK_DENIED: &[&str] = &["Bash(rtk proxy:*)", "Bash(rtk run:*)", "Bash(rtk init:*)"];
+
+/// The rules, each shell rule followed by its form behind `rtk` (`Bash(git status:*)` →
+/// also `Bash(rtk git status:*)`). The other rules (`Grep`, `mcp__orchestra`…) are kept as is.
+fn with_rtk_rules(rules: &[String]) -> Vec<String> {
+    let mut out = Vec::with_capacity(rules.len() * 2);
+    for r in rules {
+        out.push(r.clone());
+        if let Some(inner) = r.strip_prefix("Bash(")
+            && !inner.starts_with("rtk ")
+        {
+            let twin = format!("Bash(rtk {inner}");
+            if !rules.contains(&twin) {
+                out.push(twin);
+            }
+        }
+    }
+    out
+}
+
+/// RTK as shipped with Orchestra: rtk-oss, the Apache-2.0 edition built without RTK's BUSL-1.1
+/// engine (`cargo build --no-default-features`), next to this program (Orchestra.app/Contents/
+/// MacOS, the folder of the Linux archive) or in /usr/lib/orchestra (Linux package).
+/// ORCHESTRA_RTK names another one (to try it from a build in development). None: sessions
+/// run without it, as before. Not on Windows yet (its sessions don't start alone).
+pub fn rtk_binary() -> Option<PathBuf> {
+    if !cfg!(unix) {
+        return None;
+    }
+    if let Some(p) = std::env::var_os("ORCHESTRA_RTK") {
+        let p = PathBuf::from(p);
+        return p.is_file().then_some(p);
+    }
+    let exe = std::env::current_exe().ok()?;
+    let mut places = vec![exe.parent()?.join("rtk")];
+    if cfg!(target_os = "linux") {
+        places.push(PathBuf::from("/usr/lib/orchestra/rtk"));
+    }
+    places.into_iter().find(|p| p.is_file())
 }
 
 /// The only MCP server of an autonomous session: Orchestra itself (this program, `mcp`).
@@ -2745,6 +2856,127 @@ mod tests {
         let v: Value = serde_json::from_str(&mcp_config()).unwrap();
         assert_eq!(v["mcpServers"].as_object().unwrap().len(), 1);
         assert_eq!(v["mcpServers"]["orchestra"]["args"][0], "mcp");
+    }
+
+    /// With RTK, Claude Code gets its hook on the command line only (not the person's own
+    /// settings), finds `rtk` on its PATH, sends no usage report, and every shell rule is also
+    /// given behind `rtk`: a rewritten `git push` stays refused, a rewritten `git status`
+    /// stays allowed. Without RTK, the command is as before.
+    #[test]
+    fn rtk_shortens_outputs_without_widening_the_rules() {
+        let (allowed, denied) = permissions(false, "");
+        let plain = claude_command(&allowed, &denied, None);
+        assert!(plain.starts_with("claude --setting-sources user "), "{plain}");
+        assert!(!plain.contains("rtk") && !plain.contains("--settings "), "{plain}");
+
+        let q = crate::sessions::shell_quote;
+        let rtk = "/Applications/Orchestra.app/Contents/MacOS/rtk";
+        let c = claude_command(&allowed, &denied, Some(Path::new(rtk)));
+        let prefix = format!(
+            "PATH={}:\"$PATH\" RTK_TELEMETRY_DISABLED=1 claude --setting-sources user ",
+            q("/Applications/Orchestra.app/Contents/MacOS")
+        );
+        assert!(c.starts_with(&prefix), "{c}");
+        // The hook, in a --settings of its own (quoted for the shell, JSON inside), with RTK's
+        // settings of Orchestra rather than the person's.
+        let s = c.split(" --settings '").nth(1).unwrap().split("' --permission-mode").next().unwrap();
+        // As the shell gives it to Claude Code: its quotes inside the quoted JSON undone.
+        let v: Value = serde_json::from_str(&s.replace("'\\''", "'")).unwrap();
+        let h = &v["hooks"]["PreToolUse"][0];
+        assert_eq!(h["matcher"], "Bash");
+        let home = rtk_home().display().to_string();
+        assert_eq!(
+            h["hooks"][0]["command"],
+            format!(
+                "HOME={} XDG_CONFIG_HOME={} RTK_TELEMETRY_DISABLED=1 {} hook claude",
+                q(&home),
+                q(&format!("{home}/.config")),
+                q(rtk)
+            )
+        );
+        let files = rtk_config_files(Path::new("/h"));
+        assert_eq!(files.len(), 2);
+        assert!(files[0].1.contains("exclude_commands = [\"npm run lint\""), "{}", files[0].1);
+        // The rules, twice.
+        let list = |flag: &str| -> Vec<String> {
+            let rest = c.split(&format!("{flag} '")).nth(1).unwrap();
+            rest.split('\'').next().unwrap().split(',').map(String::from).collect()
+        };
+        let (a, d) = (list("--allowedTools"), list("--disallowedTools"));
+        for r in ["Bash(git status:*)", "Bash(rtk git status:*)", "Bash(cargo test:*)", "Bash(rtk cargo test:*)", "Grep", "mcp__orchestra"] {
+            assert!(a.iter().any(|x| x == r), "{r}");
+        }
+        assert!(!a.iter().any(|x| x == "rtk Grep" || x.starts_with("Bash(rtk rtk")));
+        for r in ["Bash(git push:*)", "Bash(rtk git push:*)", "Bash(curl:*)", "Bash(rtk curl:*)", "Bash(rtk proxy:*)", "Bash(rtk run:*)"] {
+            assert!(d.iter().any(|x| x == r), "{r}");
+        }
+        // Nothing allowed beyond the twins of what was allowed.
+        assert_eq!(a.len(), allowed.len() + allowed.iter().filter(|r| r.starts_with("Bash(")).count());
+    }
+
+    /// With a real rtk (ORCHESTRA_RTK=path/to/rtk cargo test), every allowed and refused
+    /// command, once rewritten by its hook, is still matched by a rule of the same kind.
+    #[test]
+    fn rtk_rewrites_stay_under_the_rules() {
+        let Some(rtk) = std::env::var_os("ORCHESTRA_RTK").map(PathBuf::from).filter(|p| p.is_file()) else {
+            return;
+        };
+        let (allowed, denied) = permissions(true, "");
+        let (a, d) = (with_rtk_rules(&allowed), with_rtk_rules(&denied));
+        let matches = |rules: &[String], cmd: &str| {
+            rules.iter().any(|r| {
+                let Some(inner) = r.strip_prefix("Bash(").and_then(|x| x.strip_suffix(')')) else { return false };
+                match inner.strip_suffix(":*") {
+                    Some(p) => cmd == p || cmd.starts_with(&format!("{p} ")),
+                    None => cmd == inner,
+                }
+            })
+        };
+        // RTK's settings of the sessions, as `write_config` writes them.
+        let home = std::env::temp_dir().join(format!("orch-rtk-{}", uuid::Uuid::new_v4().simple()));
+        for (path, text) in rtk_config_files(&home) {
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, text).unwrap();
+        }
+        let rewrite = |cmd: &str| -> String {
+            use std::io::Write;
+            let input = serde_json::json!({"tool_name": "Bash", "tool_input": {"command": cmd}, "hook_event_name": "PreToolUse"});
+            let mut child = std::process::Command::new(&rtk)
+                .args(["hook", "claude"])
+                .env("HOME", &home)
+                .env("XDG_CONFIG_HOME", home.join(".config"))
+                .env("RTK_TELEMETRY_DISABLED", "1")
+                .stdin(std::process::Stdio::piped())
+                .stdout(std::process::Stdio::piped())
+                .spawn()
+                .unwrap();
+            child.stdin.take().unwrap().write_all(input.to_string().as_bytes()).unwrap();
+            let out = child.wait_with_output().unwrap();
+            serde_json::from_slice::<Value>(&out.stdout)
+                .ok()
+                .and_then(|v| v["hookSpecificOutput"]["updatedInput"]["command"].as_str().map(String::from))
+                .unwrap_or_else(|| cmd.to_string())
+        };
+        let example = |r: &String| -> Option<String> {
+            let inner = r.strip_prefix("Bash(")?.strip_suffix(')')?;
+            Some(match inner.strip_suffix(":*") {
+                Some(p) => format!("{p} x"),
+                None => inner.to_string(),
+            })
+        };
+        for r in &allowed {
+            if let Some(cmd) = example(r) {
+                let new = rewrite(&cmd);
+                assert!(matches(&a, &new), "allowed {cmd} → {new}");
+            }
+        }
+        for r in &denied {
+            if let Some(cmd) = example(r) {
+                let new = rewrite(&cmd);
+                assert!(matches(&d, &new), "refused {cmd} → {new} escapes the rules");
+            }
+        }
+        let _ = std::fs::remove_dir_all(&home);
     }
 
     #[test]

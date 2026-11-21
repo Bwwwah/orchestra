@@ -51,6 +51,20 @@ if [ -n "${MACOS_CERT_P12:-}" ]; then
   security list-keychains -d user -s "$KEYCHAIN" $(security list-keychains -d user | tr -d '"')
 fi
 
+# Helper programs next to Orchestra (RTK): signed first, on their own, with the same identity
+# (notarization wants every program inside the app signed, with the hardened runtime).
+RTK_BIN="$APP/Contents/MacOS/rtk"
+if [ -f "$RTK_BIN" ]; then
+  case "$IDENTITY" in
+    "Developer ID Application"*)
+      codesign --force --options runtime --timestamp --identifier app.orchestra.rtk --sign "$IDENTITY" "$RTK_BIN" ;;
+    "")
+      codesign --force --identifier app.orchestra.rtk --sign - "$RTK_BIN" ;;
+    *)
+      codesign --force --timestamp=none --identifier app.orchestra.rtk --sign "$IDENTITY" "$RTK_BIN" ;;
+  esac
+fi
+
 if [ -n "$IDENTITY" ]; then
   echo "Signature avec « $IDENTITY »…"
   case "$IDENTITY" in

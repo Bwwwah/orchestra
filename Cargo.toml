@@ -41,4 +41,7 @@ assets = [
     ["packaging/orchestra.desktop", "usr/share/applications/", "644"],
     ["assets/icon-512.png", "usr/share/icons/hicolor/512x512/apps/orchestra.png", "644"],
     ["assets/icon-256.png", "usr/share/icons/hicolor/256x256/apps/orchestra.png", "644"],
+    # RTK (rtk-oss, Apache-2.0, without its BUSL engine), made by packaging/build-rtk.sh.
+    ["target/rtk/x86_64-unknown-linux-gnu/rtk", "usr/lib/orchestra/rtk", "755"],
+    ["target/rtk/LICENSE", "usr/share/doc/orchestra/LICENSE-rtk", "644"],
 ]

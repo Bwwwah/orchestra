@@ -22,6 +22,16 @@ lipo -create -output "$APP/Contents/MacOS/orchestra" \
   target/aarch64-apple-darwin/release/orchestra \
   target/x86_64-apple-darwin/release/orchestra
 
+# RTK (rtk-oss, Apache-2.0, without its BUSL engine), next to the program: Orchestra's
+# autonomous sessions shorten the AI's command outputs with it. Skipped with ORCHESTRA_NO_RTK=1.
+if [ "${ORCHESTRA_NO_RTK:-0}" != "1" ]; then
+  sh packaging/build-rtk.sh aarch64-apple-darwin x86_64-apple-darwin
+  lipo -create -output "$APP/Contents/MacOS/rtk" \
+    target/rtk/aarch64-apple-darwin/rtk \
+    target/rtk/x86_64-apple-darwin/rtk
+  cp target/rtk/LICENSE "$APP/Contents/Resources/LICENSE-rtk.txt"
+fi
+
 sed "s/__VERSION__/$VERSION/g" packaging/Info.plist > "$APP/Contents/Info.plist"
 printf 'APPL????' > "$APP/Contents/PkgInfo"
 
