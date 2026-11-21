@@ -1091,7 +1091,7 @@ fn draw_card(ui: &mut egui::Ui, cx: &mut Cx, k: CardKind, extra: f32) -> f32 {
         CardKind::Questions => questions_card(ui, cx, extra),
         CardKind::Watch => {
             let folder = cx.pr.folder.trim().to_string();
-            super::watch::watch_card(ui, cx.page_id, &folder, cx.t, extra)
+            super::watch::watch_card(ui, cx.page_id, &folder, &mut cx.pr.cve_watch, cx.t, extra)
         }
         CardKind::Versions => {
             let folder = cx.pr.folder.trim().to_string();
