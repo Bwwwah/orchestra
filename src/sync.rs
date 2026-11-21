@@ -1065,14 +1065,22 @@ fn question_prompt_base(folder: &str, question: &str, code: bool) -> String {
     )
 }
 
+/// An agent's conversation that can be carried on: its id, the folder it ran in (where its
+/// session is filed) and the command that reopens it (`claude --resume …`).
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Resume {
+    pub session: String,
+    pub cwd: String,
+    pub cmd: String,
+}
+
 /// The answer to a quick question, and how to carry the conversation on.
 #[derive(Clone, Debug)]
 pub struct QuestionReply {
     pub answer: String,
     pub tool: Tool,
-    /// The command that reopens the agent's conversation (`claude --resume …`), when the
-    /// agent gave its id, and the folder to run it in (where the question was asked).
-    pub resume: Option<(String, String)>,
+    /// When the agent gave its conversation's id.
+    pub resume: Option<Resume>,
 }
 
 /// A quick question about a project, answered in a few lines by an agent (read-only).
@@ -1105,9 +1113,13 @@ pub fn ask_question(
     Ok(QuestionReply {
         answer: answer.trim().to_string(),
         tool,
-        resume: session
-            .and_then(|s| resume_command(tool, &s))
-            .map(|cmd| (dir, cmd)),
+        resume: session.and_then(|s| {
+            resume_command(tool, &s).map(|cmd| Resume {
+                session: s,
+                cwd: dir,
+                cmd,
+            })
+        }),
     })
 }
 

@@ -49,8 +49,8 @@ pub struct QuickAnswer {
     pub by: String,
     /// How many steps the answer proposed (added to the Steps box's proposals).
     pub steps: usize,
-    /// (folder, command) reopening the AI's conversation in a terminal, to carry it on.
-    pub resume: Option<(String, String)>,
+    /// The AI's conversation, to carry it on (shown in the right-hand panel).
+    pub resume: Option<crate::sync::Resume>,
 }
 
 fn req_key() -> egui::Id {

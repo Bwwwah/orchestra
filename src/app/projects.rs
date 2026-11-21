@@ -2156,10 +2156,10 @@ mod new_step_field_tests {
         h
     }
 
-    /// An answered quick question offers to carry the conversation on: the button opens a
-    /// terminal on the AI's conversation, in the folder where the question was asked.
+    /// An answered quick question offers to carry the conversation on: the button asks for
+    /// the AI's conversation in the right-hand panel (or a terminal, failing that).
     #[test]
-    fn a_quick_answer_can_be_carried_on_in_a_terminal() {
+    fn a_quick_answer_can_be_carried_on_in_the_side_panel() {
         let mut h = harness(quick_question);
         let answer = |resume| super::super::ai_fill::QuickAnswer {
             question: "Faut-il un mode hors ligne ?".into(),
@@ -2172,24 +2172,28 @@ mod new_step_field_tests {
         h.state_mut().ai.answers.insert("p1".into(), answer(None));
         h.run();
         assert!(h.query_by_label("Poursuivre la conversation").is_none());
-        let cmd = "claude --resume 0199a2b3-c4d5-7e6f-8a9b-0c1d2e3f4a5b";
+        let resume = crate::sync::Resume {
+            session: "0199a2b3-c4d5-7e6f-8a9b-0c1d2e3f4a5b".into(),
+            cwd: "/tmp/projet".into(),
+            cmd: "claude --resume 0199a2b3-c4d5-7e6f-8a9b-0c1d2e3f4a5b".into(),
+        };
         h.state_mut()
             .ai
             .answers
-            .insert("p1".into(), answer(Some(("/tmp/projet".into(), cmd.into()))));
+            .insert("p1".into(), answer(Some(resume.clone())));
         h.run();
         h.get_by_label("Poursuivre la conversation").click();
         h.run();
         let req = h
             .ctx
             .data_mut(|d| {
-                d.remove_temp::<super::super::term_ui::TermRequest>(egui::Id::unique(
-                    "term-request",
+                d.remove_temp::<super::super::side::ConversationRequest>(egui::Id::unique(
+                    "side-conversation-request",
                 ))
             })
-            .expect("a terminal is asked for");
-        assert_eq!(req.cmd.as_deref(), Some(cmd));
-        assert_eq!(req.cwd, "/tmp/projet");
+            .expect("the conversation is asked for in the side panel");
+        assert_eq!(req.project, "p1");
+        assert_eq!(req.resume, resume);
         assert_eq!(req.title, "Faut-il un mode hors ligne ?");
     }
 
@@ -3801,7 +3805,7 @@ fn quick_question(ui: &mut egui::Ui, cx: &mut Cx) {
                                     .color(t.tertiary),
                                 );
                             }
-                            if let Some((cwd, cmd)) = &a.resume
+                            if let Some(resume) = &a.resume
                                 && action_link(
                                     ui,
                                     crate::tr!(
@@ -3810,16 +3814,16 @@ fn quick_question(ui: &mut egui::Ui, cx: &mut Cx) {
                                     ),
                                 )
                                 .on_hover_text(crate::tr!(
-                                    "Rouvrir cet échange avec l'IA dans un terminal, pour lui répondre ou creuser la question",
-                                    "Reopen this exchange with the AI in a terminal, to answer it or dig further"
+                                    "Ouvrir cet échange avec l'IA dans le volet de droite, pour lui répondre ou creuser la question",
+                                    "Open this exchange with the AI in the right-hand panel, to answer it or dig further"
                                 ))
                                 .clicked()
                             {
-                                super::term_ui::request(
+                                super::side::open_conversation(
                                     ui.ctx(),
+                                    page_id,
                                     &resume_title(&a.question),
-                                    cwd,
-                                    Some(cmd.clone()),
+                                    resume.clone(),
                                 );
                             }
                         });

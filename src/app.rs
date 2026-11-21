@@ -1516,6 +1516,7 @@ impl eframe::App for NotesApp {
         }
         let mut actions = vec![];
         self.take_term_request(&ctx);
+        self.take_conversation_request(&ctx);
         self.review_tick(&ctx);
         self.ai_tick(&ctx);
         self.ais_tick();
