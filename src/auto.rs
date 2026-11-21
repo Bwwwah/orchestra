@@ -1900,7 +1900,7 @@ fn mission_text(
          {intro}\n\
          1. Appelle get_project_state avec project = « {project_id} » pour l'état des lieux et les étapes.\n\
          2. Mission : {mission}\n\
-         3. Prends les étapes ouvertes une par une : passe-la « doing » avec update_step, fais le travail, vérifie-le \
+         3. Prends les étapes ouvertes une par une, quel que soit leur auteur (« ajoutée par la personne » ne veut pas dire « réservée à la personne ») : passe-la « doing » avec update_step, fais le travail, vérifie-le \
          (compilation, tests ; take_screenshot pour voir une interface à l'écran) quand c'est possible, puis passe-la « done ». \
          Si update_step refuse « doing » parce qu'une IA d'un autre ordinateur a déjà réservé l'étape, prends l'étape ouverte suivante.\n\
          4. {commit_rule}\n\
@@ -1916,7 +1916,7 @@ fn mission_text(
          {intro}\n\
          1. Call get_project_state with project = « {project_id} » for the current state and the steps.\n\
          2. Mission: {mission}\n\
-         3. Take the open steps one by one: set it to « doing » with update_step, do the work, check it \
+         3. Take the open steps one by one, whoever wrote them (« added by the person » does not mean « kept for the person »): set it to « doing » with update_step, do the work, check it \
          (build, tests; take_screenshot to see an interface on screen) when possible, then set it to « done ». \
          If update_step refuses « doing » because an AI on another computer already reserved the step, take the next open step.\n\
          4. {commit_rule}\n\

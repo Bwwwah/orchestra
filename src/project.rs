@@ -1129,7 +1129,10 @@ pub fn project_to_markdown(page: &Page) -> String {
             ));
         }
     }
-    out.push_str(crate::tr!("\n## Étapes\n\n", "\n## Steps\n\n"));
+    out.push_str(crate::tr!(
+        "\n## Étapes\n\n_« ajoutée par … » dit seulement qui a écrit l'étape : toute étape ouverte peut être faite par l'IA._\n\n",
+        "\n## Steps\n\n_« added by … » only says who wrote the step: any open step can be done by the AI._\n\n"
+    ));
     if pr.steps.is_empty() {
         out.push_str(crate::tr!("(aucune)\n", "(none)\n"));
     }
@@ -1139,10 +1142,20 @@ pub fn project_to_markdown(page: &Page) -> String {
             StepStatus::Doing => "~",
             StepStatus::Todo => " ",
         };
+        // Who added the step, said in words: a bare « — moi » read like « for me, the
+        // person », and the AIs left such steps alone. The author never restricts who does it.
         let src = if s.source.is_empty() {
             String::new()
+        } else if s.source == SOURCE_PERSON {
+            crate::tr!(" — ajoutée par la personne", " — added by the person").to_string()
+        } else if s.source == SOURCE_ACCEPTED {
+            crate::tr!(
+                " — proposée par une IA, acceptée par la personne",
+                " — proposed by an AI, accepted by the person"
+            )
+            .to_string()
         } else {
-            format!(" — {}", s.source)
+            crate::trf!(" — ajoutée par {}", " — added by {}", s.source)
         };
         // Written on another computer of the shared project: the AI weighs it as a request.
         let from = if s.received {
@@ -1333,6 +1346,44 @@ mod tests {
             "no folder, nothing forced: no kind"
         );
         let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// The author of a step is said in words: a bare « — moi » read as « kept for the
+    /// person » and the AIs skipped those steps.
+    #[test]
+    fn step_author_reads_as_author_not_owner() {
+        let mut page = Page::new("Auteurs", None);
+        let mut p = Project::new("");
+        let a = p.add_step("Tapée", SOURCE_PERSON);
+        let b = p.add_step("Acceptée", SOURCE_ACCEPTED);
+        let c = p.add_step("Par l'IA", "claude-code");
+        page.project = Some(p);
+        let md = project_to_markdown(&page);
+        let line = |id: &str| {
+            md.lines()
+                .find(|l| l.contains(id))
+                .unwrap_or_else(|| panic!("{md}"))
+                .to_string()
+        };
+        let (la, lb, lc) = (line(&a), line(&b), line(&c));
+        assert!(!la.ends_with("— moi") && !lb.ends_with("— IA"), "{md}");
+        assert!(
+            la.ends_with("ajoutée par la personne") || la.ends_with("added by the person"),
+            "{la}"
+        );
+        assert!(
+            lb.contains("acceptée par la personne") || lb.contains("accepted by the person"),
+            "{lb}"
+        );
+        assert!(
+            lc.ends_with("ajoutée par claude-code") || lc.ends_with("added by claude-code"),
+            "{lc}"
+        );
+        assert!(
+            md.contains("toute étape ouverte peut être faite par l'IA")
+                || md.contains("any open step can be done by the AI"),
+            "{md}"
+        );
     }
 
     #[test]
