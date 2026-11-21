@@ -3178,6 +3178,29 @@ pub fn setup_fonts(ctx: &egui::Context) {
     }
     semibold_family.extend(fallbacks.clone());
     bold_family.extend(fallbacks);
+    // Linux: egui's own font has no arrows (→) nor many symbols, and Inter may be missing:
+    // DejaVu Sans, present almost everywhere, comes last to draw them instead of a box.
+    if cfg!(target_os = "linux")
+        && let Some(bytes) = read(&[
+            "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+            "/usr/share/fonts/TTF/DejaVuSans.ttf",
+            "/usr/share/fonts/dejavu/DejaVuSans.ttf",
+        ])
+    {
+        fonts
+            .font_data
+            .insert("symbols".into(), Arc::new(FontData::from_owned(bytes)));
+        for list in [
+            fonts.families.get_mut(&egui::FontFamily::Proportional),
+            Some(&mut semibold_family),
+            Some(&mut bold_family),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            list.push("symbols".into());
+        }
+    }
     fonts
         .families
         .insert(egui::FontFamily::Name(SEMIBOLD.into()), semibold_family);

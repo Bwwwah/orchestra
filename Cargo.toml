@@ -36,6 +36,8 @@ strip = true
 maintainer = "Orchestra"
 section = "utils"
 priority = "optional"
+# DejaVu Sans draws the arrows and symbols the other fonts lack (src/app.rs, setup_fonts).
+depends = "$auto, fonts-dejavu-core"
 assets = [
     ["target/release/orchestra", "usr/bin/", "755"],
     ["packaging/orchestra.desktop", "usr/share/applications/", "644"],
