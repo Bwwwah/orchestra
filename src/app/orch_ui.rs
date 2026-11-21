@@ -286,6 +286,32 @@ pub struct Figures {
     pub week_reset: Option<u64>,
 }
 
+impl Figures {
+    /// A new reading (`new`, None when it failed) laid over the last known figures: a window
+    /// the reading misses keeps its last figure as long as its reset time is still ahead,
+    /// so a failed or partial reading never passes for 0 % (nor lifts the ceilings). A window
+    /// that has reset, or whose reset time is unknown, is forgotten. Readings are taken again
+    /// every few seconds: the next one that succeeds replaces what was kept.
+    fn merged(self, new: Option<Figures>, now: u64) -> Figures {
+        let new = new.unwrap_or_default();
+        let keep = |pct: Option<f32>, reset: Option<u64>| match (pct, reset) {
+            (Some(p), Some(r)) if r > now => (Some(p), Some(r)),
+            _ => (None, None),
+        };
+        let (five, five_reset) = if new.five.is_some() {
+            (new.five, new.five_reset)
+        } else {
+            keep(self.five, self.five_reset)
+        };
+        let (week, week_reset) = if new.week.is_some() {
+            (new.week, new.week_reset)
+        } else {
+            keep(self.week, self.week_reset)
+        };
+        Figures { five, week, five_reset, week_reset }
+    }
+}
+
 #[derive(Default)]
 pub struct Orch {
     pub runs: Vec<LiveRun>,
@@ -1077,33 +1103,33 @@ impl NotesApp {
         }
         self.orch.usage_polled = Some(Instant::now());
         self.other_agents_tick();
-        // A window that has reset is dropped by read(): forget its old figure too, so a
-        // limit reached before the reset doesn't block what follows.
-        let Some(u) = crate::usage::read() else {
-            (
-                self.orch.five,
-                self.orch.week,
-                self.orch.five_reset,
-                self.orch.week_reset,
-            ) = (None, None, None, None);
-            return;
+        // A window that has reset is dropped by read(): its old figure is forgotten too, so a
+        // limit reached before the reset doesn't block what follows. A reading that fails
+        // keeps the last figures until their reset (never taken for 0 %); tried again in 3 s.
+        let u = crate::usage::read();
+        let now = crate::model::now_ms();
+        let last = Figures {
+            five: self.orch.five,
+            week: self.orch.week,
+            five_reset: self.orch.five_reset,
+            week_reset: self.orch.week_reset,
         };
+        let f = last.merged(u.as_ref().map(Figures::of), now);
+        (
+            self.orch.five,
+            self.orch.week,
+            self.orch.five_reset,
+            self.orch.week_reset,
+        ) = (f.five, f.week, f.five_reset, f.week_reset);
+        let Some(u) = u else { return };
         if self.orch.history_at != u.at {
             self.orch.history_at = u.at;
             let h = crate::usage::record(&u);
-            let now = crate::model::now_ms();
             self.orch.day_total = crate::usage::day_total(&h, now);
             self.orch.day_week = crate::usage::day_week_used(&h, now);
         }
-        let five = u.five().cloned();
-        self.orch.week = u.week().map(|w| w.pct);
-        self.orch.week_reset = u.week().and_then(|w| w.resets_at);
-        self.orch.five_reset = five.as_ref().and_then(|w| w.resets_at);
-        let Some(five) = five else {
-            self.orch.five = None;
-            return;
-        };
-        self.orch.five = Some(five.pct);
+        // Only a fresh figure is shared between the sessions.
+        let Some(five) = u.five().cloned() else { return };
         apply_reading(
             &mut self.orch.runs,
             Agent::ClaudeCode,
@@ -1124,13 +1150,18 @@ impl NotesApp {
             }
         }
         self.orch.others.retain(|a, _| agents.contains(a));
+        let now = crate::model::now_ms();
         for a in agents {
-            let Some(u) = crate::usage::read_for(a) else {
-                // Reset or never seen: forget the old figures (as for Claude Code).
+            // As for Claude Code: a failed reading keeps the last figures until their reset.
+            let u = crate::usage::read_for(a);
+            let last = self.orch.others.get(&a).copied().unwrap_or_default();
+            let f = last.merged(u.as_ref().map(Figures::of), now);
+            if f == Figures::default() {
                 self.orch.others.remove(&a);
-                continue;
-            };
-            self.orch.others.insert(a, Figures::of(&u));
+            } else {
+                self.orch.others.insert(a, f);
+            }
+            let Some(u) = u else { continue };
             if let Some(five) = u.five() {
                 let mut last = self.orch.others_reading.get(&a).copied();
                 apply_reading(&mut self.orch.runs, a, &mut last, u.at, five);
@@ -5186,6 +5217,40 @@ mod tests {
             }
         );
         assert_eq!(window_bar(120.0, 5.0, 50.0, 200.0).stop, 100.0);
+    }
+
+    #[test]
+    fn a_failed_reading_keeps_the_last_figures_until_their_reset() {
+        use super::{Figures, Stop, stop_reason};
+        let now = 1_000_000;
+        let last = Figures {
+            five: Some(58.0),
+            week: Some(40.0),
+            five_reset: Some(now + 3_600_000),
+            week_reset: Some(now + 86_400_000),
+        };
+        // The reading fails: the last figures stay (never 0 %), and the ceiling still stops.
+        let kept = last.merged(None, now);
+        assert_eq!(kept, last);
+        let mut t = calm();
+        (t.five, t.week, t.global) = (kept.five, kept.week, 50.0);
+        assert_eq!(stop_reason(&t), Some(Stop::GlobalLimit(50.0)));
+        // A partial reading: what it brings replaces, what it misses is kept.
+        let part = Figures { five: Some(62.0), five_reset: Some(now + 3_000_000), ..Default::default() };
+        let m = last.merged(Some(part), now);
+        assert_eq!((m.five, m.five_reset), (Some(62.0), Some(now + 3_000_000)));
+        assert_eq!((m.week, m.week_reset), (last.week, last.week_reset));
+        // Once a window has reset, its old figure is forgotten, not kept.
+        let later = now + 4_000_000;
+        let m = last.merged(None, later);
+        assert_eq!((m.five, m.five_reset), (None, None));
+        assert_eq!(m.week, Some(40.0));
+        // Without a reset time, nothing tells when it goes stale: forgotten.
+        let no_reset = Figures { five: Some(30.0), ..Default::default() };
+        assert_eq!(no_reset.merged(None, now), Figures::default());
+        // The next reading that succeeds wins, even lower (the window started again).
+        let fresh = Figures { five: Some(2.0), five_reset: Some(now + 18_000_000), ..Default::default() };
+        assert_eq!(last.merged(Some(fresh), now).five, Some(2.0));
     }
 
     #[test]
