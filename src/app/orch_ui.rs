@@ -292,6 +292,22 @@ fn parallel_note(running: Option<f32>, chosen: f32, touched: bool) -> String {
     }
 }
 
+/// A project's share of the 5-hour window in the launch card, always shown: its running
+/// session's own use (`running`), else 0 %; None for an endless session suspended until the
+/// quota resets (shown with the suspended ones instead).
+fn row_share(running: Option<f32>, suspended_endless: bool) -> Option<f32> {
+    match running {
+        Some(p) => Some(p.max(0.0)),
+        None if suspended_endless => None,
+        None => Some(0.0),
+    }
+}
+
+/// A share as the launch card shows it: « 0 % » at the start, then to a tenth (« 2,5 % »).
+fn share_text(p: f32) -> String {
+    if p < 0.05 { "0 %".into() } else { format!("{} %", crate::i18n::dec1(p)) }
+}
+
 /// Whether a session can start under the global limit: at least 1 % of the window is left.
 fn room_left(five: Option<f32>, global: f32) -> bool {
     five.is_none_or(|f| global - f >= 1.0)
@@ -2780,6 +2796,19 @@ impl NotesApp {
         let running_at = running_ceiling(
             self.orch.runs.iter().filter(|r| r.agent == Agent::ClaudeCode).map(|r| r.ceiling),
         );
+        // Each project's share of the window, always shown: its running session's use, else
+        // 0 %; none for an endless session suspended until the quota resets.
+        let run_pct: HashMap<String, f32> =
+            self.orch.runs.iter().map(|r| (r.project.clone(), r.pct)).collect();
+        let suspended_endless: Vec<String> = {
+            let names: Vec<&str> = running.iter().map(String::as_str).collect();
+            crate::model::suspended_runs(&self.ws.runs, crate::model::wall_ms(), &names)
+                .into_iter()
+                .map(|i| &self.ws.runs[i])
+                .filter(|r| r.endless.is_some())
+                .map(|r| r.project.clone())
+                .collect()
+        };
         let open_steps: HashMap<String, usize> = projects
             .iter()
             .map(|(id, _, _)| {
@@ -2873,6 +2902,10 @@ impl NotesApp {
                                 ui.label(RichText::new(title).font(semibold(14.5)).color(t.text));
                                 let (txt, col) = if busy { (crate::tr!("au travail", "at work").to_string(), super::projects::GREEN) } else if open == 0 { (crate::tr!("aucune étape ouverte", "no open step").to_string(), t.tertiary) } else { ({ let s = crate::i18n::plural(open); crate::trf!("{open} étape{s} ouverte{s}", "{open} open step{s}") }, t.secondary) };
                                 ui.label(RichText::new(txt).size(12.0).color(col));
+                                if let Some(p) = row_share(run_pct.get(id).copied(), suspended_endless.contains(id)) {
+                                    ui.label(RichText::new(share_text(p)).size(12.0).color(if busy { super::projects::GREEN } else { t.tertiary }))
+                                        .on_hover_text(crate::tr!("Ce que la session de ce projet a pris de la fenêtre de 5 h depuis son lancement : 0 % tant qu'elle n'est pas lancée.", "What this project's session took from the 5-hour window since it started: 0 % until it is started."));
+                                }
                             });
                             let mut job = egui::text::LayoutJob::single_section(super::projects::tilde(folder), egui::TextFormat::simple(FontId::monospace(11.0), t.tertiary));
                             job.wrap = egui::text::TextWrapping::truncate_at_width(if wide { (ui.available_width() - 250.0).max(80.0) } else { ui.available_width().max(40.0) });
@@ -4957,6 +4990,22 @@ mod tests {
     /// person changed it in the card since Orchestra opened.
     /// The next session may get a higher ceiling than the one running (« stop at 60 % »
     /// beside 50 %): offered, accepted, and each stops at its own.
+    /// Every project of the launch card shows its share of the window: 0 % until its
+    /// session starts, then that session's own use; none for an endless session suspended
+    /// until the quota resets.
+    #[test]
+    fn a_base_share_of_zero_is_always_shown() {
+        use super::{row_share, share_text};
+        assert_eq!(row_share(None, false), Some(0.0));
+        assert_eq!(row_share(Some(4.2), false), Some(4.2));
+        assert_eq!(row_share(None, true), None);
+        // Running again after its suspension: shown.
+        assert_eq!(row_share(Some(0.0), true), Some(0.0));
+        assert_eq!(share_text(0.0), "0 %");
+        assert_eq!(share_text(0.01), "0 %");
+        assert!(share_text(2.5) == "2,5 %" || share_text(2.5) == "2.5 %");
+    }
+
     #[test]
     fn the_next_session_may_stop_higher() {
         use super::{Draft, Stop, ceiling_choice, draft_ceiling, parallel_note, stop_reason};
