@@ -551,7 +551,9 @@ pub(super) fn accent_of(title: &str) -> Color32 {
     match title {
         "ÉTAT DES LIEUX" | "CURRENT STATE" => Color32::from_rgb(144, 101, 176),
         "ÉTAPES" | "STEPS" => GREEN,
-        "SESSIONS IA" | "AI SESSIONS" => Color32::from_rgb(204, 120, 92),
+        "SESSIONS IA" | "AI SESSIONS" | "NOUVELLE SESSION" | "NEW SESSION" => {
+            Color32::from_rgb(204, 120, 92)
+        }
         "VERSIONS" | "PROJETS" | "PROJECTS" => BLUE,
         "POUR COMMENCER" | "TO GET GOING" => GREEN,
         "PAGES" | "CONTENU" | "CONTENTS" | "PAGES RÉCENTES" | "RECENT PAGES" => {
@@ -1029,6 +1031,8 @@ pub(super) struct Cx<'a> {
 enum CardKind {
     Summary(f32),
     Steps,
+    /// Starting a session (once the project has a folder), apart from the sessions' list.
+    NewSession,
     Sessions,
     Pages,
     Versions,
@@ -1040,7 +1044,7 @@ fn draw(ui: &mut egui::Ui, cx: &mut Cx, k: CardKind, extra: f32) -> f32 {
     let order = match k {
         CardKind::Summary(_) => 0.0,
         CardKind::Steps | CardKind::Questions => 1.0,
-        CardKind::Sessions | CardKind::Pages => 2.0,
+        CardKind::NewSession | CardKind::Sessions | CardKind::Pages => 2.0,
         CardKind::Versions => 3.0,
     };
     let t0: f64 = ui
@@ -1078,6 +1082,7 @@ fn draw_card(ui: &mut egui::Ui, cx: &mut Cx, k: CardKind, extra: f32) -> f32 {
     match k {
         CardKind::Summary(h) => summary_card(ui, cx, h, extra),
         CardKind::Steps => steps_card(ui, cx, extra),
+        CardKind::NewSession => new_session_card(ui, cx, extra),
         CardKind::Sessions => sessions_card(ui, cx, extra),
         CardKind::Pages => pages_card(ui, cx, extra),
         CardKind::Questions => questions_card(ui, cx, extra),
@@ -1096,12 +1101,26 @@ fn card_key(page_id: &str, k: CardKind) -> egui::Id {
     let name = match k {
         CardKind::Summary(_) => "summary",
         CardKind::Steps => "steps",
+        CardKind::NewSession => "new-session",
         CardKind::Sessions => "sessions",
         CardKind::Pages => "pages",
         CardKind::Versions => "versions",
         CardKind::Questions => "questions",
     };
     egui::Id::unique(("card-h", page_id, name))
+}
+
+/// Put `cards` (the new session's, or none) right above the sessions' list, in whichever
+/// column it landed: the two stay together.
+fn above_sessions(cols: &mut [Vec<CardKind>], cards: &[CardKind]) {
+    for col in cols.iter_mut() {
+        if let Some(i) = col.iter().position(|k| matches!(k, CardKind::Sessions)) {
+            for (j, k) in cards.iter().enumerate() {
+                col.insert(i + j, *k);
+            }
+            return;
+        }
+    }
 }
 
 /// One card at the top of each column, then each other card under the column that is
@@ -1368,9 +1387,17 @@ pub(super) fn project_panel(ui: &mut egui::Ui, cx: &mut Cx) -> Option<super::not
     } else {
         &[]
     };
+    // Starting a session in a card of its own, apart from the list of sessions; none without
+    // a folder to start it in (the list then says to set one).
+    let new_session: &[CardKind] = if cx.pr.folder.trim().is_empty() {
+        &[]
+    } else {
+        &[NewSession]
+    };
     if w >= 1380.0 {
         let rest: Vec<CardKind> = asked.iter().chain(vers).copied().chain([Pages]).collect();
-        let cols = balance(ui, cx.page_id, [Summary(420.0), Steps, Sessions], &rest);
+        let mut cols = balance(ui, cx.page_id, [Summary(420.0), Steps, Sessions], &rest);
+        above_sessions(&mut cols, new_session);
         columns(ui, cx, &cols, gap);
     } else if w >= 860.0 {
         let rest: Vec<CardKind> = asked
@@ -1380,12 +1407,14 @@ pub(super) fn project_panel(ui: &mut egui::Ui, cx: &mut Cx) -> Option<super::not
             .chain(vers.iter().copied())
             .chain([Pages])
             .collect();
-        let cols = balance(ui, cx.page_id, [Summary(380.0), Steps], &rest);
+        let mut cols = balance(ui, cx.page_id, [Summary(380.0), Steps], &rest);
+        above_sessions(&mut cols, new_session);
         columns(ui, cx, &cols, gap);
     } else {
         let one: Vec<CardKind> = [Summary(210.0), Steps]
             .into_iter()
             .chain(asked.iter().copied())
+            .chain(new_session.iter().copied())
             .chain([Sessions])
             .chain(vers.iter().copied())
             .chain([Pages])
@@ -2055,6 +2084,45 @@ mod session_pick_tests {
 }
 
 #[cfg(test)]
+mod card_layout_tests {
+    use super::{CardKind, above_sessions};
+
+    fn names(cols: &[Vec<CardKind>]) -> Vec<Vec<&'static str>> {
+        cols.iter()
+            .map(|c| {
+                c.iter()
+                    .map(|k| match k {
+                        CardKind::Summary(_) => "summary",
+                        CardKind::Steps => "steps",
+                        CardKind::NewSession => "new",
+                        CardKind::Sessions => "sessions",
+                        CardKind::Pages => "pages",
+                        CardKind::Versions => "versions",
+                        CardKind::Questions => "questions",
+                    })
+                    .collect()
+            })
+            .collect()
+    }
+
+    /// Starting a session is a card of its own, always right above the sessions' list,
+    /// whichever column the list landed in; without a folder, nothing is added.
+    #[test]
+    fn the_new_session_card_sits_above_the_list() {
+        use CardKind::*;
+        let mut cols = vec![vec![Summary(0.0), Pages], vec![Steps, Questions, Sessions]];
+        above_sessions(&mut cols, &[NewSession]);
+        assert_eq!(names(&cols), vec![vec!["summary", "pages"], vec!["steps", "questions", "new", "sessions"]]);
+        let mut cols = vec![vec![Summary(0.0)], vec![Steps], vec![Sessions, Pages]];
+        above_sessions(&mut cols, &[NewSession]);
+        assert_eq!(names(&cols)[2], vec!["new", "sessions", "pages"]);
+        let mut cols = vec![vec![Steps, Sessions]];
+        above_sessions(&mut cols, &[]);
+        assert_eq!(names(&cols), vec![vec!["steps", "sessions"]]);
+    }
+}
+
+#[cfg(test)]
 mod glow_tests {
     /// The Steps card glows fully, then fades, then stops (never before, never after).
     #[test]
@@ -2331,33 +2399,16 @@ fn ai_steps(
     });
 }
 
-fn sessions_card(ui: &mut egui::Ui, cx: &mut Cx, extra: f32) -> f32 {
-    let (page_id, pr, t, live) = (cx.page_id, &*cx.pr, cx.t, cx.live);
-    // ---- Sessions: live ones read from disk, plus those an AI linked itself.
-    let mut msg = None;
-    let mut clear = false;
-    let h = card(ui, t, extra, |ui| {
-        let others: Vec<&crate::project::SessionRef> = pr
-            .sessions
-            .iter()
-            .filter(|x| !live.iter().any(|l| l.id == x.id))
-            .collect();
-        let n = live.len() + others.len();
-        card_title(
-            ui,
-            crate::tr!("SESSIONS IA", "AI SESSIONS"),
-            &if n > 0 { n.to_string() } else { String::new() },
-            t,
-        );
-        if !pr.folder.trim().is_empty() {
-            // Start something new in the project's folder, in the built-in terminal.
+/// Start a new AI session in the project's folder, in the built-in terminal: its AI and
+/// model, then « Ouvrir ». A card of its own, apart from the sessions' list (`sessions_card`);
+/// shown only once the project has a folder.
+fn new_session_card(ui: &mut egui::Ui, cx: &mut Cx, extra: f32) -> f32 {
+    let (page_id, pr, t) = (cx.page_id, &*cx.pr, cx.t);
+    card(ui, t, extra, |ui| {
+        card_title(ui, crate::tr!("NOUVELLE SESSION", "NEW SESSION"), "", t);
+        {
             ui.horizontal_wrapped(|ui| {
                 ui.spacing_mut().item_spacing.x = 6.0;
-                ui.label(
-                    RichText::new(crate::tr!("Nouvelle session", "New session"))
-                        .size(12.5)
-                        .color(t.tertiary),
-                );
                 let name = std::path::Path::new(pr.folder.trim())
                     .file_name()
                     .map(|n| n.to_string_lossy().to_string())
@@ -2445,8 +2496,28 @@ fn sessions_card(ui: &mut egui::Ui, cx: &mut Cx, extra: f32) -> f32 {
                     super::term_ui::request(ui.ctx(), &title, pr.folder.trim(), pick.command());
                 }
             });
-            ui.add_space(8.0);
         }
+    })
+}
+
+fn sessions_card(ui: &mut egui::Ui, cx: &mut Cx, extra: f32) -> f32 {
+    let (page_id, pr, t, live) = (cx.page_id, &*cx.pr, cx.t, cx.live);
+    // ---- Sessions: live ones read from disk, plus those an AI linked itself.
+    let mut msg = None;
+    let mut clear = false;
+    let h = card(ui, t, extra, |ui| {
+        let others: Vec<&crate::project::SessionRef> = pr
+            .sessions
+            .iter()
+            .filter(|x| !live.iter().any(|l| l.id == x.id))
+            .collect();
+        let n = live.len() + others.len();
+        card_title(
+            ui,
+            crate::tr!("SESSIONS IA", "AI SESSIONS"),
+            &if n > 0 { n.to_string() } else { String::new() },
+            t,
+        );
         if n == 0 {
             let hint = if pr.folder.trim().is_empty() {
                 crate::tr!(
