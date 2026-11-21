@@ -1497,7 +1497,7 @@ pub fn merge(r: &crate::model::RunRecord) -> Result<String, String> {
     }
     let _ = git(&rd, &["worktree", "remove", "--force", &r.worktree]);
     if r.branch != DEV {
-        let _ = git(&rd, &["branch", "-d", &r.branch]);
+        let _ = git(&rd, &["branch", "-D", &r.branch]);
         delete_remote_later(r.root.clone(), r.branch.clone());
     }
     Ok(crate::trf!(
@@ -3590,6 +3590,43 @@ mod tests {
         assert!(ok(&repo, &["switch", "main"]));
         discard(&rec2).unwrap();
         assert!(!git(&repo, &["branch"]).unwrap().contains("orchestra/"));
+        let _ = std::fs::remove_dir_all(base);
+    }
+
+    /// A session's branch pushed with an upstream, then merged with work the merge commits
+    /// itself (so ahead of its upstream): the local branch still goes once merged.
+    #[test]
+    fn a_merged_branch_ahead_of_its_upstream_goes() {
+        let base =
+            std::env::temp_dir().join(format!("orch-auto-{}", uuid::Uuid::new_v4().simple()));
+        let (repo, copies) = (base.join("repo"), base.join("worktrees"));
+        let remote = base.join("remote.git");
+        std::fs::create_dir_all(&repo).unwrap();
+        let ok = |d: &Path, a: &[&str]| git(d, a).is_ok();
+        if !ok(&repo, &["init", "-b", "main"]) {
+            return;
+        }
+        let _ = git(&repo, &["config", "user.email", "t@t"]);
+        let _ = git(&repo, &["config", "user.name", "T"]);
+        std::fs::write(repo.join("a.txt"), "a").unwrap();
+        assert!(ok(&repo, &["add", "-A"]) && ok(&repo, &["commit", "-m", "a"]));
+        assert!(ok(&base, &["init", "--bare", "remote.git"]));
+        assert!(ok(&repo, &["remote", "add", "origin", &remote.display().to_string()]));
+        let c = make_copy_in(&copies, &repo.display().to_string(), "Essai").unwrap();
+        let wt = PathBuf::from(&c.worktree);
+        assert!(ok(&wt, &["push", "-u", "origin", &c.branch]));
+        std::fs::write(wt.join("b.txt"), "b").unwrap();
+        let rec = crate::model::RunRecord {
+            title: "Essai".into(),
+            root: c.root.clone(),
+            worktree: c.worktree.clone(),
+            branch: c.branch.clone(),
+            ..Default::default()
+        };
+        merge(&rec).unwrap();
+        assert!(repo.join("b.txt").exists());
+        let branches = git(&repo, &["branch"]).unwrap();
+        assert!(!branches.contains("orchestra/"), "{branches}");
         let _ = std::fs::remove_dir_all(base);
     }
 
