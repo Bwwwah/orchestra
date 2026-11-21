@@ -16,7 +16,8 @@ pub struct Ais {
     pub usage: Option<crate::usage::Usage>,
     pub usage_read: Option<Instant>,
     /// The other plugged AIs (not Claude Code) and their figures when Orchestra can read
-    /// them (Codex); None for those that tell none (Gemini, Vibe). Read with `usage`.
+    /// them (Codex, Vibe's monthly budget); None for those that tell none (Gemini) or before
+    /// a first reading. Read with `usage`.
     pub others: Vec<(crate::auto::Agent, Option<crate::usage::Usage>)>,
     /// Mistral Vibe's plan and tokens, when it is among `others`.
     pub vibe: Option<crate::usage::VibeUse>,
@@ -304,10 +305,10 @@ fn level_color(pct: f32) -> Color32 {
 
 const CLAUDE: Color32 = Color32::from_rgb(204, 120, 92);
 
-/// "repart dans 2 h 14": the time left before the 5-hour window resets, for the header of
+/// "repart dans 2 h 14": the time left before the 5-hour window (or a budget's month) resets, for the header of
 /// the subscription tile. None when that time isn't known or has passed.
 fn five_reset_in(u: &crate::usage::Usage, now: u64) -> Option<String> {
-    let left = crate::usage::until(u.five()?.resets_at?, now)?;
+    let left = crate::usage::until(u.measured()?.resets_at?, now)?;
     Some(crate::trf!(
         "repart dans {}",
         "resets in {}",
@@ -325,23 +326,46 @@ mod reset_tests {
     fn the_mistral_tile_says_why_it_has_no_percentage_in_one_line() {
         let ctx = eframe::egui::Context::default();
         super::super::setup_fonts(&ctx);
-        let mut width = 0.0;
-        for _ in 0..2 {
-            ctx.begin_pass(Default::default());
-            width = ctx.fonts_mut(|f| {
-                f.layout_no_wrap(
-                    super::vibe_no_pct_note().to_string(),
-                    eframe::egui::FontId::proportional(10.5),
-                    eframe::egui::Color32::WHITE,
-                )
-                .size()
-                .x
-            });
-            ctx.end_pass().textures_delta.clear();
+        let waiting = crate::usage::VibeUse::default();
+        let failed = crate::usage::VibeUse {
+            budget_problem: Some("Mistral a répondu 500.".into()),
+            ..Default::default()
+        };
+        assert_ne!(super::vibe_no_pct_note(&waiting), super::vibe_no_pct_note(&failed));
+        for v in [&waiting, &failed] {
+            let mut width = 0.0;
+            for _ in 0..2 {
+                ctx.begin_pass(Default::default());
+                width = ctx.fonts_mut(|f| {
+                    f.layout_no_wrap(
+                        super::vibe_no_pct_note(v).to_string(),
+                        eframe::egui::FontId::proportional(10.5),
+                        eframe::egui::Color32::WHITE,
+                    )
+                    .size()
+                    .x
+                });
+                ctx.end_pass().textures_delta.clear();
+            }
+            assert!(width > 0.0 && width <= 220.0 - 20.0 - 24.0, "{width}");
         }
-        assert!(width > 0.0 && width <= 220.0 - 20.0 - 24.0, "{width}");
-        let why = crate::usage::unreadable_reason(crate::auto::Agent::Vibe).unwrap();
-        assert!(why.contains("Claude") && why.contains("Codex"), "{why}");
+        // Its monthly budget is read like Claude's and Codex's windows, never "not readable".
+        assert!(crate::usage::unreadable_reason(crate::auto::Agent::Vibe).is_none());
+    }
+
+    #[test]
+    fn header_shows_time_left_before_the_month_of_a_budget_resets() {
+        let now = 1_000_000_000u64;
+        let u = Usage {
+            windows: vec![Window {
+                label: crate::usage::MONTH.into(),
+                pct: 12.0,
+                resets_at: Some(now + 3 * 86_400_000 + 5 * 3_600_000),
+            }],
+            at: now,
+        };
+        let s = super::five_reset_in(&u, now).unwrap();
+        assert!(s.ends_with("3 j 5 h") || s.ends_with("3 d 5 h"), "{s}");
     }
 
     #[test]
@@ -541,8 +565,6 @@ impl NotesApp {
 pub(super) fn quota_title(agent: crate::auto::Agent) -> String {
     if crate::usage::reports_usage(agent) {
         crate::trf!("Abonnement {}", "{} subscription", agent.label())
-    } else if agent == crate::auto::Agent::Vibe {
-        crate::trf!("Utilisation de {}", "{} usage", agent.label())
     } else {
         crate::trf!("Quota {}", "{} quota", agent.label())
     }
@@ -576,9 +598,30 @@ pub(super) fn vibe_details(ui: &mut egui::Ui, v: &crate::usage::VibeUse, t: &Ton
     ui.add_space(2.0);
 }
 
-/// The Mistral tile's last line: why no percentage (the hover says more).
-fn vibe_no_pct_note() -> &'static str {
-    crate::tr!("pas de % : Mistral ne le donne pas", "no %: Mistral doesn't give it")
+/// The Mistral tile's last line while its monthly budget isn't shown: why (the hover says more).
+fn vibe_no_pct_note(v: &crate::usage::VibeUse) -> &'static str {
+    if v.budget_problem.is_some() {
+        crate::tr!("pas de % : budget non lu (survol)", "no %: budget not read (hover)")
+    } else {
+        crate::tr!("% du budget : demandé à Mistral…", "budget %: asking Mistral…")
+    }
+}
+
+/// Where a reading of the monthly budget comes from and how old it is, or why it failed.
+pub(super) fn vibe_budget_note(ui: &mut egui::Ui, v: &crate::usage::VibeUse, t: &Tone) {
+    let text = match &v.budget_problem {
+        Some(why) => crate::trf!(
+            "Budget mensuel de Vibe non lu : {}",
+            "Vibe's monthly budget not read: {}",
+            why
+        ),
+        None => crate::tr!(
+            "Le budget mensuel de Vibe est demandé à Mistral avec la connexion de Vibe, comme Vibe le fait pour le % en bas de son écran.",
+            "Vibe's monthly budget is asked to Mistral with Vibe's sign-in, as Vibe does for the % at the bottom of its screen."
+        )
+        .to_string(),
+    };
+    ui.label(RichText::new(text).size(12.0).color(t.secondary));
 }
 
 /// A plugged AI other than Claude Code, in the sidebar: its windows (5 h, week) when Orchestra
@@ -650,7 +693,7 @@ fn other_usage_tile(
         p.text(
             egui::pos2(rect.left() + 12.0, rect.top() + 49.0),
             egui::Align2::LEFT_CENTER,
-            vibe_no_pct_note(),
+            vibe_no_pct_note(v),
             FontId::proportional(10.5),
             t.tertiary,
         );
@@ -666,6 +709,8 @@ fn other_usage_tile(
         let y = rect.top() + 34.0 + 20.0 * i as f32;
         let short = if win.label.starts_with("Session") {
             "5 h".to_string()
+        } else if win.label == crate::usage::MONTH {
+            crate::tr!("Mois", "Month").to_string()
         } else {
             win.label.replace("Semaine", crate::tr!("Sem.", "Wk"))
         };
@@ -710,6 +755,12 @@ fn other_usage_tile(
                 }
                 ui.label(RichText::new(why).size(12.5).color(t.secondary));
             }
+            (None, None) if vibe.is_some() => {
+                if let Some(v) = vibe {
+                    vibe_details(ui, v, t);
+                    vibe_budget_note(ui, v, t);
+                }
+            }
             (None, None) => {
                 ui.label(RichText::new(crate::trf!(
                     "Les chiffres arrivent à la prochaine réponse de {} (ils sont lus dans ses fichiers de session).",
@@ -732,16 +783,25 @@ fn other_usage_tile(
                         .size(13.0),
                     );
                 }
+                let from = if agent == crate::auto::Agent::Vibe {
+                    "Mistral".to_string()
+                } else {
+                    agent.label().to_string()
+                };
                 ui.label(
                     RichText::new(crate::trf!(
                         "Relevé par {} {}",
                         "Read from {} {}",
-                        agent.label(),
+                        from,
                         super::chrome::relative_time(u.at)
                     ))
                     .size(11.5)
                     .color(t.tertiary),
                 );
+                if let Some(v) = vibe {
+                    ui.add_space(4.0);
+                    vibe_details(ui, v, t);
+                }
             }
         }
     })

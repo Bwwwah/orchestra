@@ -57,6 +57,7 @@ pub fn shown(label: &str) -> String {
     label
         .replace("Semaine", "Week")
         .replace("Dépenses", "Spending")
+        .replace(MONTH, "Month")
 }
 
 fn label_for(key: &str) -> String {
@@ -227,29 +228,25 @@ pub fn read() -> Option<Usage> {
 // - Gemini CLI: its free or paid quota is a number of requests per day, counted by Google
 //   and never written locally (`/stats` only shows the tokens of the session). Nothing to read.
 // - Mistral Vibe: used with a Le Chat plan (Free, Pro…) or an API key. The share of the plan
-//   left is never written locally, so it has no window and no ceiling; but its caches name the
-//   plan (`planType`, `planName`) and every session's state holds its tokens (`tokenUsage`):
-//   read by `read_vibe` to show how much Vibe was used.
+//   left is never written locally: it is asked to Mistral (`/v1/billing/budget`, a monthly
+//   window, see « Mistral Vibe's budget » below). Its caches also name the plan (`planType`,
+//   `planName`) and every session's state holds its tokens (`tokenUsage`): read by `read_vibe`.
 
 /// The agents whose use of the subscription Orchestra can read (the ceiling of a session
 /// rests on it).
 pub fn reports_usage(agent: crate::auto::Agent) -> bool {
     use crate::auto::Agent;
-    matches!(agent, Agent::ClaudeCode | Agent::Codex)
+    matches!(agent, Agent::ClaudeCode | Agent::Codex | Agent::Vibe)
 }
 
 /// Why an agent's quota can't be shown, in a few words (None when Orchestra reads it).
 pub fn unreadable_reason(agent: crate::auto::Agent) -> Option<&'static str> {
     use crate::auto::Agent;
     match agent {
-        Agent::ClaudeCode | Agent::Codex => None,
+        Agent::ClaudeCode | Agent::Codex | Agent::Vibe => None,
         Agent::Gemini => Some(crate::tr!(
             "Quota compté par Google en requêtes par jour, jamais écrit sur cet ordinateur.",
             "Quota counted by Google in requests per day, never written on this computer."
-        )),
-        Agent::Vibe => Some(crate::tr!(
-            "Pas de pourcentage comme pour Claude ou Codex : Mistral n'écrit nulle part sur cet ordinateur la part du forfait qui reste (Claude et Codex, eux, la notent dans leurs fichiers). Orchestra compte à la place les jetons des sessions de Vibe.",
-            "No percentage as for Claude or Codex: Mistral writes nowhere on this computer how much of the plan is left (Claude and Codex note it in their files). Orchestra counts the tokens of Vibe's sessions instead."
         )),
     }
 }
@@ -260,7 +257,8 @@ pub fn read_for(agent: crate::auto::Agent) -> Option<Usage> {
     match agent {
         Agent::ClaudeCode => read(),
         Agent::Codex => read_codex(),
-        Agent::Gemini | Agent::Vibe => None,
+        Agent::Vibe => vibe_budget_state().0,
+        Agent::Gemini => None,
     }
 }
 
@@ -276,6 +274,8 @@ pub struct VibeUse {
     pub tokens_week: u64,
     /// Last activity of a session (ms), 0 when none this week.
     pub at: u64,
+    /// Why its monthly budget isn't shown, when Mistral couldn't be asked (`vibe_budget_problem`).
+    pub budget_problem: Option<String>,
 }
 
 fn vibe_dir() -> PathBuf {
@@ -372,7 +372,245 @@ pub fn read_vibe() -> Option<VibeUse> {
             sessions.push(s);
         }
     }
-    Some(vibe_totals(plan, &sessions, crate::model::now_ms()))
+    let mut u = vibe_totals(plan, &sessions, crate::model::now_ms());
+    u.budget_problem = vibe_budget_problem();
+    Some(u)
+}
+
+// ------------------------------------------------------------------ Mistral Vibe's budget
+//
+// The limit of a Vibe plan (Le Chat Free, Pro…) is a monthly budget, not a number of tokens:
+// Mistral answers `GET https://api.mistral.ai/v1/billing/budget` with
+// `{"vibe_budget": {"usage_percentage": 12.5, "initial_budget": 5.0, "reset_at": "…"}}`, the
+// share of it used and when it starts again. Vibe itself reads it there for the % at the
+// bottom of its screen (`vibe/app_server/_billing.py`) and writes it nowhere, so Orchestra
+// asks the same question with Vibe's own sign-in (the person agreed to it). The key is read
+// where Vibe keeps it and only sent to api.mistral.ai, on curl's standard input (never on a
+// command line); the answer, never the key, is kept in the data folder.
+
+/// The label of the monthly window (kept in French inside, like the others).
+pub const MONTH: &str = "Mois";
+
+const VIBE_BUDGET_URL: &str = "https://api.mistral.ai/v1/billing/budget";
+/// How often the budget is asked again (it moves slowly: a share of a month).
+const VIBE_BUDGET_EVERY_MS: u64 = 2 * 60 * 1000;
+/// An answer older than this no longer measures a session.
+const VIBE_BUDGET_STALE_MS: u64 = 30 * 60 * 1000;
+
+fn vibe_budget_file() -> PathBuf {
+    crate::store::data_dir().join("vibe-budget.json")
+}
+
+/// Mistral's answer, as a monthly window; None when the account has no Vibe budget (Vibe
+/// shows none either then: no `vibe_budget`, or an `initial_budget` of 0).
+fn vibe_budget_usage(v: &Value, at: u64) -> Option<Usage> {
+    let b = &v["vibe_budget"];
+    b["initial_budget"].as_f64().filter(|x| *x > 0.0)?;
+    let pct = b["usage_percentage"].as_f64()? as f32;
+    Some(Usage {
+        windows: vec![Window {
+            label: MONTH.into(),
+            pct: pct.clamp(0.0, 100.0),
+            resets_at: b.get("reset_at").and_then(time_ms),
+        }],
+        at,
+    })
+}
+
+/// Why the budget couldn't be read, from Mistral's HTTP status.
+fn vibe_budget_status_problem(status: u16) -> String {
+    match status {
+        401 => crate::tr!(
+            "Mistral a refusé la connexion de Vibe : reconnectez-vous dans vibe.",
+            "Mistral refused Vibe's sign-in: sign in again in vibe."
+        )
+        .into(),
+        403 => crate::tr!(
+            "Ce compte Mistral n'a pas le droit de voir l'usage de son organisation (permission see_org_inference_usage).",
+            "This Mistral account may not see its organization's usage (see_org_inference_usage permission)."
+        )
+        .into(),
+        404 => crate::tr!(
+            "Mistral ne donne pas de budget Vibe pour ce compte.",
+            "Mistral gives no Vibe budget for this account."
+        )
+        .into(),
+        s => crate::trf!("Mistral a répondu {}.", "Mistral answered {}.", s),
+    }
+}
+
+/// `MISTRAL_API_KEY=…` in Vibe's `.env` (quotes and `export` allowed).
+fn dotenv_key(text: &str) -> Option<String> {
+    text.lines().find_map(|l| {
+        let l = l.trim();
+        let l = l.strip_prefix("export ").unwrap_or(l);
+        let v = l.strip_prefix("MISTRAL_API_KEY")?.trim_start().strip_prefix('=')?.trim();
+        let v = v.trim_matches(|c| c == '"' || c == '\'');
+        (!v.is_empty()).then(|| v.to_string())
+    })
+}
+
+/// Vibe's sign-in, where Vibe looks for it, in its order (`vibe/utils/api_keys.py`): the
+/// environment, then the system keyring (service `ai.mistral.vibe`, formerly `vibe`), then
+/// its `.env`. Err with the reason when there is none.
+fn vibe_api_key() -> Result<String, String> {
+    if std::env::var("VIBE_CLI_OIDC_ENABLED").is_ok_and(|v| v == "1" || v.eq_ignore_ascii_case("true")) {
+        return Err(crate::tr!(
+            "Vibe est connecté par OIDC : Orchestra ne sait pas encore lire son budget ainsi.",
+            "Vibe is signed in through OIDC: Orchestra can't read its budget that way yet."
+        )
+        .into());
+    }
+    if let Ok(k) = std::env::var("MISTRAL_API_KEY")
+        && !k.trim().is_empty()
+    {
+        return Ok(k.trim().to_string());
+    }
+    for service in ["ai.mistral.vibe", "vibe"] {
+        let out = if cfg!(target_os = "macos") {
+            // Vibe stores it with `-A` (any app may read it): no dialog.
+            crate::proc::command("/usr/bin/security")
+                .args(["find-generic-password", "-s", service, "-a", "MISTRAL_API_KEY", "-w"])
+                .stdin(std::process::Stdio::null())
+                .output()
+                .ok()
+        } else if cfg!(target_os = "linux") {
+            crate::proc::command("secret-tool")
+                .args(["lookup", "service", service, "username", "MISTRAL_API_KEY"])
+                .stdin(std::process::Stdio::null())
+                .output()
+                .ok()
+        } else {
+            None
+        };
+        if let Some(o) = out.filter(|o| o.status.success()) {
+            let k = String::from_utf8_lossy(&o.stdout).trim().to_string();
+            if !k.is_empty() {
+                return Ok(k);
+            }
+        }
+    }
+    std::fs::read_to_string(vibe_dir().join(".env"))
+        .ok()
+        .and_then(|t| dotenv_key(&t))
+        .ok_or_else(|| {
+            crate::tr!(
+                "Connexion de Vibe introuvable (trousseau, MISTRAL_API_KEY, ~/.vibe/.env) : lancez vibe et connectez-vous.",
+                "Vibe's sign-in not found (keyring, MISTRAL_API_KEY, ~/.vibe/.env): start vibe and sign in."
+            )
+            .into()
+        })
+}
+
+/// Asks Mistral for the budget (a few seconds at most), as JSON to keep:
+/// `{"at", "budget"}` or `{"at", "error"}`.
+fn fetch_vibe_budget(now: u64) -> Value {
+    let fail = |e: String| json!({ "at": now, "error": e });
+    let key = match vibe_api_key() {
+        Ok(k) => k,
+        Err(e) => return fail(e),
+    };
+    let p = crate::sync::shell_path();
+    let Some(curl) = crate::sync::which("curl", &p) else {
+        return fail(crate::tr!("« curl » introuvable.", "« curl » not found.").into());
+    };
+    let child = crate::proc::command(curl)
+        .args(["-sS", "--max-time", "8", "-H", "@-", "-w", "\n%{http_code}", VIBE_BUDGET_URL])
+        .env("PATH", &p)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn();
+    let mut child = match child {
+        Ok(c) => c,
+        Err(e) => return fail(e.to_string()),
+    };
+    if let Some(mut stdin) = child.stdin.take() {
+        let _ = writeln!(stdin, "Authorization: Bearer {key}");
+    }
+    let o = match child.wait_with_output() {
+        Ok(o) => o,
+        Err(e) => return fail(e.to_string()),
+    };
+    let text = String::from_utf8_lossy(&o.stdout);
+    let (body, status) = text.rsplit_once('\n').unwrap_or(("", &text));
+    match status.trim().parse::<u16>() {
+        Ok(200) => match serde_json::from_str::<Value>(body) {
+            Ok(v) => json!({ "at": now, "budget": v }),
+            Err(_) => fail(crate::tr!("Réponse de Mistral illisible.", "Mistral's answer unreadable.").into()),
+        },
+        Ok(s) if s > 0 => fail(vibe_budget_status_problem(s)),
+        _ => {
+            let err = String::from_utf8_lossy(&o.stderr);
+            let err = err.lines().find(|l| !l.trim().is_empty()).unwrap_or("").trim();
+            fail(crate::trf!("Mistral injoignable ({}).", "Mistral unreachable ({}).", err))
+        }
+    }
+}
+
+/// The budget kept from the last answer, and why there is none if it failed: (figures, problem).
+fn vibe_budget_kept(kept: &Value, now: u64) -> (Option<Usage>, Option<String>) {
+    let at = kept["at"].as_u64().unwrap_or(0);
+    if let Some(e) = kept["error"].as_str() {
+        return (None, Some(e.to_string()));
+    }
+    if at + VIBE_BUDGET_STALE_MS < now {
+        return (None, None);
+    }
+    match vibe_budget_usage(&kept["budget"], at) {
+        Some(mut u) => {
+            u.windows.retain(|w| w.resets_at.is_none_or(|r| r > now));
+            if u.windows.is_empty() { (None, None) } else { (Some(u), None) }
+        }
+        None => (
+            None,
+            Some(
+                crate::tr!(
+                    "Pas de budget Vibe sur ce compte Mistral.",
+                    "No Vibe budget on this Mistral account."
+                )
+                .into(),
+            ),
+        ),
+    }
+}
+
+static VIBE_FETCHING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// The last answer kept; asks Mistral again in the background when it is old (never in tests).
+fn vibe_budget_state() -> (Option<Usage>, Option<String>) {
+    use std::sync::atomic::Ordering;
+    let now = crate::model::now_ms();
+    let kept: Value = std::fs::read_to_string(vibe_budget_file())
+        .ok()
+        .and_then(|t| serde_json::from_str(&t).ok())
+        .unwrap_or(Value::Null);
+    let at = kept["at"].as_u64().unwrap_or(0);
+    if !cfg!(test)
+        && (at + VIBE_BUDGET_EVERY_MS < now || at > now)
+        && vibe_dir().is_dir()
+        && !VIBE_FETCHING.swap(true, Ordering::SeqCst)
+    {
+        std::thread::spawn(move || {
+            let v = fetch_vibe_budget(now);
+            let _ = std::fs::write(vibe_budget_file(), v.to_string());
+            VIBE_FETCHING.store(false, Ordering::SeqCst);
+        });
+    }
+    vibe_budget_state_of(&kept, now)
+}
+
+fn vibe_budget_state_of(kept: &Value, now: u64) -> (Option<Usage>, Option<String>) {
+    if kept.is_null() {
+        return (None, None);
+    }
+    vibe_budget_kept(kept, now)
+}
+
+/// Why Mistral Vibe's budget isn't shown, when its last reading failed (None: read, or not
+/// asked yet).
+pub fn vibe_budget_problem() -> Option<String> {
+    vibe_budget_state().1
 }
 
 /// "8 k", "1,2 M": a number of tokens in a few characters.
@@ -465,6 +703,12 @@ impl Usage {
     /// The 5-hour window.
     pub fn five(&self) -> Option<&Window> {
         self.windows.iter().find(|w| w.label.starts_with("Session"))
+    }
+
+    /// The window a session is measured and stopped on: the 5-hour one, else the month of a
+    /// budget (Mistral Vibe's).
+    pub fn measured(&self) -> Option<&Window> {
+        self.five().or_else(|| self.windows.iter().find(|w| w.label == MONTH))
     }
 
     /// The weekly window (all models).
@@ -1165,8 +1409,8 @@ mod tests {
         assert!(codex_usage(r#"{"payload":{"rate_limits":null}}"#, 0).is_none());
         assert!(codex_usage(r#"{"payload":{"rate_limits":{"primary":{}}}}"#, 0).is_none());
         assert!(reports_usage(Agent::ClaudeCode) && reports_usage(Agent::Codex));
-        assert!(!reports_usage(Agent::Gemini) && !reports_usage(Agent::Vibe));
-        assert!(read_for(Agent::Gemini).is_none() && read_for(Agent::Vibe).is_none());
+        assert!(reports_usage(Agent::Vibe) && !reports_usage(Agent::Gemini));
+        assert!(read_for(Agent::Gemini).is_none());
         // Every agent either has its figures read or says why not, never both.
         for a in Agent::ALL {
             assert_eq!(unreadable_reason(a).is_none(), reports_usage(a), "{a:?}");
@@ -1202,6 +1446,64 @@ mod tests {
         );
         assert_eq!((u.tokens_day, u.tokens_week, u.at), (1000, 1500, now - HOUR));
         assert_eq!(vibe_totals(None, &[], now), VibeUse::default());
+    }
+
+    #[test]
+    fn vibe_budget_is_a_monthly_window_that_measures_sessions() {
+        let now = 1_795_000_000_000u64;
+        // Mistral's answer, as `vibe/app_server/_billing.py` reads it.
+        let answer = json!({"vibe_budget": {"usage_percentage": 37.5, "initial_budget": 5.0,
+            "reset_at": "2026-12-01T00:00:00Z", "payg_enabled": false}, "other": 1});
+        let u = vibe_budget_usage(&answer, now).unwrap();
+        assert_eq!(u.windows.len(), 1);
+        let w = u.measured().unwrap();
+        assert_eq!((w.label.as_str(), w.pct), (MONTH, 37.5));
+        assert_eq!(w.resets_at, crate::sessions::parse_iso_ms("2026-12-01T00:00:00Z"));
+        assert!(u.five().is_none() && u.week().is_none());
+        // A 5-hour window, when there is one, stays the one sessions are measured on.
+        let both = Usage {
+            windows: vec![
+                Window { label: MONTH.into(), pct: 1.0, resets_at: None },
+                Window { label: "Session (5 h)".into(), pct: 2.0, resets_at: None },
+            ],
+            at: now,
+        };
+        assert_eq!(both.measured().unwrap().pct, 2.0);
+        // No budget on the account (Vibe shows none either): no figures, never a made-up 0 %.
+        assert!(vibe_budget_usage(&json!({"vibe_budget": null}), now).is_none());
+        assert!(vibe_budget_usage(&json!({"vibe_budget": {"usage_percentage": 0.0, "initial_budget": 0.0}}), now).is_none());
+        assert!(vibe_budget_usage(&json!({}), now).is_none());
+        // Over 100 or below 0 is clamped.
+        let over = json!({"vibe_budget": {"usage_percentage": 130.0, "initial_budget": 1.0}});
+        assert_eq!(vibe_budget_usage(&over, now).unwrap().windows[0].pct, 100.0);
+
+        // What was kept: fresh figures, too old ones (dropped), a failure (its reason).
+        let kept = json!({"at": now - 60_000, "budget": answer});
+        let (u, why) = vibe_budget_state_of(&kept, now);
+        assert_eq!(u.unwrap().windows[0].pct, 37.5);
+        assert!(why.is_none());
+        let old = json!({"at": now - VIBE_BUDGET_STALE_MS - 1, "budget": kept["budget"].clone()});
+        assert_eq!(vibe_budget_state_of(&old, now), (None, None));
+        let failed = json!({"at": now, "error": vibe_budget_status_problem(403)});
+        let (u, why) = vibe_budget_state_of(&failed, now);
+        assert!(u.is_none() && why.unwrap().contains("see_org_inference_usage"));
+        let none = json!({"at": now, "budget": {"vibe_budget": null}});
+        assert!(vibe_budget_state_of(&none, now).1.is_some());
+        // Past its reset: the month started again, the figure is stale.
+        let reset = json!({"at": now, "budget": {"vibe_budget": {"usage_percentage": 90.0,
+            "initial_budget": 5.0, "reset_at": "2020-01-01T00:00:00Z"}}});
+        assert_eq!(vibe_budget_state_of(&reset, now), (None, None));
+        assert_eq!(vibe_budget_state_of(&Value::Null, now), (None, None));
+        assert!(vibe_budget_status_problem(401).contains("vibe"));
+    }
+
+    #[test]
+    fn vibe_key_in_its_dotenv() {
+        assert_eq!(dotenv_key("A=1\nMISTRAL_API_KEY=abc\n").as_deref(), Some("abc"));
+        assert_eq!(dotenv_key("export MISTRAL_API_KEY = \"x y\"").as_deref(), Some("x y"));
+        assert_eq!(dotenv_key("MISTRAL_API_KEY='k'").as_deref(), Some("k"));
+        assert_eq!(dotenv_key("MISTRAL_API_KEY=\nOTHER=1"), None);
+        assert_eq!(dotenv_key("MISTRAL_API_KEY_OLD=1"), None);
     }
 
     #[test]

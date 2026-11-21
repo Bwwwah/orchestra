@@ -1412,7 +1412,7 @@ impl NotesApp {
     }
 
     /// The same for the other agents that have sessions running and tell their figures
-    /// (Codex); those that tell none (Gemini, Vibe) stay unmeasured, so their sessions stop
+    /// (Codex, Vibe's monthly budget); those that tell none (Gemini) stay unmeasured, so their sessions stop
     /// (`Stop::Unmeasured`) rather than run with no ceiling.
     fn other_agents_tick(&mut self) {
         let mut agents: Vec<Agent> = vec![];
@@ -1434,7 +1434,8 @@ impl NotesApp {
                 self.orch.others.insert(a, f);
             }
             let Some(u) = u else { continue };
-            if let Some(five) = u.five() {
+            // Its 5-hour window, or the month of its budget (Mistral Vibe).
+            if let Some(five) = u.measured() {
                 let mut last = self.orch.others_reading.get(&a).copied();
                 apply_reading(&mut self.orch.runs, a, &mut last, u.at, five);
                 if let Some(l) = last {
@@ -4159,9 +4160,9 @@ fn stop_reason(t: &TurnEnd) -> Option<Stop> {
 impl Figures {
     fn of(u: &crate::usage::Usage) -> Self {
         Figures {
-            five: u.five().map(|w| w.pct),
+            five: u.measured().map(|w| w.pct),
             week: u.week().map(|w| w.pct),
-            five_reset: u.five().and_then(|w| w.resets_at),
+            five_reset: u.measured().and_then(|w| w.resets_at),
             week_reset: u.week().and_then(|w| w.resets_at),
         }
     }
@@ -5424,9 +5425,12 @@ mod tests {
         for a in Agent::ALL {
             assert_eq!(agent_unavailable(a).is_none(), a.ready(), "{a:?}");
         }
-        // Mistral Vibe: the reason names what's missing, the % behind « arrêt à ».
-        let why = agent_unavailable(Agent::Vibe).unwrap();
+        // Gemini: the reason names what's missing, the % behind « arrêt à ». Mistral Vibe
+        // gives it now (its monthly budget): only its autonomous work is left to check.
+        let why = agent_unavailable(Agent::Gemini).unwrap();
         assert!(why.contains("arrêt à") || why.contains("stop at"), "{why}");
+        let why = agent_unavailable(Agent::Vibe).unwrap();
+        assert!(!why.contains("arrêt à") && !why.contains("stop at"), "{why}");
         // Only the plugged AIs are listed, in the usual order, plus the one already chosen.
         use super::agent_choices;
         let plugged = [Agent::Vibe, Agent::ClaudeCode];
