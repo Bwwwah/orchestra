@@ -130,7 +130,7 @@ impl Agent {
             // Orchestra's MCP server, and only it, on the command line (`codex_command`).
             Agent::Codex => {
                 let git_dirs = if allow_commits { codex_git_dirs(cwd) } else { Vec::new() };
-                codex_command(&git_dirs)
+                codex_command(&git_dirs, model)
             }
             // Its settings of the session (`config_files`) as the « system » settings, which
             // win over the person's and the repository's; only Orchestra's MCP server.
@@ -420,7 +420,9 @@ fn content_text(c: &Value) -> String {
 /// allowed (`cat`, `cp` ask first, and are refused). `git_dirs`: the folders git writes to
 /// for a commit, outside the copy (see `codex_git_dirs`); empty when commits are not allowed,
 /// so a `git commit` fails in the sandbox even if asked.
-fn codex_command(git_dirs: &[PathBuf]) -> String {
+///
+/// With `model`, Codex works with it (`--model`) rather than the person's default.
+fn codex_command(git_dirs: &[PathBuf], model: &str) -> String {
     let mut c = String::from(
         "codex --sandbox workspace-write --ask-for-approval untrusted \
          -c sandbox_workspace_write.network_access=false \
@@ -439,6 +441,10 @@ fn codex_command(git_dirs: &[PathBuf]) -> String {
             "sandbox_workspace_write.writable_roots=[{}]",
             roots.join(",")
         )));
+    }
+    if let Some(m) = model_arg(model) {
+        c.push_str(" --model ");
+        c.push_str(&crate::sessions::shell_quote(m));
     }
     c
 }
@@ -3361,6 +3367,22 @@ mod tests {
         }
     }
 
+    /// The model chosen for a session reaches Codex as `--model`, quoted; no model or a name
+    /// that isn't one adds nothing.
+    #[test]
+    fn the_chosen_model_reaches_codex() {
+        let plain = codex_command(&[], "");
+        assert!(!plain.contains("--model"), "{plain}");
+        let c = codex_command(&[], "gpt-5.1-codex");
+        assert!(c.ends_with(" --model gpt-5.1-codex"), "{c}");
+        let c = Agent::Codex.command(Path::new("/x"), false, "", "o4-mini");
+        assert!(c.contains(" --model o4-mini"), "{c}");
+        for bad in ["--full-auto", "x; echo hi", "$(id)", "a b"] {
+            let c = codex_command(&[], bad);
+            assert!(!c.contains("--model"), "{c}");
+        }
+    }
+
     /// With RTK, Claude Code gets its hook on the command line only (not the person's own
     /// settings), finds `rtk` on its PATH, sends no usage report, and every shell rule is also
     /// given behind `rtk`: a rewritten `git push` stays refused, a rewritten `git status`
@@ -3573,7 +3595,7 @@ mod tests {
         );
         let s: Vec<String> = dirs.iter().map(|d| d.display().to_string()).collect();
         assert_eq!(s, ["/r/.git/worktrees/copy", "/r/.git/objects", "/r/.git/refs", "/r/.git/logs"]);
-        let c = codex_command(&dirs);
+        let c = codex_command(&dirs, "");
         assert!(c.ends_with(
             " -c 'sandbox_workspace_write.writable_roots=[\"/r/.git/worktrees/copy\",\"/r/.git/objects\",\"/r/.git/refs\",\"/r/.git/logs\"]'"
         ), "{c}");
