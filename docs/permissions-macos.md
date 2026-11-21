@@ -79,15 +79,24 @@ GitHub › Settings › Secrets and variables › Actions, ajouter `MACOS_CERT_P
 exact du certificat, ex. « Developer ID Application: Nom (ÉQUIPE) »). Toujours réutiliser ce même
 certificat ensuite.
 
-## Developer ID : ce qu'il reste à faire (une fois)
+## Developer ID : mise en place (faite le 21/11/2026)
 
 Choix fait le 20/11/2026 : abonnement Apple Developer, donc certificat **Developer ID Application**.
-Tout est prêt dans les scripts ; il manque le certificat et les secrets, que seul le titulaire du
-compte peut créer.
+Fait le 21/11/2026 : certificat créé (émis par *Developer ID Certification Authority*, **G2**,
+équipe `J9WHA8C3FN`), **expire le 21/12/2027**. Les 6 secrets sont sur GitHub et le workflow exige
+la signature (`MACOS_REQUIRE_IDENTITY: "1"`). Les étapes ci-dessous restent comme mémo pour un
+renouvellement.
 
 1. **Créer le certificat** sur le Mac : Xcode › Réglages › Comptes › (le compte) › Gérer les
    certificats › « + » › *Developer ID Application*. (Ou developer.apple.com › Certificates, avec une
    demande de signature faite dans Trousseaux d'accès.)
+   **Le fichier demandé** par developer.apple.com est cette demande de signature (`.certSigningRequest`) :
+   Trousseaux d'accès › Assistant de certification › Demander un certificat à une autorité de
+   certification…, adresse du compte Apple, nom commun, AC vide, « Enregistrée sur le disque ». La clé
+   privée est créée sur ce Mac à ce moment-là : faire l'export .p12 depuis ce même Mac.
+   **Installer le .cer** téléchargé dans le trousseau **Session** (pas Système, pas iCloud), là où est
+   la clé privée. S'il est indiqué « pas fiable », installer l'intermédiaire *Developer ID - G2*
+   (apple.com/certificateauthority) ; ne pas forcer la confiance à la main.
    **Aucun service à cocher** : un Developer ID Application ne demande ni identifiant d'app
    (*Identifiers*) ni capacités (*Capabilities* : iCloud, Push…). Si la page *Identifiers* propose
    des services, c'est pour l'App Store : ne rien créer là. Sur *Certificates*, choisir seulement
@@ -120,6 +129,22 @@ version ne puisse plus partir signée ad hoc par erreur.
 
 La première version signée avec le certificat demandera la permission une dernière fois ; ensuite elle
 sera conservée.
+
+## Renouveler le certificat (avant le 21/12/2027)
+
+Une fois le certificat expiré, on ne peut plus signer de nouvelle version (`MACOS_REQUIRE_IDENTITY`
+fait alors échouer la publication). Les versions déjà publiées restent valables : la notarisation est
+horodatée.
+
+1. Vers novembre 2027, refaire les étapes 1 et 2 ci-dessus : nouvelle demande de signature, nouveau
+   *Developer ID Application* (G2), export .p12.
+2. Remplacer sur GitHub `MACOS_CERT_P12`, `MACOS_CERT_PASSWORD` et `MACOS_SIGN_IDENTITY` (le nom
+   reste normalement le même). `APPLE_ID`, `APPLE_TEAM_ID` et `APPLE_APP_PASSWORD` ne changent pas,
+   sauf si le mot de passe pour app a été révoqué.
+3. Rien d'autre : avec un Developer ID, l'exigence désignée porte sur l'identifiant d'équipe et non
+   sur ce certificat précis, donc la permission « Enregistrement de l'écran » est conservée ; la mise à
+   jour intégrée (`signature_allows`) n'exige que le même `TeamIdentifier`, elle accepte donc la version
+   signée avec le nouveau certificat.
 
 ## Mises à jour : même développeur Apple exigé
 
