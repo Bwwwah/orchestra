@@ -29,14 +29,100 @@ pub struct ModelInfo {
     /// The account's plan doesn't include it (Vibe's catalog says so): listed, never chosen
     /// on its own.
     pub needs_higher_plan: bool,
+    /// Light, intermediate or high-end: what the model can be trusted with.
+    pub tier: Tier,
+    /// Rough public price, in US cents per million output tokens: only meant to compare models,
+    /// across AIs too, never shown as a bill.
+    pub cost_cents: u32,
+}
+
+/// What a model can be trusted with, from the cheapest to the most capable.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Tier {
+    /// Short, well-framed work: commit messages, versions, splitting a text into tasks.
+    Light,
+    /// Ordinary steps: a bounded change in a few files.
+    Mid,
+    /// Hard steps: design, wide changes, tricky bugs.
+    High,
+}
+
+impl Tier {
+    pub fn label(self) -> &'static str {
+        match self {
+            Tier::Light => "léger",
+            Tier::Mid => "intermédiaire",
+            Tier::High => "haut de gamme",
+        }
+    }
+}
+
+/// The tier and rough cost of a model, from the words of its name and label (`gemini-2.5-flash`,
+/// `GPT-5.2 Codex`…). Prices are the public ones per million output tokens, rounded: enough to
+/// tell a cheap model from a dear one. A name nobody knows yet counts as intermediate.
+pub fn classify(id: &str, label: &str) -> (Tier, u32) {
+    let text = format!("{id} {label}").to_lowercase();
+    let words: Vec<&str> = text
+        .split(|c: char| !c.is_ascii_alphanumeric())
+        .filter(|w| !w.is_empty())
+        .collect();
+    let has = |w: &str| words.contains(&w);
+    // Claude
+    if has("opus") {
+        return (Tier::High, 2500);
+    }
+    if has("sonnet") {
+        return (Tier::Mid, 1500);
+    }
+    if has("haiku") {
+        return (Tier::Light, 500);
+    }
+    // Gemini (word by word, so « gemini » isn't read as « mini »)
+    if has("gemini") {
+        return if has("lite") {
+            (Tier::Light, 40)
+        } else if has("flash") {
+            (Tier::Mid, 250)
+        } else {
+            (Tier::High, 1000)
+        };
+    }
+    // Light words shared by several families: gpt-5-mini, codex-mini, devstral-small…
+    if has("nano") || has("tiny") {
+        return (Tier::Light, 40);
+    }
+    if has("mini") {
+        return (Tier::Light, 200);
+    }
+    if has("small") || has("ministral") {
+        return (Tier::Light, 30);
+    }
+    // OpenAI
+    if has("gpt") || has("codex") || has("o3") || has("o4") {
+        return (Tier::High, 1000);
+    }
+    // Mistral
+    if has("large") {
+        return (Tier::High, 600);
+    }
+    if has("codestral") {
+        return (Tier::Mid, 90);
+    }
+    if has("medium") || has("devstral") || has("magistral") || has("mistral") {
+        return (Tier::Mid, 200);
+    }
+    (Tier::Mid, 500)
 }
 
 impl ModelInfo {
     fn new(id: &str, label: &str) -> ModelInfo {
+        let (tier, cost_cents) = classify(id, label);
         ModelInfo {
             id: id.to_string(),
             label: label.to_string(),
             needs_higher_plan: false,
+            tier,
+            cost_cents,
         }
     }
 }
@@ -252,5 +338,35 @@ mod tests {
         let text = "active_model = \"local\"\n\n[[models]]\nname = \"devstral-small-2\"\nprovider = \"llamacpp\"\nalias = \"local\"\n\n[[models]]\nname = \"codestral\"\nprovider = \"mistral\"\n\n[[mcp_servers]]\nname = \"fetch\"\n";
         let ids: Vec<String> = vibe_config_models(text).into_iter().map(|m| m.id).collect();
         assert_eq!(ids, ["local", "codestral"]);
+    }
+
+    #[test]
+    fn models_are_classed_by_tier_and_cost() {
+        let c = |id: &str| classify(id, id);
+        assert_eq!(c("opus").0, Tier::High);
+        assert_eq!(c("sonnet").0, Tier::Mid);
+        assert_eq!(c("haiku").0, Tier::Light);
+        assert_eq!(c("gemini-2.5-pro").0, Tier::High);
+        assert_eq!(c("gemini-2.5-flash").0, Tier::Mid);
+        assert_eq!(c("gemini-2.5-flash-lite").0, Tier::Light);
+        assert_eq!(c("gpt-5-codex").0, Tier::High);
+        assert_eq!(c("gpt-5.1-codex-mini").0, Tier::Light);
+        assert_eq!(c("mistral-large-4-0").0, Tier::High);
+        assert_eq!(c("mistral-medium-latest").0, Tier::Mid);
+        assert_eq!(c("devstral-small-2").0, Tier::Light);
+        assert_eq!(c("something-new"), (Tier::Mid, 500));
+        // The label counts too: a Vibe alias says nothing, its label does.
+        assert_eq!(classify("local", "Devstral Small").0, Tier::Light);
+        // Within a family, the higher tier costs more.
+        assert!(c("opus").1 > c("sonnet").1 && c("sonnet").1 > c("haiku").1);
+        assert!(c("gemini-2.5-pro").1 > c("gemini-2.5-flash").1);
+        // Every written model is classed.
+        for a in Agent::ALL {
+            for m in builtin(a) {
+                assert!(m.cost_cents > 0, "{}", m.id);
+            }
+        }
+        assert_eq!(Tier::High.label(), "haut de gamme");
+        assert!(Tier::Light < Tier::Mid && Tier::Mid < Tier::High);
     }
 }
