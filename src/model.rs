@@ -493,6 +493,9 @@ pub struct Settings {
     pub theme: String,
     #[serde(default)]
     pub hide_connect_card: bool,
+    /// The tutorial has been offered once (it starts by itself on the first use only).
+    #[serde(default)]
+    pub tutorial_seen: bool,
     #[serde(default)]
     pub sidebar_width: f32,
     /// Start with no tabs restored (the original's onStartup "default_page").

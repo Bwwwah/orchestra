@@ -277,6 +277,16 @@ impl NotesApp {
         if let Some(id) = open.filter(|id| alive(id)) {
             app.navigate(id);
         }
+        // First use: the tutorial starts by itself, once.
+        if !app.ws.settings.tutorial_seen
+            && std::env::var_os("ORCHESTRA_DEMO").is_none()
+            && std::env::var_os("ORCHESTRA_NO_SESSIONS").is_none()
+            && app.shot.is_none()
+        {
+            app.ws.settings.tutorial_seen = true;
+            app.dirty_since = Some(Instant::now());
+            app.start_project_cards_tour();
+        }
         // Developer aid for screenshots: ORCHESTRA_DEMO=settings | ai | collab | slash[:text].
         if let Ok(demo) = std::env::var("ORCHESTRA_DEMO") {
             match demo.split(':').next().unwrap_or("") {
