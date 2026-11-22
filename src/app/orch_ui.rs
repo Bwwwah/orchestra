@@ -631,6 +631,37 @@ fn hash(s: &str) -> u64 {
 }
 
 impl NotesApp {
+    /// The project's effort level (economy slider) as the launch card shows it: the draft
+    /// of the card and the choices kept in the project change together.
+    pub(super) fn project_saving(&self, pid: &str) -> crate::model::Saving {
+        self.orch
+            .drafts
+            .get(pid)
+            .map(|d| d.saving)
+            .or_else(|| {
+                let p = self.ws.page(pid)?.project.as_ref()?;
+                Some(p.launch.as_ref().map(|l| l.saving).unwrap_or_default())
+            })
+            .unwrap_or_default()
+    }
+
+    /// Sets the project's effort level for its next sessions (the end of the framing).
+    pub(super) fn set_project_saving(&mut self, pid: &str, s: crate::model::Saving) {
+        if let Some(d) = self.orch.drafts.get_mut(pid) {
+            d.saving = s;
+        }
+        let commits = self.ws.settings.orch.allow_commits;
+        if let Some(p) = self.ws.page_mut(pid).and_then(|p| p.project.as_mut()) {
+            let mut prefs = p.launch.clone().unwrap_or_else(|| default_prefs(commits));
+            if prefs.saving == s {
+                return;
+            }
+            prefs.saving = s;
+            p.launch = Some(prefs);
+            self.dirty_since.get_or_insert_with(Instant::now);
+        }
+    }
+
     /// « Veille automatique » (Veille · CVE card): every watched code project is checked
     /// once a day; a check that finds an important vulnerability no step names yet asks for
     /// a fix session (`cve_fix_tick`), unless a session already runs on the project (the

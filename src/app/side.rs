@@ -566,6 +566,28 @@ impl NotesApp {
                     })
             });
         }
+        // The end of the framing: how much effort the project's sessions will put in.
+        let mut saving = self.project_saving(pid);
+        let before = saving;
+        ui.horizontal(|ui| {
+            ui.label(RichText::new(crate::tr!("Effort", "Effort")).size(12.5).color(t.secondary));
+            egui::ComboBox::from_id_salt(("frame-saving", pid))
+                .selected_text(RichText::new(saving.label()).size(12.5))
+                .width(100.0)
+                .show_ui(ui, |ui| {
+                    for s in crate::model::Saving::ALL {
+                        ui.selectable_value(&mut saving, s, s.label());
+                    }
+                })
+                .response
+                .on_hover_text(crate::tr!(
+                    "Économe = modèle plus léger et peu de réflexion, Qualité = modèle plus haut et plus de réflexion. Gardé pour les prochaines sessions du projet (modifiable dans le lancement autonome).",
+                    "Economical = lighter model and little thinking, Quality = higher model and more thinking. Kept for the project's next sessions (also editable in the autonomous launch card)."
+                ));
+        });
+        if saving != before {
+            self.set_project_saving(pid, saving);
+        }
         true
     }
 
