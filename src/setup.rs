@@ -302,10 +302,11 @@ pub enum Ai {
 }
 
 impl Ai {
-    pub const ALL: [Ai; 7] = [
+    /// Gemini CLI is no longer maintained: it stays a variant (so existing settings still
+    /// parse) but is hidden from the list; Antigravity replaces it.
+    pub const ALL: [Ai; 6] = [
         Ai::ClaudeCode,
         Ai::Codex,
-        Ai::Gemini,
         Ai::Antigravity,
         Ai::Vibe,
         Ai::ClaudeDesktop,

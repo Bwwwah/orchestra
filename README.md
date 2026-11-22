@@ -1,7 +1,7 @@
 # Orchestra
 
 **Un tableau de bord de bureau pour suivre vos projets et les IA qui travaillent dessus**
-(Claude Code, Codex, Gemini CLI, l'app Claude…). Tout reste sur votre ordinateur : pas de
+(Claude Code, Codex, Antigravity CLI, l'app Claude…). Tout reste sur votre ordinateur : pas de
 compte, pas d'abonnement, pas de serveur d'entreprise.
 
 Orchestra réunit au même endroit :
@@ -70,7 +70,7 @@ Les données sont dans `$ORCHESTRA_DIR`, sinon dans le dossier de données de l'
 ## Brancher une IA
 
 Rien à faire en général : au démarrage, Orchestra s'ajoute comme serveur MCP à Claude Code,
-Codex, Gemini CLI et l'app Claude quand ils sont installés (une copie `.bak` des fichiers de
+Codex, Antigravity CLI et l'app Claude quand ils sont installés (une copie `.bak` des fichiers de
 réglages est gardée). Réglages → IA (MCP) permet de brancher ou débrancher chacune.
 
 À la main, pour Claude Code :
