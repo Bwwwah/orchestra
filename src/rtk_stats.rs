@@ -129,8 +129,56 @@ pub fn week_saving(
     w
 }
 
+/// The conversation files an agent leaves, when Orchestra reads them (Claude Code, Codex).
+pub fn tool_of(agent: crate::auto::Agent) -> Option<crate::sessions::Tool> {
+    use crate::auto::Agent;
+    match agent {
+        Agent::ClaudeCode => Some(crate::sessions::Tool::ClaudeCode),
+        Agent::Codex => Some(crate::sessions::Tool::Codex),
+        _ => None,
+    }
+}
+
+/// The week's saving of every agent whose sessions Orchestra reads, over the autonomous
+/// copies (`data_dir/worktrees/*`).
+pub fn week_savings_all(
+    sessions: &[crate::sessions::SessionInfo],
+    now_ms: u64,
+) -> Vec<(crate::auto::Agent, WeekSaving)> {
+    let copies: Vec<std::path::PathBuf> =
+        std::fs::read_dir(crate::store::data_dir().join("worktrees"))
+            .into_iter()
+            .flatten()
+            .flatten()
+            .map(|e| e.path())
+            .filter(|p| p.is_dir())
+            .collect();
+    crate::auto::Agent::ALL
+        .into_iter()
+        .filter_map(|a| Some((a, tool_of(a)?)))
+        .map(|(a, tool)| (a, week_saving(sessions, tool, a, &copies, now_ms)))
+        .collect()
+}
+
+/// « ≈ 12 % de consommation économisée grâce à RTK (7 jours, estimation) ».
+pub fn saving_line(w: &WeekSaving) -> Option<String> {
+    let pct = w.percent().filter(|_| w.rtk_sessions > 0)?;
+    Some(crate::trf!(
+        "≈ {} % de consommation économisée grâce à RTK (7 jours, estimation)",
+        "≈ {} % of consumption saved thanks to RTK (7 days, estimate)",
+        format!("{pct:.0}")
+    ))
+}
+
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn the_line_names_the_percentage() {
+        let w = super::WeekSaving { saved: 12, consumed: 88, rtk_sessions: 1 };
+        assert!(super::saving_line(&w).unwrap().contains("12 %"));
+        assert!(super::saving_line(&super::WeekSaving::default()).is_none());
+    }
+
     use super::*;
 
     #[test]

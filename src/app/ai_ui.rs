@@ -22,6 +22,9 @@ pub struct Ais {
     /// Mistral Vibe's plan and tokens, when it is among `others`.
     pub vibe: Option<crate::usage::VibeUse>,
     pub tracking: bool,
+    /// What RTK saved over 7 days for each AI, computed in the background (see `rtk_tick`).
+    pub rtk_week: Arc<Mutex<Vec<(crate::auto::Agent, crate::rtk_stats::WeekSaving)>>>,
+    pub rtk_read: Option<Instant>,
     /// An install started from the settings (built-in terminal): the AI, when it started,
     /// and the last check of whether it is there yet. Plugged in as soon as it is.
     pub installing: Option<(Ai, Instant, Instant)>,
@@ -404,13 +407,38 @@ impl NotesApp {
     /// Bottom of the sidebar: the Claude subscription, then the quota of every other plugged
     /// AI (Codex, Gemini, Mistral Vibe…), each in its own tile; details on hover.
     pub(super) fn usage_widget(&mut self, ui: &mut egui::Ui, t: &Tone) {
+        self.rtk_tick(ui.ctx());
         self.claude_usage_tile(ui, t);
         for (agent, usage) in self.ais.others.clone() {
             let vibe = self.ais.vibe.as_ref().filter(|_| agent == crate::auto::Agent::Vibe);
-            if other_usage_tile(ui, agent, usage.as_ref(), vibe, t).clicked() {
+            let rtk = self.rtk_line_of(agent);
+            if other_usage_tile(ui, agent, usage.as_ref(), vibe, rtk, t).clicked() {
                 self.open_settings(SettingsTab::Ai);
             }
         }
+    }
+
+    /// Every minute, in the background: what RTK saved this week for each AI.
+    fn rtk_tick(&mut self, ctx: &egui::Context) {
+        if self.ais.rtk_read.is_some_and(|t| t.elapsed().as_secs() < 60) {
+            return;
+        }
+        self.ais.rtk_read = Some(Instant::now());
+        let sessions = self.agents.all();
+        let out = self.ais.rtk_week.clone();
+        let ctx = ctx.clone();
+        std::thread::spawn(move || {
+            let r = crate::rtk_stats::week_savings_all(&sessions, crate::model::now_ms());
+            *out.lock_or_recover() = r;
+            ctx.request_repaint();
+        });
+    }
+
+    /// The tile line « ≈ X % de consommation économisée grâce à RTK… » of an AI, if it has one.
+    fn rtk_line_of(&self, agent: crate::auto::Agent) -> Option<String> {
+        let all = self.ais.rtk_week.lock_or_recover();
+        let (_, w) = all.iter().find(|(a, _)| *a == agent)?;
+        crate::rtk_stats::saving_line(w)
     }
 
     /// The Claude subscription at a glance.
@@ -431,6 +459,9 @@ impl NotesApp {
         } else {
             26.0 + 20.0 * shown.len() as f32
         };
+        let rtk = self.rtk_line_of(crate::auto::Agent::ClaudeCode);
+        let note = rtk_note(ui, rtk, w, t);
+        let h = h + note.as_ref().map_or(0.0, |g| g.size().y + 6.0);
         let (rect, resp) = ui.allocate_exact_size(egui::vec2(w, h), egui::Sense::click());
         let hov = ui
             .ctx()
@@ -443,6 +474,7 @@ impl NotesApp {
             egui::Stroke::new(1.0, t.border.lerp_to_gamma(CLAUDE, 0.35 * hov)),
             egui::StrokeKind::Inside,
         );
+        draw_rtk_note(p, rect, note);
         // Header: a small mark, "Claude", and the time since the last reading.
         let top = rect.top() + 14.0;
         p.circle_filled(egui::pos2(rect.left() + 16.0, top), 4.0, CLAUDE);
@@ -561,6 +593,30 @@ impl NotesApp {
     }
 }
 
+/// The RTK line of a tile, laid out to fit the tile's width (it wraps).
+fn rtk_note(
+    ui: &egui::Ui,
+    line: Option<String>,
+    width: f32,
+    t: &Tone,
+) -> Option<std::sync::Arc<egui::Galley>> {
+    let line = line?;
+    Some(ui.painter().layout(
+        line,
+        FontId::proportional(10.5),
+        t.tertiary,
+        (width - 24.0).max(40.0),
+    ))
+}
+
+/// Draw the RTK line at the bottom of a tile.
+fn draw_rtk_note(p: &egui::Painter, rect: egui::Rect, note: Option<std::sync::Arc<egui::Galley>>) {
+    if let Some(g) = note {
+        let pos = egui::pos2(rect.left() + 12.0, rect.bottom() - g.size().y - 6.0);
+        p.galley(pos, g, Color32::PLACEHOLDER);
+    }
+}
+
 /// "Abonnement Codex", "Quota Gemini": the title of an agent's tile.
 pub(super) fn quota_title(agent: crate::auto::Agent) -> String {
     if crate::usage::reports_usage(agent) {
@@ -631,6 +687,7 @@ fn other_usage_tile(
     agent: crate::auto::Agent,
     usage: Option<&crate::usage::Usage>,
     vibe: Option<&crate::usage::VibeUse>,
+    rtk: Option<String>,
     t: &Tone,
 ) -> egui::Response {
     let (r, g, b) = agent.ai().accent();
@@ -647,6 +704,8 @@ fn other_usage_tile(
     } else {
         26.0 + 20.0 * shown.len() as f32
     };
+    let note = rtk_note(ui, rtk, w, t);
+    let h = h + note.as_ref().map_or(0.0, |g| g.size().y + 6.0);
     let (rect, resp) = ui.allocate_exact_size(egui::vec2(w, h), egui::Sense::click());
     let hov = ui
         .ctx()
@@ -659,6 +718,7 @@ fn other_usage_tile(
         egui::Stroke::new(1.0, t.border.lerp_to_gamma(accent, 0.35 * hov)),
         egui::StrokeKind::Inside,
     );
+    draw_rtk_note(p, rect, note);
     let top = rect.top() + 14.0;
     p.circle_filled(egui::pos2(rect.left() + 16.0, top), 4.0, accent);
     p.text(
