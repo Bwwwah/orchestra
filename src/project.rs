@@ -926,6 +926,16 @@ impl Workspace {
         id
     }
 
+    /// The project the tutorial walks through: the example project, or, if it was deleted, the
+    /// first other project that exists (not in the trash). None when there is no project.
+    pub fn tutorial_project(&self) -> Option<String> {
+        let live = || self.pages.iter().filter(|p| !p.trashed && p.project.is_some());
+        live()
+            .find(|p| p.project.as_ref().is_some_and(|x| x.example))
+            .or_else(|| live().next())
+            .map(|p| p.id.clone())
+    }
+
     /// The project a page belongs to (itself, or its nearest parent that is a project).
     pub fn project_of(&self, id: &str) -> Option<&Page> {
         let mut cur = self.page(id);
@@ -1320,6 +1330,22 @@ mod tests {
         for st in [StepStatus::Todo, StepStatus::Doing, StepStatus::Done] {
             assert!(p.steps.iter().any(|s| s.status == st), "{st:?}");
         }
+    }
+
+    /// The tutorial uses the example project; once it is deleted (trashed), another existing
+    /// project; with none left, nothing.
+    #[test]
+    fn tutorial_project_falls_back_to_another_project() {
+        let mut ws = Workspace::default();
+        assert_eq!(ws.tutorial_project(), None);
+        let other = ws.create_project("Autre", "");
+        assert_eq!(ws.tutorial_project(), Some(other.clone()));
+        let ex = ws.create_example_project();
+        assert_eq!(ws.tutorial_project(), Some(ex.clone()));
+        ws.set_trashed(&ex, true);
+        assert_eq!(ws.tutorial_project(), Some(other.clone()));
+        ws.set_trashed(&other, true);
+        assert_eq!(ws.tutorial_project(), None);
     }
 
     /// The budget per session is saved with the project, comes back on loading, and stays
