@@ -48,9 +48,97 @@ pub fn repeated_savings(savings: &[Saving], requests_ms: &[u64]) -> u64 {
         .sum()
 }
 
+/// When the model was called in the conversation file `path` (ms since 1970, sorted): one
+/// per distinct Claude Code assistant message, one per Codex `token_count` event.
+pub fn request_times(path: &Path, tool: crate::sessions::Tool) -> Vec<u64> {
+    use crate::sessions::Tool;
+    use serde_json::Value;
+    let Ok(text) = std::fs::read_to_string(path) else {
+        return Vec::new();
+    };
+    let mut seen = std::collections::HashSet::new();
+    let mut out: Vec<u64> = text
+        .lines()
+        .filter_map(|l| serde_json::from_str::<Value>(l).ok())
+        .filter_map(|v| {
+            let at = crate::sessions::parse_iso_ms(v.get("timestamp")?.as_str()?)?;
+            match tool {
+                Tool::ClaudeCode => {
+                    if v.get("type")?.as_str()? != "assistant" {
+                        return None;
+                    }
+                    let id = v.get("message")?.get("id")?.as_str()?;
+                    seen.insert(id.to_string()).then_some(at)
+                }
+                Tool::Codex => {
+                    let p = v.get("payload")?;
+                    (p.get("type")?.as_str()? == "token_count").then_some(at)
+                }
+            }
+        })
+        .collect();
+    out.sort_unstable();
+    out
+}
+
+/// What RTK saved over a week for one AI and what that AI consumed, in tokens.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct WeekSaving {
+    pub saved: u64,
+    pub consumed: u64,
+    /// Copies of the week that ran with RTK (a database with savings).
+    pub rtk_sessions: u32,
+}
+
+impl WeekSaving {
+    /// The share of consumption saved: saved / (consumed + saved), in percent. None without
+    /// any token.
+    pub fn percent(&self) -> Option<f64> {
+        let total = self.saved + self.consumed;
+        (total > 0).then(|| 100.0 * self.saved as f64 / total as f64)
+    }
+}
+
+/// The rolling 7 days up to `now_ms` for the sessions of `tool`, run by `agent` in the copies
+/// `folders`: the savings of each copy's RTK database (counted for every later request of
+/// the copy's sessions), against the consumption of the sessions of the week.
+pub fn week_saving(
+    sessions: &[crate::sessions::SessionInfo],
+    tool: crate::sessions::Tool,
+    agent: crate::auto::Agent,
+    folders: &[std::path::PathBuf],
+    now_ms: u64,
+) -> WeekSaving {
+    let since = now_ms.saturating_sub(7 * 24 * 3600 * 1000);
+    let mut w = WeekSaving::default();
+    for folder in folders {
+        let savings: Vec<Saving> =
+            read_savings(&agent.rtk_db(folder)).into_iter().filter(|s| s.at_ms >= since).collect();
+        let mut requests = Vec::new();
+        for s in sessions.iter().filter(|s| {
+            s.tool == tool && s.last_activity >= since && Path::new(&s.cwd).starts_with(folder)
+        }) {
+            requests.extend(request_times(&s.path, tool).into_iter().filter(|t| *t >= since));
+        }
+        if !savings.is_empty() {
+            w.rtk_sessions += 1;
+        }
+        w.saved += repeated_savings(&savings, &requests);
+        w.consumed += crate::sessions::consumption(sessions, tool, folder, since).billed;
+    }
+    w
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn percent_of_a_week() {
+        assert_eq!(WeekSaving::default().percent(), None);
+        let w = WeekSaving { saved: 25, consumed: 75, rtk_sessions: 1 };
+        assert_eq!(w.percent(), Some(25.0));
+    }
 
     #[test]
     fn a_saving_counts_for_every_later_request() {
