@@ -25,6 +25,11 @@ pub const API_KEY_VARS: [&str; 3] = [
     "OPENAI_API_KEY",
 ];
 
+/// The AIs that can run on an API key rather than the subscription (the choice is
+/// `Settings::api_mode`).
+pub const API_KEY_AGENTS: [crate::auto::Agent; 2] =
+    [crate::auto::Agent::ClaudeCode, crate::auto::Agent::Codex];
+
 /// What a Claude Code session puts in the environment of the programs it runs. Orchestra
 /// started from one (`cargo run` in a Claude Code terminal) would hand them down: a Claude
 /// Code started with them takes itself for that session's child and saves no transcript,
