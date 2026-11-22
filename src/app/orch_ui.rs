@@ -902,7 +902,8 @@ impl NotesApp {
         let o = &self.ws.settings.orch;
         let cwd = std::path::Path::new(&copy.worktree);
         agent.write_config(cwd, commits, &o.extra_tools, model)?;
-        let cmd = agent.command(cwd, commits, &o.extra_tools, model);
+        let saving = pr.launch.as_ref().map(|l| l.saving).unwrap_or_default();
+        let cmd = agent.command_saving(cwd, commits, &o.extra_tools, model, saving);
         let c2 = ctx.clone();
         let mut term = Term::spawn_once(
             &crate::trf!("Autonome · {title}", "Autonomous · {title}"),

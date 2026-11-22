@@ -797,6 +797,16 @@ impl Saving {
         }
     }
 
+    /// The thinking level this setting asks of an AI that takes one (`catalog::accepts_effort`):
+    /// little for Économe, more for Qualité; Équilibré leaves the AI's own default.
+    pub fn effort(self) -> Option<&'static str> {
+        match self {
+            Saving::Economical => Some("low"),
+            Saving::Balanced => None,
+            Saving::Quality => Some("high"),
+        }
+    }
+
     /// Shift of the model tier chosen automatically: -1 lighter, +1 higher.
     pub fn tier_shift(self) -> i8 {
         match self {

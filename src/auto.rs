@@ -126,6 +126,19 @@ impl Agent {
     /// The command started in the hidden terminal, in the copy `cwd`, with `model` (empty:
     /// the AI's own default; see `model_arg`).
     pub fn command(self, cwd: &Path, allow_commits: bool, extra: &str, model: &str) -> String {
+        self.command_saving(cwd, allow_commits, extra, model, crate::model::Saving::Balanced)
+    }
+
+    /// `command` with the project's economy slider: the thinking level it asks of the AI
+    /// (`Saving::effort`), for those that take one.
+    pub fn command_saving(
+        self,
+        cwd: &Path,
+        allow_commits: bool,
+        extra: &str,
+        model: &str,
+        saving: crate::model::Saving,
+    ) -> String {
         match self {
             // Orchestra's MCP server, and only it, on the command line (`codex_command`).
             Agent::Codex => {
@@ -158,7 +171,13 @@ impl Agent {
             }
             Agent::ClaudeCode => {
                 let (allowed, denied) = permissions(allow_commits, extra);
-                claude_command(&allowed, &denied, rtk_binary().as_deref(), &self.rtk_db(cwd), model)
+                let mut c =
+                    claude_command(&allowed, &denied, rtk_binary().as_deref(), &self.rtk_db(cwd), model);
+                if let Some(e) = saving.effort() {
+                    c.push_str(" --effort ");
+                    c.push_str(e);
+                }
+                c
             }
         }
     }
@@ -3538,6 +3557,18 @@ mod tests {
             let c = claude_command(&allowed, &denied, None, db, bad);
             assert!(!c.contains("--model"), "{c}");
         }
+    }
+
+    /// The slider's thinking level reaches Claude Code as `--effort`; Équilibré adds nothing.
+    #[test]
+    fn the_slider_reaches_claude_code_as_effort() {
+        use crate::model::Saving;
+        let cwd = Path::new("/x");
+        let run = |s| Agent::ClaudeCode.command_saving(cwd, false, "", "", s);
+        assert!(!run(Saving::Balanced).contains("--effort"));
+        assert!(run(Saving::Economical).ends_with(" --effort low"));
+        assert!(run(Saving::Quality).ends_with(" --effort high"));
+        assert_eq!(run(Saving::Balanced), Agent::ClaudeCode.command(cwd, false, "", ""));
     }
 
     /// The model chosen for a session reaches Gemini CLI as `--model`, quoted; no model or a
