@@ -2032,6 +2032,10 @@ pub struct Reader {
     /// Tokens of the session's earlier conversations (`new_conversation`): the agents that
     /// give a conversation's total add theirs to it.
     tokens_before: u64,
+    /// What the session would cost at API prices so far (micro-dollars), and the part that
+    /// belongs to its earlier conversations.
+    pub cost_micro: u64,
+    cost_before: u64,
     /// The earlier conversations of the session (their file, or for Vibe their folder):
     /// never read again.
     old: Vec<PathBuf>,
@@ -2045,6 +2049,7 @@ impl Reader {
             self.old.push(conversation_root(&p));
         }
         self.tokens_before = self.tokens;
+        self.cost_before = self.cost_micro;
         self.offset = 0;
         self.carry.clear();
         self.turn_over = false;
@@ -2165,6 +2170,16 @@ impl Reader {
                     let id = m["id"].as_str().unwrap_or("").to_string();
                     if !id.is_empty() && self.seen.insert(id) {
                         let u = &m["usage"];
+                        let n = |k: &str| u[k].as_u64().unwrap_or(0);
+                        self.cost_micro += crate::pricing::cost_micro(
+                            m["model"].as_str().unwrap_or(""),
+                            crate::pricing::Counts {
+                                input: n("input_tokens"),
+                                output: n("output_tokens"),
+                                cache_write: n("cache_creation_input_tokens"),
+                                cache_read: n("cache_read_input_tokens"),
+                            },
+                        );
                         self.tokens += [
                             "input_tokens",
                             "output_tokens",
@@ -2215,6 +2230,17 @@ impl Reader {
                 let n = |k: &str| u[k].as_u64().unwrap_or(0);
                 let total = n("input_tokens").saturating_sub(n("cached_input_tokens")) + n("output_tokens");
                 self.tokens = self.tokens.max(self.tokens_before + total);
+                // Codex doesn't name its model here: priced as an intermediate one.
+                let cost = crate::pricing::cost_micro(
+                    "",
+                    crate::pricing::Counts {
+                        input: n("input_tokens").saturating_sub(n("cached_input_tokens")),
+                        output: n("output_tokens"),
+                        cache_write: 0,
+                        cache_read: n("cached_input_tokens"),
+                    },
+                );
+                self.cost_micro = self.cost_micro.max(self.cost_before + cost);
             }
             (Some("event_msg"), Some("agent_message")) => {
                 let text = p["message"].as_str().unwrap_or("");

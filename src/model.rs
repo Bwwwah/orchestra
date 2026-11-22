@@ -1119,6 +1119,9 @@ pub struct OrchSettings {
     /// asked with ask_human), the session pauses for the person instead of refusing or
     /// stopping.
     pub pause_for_answer: bool,
+    /// Most an AI run with an API key may spend in one session, in dollars (estimate at API
+    /// prices); 0: no limit. Doesn't apply to AIs run on their subscription.
+    pub budget_usd: f32,
 }
 
 impl Default for OrchSettings {
@@ -1136,11 +1139,17 @@ impl Default for OrchSettings {
             reports_page: String::new(),
             auto_resume: true,
             pause_for_answer: false,
+            budget_usd: 5.0,
         }
     }
 }
 
 impl OrchSettings {
+    /// The dollar budget of a session in micro-dollars, if it has one (API mode, a limit set).
+    pub fn budget_micro(&self, api_mode: bool) -> Option<u64> {
+        (api_mode && self.budget_usd > 0.0).then(|| (self.budget_usd as f64 * 1e6) as u64)
+    }
+
     /// Share of the week's subscription kept for the person, never used by the AIs.
     pub fn reserve(&self) -> f32 {
         (100.0 - self.week_limit).clamp(0.0, 95.0)
