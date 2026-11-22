@@ -524,6 +524,27 @@ impl NotesApp {
                     })
             });
         }
+        // The validated plan turned into proposed steps, ticked by the person before any is added.
+        if ui
+            .add_enabled_ui(!busy, |ui| {
+                super::projects::action_link(ui, crate::tr!("Proposer les étapes", "Propose the steps"))
+                    .on_hover_text(crate::tr!(
+                        "L'IA propose les étapes du plan validé dans l'encadré Étapes ; vous cochez celles à ajouter.",
+                        "The AI proposes the validated plan's steps in the Steps box; you tick the ones to add."
+                    ))
+            })
+            .inner
+            .clicked()
+        {
+            ui.ctx().data_mut(|d| {
+                d.get_temp_mut_or_default::<Vec<ThreadReply>>(reply_key())
+                    .push(ThreadReply {
+                        project: pid.to_string(),
+                        text: crate::sync::plan_steps_request().to_string(),
+                        plan: false,
+                    })
+            });
+        }
         // Once the questions are answered: the AI writes the plan into the project's notes.
         if ui
             .add_enabled_ui(!busy, |ui| {

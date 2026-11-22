@@ -1145,6 +1145,21 @@ pub fn plan_request() -> &'static str {
     )
 }
 
+/// The reply that asks the AI of a framing conversation for the steps of the validated plan.
+/// They come back as a ```etapes block, which goes to the Steps box where the person ticks
+/// the ones to add (nothing is added by itself).
+pub fn plan_steps_request() -> &'static str {
+    crate::tr!(
+        "À partir du plan validé (objectif, périmètre, hors périmètre), propose les étapes du projet. \
+         Termine ta réponse par un bloc de code ```etapes avec une étape par ligne, au format « Thème : \
+         action à l'infinitif », une seule action par étape, dans l'ordre où les faire, 10 au plus, rien \
+         de ce qui est hors périmètre. Ne modifie rien.",
+        "From the validated plan (goal, scope, out of scope), propose the project's steps. End your answer \
+         with a ```steps code block, one step per line, written « Theme: action », one action per step, in \
+         the order to do them, 10 at most, nothing that is out of scope. Change nothing."
+    )
+}
+
 /// An answer split into the text to show and the plan it holds: the content of its last
 /// ```plan block (None when there is none or it is empty); the block is taken out of the text.
 pub fn split_answer_plan(answer: &str) -> (String, Option<String>) {
@@ -1734,9 +1749,12 @@ mod tests {
         assert!(plan.starts_with("## Objectif") && plan.ends_with("- Z"));
         assert_eq!(split_answer_plan("Pas de plan."), ("Pas de plan.".to_string(), None));
         assert_eq!(split_answer_plan("```plan\n\n```").1, None);
-        for p in [plan_request()] {
-            assert!(p.contains("```plan") && !p.is_empty());
-        }
+        assert!(plan_request().contains("```plan"));
+        // The steps asked for come back in a block the thread already knows how to read.
+        let ask = plan_steps_request();
+        assert!(ask.contains("```etapes") || ask.contains("```steps"));
+        let (_, steps) = split_answer_steps("Voici.\n```etapes\n- Tests : écrire le test du plan\n```");
+        assert_eq!(steps, vec!["Tests : écrire le test du plan".to_string()]);
     }
 
     #[test]
