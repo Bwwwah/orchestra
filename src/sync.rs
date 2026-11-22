@@ -1132,6 +1132,42 @@ pub fn split_answer_steps(answer: &str) -> (String, Vec<String>) {
     (text.join("\n").trim().to_string(), steps)
 }
 
+/// The reply that asks the AI of a framing conversation to write the validated plan.
+pub fn plan_request() -> &'static str {
+    crate::tr!(
+        "Valide le plan. D'après nos échanges, écris le plan du projet dans un bloc de code ```plan, en \
+         Markdown, avec exactement ces trois parties : « ## Objectif », « ## Périmètre » et « ## Hors \
+         périmètre » (des puces courtes). Écris-le dans la langue de la conversation. Ne propose aucune \
+         étape et ne modifie rien.",
+        "Validate the plan. From our exchanges, write the project's plan in a ```plan code block, in \
+         Markdown, with exactly these three parts: « ## Goal », « ## Scope » and « ## Out of scope » \
+         (short bullets). Write it in the conversation's language. Propose no step and change nothing."
+    )
+}
+
+/// An answer split into the text to show and the plan it holds: the content of its last
+/// ```plan block (None when there is none or it is empty); the block is taken out of the text.
+pub fn split_answer_plan(answer: &str) -> (String, Option<String>) {
+    let lines: Vec<&str> = answer.lines().collect();
+    let Some(open) = lines
+        .iter()
+        .rposition(|l| l.trim().strip_prefix("```").is_some_and(|t| t.trim().eq_ignore_ascii_case("plan")))
+    else {
+        return (answer.trim().to_string(), None);
+    };
+    let close = lines[open + 1..]
+        .iter()
+        .position(|l| l.trim().starts_with("```"))
+        .map(|i| open + 1 + i)
+        .unwrap_or(lines.len());
+    let plan = lines[open + 1..close].join("\n").trim().to_string();
+    let mut text: Vec<&str> = lines[..open].to_vec();
+    if close < lines.len() {
+        text.extend(&lines[close + 1..]);
+    }
+    (text.join("\n").trim().to_string(), (!plan.is_empty()).then_some(plan))
+}
+
 fn question_prompt_base(folder: &str, question: &str, code: bool) -> String {
     let q: String = question.trim().chars().take(QUESTION_MAX).collect();
     if !code {
@@ -1687,6 +1723,20 @@ mod tests {
         let many = format!("```étapes\n{}```", (0..30).map(|i| format!("T : faire {i}\n")).collect::<String>());
         assert_eq!(split_answer_steps(&many).1.len(), ANSWER_STEPS_MAX);
         assert!(question_prompt("/tmp/x", "?", true).contains("```"));
+    }
+
+    #[test]
+    fn the_plan_block_is_taken_out_of_the_answer() {
+        let a = "Voici.\n```plan\n## Objectif\n- X\n## Périmètre\n- Y\n## Hors périmètre\n- Z\n```\nFin.";
+        let (text, plan) = split_answer_plan(a);
+        assert_eq!(text, "Voici.\nFin.");
+        let plan = plan.unwrap();
+        assert!(plan.starts_with("## Objectif") && plan.ends_with("- Z"));
+        assert_eq!(split_answer_plan("Pas de plan."), ("Pas de plan.".to_string(), None));
+        assert_eq!(split_answer_plan("```plan\n\n```").1, None);
+        for p in [plan_request()] {
+            assert!(p.contains("```plan") && !p.is_empty());
+        }
     }
 
     #[test]

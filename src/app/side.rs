@@ -38,6 +38,8 @@ fn pending_key() -> egui::Id {
 pub struct ThreadReply {
     pub project: String,
     pub text: String,
+    /// The reply asks for the validated plan, which is written into the project's notes.
+    pub plan: bool,
 }
 
 pub fn reply_key() -> egui::Id {
@@ -518,6 +520,28 @@ impl NotesApp {
                     .push(ThreadReply {
                         project: pid.to_string(),
                         text,
+                        plan: false,
+                    })
+            });
+        }
+        // Once the questions are answered: the AI writes the plan into the project's notes.
+        if ui
+            .add_enabled_ui(!busy, |ui| {
+                super::projects::action_link(ui, crate::tr!("Valider le plan", "Validate the plan"))
+                    .on_hover_text(crate::tr!(
+                        "L'IA écrit l'objectif, le périmètre et le hors périmètre dans les notes du projet.",
+                        "The AI writes the goal, scope and out-of-scope into the project's notes."
+                    ))
+            })
+            .inner
+            .clicked()
+        {
+            ui.ctx().data_mut(|d| {
+                d.get_temp_mut_or_default::<Vec<ThreadReply>>(reply_key())
+                    .push(ThreadReply {
+                        project: pid.to_string(),
+                        text: crate::sync::plan_request().to_string(),
+                        plan: true,
                     })
             });
         }
