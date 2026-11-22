@@ -504,6 +504,8 @@ struct CopyJob {
     /// The project's repository.
     root: String,
     done: std::sync::mpsc::Receiver<Result<String, String>>,
+    /// The cross review's opinion, set by the thread when there was one.
+    review: std::sync::Arc<std::sync::Mutex<Option<crate::review::Review>>>,
 }
 
 /// The figures of one agent's subscription, as last read.
@@ -1748,6 +1750,7 @@ impl NotesApp {
             return false;
         }
         let (tx, rx) = std::sync::mpsc::channel();
+        let review_slot = std::sync::Arc::new(std::sync::Mutex::new(None));
         self.orch.copy_jobs.push(CopyJob {
             id: rec.id.clone(),
             merge: op != CopyOp::Discard,
@@ -1755,6 +1758,7 @@ impl NotesApp {
             title: rec.title.clone(),
             root: rec.root.clone(),
             done: rx,
+            review: review_slot.clone(),
         });
         let ctx = ctx.clone();
         std::thread::spawn(move || {
@@ -1763,15 +1767,22 @@ impl NotesApp {
                 CopyOp::ToMain => match crate::review::review_run(&rec) {
                     // Another AI found a defect: no automatic merge, the person decides.
                     Ok(rv) if rv.verdict == crate::review::Verdict::Blocking => {
-                        Err(crate::trf!(
+                        let msg = crate::trf!(
                             "relecture par {} : défaut bloquant, fusion laissée à faire à la main. {}",
                             "review by {}: blocking defect, merge left to do by hand. {}",
                             rv.reviewer,
                             rv.text
-                        ))
+                        );
+                        *review_slot.lock().unwrap() = Some(rv);
+                        Err(msg)
                     }
-                    // Approved, remarks, or no reviewer available: the merge goes on.
-                    _ => auto::merge_into_main(&rec),
+                    // Approved, remarks: the merge goes on.
+                    Ok(rv) => {
+                        *review_slot.lock().unwrap() = Some(rv);
+                        auto::merge_into_main(&rec)
+                    }
+                    // No reviewer available: the merge goes on.
+                    Err(_) => auto::merge_into_main(&rec),
                 },
                 CopyOp::Park => auto::park(&rec),
                 CopyOp::Discard => auto::discard(&rec),
@@ -3976,8 +3987,12 @@ impl NotesApp {
     /// The merges and discards finished in the background: their outcome recorded.
     fn copy_jobs_tick(&mut self) {
         let mut finished = vec![];
+        let mut reviews = vec![];
         self.orch.copy_jobs.retain(|j| match j.done.try_recv() {
             Ok(res) => {
+                if let Some(rv) = j.review.lock().ok().and_then(|mut g| g.take()) {
+                    reviews.push((j.id.clone(), rv));
+                }
                 finished.push((
                     j.id.clone(),
                     if j.park { 2 } else { j.merge as u8 },
@@ -3997,6 +4012,24 @@ impl NotesApp {
                 false
             }
         });
+        // The reviewer's opinion goes at the end of the session's report.
+        for (id, rv) in reviews {
+            let page = self
+                .ws
+                .runs
+                .iter()
+                .find(|x| x.id == id)
+                .and_then(|x| x.report.clone());
+            if let Some(page) = page {
+                let extra = crate::store::page_from_markdown(
+                    &crate::review::report_section(&rv),
+                    "",
+                );
+                if let Some(p) = self.ws.pages.iter_mut().find(|p| p.id == page) {
+                    p.blocks.extend(extra.blocks);
+                }
+            }
+        }
         for (id, merge, title, res) in finished {
             match res {
                 Ok(m) => {

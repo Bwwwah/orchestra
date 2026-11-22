@@ -78,6 +78,29 @@ pub fn parse(reply: &str) -> (Verdict, String) {
     (verdict, rest)
 }
 
+/// The section added to the session report: who reviewed, the verdict, the opinion.
+pub fn report_section(rv: &Review) -> String {
+    let verdict = match rv.verdict {
+        Verdict::Approved => crate::tr!("rien à signaler", "nothing to report"),
+        Verdict::Remarks => crate::tr!("remarques", "remarks"),
+        Verdict::Blocking => crate::tr!(
+            "défaut bloquant (fusion laissée à faire à la main)",
+            "blocking defect (merge left to do by hand)"
+        ),
+    };
+    let mut s = crate::trf!(
+        "## Relecture par {}\n\n**Verdict** : {verdict}\n",
+        "## Review by {}\n\n**Verdict**: {verdict}\n",
+        rv.reviewer
+    );
+    if !rv.text.trim().is_empty() {
+        s.push('\n');
+        s.push_str(rv.text.trim());
+        s.push('\n');
+    }
+    s
+}
+
 /// Have the branch of `r` read by another AI than the one that wrote it. Err: no other AI
 /// installed, or it failed: the merge then goes on without a review.
 pub fn review_run(r: &crate::model::RunRecord) -> Result<Review, String> {
@@ -130,6 +153,18 @@ mod tests {
         assert_eq!(parse("VERDICT: REMARQUES\nUn test manque.").0, Verdict::Remarks);
         // No verdict: kept as remarks, neither approved nor blocking.
         assert_eq!(parse("Ça me semble bon.").0, Verdict::Remarks);
+    }
+
+    #[test]
+    fn the_report_section_names_reviewer_and_opinion() {
+        let s = report_section(&Review {
+            verdict: Verdict::Blocking,
+            reviewer: "codex".into(),
+            text: "src/a.rs : panique.".into(),
+        });
+        assert!(s.contains("codex"));
+        assert!(s.contains("src/a.rs : panique."));
+        assert!(s.starts_with("## "));
     }
 
     #[test]
