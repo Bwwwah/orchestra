@@ -3731,7 +3731,8 @@ impl NotesApp {
                                     });
                                     ui.add_space(3.0);
                                     ui.add(egui::Label::new(RichText::new(&m.title).font(if m.read { FontId::proportional(14.5) } else { semibold(14.5) }).color(t.text)).wrap());
-                                    let body = plain_text(&m.text);
+                                    let (question_text, analysis) = split_analysis(&m.text);
+                                    let body = plain_text(question_text);
                                     if !body.is_empty() {
                                         ui.add_space(2.0);
                                         // Long texts (session summaries) folded to a few lines.
@@ -3748,6 +3749,20 @@ impl NotesApp {
                                         if (cut || all) && super::projects::action_link(ui, if all { crate::tr!("Réduire", "Show less") } else { crate::tr!("Afficher tout", "Show all") }).clicked() {
                                             ui.data_mut(|d| d.insert_temp(more_id, !all));
                                         }
+                                    }
+                                    // The responder's analysis, apart and whole: it is what helps to decide.
+                                    if let Some(a) = analysis.map(plain_text).filter(|a| !a.is_empty()) {
+                                        ui.add_space(6.0);
+                                        egui::Frame::new()
+                                            .fill(accent.gamma_multiply(0.08))
+                                            .corner_radius(8.0)
+                                            .inner_margin(egui::Margin::symmetric(10, 8))
+                                            .show(ui, |ui| {
+                                                ui.set_width(ui.available_width());
+                                                ui.label(RichText::new(crate::tr!("Analyse du répondeur", "Responder's analysis")).font(semibold(12.0)).color(accent));
+                                                ui.add_space(3.0);
+                                                ui.add(egui::Label::new(RichText::new(a).size(13.0).color(t.text)).wrap());
+                                            });
                                     }
                                 });
                                 let x = super::icons::delete_cross(ui, 22.0, t.tertiary, t.text, t.selected, crate::tr!("Supprimer", "Delete"));
@@ -4792,6 +4807,16 @@ fn plain_text(text: &str) -> String {
         out.pop();
     }
     out.join("\n")
+}
+
+/// A question's text split from the responder's analysis appended to it by `triage`
+/// (« — Analyse du répondeur : »).
+fn split_analysis(text: &str) -> (&str, Option<&str>) {
+    const MARK: &str = "— Analyse du répondeur :";
+    match text.find(MARK) {
+        Some(i) => (text[..i].trim_end(), Some(text[i + MARK.len()..].trim())),
+        None => (text, None),
+    }
 }
 
 /// Lines of a message's text shown before « Afficher tout ».
@@ -6782,6 +6807,13 @@ mod tests {
         // The next turn starts from what is there now: nothing new any more.
         let at_turn: Vec<String> = p.steps.iter().map(|s| s.id.clone()).collect();
         assert!(super::fresh_steps(&at_turn, &p.steps).is_empty());
+    }
+
+    #[test]
+    fn the_responder_analysis_is_split_from_the_question() {
+        let (q, a) = super::split_analysis("Quoi faire ?\n\n— Analyse du répondeur :\nOption C.");
+        assert_eq!((q, a), ("Quoi faire ?", Some("Option C.")));
+        assert_eq!(super::split_analysis("Sans analyse"), ("Sans analyse", None));
     }
 
     #[test]
