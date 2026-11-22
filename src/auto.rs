@@ -1632,6 +1632,18 @@ fn delete_remote_later(root: String, branch: String) {
     });
 }
 
+/// What a review reads: the commits of the session's branch not yet in the branch checked
+/// out in the project's folder (`<into>...<branch>`).
+pub fn review_range(r: &crate::model::RunRecord) -> Result<String, String> {
+    if in_place(r) {
+        return Err(crate::tr!("pas de branche à relire", "no branch to review").into());
+    }
+    let into = git(&PathBuf::from(&r.root), &["rev-parse", "--abbrev-ref", "HEAD"])?
+        .trim()
+        .to_string();
+    Ok(format!("{into}...{}", r.branch))
+}
+
 /// Bring the session's work into the branch checked out in the project's folder.
 pub fn merge(r: &crate::model::RunRecord) -> Result<String, String> {
     if in_place(r) {

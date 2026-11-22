@@ -1760,7 +1760,19 @@ impl NotesApp {
         std::thread::spawn(move || {
             let res = match op {
                 CopyOp::Merge => auto::merge(&rec),
-                CopyOp::ToMain => auto::merge_into_main(&rec),
+                CopyOp::ToMain => match crate::review::review_run(&rec) {
+                    // Another AI found a defect: no automatic merge, the person decides.
+                    Ok(rv) if rv.verdict == crate::review::Verdict::Blocking => {
+                        Err(crate::trf!(
+                            "relecture par {} : défaut bloquant, fusion laissée à faire à la main. {}",
+                            "review by {}: blocking defect, merge left to do by hand. {}",
+                            rv.reviewer,
+                            rv.text
+                        ))
+                    }
+                    // Approved, remarks, or no reviewer available: the merge goes on.
+                    _ => auto::merge_into_main(&rec),
+                },
                 CopyOp::Park => auto::park(&rec),
                 CopyOp::Discard => auto::discard(&rec),
             };
