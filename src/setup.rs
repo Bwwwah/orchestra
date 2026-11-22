@@ -461,6 +461,11 @@ pub enum Install {
 /// Node.js's download page, for the npm packages when neither npm nor Homebrew is there.
 const NODE_PAGE: &str = "https://nodejs.org/en/download";
 
+/// Installs npm packages in the user's own folder: the default prefix (`/usr/local`, from
+/// the official Node.js installer) belongs to root and fails with EACCES. Its `bin` is
+/// already on the PATH Orchestra uses (see `sync::read_shell_path`).
+const NPM_USER_PREFIX: &str = "--prefix \"$HOME/.npm-global\"";
+
 /// How to install `ai`, given which commands this machine has (`has("npm")`…): the
 /// official command when its tool is there, else that tool first (Homebrew, or its
 /// maker's installer), else the page to download it from.
@@ -468,12 +473,12 @@ pub fn install_plan(ai: Ai, has: impl Fn(&str) -> bool) -> Option<Install> {
     let npm = |pkg: &str| {
         if has("npm") {
             Some(Install::Run(
-                format!("npm install -g {pkg}"),
+                format!("npm install -g {NPM_USER_PREFIX} {pkg}"),
                 crate::tr!("avec npm (Node.js)", "with npm (Node.js)"),
             ))
         } else if has("brew") {
             Some(Install::Run(
-                format!("brew install node && npm install -g {pkg}"),
+                format!("brew install node && npm install -g {NPM_USER_PREFIX} {pkg}"),
                 crate::tr!(
                     "installe d'abord Node.js avec Homebrew",
                     "installs Node.js first, with Homebrew"
@@ -780,16 +785,19 @@ mod tests {
             Some(Install::Download(url, _)) => format!("page {url}"),
             None => "rien".into(),
         };
-        assert_eq!(run(Ai::Codex, &["npm"]), "npm install -g @openai/codex");
+        assert_eq!(
+            run(Ai::Codex, &["npm"]),
+            "npm install -g --prefix \"$HOME/.npm-global\" @openai/codex"
+        );
         assert_eq!(
             run(Ai::Codex, &["brew"]),
-            "brew install node && npm install -g @openai/codex"
+            "brew install node && npm install -g --prefix \"$HOME/.npm-global\" @openai/codex"
         );
         assert_eq!(run(Ai::Gemini, &[]), format!("page {NODE_PAGE}"));
         // Claude Code needs no Node.js: Anthropic's installer when npm is missing.
         assert_eq!(
             run(Ai::ClaudeCode, &["npm"]),
-            "npm install -g @anthropic-ai/claude-code"
+            "npm install -g --prefix \"$HOME/.npm-global\" @anthropic-ai/claude-code"
         );
         assert!(run(Ai::ClaudeCode, &[]).contains("https://claude.ai/install.sh"));
         assert_eq!(
