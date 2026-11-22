@@ -3638,7 +3638,7 @@ impl NotesApp {
                         }
                     }
                 });
-                super::tutorial::mark(ui.ctx(), "inbox:filters", filters.response.rect);
+                super::tutorial::mark(ui, "inbox:filters", filters.response.rect);
                 ui.data_mut(|d| d.insert_temp(filter_id, filter));
                 ui.add_space(12.0);
                 let shown: Vec<usize> = (0..self.ws.inbox.len())
@@ -3795,7 +3795,7 @@ impl NotesApp {
                         });
                     let rect = card.response.rect;
                     if std::mem::take(&mut first_card) {
-                        super::tutorial::mark(ui.ctx(), "inbox:message", rect);
+                        super::tutorial::mark(ui, "inbox:message", rect);
                     }
                     // A coloured edge on the left: the kind at a glance.
                     ui.painter().rect_filled(
@@ -5187,7 +5187,7 @@ fn mark_from(ui: &egui::Ui, name: &str, top: egui::Pos2) {
     if bottom > top.y {
         let w = ui.max_rect().width().max(1.0);
         let r = egui::Rect::from_min_max(top, egui::pos2(top.x + w, bottom));
-        super::tutorial::mark(ui.ctx(), name, r);
+        super::tutorial::mark(ui, name, r);
     }
 }
 
