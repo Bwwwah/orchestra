@@ -482,14 +482,14 @@ impl NotesApp {
         let rtk = self.rtk_line_of(crate::auto::Agent::ClaudeCode);
         let has_rtk = rtk.is_some();
         let first = usage.as_ref().and_then(|u| u.windows.first().cloned());
-        let (rect, resp) = usage_row(ui, CLAUDE, crate::auto::Agent::ClaudeCode.short_name(), t);
-        match &first {
-            Some(win) => {
-                row_figure(ui, rect, resp.id, win, t);
+        let (rect, resp, name_end) = usage_row(ui, CLAUDE, crate::auto::Agent::ClaudeCode.short_name(), t);
+        match (&first, &usage) {
+            (Some(_), Some(u)) => {
+                row_figures(ui, rect, name_end, resp.id, u, t);
                 ui.ctx()
                     .request_repaint_after(std::time::Duration::from_secs(30));
             }
-            None => {
+            _ => {
                 let (text, color) = if self.ais.tracking {
                     (crate::tr!("en attente…", "waiting…"), t.tertiary)
                 } else {
@@ -633,9 +633,9 @@ fn other_usage_tile(
     let (r, g, b) = agent.ai().accent();
     let accent = Color32::from_rgb(r, g, b);
     let has_rtk = rtk.is_some();
-    let (rect, resp) = usage_row(ui, accent, agent.short_name(), t);
-    match (usage.and_then(|u| u.windows.first()), vibe) {
-        (Some(win), _) => row_figure(ui, rect, resp.id, win, t),
+    let (rect, resp, name_end) = usage_row(ui, accent, agent.short_name(), t);
+    match (usage.filter(|u| !u.windows.is_empty()), vibe) {
+        (Some(u), _) => row_figures(ui, rect, name_end, resp.id, u, t),
         (None, v) => {
             let text = match v {
                 Some(v) => crate::trf!(
@@ -734,7 +734,7 @@ fn other_usage_tile(
 
 /// One AI's line in the sidebar's usage block: its mark and its name; the figure is drawn
 /// on the right by the caller. Returns the row and its response (hover tint included).
-fn usage_row(ui: &mut egui::Ui, accent: Color32, name: &str, t: &Tone) -> (egui::Rect, egui::Response) {
+fn usage_row(ui: &mut egui::Ui, accent: Color32, name: &str, t: &Tone) -> (egui::Rect, egui::Response, f32) {
     let w = ui.available_width();
     let (rect, resp) = ui.allocate_exact_size(egui::vec2(w, USAGE_ROW), egui::Sense::click());
     let hov = ui
@@ -746,14 +746,80 @@ fn usage_row(ui: &mut egui::Ui, accent: Color32, name: &str, t: &Tone) -> (egui:
     }
     let cy = rect.center().y;
     p.circle_filled(egui::pos2(rect.left() + 12.0, cy), 3.5, accent);
-    p.text(
+    let named = p.text(
         egui::pos2(rect.left() + 22.0, cy),
         egui::Align2::LEFT_CENTER,
         name,
         FontId::proportional(12.5),
         t.text,
     );
-    (rect, resp.on_hover_cursor(egui::CursorIcon::PointingHand))
+    (rect, resp.on_hover_cursor(egui::CursorIcon::PointingHand), named.right())
+}
+
+/// The right of a usage line with every figure that fits: the measured window (5 h, or
+/// Mistral's month) and the week when the AI gives one, as « 5 h 23 % · sem. 40 % », each
+/// figure in its level's colour. Too narrow for both (a slim sidebar): the measured window
+/// alone, with its bar.
+fn row_figures(
+    ui: &egui::Ui,
+    rect: egui::Rect,
+    name_end: f32,
+    id: egui::Id,
+    u: &crate::usage::Usage,
+    t: &Tone,
+) {
+    let Some(first) = u.measured().or_else(|| u.windows.first()) else {
+        return;
+    };
+    let week = u.week().filter(|w| w.label != first.label);
+    let Some(week) = week else {
+        row_figure(ui, rect, id, first, t);
+        return;
+    };
+    let short = |w: &crate::usage::Window| -> String {
+        if w.label.starts_with("Session") {
+            "5 h".into()
+        } else if w.label == crate::usage::MONTH {
+            crate::tr!("mois", "month").into()
+        } else {
+            crate::tr!("sem.", "wk").into()
+        }
+    };
+    let p = ui.painter();
+    let lay = |text: String, font: FontId, c: Color32| p.layout_no_wrap(text, font, c);
+    // Right to left: the week, a dot, the 5 hours.
+    let parts = [(short(week), week.pct), (short(first), first.pct)];
+    let galleys: Vec<_> = parts
+        .iter()
+        .map(|(l, pct)| {
+            (
+                lay(l.clone(), FontId::proportional(11.0), t.tertiary),
+                lay(format!("{pct:.0} %"), semibold(11.5), level_color(*pct)),
+            )
+        })
+        .collect();
+    let sep = lay("·".into(), FontId::proportional(11.0), t.tertiary);
+    let need: f32 = galleys.iter().map(|(a, b)| a.size().x + 4.0 + b.size().x).sum::<f32>()
+        + sep.size().x
+        + 12.0;
+    let right = rect.right() - 10.0;
+    if right - need < name_end + 10.0 {
+        row_figure(ui, rect, id, first, t);
+        return;
+    }
+    let cy = rect.center().y;
+    let mut x = right;
+    for (k, (label, pct)) in galleys.into_iter().enumerate() {
+        if k == 1 {
+            x -= 6.0 + sep.size().x;
+            p.galley(egui::pos2(x, cy - sep.size().y / 2.0), sep.clone(), t.tertiary);
+            x -= 6.0;
+        }
+        x -= pct.size().x;
+        p.galley(egui::pos2(x, cy - pct.size().y / 2.0), pct, t.text);
+        x -= 4.0 + label.size().x;
+        p.galley(egui::pos2(x, cy - label.size().y / 2.0), label, t.tertiary);
+    }
 }
 
 /// The right of a usage line: « 5 h » or « Sem. », a short bar and the percentage.
