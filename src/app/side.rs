@@ -33,6 +33,17 @@ fn pending_key() -> egui::Id {
     egui::Id::unique("side-conversation-pending")
 }
 
+/// A reply typed under a quick question's thread, waiting to be sent to the AI.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ThreadReply {
+    pub project: String,
+    pub text: String,
+}
+
+pub fn reply_key() -> egui::Id {
+    egui::Id::unique("side-quick-thread-reply")
+}
+
 fn thread_key() -> egui::Id {
     egui::Id::unique("side-quick-thread-request")
 }
@@ -439,6 +450,37 @@ impl NotesApp {
         }
     }
 
+    /// The thread of the project's quick question with a field under it to answer the AI.
+    /// False when the project has no quick answer. A reply sent is queued as a
+    /// `ThreadReply`, for whoever carries the conversation on.
+    fn quick_thread_view(&mut self, ui: &mut egui::Ui, pid: &str, t: &Tone) -> bool {
+        let Some(a) = self.ai.answers.get(pid) else {
+            return false;
+        };
+        let busy = self.ai.asking(pid).is_some();
+        let composer_h = 90.0;
+        egui::ScrollArea::vertical()
+            .id_salt(("quick-thread", pid))
+            .max_height((ui.available_height() - composer_h).max(80.0))
+            .auto_shrink([false, false])
+            .show(ui, |ui| thread(ui, &a.question, &a.answer, &a.by, t));
+        ui.add_space(6.0);
+        let hint = crate::tr!(
+            "Répondre à l'IA… (Entrée pour envoyer)",
+            "Reply to the AI… (Enter to send)"
+        );
+        if let Some(text) = composer(ui, &mut self.thread_draft, hint, !busy) {
+            ui.ctx().data_mut(|d| {
+                d.get_temp_mut_or_default::<Vec<ThreadReply>>(reply_key())
+                    .push(ThreadReply {
+                        project: pid.to_string(),
+                        text,
+                    })
+            });
+        }
+        true
+    }
+
     fn ai_conversation(
         &mut self,
         ui: &mut egui::Ui,
@@ -460,11 +502,7 @@ impl NotesApp {
                         .data_mut(|d| d.remove::<ConversationRequest>(pending_key()));
                 }
                 Waiting::Wait => {
-                    if let Some(a) = self.ai.answers.get(pid) {
-                        egui::ScrollArea::vertical()
-                            .id_salt(("quick-thread", pid))
-                            .auto_shrink([false, false])
-                            .show(ui, |ui| thread(ui, &a.question, &a.answer, &a.by, t));
+                    if self.quick_thread_view(ui, pid, t) {
                         ui.ctx().request_repaint_after(std::time::Duration::from_millis(500));
                         return;
                     }
@@ -498,11 +536,7 @@ impl NotesApp {
             }
         }
         if live.is_empty() {
-            if let Some(a) = self.ai.answers.get(pid) {
-                egui::ScrollArea::vertical()
-                    .id_salt(("quick-thread", pid))
-                    .auto_shrink([false, false])
-                    .show(ui, |ui| thread(ui, &a.question, &a.answer, &a.by, t));
+            if self.quick_thread_view(ui, pid, t) {
                 return;
             }
             ui.add_space(10.0);

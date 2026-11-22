@@ -128,6 +128,8 @@ pub struct NotesApp {
     side_tab: u8,
     chat_draft: String,
     ai_draft: String,
+    /// The reply being typed under a quick question's thread.
+    thread_draft: String,
     ai_session: Option<String>,
     transcripts: HashMap<String, (u64, std::sync::Arc<Vec<crate::sessions::Turn>>)>,
     /// Space taken this frame by the side panel (right) and the terminal dock (bottom).
@@ -224,6 +226,7 @@ impl NotesApp {
             side_tab: 0,
             chat_draft: String::new(),
             ai_draft: String::new(),
+            thread_draft: String::new(),
             ai_session: None,
             transcripts: HashMap::new(),
             side_w: 0.0,
