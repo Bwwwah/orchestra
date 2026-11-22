@@ -11,8 +11,8 @@ use std::sync::Mutex;
 const SERVICE: &str = "Orchestra";
 const ACCOUNT: &str = "live-code";
 
-/// The code as last read or written by this process (None: not read yet).
-static CACHE: Mutex<Option<String>> = Mutex::new(None);
+/// What each account holds as last read or written by this process (absent: not read yet).
+static CACHE: Mutex<Vec<(String, String)>> = Mutex::new(Vec::new());
 
 fn use_keychain() -> bool {
     // Tests and separate data folders (ORCHESTRA_DIR) keep theirs in a file, so they never
@@ -20,18 +20,18 @@ fn use_keychain() -> bool {
     cfg!(target_os = "macos") && !cfg!(test) && std::env::var_os("ORCHESTRA_DIR").is_none()
 }
 
-fn file() -> PathBuf {
-    crate::store::data_dir().join(".live-code")
+fn file(account: &str) -> PathBuf {
+    crate::store::data_dir().join(format!(".{account}"))
 }
 
 fn security() -> std::process::Command {
     std::process::Command::new("/usr/bin/security")
 }
 
-fn read_store() -> String {
+fn read_store(account: &str) -> String {
     if use_keychain() {
         security()
-            .args(["find-generic-password", "-s", SERVICE, "-a", ACCOUNT, "-w"])
+            .args(["find-generic-password", "-s", SERVICE, "-a", account, "-w"])
             .stderr(std::process::Stdio::null())
             .output()
             .ok()
@@ -39,13 +39,13 @@ fn read_store() -> String {
             .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
             .unwrap_or_default()
     } else {
-        std::fs::read_to_string(file())
+        std::fs::read_to_string(file(account))
             .map(|s| s.trim().to_string())
             .unwrap_or_default()
     }
 }
 
-fn write_store(code: &str) -> Result<(), String> {
+fn write_store(account: &str, code: &str) -> Result<(), String> {
     if code.is_empty() {
         return Err("empty code".into());
     }
@@ -57,9 +57,9 @@ fn write_store(code: &str) -> Result<(), String> {
                 "-s",
                 SERVICE,
                 "-a",
-                ACCOUNT,
+                account,
                 "-l",
-                "Orchestra · code d'accès en direct",
+                &format!("Orchestra · {account}"),
                 "-w",
                 code,
             ])
@@ -71,7 +71,7 @@ fn write_store(code: &str) -> Result<(), String> {
             Err(String::from_utf8_lossy(&o.stderr).trim().to_string())
         }
     } else {
-        let f = file();
+        let f = file(account);
         if let Some(d) = f.parent() {
             std::fs::create_dir_all(d).map_err(|e| e.to_string())?;
         }
@@ -85,19 +85,64 @@ fn write_store(code: &str) -> Result<(), String> {
     }
 }
 
+fn get(account: &str) -> String {
+    let mut c = CACHE.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some((_, v)) = c.iter().find(|(a, _)| a == account) {
+        return v.clone();
+    }
+    let v = read_store(account);
+    c.push((account.to_string(), v.clone()));
+    v
+}
+
+fn set(account: &str, value: &str) -> Result<(), String> {
+    let value = value.trim();
+    if get(account) == value {
+        return Ok(());
+    }
+    write_store(account, value)?;
+    let mut c = CACHE.lock().unwrap_or_else(|e| e.into_inner());
+    c.retain(|(a, _)| a != account);
+    c.push((account.to_string(), value.to_string()));
+    Ok(())
+}
+
 /// The live access code ("" when none was ever set).
 pub fn live_code() -> String {
-    let mut c = CACHE.lock().unwrap_or_else(|e| e.into_inner());
-    c.get_or_insert_with(read_store).clone()
+    get(ACCOUNT)
 }
 
 /// Keep `code` as the live access code (only written when it changed; never empty).
 pub fn set_live_code(code: &str) -> Result<(), String> {
-    let code = code.trim();
-    if live_code() == code {
-        return Ok(());
+    set(ACCOUNT, code)
+}
+
+/// The account holding the API key named `var` (one of `sync::API_KEY_VARS`).
+fn key_account(var: &str) -> String {
+    format!("api-key-{var}")
+}
+
+/// The API key kept for `var` ("" when none was ever set). Only to be handed to an AI that
+/// runs in API mode; subscription sessions never get it.
+#[allow(dead_code)]
+pub fn api_key(var: &str) -> String {
+    get(&key_account(var))
+}
+
+/// Keep `key` as the API key for `var` (never empty; Keychain, or a 0600 file elsewhere).
+#[allow(dead_code)]
+pub fn set_api_key(var: &str, key: &str) -> Result<(), String> {
+    set(&key_account(var), key)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn each_secret_has_its_own_account_and_file() {
+        assert_ne!(file(&key_account("A")), file(&key_account("B")));
+        assert_ne!(file(&key_account("A")), file(ACCOUNT));
+        assert_eq!(key_account("OPENAI_API_KEY"), "api-key-OPENAI_API_KEY");
     }
-    write_store(code)?;
-    *CACHE.lock().unwrap_or_else(|e| e.into_inner()) = Some(code.to_string());
-    Ok(())
 }
