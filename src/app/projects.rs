@@ -2279,6 +2279,8 @@ mod new_step_field_tests {
             by: "Claude Code".into(),
             steps: 0,
             resume,
+            tool: None,
+            earlier: vec![],
         };
         // No conversation id given back: no button.
         h.state_mut().ai.answers.insert("p1".into(), answer(None));

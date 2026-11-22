@@ -463,7 +463,26 @@ impl NotesApp {
             .id_salt(("quick-thread", pid))
             .max_height((ui.available_height() - composer_h).max(80.0))
             .auto_shrink([false, false])
-            .show(ui, |ui| thread(ui, &a.question, &a.answer, &a.by, t));
+            .stick_to_bottom(true)
+            .show(ui, |ui| {
+                for (q, ans, by) in &a.earlier {
+                    thread(ui, q, ans, by, t);
+                    ui.add_space(10.0);
+                }
+                thread(ui, &a.question, &a.answer, &a.by, t);
+                // A reply being sent: its bubble shows at once, the answer follows.
+                if let Some(q) = self.ai.asking(pid).filter(|q| *q != a.question) {
+                    ui.add_space(10.0);
+                    egui::Frame::new()
+                        .fill(t.fill)
+                        .corner_radius(10.0)
+                        .inner_margin(egui::Margin::symmetric(10, 7))
+                        .show(ui, |ui| {
+                            ui.set_width(ui.available_width());
+                            ui.add(egui::Label::new(RichText::new(q).size(13.5).color(t.text)).wrap());
+                        });
+                }
+            });
         ui.add_space(6.0);
         let hint = crate::tr!(
             "Répondre à l'IA… (Entrée pour envoyer)",
