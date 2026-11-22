@@ -3588,6 +3588,25 @@ mod tests {
         assert_eq!(run(Saving::Balanced), Agent::Codex.command(cwd, false, "", ""));
     }
 
+    /// Whatever the slider's position, an AI without a thinking level gets the same command as
+    /// without a slider, and the others get one exactly when the catalog says they take it.
+    #[test]
+    fn every_slider_position_gives_the_right_arguments_for_each_ai() {
+        use crate::model::Saving;
+        let cwd = Path::new("/x");
+        for agent in Agent::ALL {
+            let plain = agent.command(cwd, false, "", "");
+            for s in [Saving::Economical, Saving::Balanced, Saving::Quality] {
+                let c = agent.command_saving(cwd, false, "", "", s);
+                if s.effort().is_some() && crate::catalog::accepts_effort(agent) {
+                    assert_ne!(c, plain, "{agent:?} {s:?}");
+                } else {
+                    assert_eq!(c, plain, "{agent:?} {s:?}");
+                }
+            }
+        }
+    }
+
     /// The model chosen for a session reaches Gemini CLI as `--model`, quoted; no model or a
     /// name that isn't one adds nothing.
     #[test]
