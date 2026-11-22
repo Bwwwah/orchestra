@@ -334,6 +334,9 @@ pub struct Project {
     /// When the last check taken into account by the automatic watch was made (ms).
     #[serde(default, skip_serializing_if = "is_zero")]
     pub cve_seen: u64,
+    /// The example project the tutorial walks through (see `Workspace::create_example_project`).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub example: bool,
 }
 
 /// How the next autonomous session of a project starts, as last chosen by the person.
@@ -890,6 +893,39 @@ impl Workspace {
         id
     }
 
+    /// Create the example project the tutorial is built on: no folder, a state of play and a
+    /// few steps in each status, so that every card has something to show. Marked `example`.
+    pub fn create_example_project(&mut self) -> String {
+        use crate::model::{Block, BlockKind};
+        let id = self.create_project(&crate::tr!("Projet exemple", "Example project"), "");
+        if let Some(p) = self.page_mut(&id) {
+            p.icon = "🎓".into();
+            p.blocks = vec![Block::new(
+                BlockKind::Paragraph,
+                crate::tr!(
+                    "Un projet pour découvrir Orchestra : tu peux le modifier ou le supprimer.",
+                    "A project to discover Orchestra: you can edit or delete it."
+                ),
+            )];
+            if let Some(x) = p.project.as_mut() {
+                x.example = true;
+                x.set_summary(
+                    &crate::tr!(
+                        "### Fait\n- Le projet exemple est créé.\n\n### En cours\n- Découvrir les étapes.\n\n### Bloquants\n- Aucun.",
+                        "### Done\n- The example project is created.\n\n### In progress\n- Discovering the steps.\n\n### Blockers\n- None."
+                    ),
+                    "Orchestra",
+                );
+                let done = x.add_step(&crate::tr!("Exemple : créer le projet", "Example: create the project"), "Orchestra");
+                x.set_step_status(&done, StepStatus::Done);
+                let doing = x.add_step(&crate::tr!("Exemple : découvrir les étapes", "Example: discover the steps"), "Orchestra");
+                x.set_step_status(&doing, StepStatus::Doing);
+                x.add_step(&crate::tr!("Exemple : lancer une session autonome", "Example: start an autonomous session"), "Orchestra");
+            }
+        }
+        id
+    }
+
     /// The project a page belongs to (itself, or its nearest parent that is a project).
     pub fn project_of(&self, id: &str) -> Option<&Page> {
         let mut cur = self.page(id);
@@ -1269,6 +1305,20 @@ mod tests {
         ] {
             let e = ai_step(bad).unwrap_err();
             assert!(e.contains("Expected") && e.contains("Theme"), "{bad}: {e}");
+        }
+    }
+
+    /// The tutorial's example project has no folder, is marked, stays private, and has steps
+    /// in each status.
+    #[test]
+    fn example_project_is_marked_and_has_steps_in_each_status() {
+        let mut ws = Workspace::default();
+        let id = ws.create_example_project();
+        let p = ws.page(&id).and_then(|p| p.project.as_ref()).unwrap();
+        assert!(p.example && p.folder.is_empty() && !p.shared);
+        assert!(!p.summary.is_empty());
+        for st in [StepStatus::Todo, StepStatus::Doing, StepStatus::Done] {
+            assert!(p.steps.iter().any(|s| s.status == st), "{st:?}");
         }
     }
 
