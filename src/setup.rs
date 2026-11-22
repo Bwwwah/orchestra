@@ -293,6 +293,8 @@ pub enum Ai {
     ClaudeCode,
     Codex,
     Gemini,
+    /// Antigravity CLI (`agy`), Google's coding agent that replaces Gemini CLI.
+    Antigravity,
     ClaudeDesktop,
     Cursor,
     /// Mistral Vibe, Mistral's coding agent in the terminal (`vibe`).
@@ -300,10 +302,11 @@ pub enum Ai {
 }
 
 impl Ai {
-    pub const ALL: [Ai; 6] = [
+    pub const ALL: [Ai; 7] = [
         Ai::ClaudeCode,
         Ai::Codex,
         Ai::Gemini,
+        Ai::Antigravity,
         Ai::Vibe,
         Ai::ClaudeDesktop,
         Ai::Cursor,
@@ -315,6 +318,7 @@ impl Ai {
             Ai::ClaudeCode => "claude-code",
             Ai::Codex => "codex",
             Ai::Gemini => "gemini",
+            Ai::Antigravity => "antigravity",
             Ai::ClaudeDesktop => "claude-desktop",
             Ai::Cursor => "cursor",
             Ai::Vibe => "vibe",
@@ -325,6 +329,7 @@ impl Ai {
             Ai::ClaudeCode => "Claude Code",
             Ai::Codex => "Codex",
             Ai::Gemini => "Gemini CLI",
+            Ai::Antigravity => "Antigravity CLI",
             Ai::ClaudeDesktop => crate::tr!("Claude (app de bureau)", "Claude (desktop app)"),
             Ai::Cursor => "Cursor",
             Ai::Vibe => "Mistral Vibe",
@@ -343,6 +348,10 @@ impl Ai {
             Ai::Gemini => crate::tr!(
                 "Agent de code de Google, sur votre compte Google",
                 "Google's coding agent, on your Google account"
+            ),
+            Ai::Antigravity => crate::tr!(
+                "Agent de code de Google (remplace Gemini CLI), sur votre compte Google",
+                "Google's coding agent (replaces Gemini CLI), on your Google account"
             ),
             Ai::ClaudeDesktop => crate::tr!(
                 "L'app Claude : ses conversations lisent et écrivent vos projets",
@@ -364,6 +373,7 @@ impl Ai {
             Ai::ClaudeCode => Some("claude"),
             Ai::Codex => Some("codex"),
             Ai::Gemini => Some("gemini"),
+            Ai::Antigravity => Some("agy"),
             Ai::Vibe => Some("vibe"),
             _ => None,
         }
@@ -392,6 +402,7 @@ impl Ai {
             Ai::ClaudeCode => Some(("claude", "/login")),
             Ai::Codex => Some(("codex login", "")),
             Ai::Gemini => Some(("gemini", "")),
+            Ai::Antigravity => Some(("agy", "")),
             // Its first start asks for the Mistral key.
             Ai::Vibe => Some(("vibe", "")),
             _ => None,
@@ -409,6 +420,7 @@ impl Ai {
             Ai::ClaudeCode | Ai::ClaudeDesktop => (204, 120, 92),
             Ai::Codex => (110, 150, 230),
             Ai::Gemini => (66, 133, 244),
+            Ai::Antigravity => (52, 168, 83),
             Ai::Cursor => (150, 150, 150),
             Ai::Vibe => (250, 82, 15),
         }
@@ -500,6 +512,8 @@ pub fn install_plan(ai: Ai, has: impl Fn(&str) -> bool) -> Option<Install> {
         Ai::ClaudeCode => Some(Install::Run("curl -fsSL https://claude.ai/install.sh | bash".into(), crate::tr!("installateur officiel d'Anthropic", "Anthropic's official installer"))),
         Ai::Codex => npm("@openai/codex"),
         Ai::Gemini => npm("@google/gemini-cli"),
+        // Google's own installer (needs nothing else); it puts `agy` on the PATH.
+        Ai::Antigravity => Some(Install::Run("curl -fsSL https://antigravity.google/cli/install.sh | bash".into(), crate::tr!("installateur officiel de Google", "Google's official installer"))),
         // Mistral's Python package, through uv (Astral's tool), installed first if needed.
         Ai::Vibe if has("uv") => Some(Install::Run("uv tool install mistral-vibe".into(), crate::tr!("avec uv", "with uv"))),
         Ai::Vibe if has("brew") => Some(Install::Run("brew install uv && uv tool install mistral-vibe".into(), crate::tr!("installe d'abord uv avec Homebrew", "installs uv first, with Homebrew"))),
@@ -515,6 +529,7 @@ fn installed(ai: Ai, path: &str) -> bool {
     match ai {
         Ai::ClaudeCode | Ai::Codex => ai.agent(path).is_some(),
         Ai::Gemini => crate::sync::which("gemini", path).is_some(),
+        Ai::Antigravity => crate::sync::which("agy", path).is_some(),
         Ai::ClaudeDesktop => claude_desktop_config().is_some() && app_present("Claude"),
         Ai::Cursor => cursor_settings().parent().is_some_and(Path::is_dir) && app_present("Cursor"),
         Ai::Vibe => crate::sync::which("vibe", path).is_some(),
@@ -794,6 +809,7 @@ mod tests {
             "brew install node && npm install -g --prefix \"$HOME/.npm-global\" @openai/codex"
         );
         assert_eq!(run(Ai::Gemini, &[]), format!("page {NODE_PAGE}"));
+        assert!(run(Ai::Antigravity, &[]).starts_with("curl -fsSL https://antigravity.google/cli/install.sh"));
         // Claude Code needs no Node.js: Anthropic's installer when npm is missing.
         assert_eq!(
             run(Ai::ClaudeCode, &["npm"]),
