@@ -457,11 +457,11 @@ fn content_text(c: &Value) -> String {
 ///
 /// - `--sandbox workspace-write`: its commands write only in the copy (and the temporary
 ///   folder), never elsewhere on the disk; never `danger-full-access`.
-/// - `--ask-for-approval untrusted`: every command outside Codex's short list of harmless
-///   ones (and the `allow` prefix rules of `rules_config`, once written) asks first, and
-///   Orchestra refuses what is not allowed. Never `on-failure` (a command the sandbox stopped
-///   is offered again *outside* the sandbox), `on-request` (the model decides alone when to
-///   leave it) nor `never`; never `--full-auto` nor `--dangerously-bypass-approvals-and-sandbox`.
+/// - `--ask-for-approval on-request`: Codex 0.171 removed `untrusted` (every command asks),
+///   so the model decides when to ask, and Orchestra refuses what is not allowed (the prefix
+///   rules of `rules_config`). The sandbox above stays the hard barrier. Never `never`,
+///   `--approve-for-me` (an automatic review of Codex's own replaces our filter) nor
+///   `--full-auto` nor `--dangerously-bypass-approvals-and-sandbox`.
 /// - no network for its commands (`curl`, `git push`, `npm install` are refused anyway), and
 ///   no web search (`WebSearch` is refused to Claude Code too).
 /// - commands get only the core environment variables (`HOME`, `PATH`, `USER`…): no tokens
@@ -476,7 +476,7 @@ fn content_text(c: &Value) -> String {
 /// With `model`, Codex works with it (`--model`) rather than the person's default.
 fn codex_command(git_dirs: &[PathBuf], model: &str) -> String {
     let mut c = String::from(
-        "codex --sandbox workspace-write --ask-for-approval untrusted \
+        "codex --sandbox workspace-write --ask-for-approval on-request \
          -c sandbox_workspace_write.network_access=false \
          -c tools.web_search=false \
          -c shell_environment_policy.inherit=core",
@@ -3881,11 +3881,11 @@ mod tests {
     fn codex_stays_in_its_sandbox() {
         // Without commits: no folder outside the copy, whatever the copy.
         let c = Agent::Codex.command(Path::new("/x"), false, "", "");
-        assert!(c.starts_with("codex --sandbox workspace-write --ask-for-approval untrusted "));
+        assert!(c.starts_with("codex --sandbox workspace-write --ask-for-approval on-request "));
         assert!(c.contains("network_access=false") && c.contains("web_search=false"));
         assert!(c.contains("shell_environment_policy.inherit=core"));
         assert!(!c.contains("writable_roots"));
-        for bad in ["danger", "full-auto", "on-failure", "on-request", "never", "yolo", "bypass"] {
+        for bad in ["danger", "full-auto", "on-failure", "untrusted", "approve-for-me", "never", "yolo", "bypass"] {
             assert!(!c.contains(bad), "{bad}");
         }
         // A copy of a repository (git worktree): its git folder and the repository's objects
