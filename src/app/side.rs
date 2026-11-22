@@ -235,10 +235,8 @@ fn composer(ui: &mut egui::Ui, draft: &mut String, hint: &str, enabled: bool) ->
 impl NotesApp {
     /// Open this panel on the conversation a button asked for, if any.
     pub(super) fn take_conversation_request(&mut self, ctx: &egui::Context) {
-        if ctx
-            .data_mut(|d| d.remove_temp::<String>(thread_key()))
-            .is_some()
-        {
+        if let Some(p) = ctx.data_mut(|d| d.remove_temp::<String>(thread_key())) {
+            self.thread_pid = Some(p);
             self.side_open = true;
             self.side_tab = 1;
             self.ai_session = None;
@@ -249,6 +247,7 @@ impl NotesApp {
         };
         self.side_open = true;
         self.side_tab = 1;
+        self.thread_pid = None;
         self.ai_session = Some(r.resume.session.clone());
         ctx.data_mut(|d| d.insert_temp(pending_key(), r));
     }
@@ -520,6 +519,17 @@ impl NotesApp {
         t: &Tone,
     ) {
         let live: Vec<SessionInfo> = self.agents.by_project.get(pid).cloned().unwrap_or_default();
+        // The thread shown before the panel was closed comes back as it was (the answers and
+        // the replies live in the app, not in the panel).
+        if self.thread_pid.as_deref() == Some(pid) {
+            if self.quick_thread_view(ui, pid, t) {
+                if self.ai.asking(pid).is_some() {
+                    ui.ctx().request_repaint_after(std::time::Duration::from_millis(500));
+                }
+                return;
+            }
+            self.thread_pid = None;
+        }
         // A quick question carried on: its session shows up in the list within seconds.
         let pending = ui
             .ctx()

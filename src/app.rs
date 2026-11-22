@@ -130,6 +130,8 @@ pub struct NotesApp {
     ai_draft: String,
     /// The reply being typed under a quick question's thread.
     thread_draft: String,
+    /// The project whose quick-question thread the side panel shows (kept when it is closed).
+    thread_pid: Option<String>,
     ai_session: Option<String>,
     transcripts: HashMap<String, (u64, std::sync::Arc<Vec<crate::sessions::Turn>>)>,
     /// Space taken this frame by the side panel (right) and the terminal dock (bottom).
@@ -227,6 +229,7 @@ impl NotesApp {
             chat_draft: String::new(),
             ai_draft: String::new(),
             thread_draft: String::new(),
+            thread_pid: None,
             ai_session: None,
             transcripts: HashMap::new(),
             side_w: 0.0,
