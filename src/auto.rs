@@ -1679,6 +1679,52 @@ pub fn review_range(r: &crate::model::RunRecord) -> Result<String, String> {
     Ok(format!("{into}...{}", r.branch))
 }
 
+/// The files that would conflict if branch `theirs` were merged into `ours`, found without
+/// touching any folder or branch (`git merge-tree --write-tree`, git 2.38+). An empty list
+/// means the merge goes through. Only committed work is looked at.
+pub fn conflicts_between(root: &Path, ours: &str, theirs: &str) -> Result<Vec<String>, String> {
+    let p = crate::sync::shell_path();
+    let o = crate::proc::command(crate::sync::which("git", &p).unwrap_or_else(|| "git".into()))
+        .args(["merge-tree", "--write-tree", "--name-only", ours, theirs])
+        .current_dir(root)
+        .env("PATH", &p)
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .stdin(Stdio::null())
+        .output()
+        .map_err(|e| e.to_string())?;
+    match o.status.code() {
+        Some(0) => Ok(Vec::new()),
+        Some(1) => {
+            // First line: the resulting tree; then one conflicted file per line, up to a
+            // blank line (after it come the human messages).
+            Ok(String::from_utf8_lossy(&o.stdout)
+                .lines()
+                .skip(1)
+                .take_while(|l| !l.trim().is_empty())
+                .map(str::to_string)
+                .collect())
+        }
+        _ => Err(crate::tr!(
+            "détection des conflits impossible (git 2.38 ou plus requis)",
+            "conflict detection failed (git 2.38 or newer needed)"
+        )
+        .into()),
+    }
+}
+
+/// The files in conflict between the session's branch and the branch checked out in the
+/// project's folder, before merging.
+pub fn merge_conflicts(r: &crate::model::RunRecord) -> Result<Vec<String>, String> {
+    if in_place(r) {
+        return Ok(Vec::new());
+    }
+    let rd = PathBuf::from(&r.root);
+    let into = git(&rd, &["rev-parse", "--abbrev-ref", "HEAD"])?
+        .trim()
+        .to_string();
+    conflicts_between(&rd, &into, &r.branch)
+}
+
 /// Bring the session's work into the branch checked out in the project's folder.
 pub fn merge(r: &crate::model::RunRecord) -> Result<String, String> {
     if in_place(r) {
@@ -4277,6 +4323,50 @@ mod tests {
             &repo,
             &["worktree", "remove", "--force", &wt.display().to_string()],
         );
+        let _ = std::fs::remove_dir_all(base);
+    }
+
+    /// Two branches touching the same lines are reported before any merge, the others not,
+    /// and nothing in the repository moves.
+    #[test]
+    fn conflicts_are_found_before_merging() {
+        let base =
+            std::env::temp_dir().join(format!("orch-detect-{}", uuid::Uuid::new_v4().simple()));
+        let repo = base.join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        let ok = |d: &Path, a: &[&str]| git(d, a).is_ok();
+        if !ok(&repo, &["init", "-b", "main"]) {
+            return;
+        }
+        let _ = git(&repo, &["config", "user.email", "t@t"]);
+        let _ = git(&repo, &["config", "user.name", "T"]);
+        std::fs::write(repo.join("a.txt"), "a\n").unwrap();
+        std::fs::write(repo.join("b.txt"), "b\n").unwrap();
+        assert!(ok(&repo, &["add", "-A"]) && ok(&repo, &["commit", "-m", "base"]));
+        assert!(ok(&repo, &["branch", "autre"]));
+        std::fs::write(repo.join("a.txt"), "main\n").unwrap();
+        assert!(ok(&repo, &["commit", "-am", "main"]));
+        assert!(ok(&repo, &["checkout", "autre"]));
+        // Same-line change in a.txt, and a file only this side touches.
+        std::fs::write(repo.join("a.txt"), "autre\n").unwrap();
+        std::fs::write(repo.join("c.txt"), "c\n").unwrap();
+        assert!(ok(&repo, &["add", "-A"]) && ok(&repo, &["commit", "-m", "autre"]));
+        assert!(ok(&repo, &["checkout", "main"]));
+        let head = git(&repo, &["rev-parse", "HEAD"]).unwrap();
+        match conflicts_between(&repo, "main", "autre") {
+            Ok(files) => assert_eq!(files, vec!["a.txt".to_string()]),
+            // An older git without merge-tree --write-tree: reported, not a crash.
+            Err(_) => return,
+        }
+        assert_eq!(git(&repo, &["rev-parse", "HEAD"]).unwrap(), head);
+        assert!(git(&repo, &["status", "--porcelain"]).unwrap().trim().is_empty());
+        // A branch that only adds a file merges cleanly.
+        assert!(ok(&repo, &["branch", "propre", "HEAD~1"]));
+        assert!(ok(&repo, &["checkout", "propre"]));
+        std::fs::write(repo.join("d.txt"), "d\n").unwrap();
+        assert!(ok(&repo, &["add", "-A"]) && ok(&repo, &["commit", "-m", "d"]));
+        assert!(ok(&repo, &["checkout", "main"]));
+        assert!(conflicts_between(&repo, "main", "propre").unwrap().is_empty());
         let _ = std::fs::remove_dir_all(base);
     }
 
