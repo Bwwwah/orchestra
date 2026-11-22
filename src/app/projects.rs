@@ -1062,12 +1062,20 @@ fn draw(ui: &mut egui::Ui, cx: &mut Cx, k: CardKind, extra: f32) -> f32 {
     if e < 1.0 {
         ui.ctx().request_repaint();
     }
+    let top = ui.cursor().min;
     ui.scope(|ui| {
         ui.multiply_opacity(e);
         if e < 1.0 {
             ui.add_space(10.0 * (1.0 - e));
         }
         let h = draw_card(ui, cx, k, extra);
+        // Where the card is, for the tutorial to point at.
+        let w = ui.min_rect().width().max(ui.available_width().min(ui.min_rect().width()));
+        super::tutorial::mark(
+            ui.ctx(),
+            card_key_name(k),
+            egui::Rect::from_min_size(top, egui::vec2(w, h)),
+        );
         let key = card_key(cx.page_id, k);
         let prev: Option<f32> = ui.ctx().data(|d| d.get_temp(key));
         // Settle on a height (a little hysteresis, so cards don't hop between columns).
@@ -1118,6 +1126,20 @@ fn card_key(page_id: &str, k: CardKind) -> egui::Id {
         CardKind::Questions => "questions",
     };
     egui::Id::unique(("card-h", page_id, name))
+}
+
+/// The name a card goes by in the tutorial (see `tutorial::project_cards_stops`).
+fn card_key_name(k: CardKind) -> &'static str {
+    match k {
+        CardKind::Summary(_) => "card:summary",
+        CardKind::Steps => "card:steps",
+        CardKind::NewSession => "card:new-session",
+        CardKind::Sessions => "card:sessions",
+        CardKind::Pages => "card:pages",
+        CardKind::Versions => "card:versions",
+        CardKind::Watch => "card:watch",
+        CardKind::Questions => "card:questions",
+    }
 }
 
 /// Put `cards` (the new session's, or none) right above the sessions' list, in whichever

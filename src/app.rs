@@ -62,6 +62,8 @@ pub struct NotesApp {
     search_sel: usize,
     /// Popups on screen (see notices.rs); the messages themselves go to the inbox.
     toasts: Vec<notices::Toast>,
+    /// The tutorial in progress (see tutorial.rs).
+    tour: Option<tutorial::Tour>,
     /// Messages raised while the workspace is borrowed, shown at the end of the frame.
     said: Vec<notices::Notice>,
     toast_seq: u64,
@@ -170,6 +172,7 @@ impl NotesApp {
             search_ask: Default::default(),
             search_sel: 0,
             toasts: vec![],
+            tour: None,
             said: vec![],
             toast_seq: 0,
             snapshot: HashMap::new(),
@@ -1670,6 +1673,7 @@ impl eframe::App for NotesApp {
             self.notice(m);
         }
         self.toasts_ui(&ctx, fab);
+        self.tutorial_ui(&ctx);
         self.search_window(&ctx, &mut actions);
         self.settings_window(&ctx, &mut actions);
         let had_actions = !actions.is_empty();
@@ -2969,6 +2973,7 @@ mod settings;
 mod side;
 mod slash;
 mod term_ui;
+mod tutorial;
 mod update_ui;
 mod versions;
 mod watch;
