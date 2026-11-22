@@ -230,4 +230,130 @@ mod tests {
         let _ = std::fs::remove_file(&path);
         assert!(read_savings(&path).is_empty());
     }
+
+    /// A fake RTK database at `db` with the given (timestamp, saved tokens) rows.
+    fn fake_db(db: &Path, rows: &[(&str, i64)]) {
+        std::fs::create_dir_all(db.parent().unwrap()).unwrap();
+        let _ = std::fs::remove_file(db);
+        let c = rusqlite::Connection::open(db).unwrap();
+        c.execute_batch(
+            "CREATE TABLE commands (id INTEGER PRIMARY KEY, timestamp TEXT NOT NULL,
+             original_cmd TEXT NOT NULL, rtk_cmd TEXT NOT NULL, input_tokens INTEGER NOT NULL,
+             output_tokens INTEGER NOT NULL, saved_tokens INTEGER NOT NULL, savings_pct REAL NOT NULL);",
+        )
+        .unwrap();
+        for (ts, saved) in rows {
+            c.execute(
+                "INSERT INTO commands (timestamp, original_cmd, rtk_cmd, input_tokens, output_tokens, saved_tokens, savings_pct)
+                 VALUES (?1, 'git status', 'rtk git status', 0, 0, ?2, 0.0)",
+                rusqlite::params![ts, saved],
+            )
+            .unwrap();
+        }
+    }
+
+    #[test]
+    fn request_times_read_a_fake_conversation_of_each_tool() {
+        let dir = std::env::temp_dir().join(format!("orchestra-rtk-conv-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        // Claude Code: one request per distinct assistant message (m1 is written twice), none
+        // for the user's messages; the lines are out of order and one is not JSON.
+        let claude = dir.join("claude.jsonl");
+        std::fs::write(
+            &claude,
+            [
+                r#"{"type":"assistant","timestamp":"1970-01-01T00:00:20Z","message":{"id":"m2"}}"#,
+                r#"{"type":"user","timestamp":"1970-01-01T00:00:05Z","message":{"id":"u1"}}"#,
+                r#"{"type":"assistant","timestamp":"1970-01-01T00:00:10Z","message":{"id":"m1"}}"#,
+                r#"{"type":"assistant","timestamp":"1970-01-01T00:00:11Z","message":{"id":"m1"}}"#,
+                "not json",
+            ]
+            .join("\n"),
+        )
+        .unwrap();
+        assert_eq!(request_times(&claude, crate::sessions::Tool::ClaudeCode), vec![10_000, 20_000]);
+        // Codex: one request per token_count event.
+        let codex = dir.join("codex.jsonl");
+        std::fs::write(
+            &codex,
+            [
+                r#"{"timestamp":"1970-01-01T00:00:03Z","payload":{"type":"token_count"}}"#,
+                r#"{"timestamp":"1970-01-01T00:00:04Z","payload":{"type":"agent_message"}}"#,
+                r#"{"timestamp":"1970-01-01T00:00:07Z","payload":{"type":"token_count"}}"#,
+            ]
+            .join("\n"),
+        )
+        .unwrap();
+        assert_eq!(request_times(&codex, crate::sessions::Tool::Codex), vec![3_000, 7_000]);
+        assert!(request_times(&dir.join("missing.jsonl"), crate::sessions::Tool::Codex).is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_week_of_a_fake_conversation_and_a_fake_database() {
+        use crate::auto::Agent;
+        use crate::sessions::{SessionInfo, Tokens, Tool};
+        let root = std::env::temp_dir().join(format!("orchestra-rtk-week-{}", std::process::id()));
+        let folder = root.join("copy");
+        std::fs::create_dir_all(&root).unwrap();
+        let agent = Agent::ClaudeCode;
+        let db = agent.rtk_db(&folder);
+        // Now is day 10 of 1970: the week starts on day 3. The saving of day 2 is out of it,
+        // so is the negative one.
+        fake_db(
+            &db,
+            &[
+                ("1970-01-02T00:00:00Z", 1000),
+                ("1970-01-06T00:00:00Z", 100),
+                ("1970-01-06T00:00:15Z", 10),
+                ("1970-01-06T00:00:16Z", -50),
+            ],
+        );
+        let conv = root.join("claude.jsonl");
+        std::fs::write(
+            &conv,
+            [
+                r#"{"type":"assistant","timestamp":"1970-01-05T23:59:59Z","message":{"id":"a"}}"#,
+                r#"{"type":"assistant","timestamp":"1970-01-06T00:00:10Z","message":{"id":"b"}}"#,
+                r#"{"type":"assistant","timestamp":"1970-01-06T00:00:20Z","message":{"id":"c"}}"#,
+            ]
+            .join("\n"),
+        )
+        .unwrap();
+        let session = |tool, cwd: &Path, billed| SessionInfo {
+            tool,
+            id: "s".into(),
+            cwd: cwd.display().to_string(),
+            title: String::new(),
+            last_reply: String::new(),
+            model: String::new(),
+            git_branch: String::new(),
+            started: 0,
+            last_activity: 432_000_000 + 20_000,
+            user_messages: 1,
+            agent_messages: 1,
+            tokens: Tokens { billed, cached: 0 },
+            path: conv.clone(),
+        };
+        let sessions = [
+            session(Tool::ClaudeCode, &folder, 680),
+            // Not counted: another AI's session, and a session outside the copy.
+            session(Tool::Codex, &folder, 5000),
+            session(Tool::ClaudeCode, &root.join("elsewhere"), 5000),
+        ];
+        let now = 10 * 24 * 3600 * 1000;
+        let w = week_saving(&sessions, Tool::ClaudeCode, agent, std::slice::from_ref(&folder), now);
+        // 100 saved at 00:00:00 reaches the 2 requests after it (+ its own): 300; 10 saved at
+        // 00:00:15 reaches the request at 00:00:20: 20.
+        assert_eq!(w, WeekSaving { saved: 320, consumed: 680, rtk_sessions: 1 });
+        assert_eq!(w.percent(), Some(32.0));
+        assert!(saving_line(&w).unwrap().contains("32 %"));
+        // A copy whose database has nothing in the week has no RTK session.
+        let other = root.join("other");
+        let none = week_saving(&sessions, Tool::ClaudeCode, agent, &[other], now);
+        assert_eq!(none.rtk_sessions, 0);
+        assert_eq!(none.saved, 0);
+        let _ = std::fs::remove_dir_all(&root);
+        let _ = std::fs::remove_dir_all(agent.config_dir(&folder));
+    }
 }
