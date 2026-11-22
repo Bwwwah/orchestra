@@ -2132,19 +2132,13 @@ impl NotesApp {
             ui.vertical(|ui| {
                 ui.set_width(width);
                 ui.spacing_mut().item_spacing.y = 8.0;
-                ui.label(RichText::new(crate::tr!("Orchestration", "Orchestration")).font(bold(30.0)).color(t.text));
-                ui.label(RichText::new(crate::tr!("Des IA qui avancent seules sur vos projets, chacune dans une copie à part, dans les limites de votre abonnement.", "AIs that move your projects forward on their own, each in a separate copy, within your subscription's limits.")).color(t.secondary));
+                ui.label(RichText::new(crate::tr!("Orchestration", "Orchestration")).font(bold(super::style::TITLE)).color(t.text));
+                ui.label(RichText::new(crate::tr!("Des IA qui avancent seules sur vos projets, dans une copie à part.", "AIs moving your projects forward on their own, in a separate copy.")).color(t.secondary));
                 ui.add_space(14.0);
                 self.screen_card(ui, &t);
                 self.measure_card(ui, &t);
-                let top = ui.cursor().min;
-                self.week_bar(ui, &t);
-                mark_from(ui, "orch:week", top);
-                ui.add_space(14.0);
-                let top = ui.cursor().min;
-                self.stats_row(ui, &t);
-                mark_from(ui, "orch:stats", top);
-                ui.add_space(14.0);
+                // What is happening first (sessions at work, questions waiting), then what
+                // can start, then the budget it all runs within, then the settings.
                 let top = ui.cursor().min;
                 self.running_card(ui, &t, actions);
                 mark_from(ui, "orch:running", top);
@@ -2196,16 +2190,29 @@ impl NotesApp {
                     });
                     ui.add_space(14.0);
                 }
-                // The settings and limits come first: they frame every launch below.
-                let top = ui.cursor().min;
-                self.limits_card(ui, &t);
-                mark_from(ui, "orch:limits", top);
-                ui.add_space(14.0);
                 let top = ui.cursor().min;
                 if let Some(msg) = self.launch_card(ui, &ctx, &t) {
                     self.notice(msg);
                 }
                 mark_from(ui, "orch:launch", top);
+                ui.add_space(14.0);
+                let top = ui.cursor().min;
+                self.week_bar(ui, &t);
+                mark_from(ui, "orch:week", top);
+                ui.add_space(14.0);
+                // The figures once there are some: three tiles of « — » say nothing.
+                let known = self.orch.five.is_some()
+                    || !self.orch.runs.is_empty()
+                    || !self.ws.runs.is_empty();
+                if known {
+                    let top = ui.cursor().min;
+                    self.stats_row(ui, &t);
+                    mark_from(ui, "orch:stats", top);
+                    ui.add_space(14.0);
+                }
+                let top = ui.cursor().min;
+                self.limits_card(ui, &t);
+                mark_from(ui, "orch:limits", top);
                 ui.add_space(40.0);
             });
         });
@@ -2219,7 +2226,7 @@ impl NotesApp {
             self.ws.settings.orch.week_limit,
             self.ws.settings.orch.reserve_asked,
         );
-        let red = Color32::from_rgb(224, 62, 62);
+        let red = super::style::RED;
         super::projects::card(ui, t, 0.0, |ui| {
             // Until the person has chosen it: the question, with a few ready answers.
             if !self.ws.settings.orch.reserve_asked {
@@ -2241,17 +2248,13 @@ impl NotesApp {
                 );
                 ui.horizontal(|ui| {
                     for r in [5.0, 10.0, 20.0, 30.0] {
-                        if ui.button(format!("{r:.0} %")).clicked() {
+                        if super::style::secondary(ui, &format!("{r:.0} %")).clicked() {
                             self.ws.settings.orch.set_reserve(r);
                             self.ws.settings.orch.reserve_asked = true;
                         }
                     }
                     let keep = self.ws.settings.orch.reserve();
-                    if ui
-                        .button(
-                            RichText::new(crate::trf!("Garder {keep:.0} %", "Keep {keep:.0} %"))
-                                .color(t.secondary),
-                        )
+                    if super::style::quiet(ui, &crate::trf!("Garder {keep:.0} %", "Keep {keep:.0} %"))
                         .clicked()
                     {
                         self.ws.settings.orch.reserve_asked = true;
@@ -2425,7 +2428,7 @@ impl NotesApp {
                 .ctx()
                 .animate_bool_with_time(resp.id.with("hov"), resp.hovered(), 0.18);
             let accent = [
-                Color32::from_rgb(212, 76, 125),
+                super::style::PINK,
                 super::projects::GREEN,
                 super::projects::BLUE,
             ][i];
@@ -2600,10 +2603,6 @@ impl NotesApp {
         super::projects::card(ui, t, 0.0, |ui| {
             let title = crate::tr!("RÉGLAGES ET LIMITES", "SETTINGS AND LIMITS");
             ui.horizontal(|ui| {
-                let (r, _) = ui.allocate_exact_size(egui::vec2(4.0, 14.0), egui::Sense::hover());
-                ui.painter()
-                    .rect_filled(r, 2.0, super::projects::accent_of(title));
-                ui.add_space(2.0);
                 ui.label(RichText::new(title).font(semibold(12.5)).color(t.secondary));
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     let label = if open {
@@ -3389,9 +3388,9 @@ impl NotesApp {
                                     ui.label(RichText::new(fig).size(12.0).color(col)).on_hover_text(hover);
                                 }
                             });
-                            let mut job = egui::text::LayoutJob::single_section(super::projects::tilde(folder), egui::TextFormat::simple(FontId::monospace(11.0), t.tertiary));
+                            let mut job = egui::text::LayoutJob::single_section(format!("📁 {}", super::projects::short_folder(folder)), egui::TextFormat::simple(FontId::proportional(12.0), t.tertiary));
                             job.wrap = egui::text::TextWrapping::truncate_at_width(if wide { (ui.available_width() - 250.0).max(80.0) } else { ui.available_width().max(40.0) });
-                            super::projects::cut_label(ui, job);
+                            super::projects::cut_label(ui, job).on_hover_text(super::projects::tilde(folder));
                         });
                         if wide {
                             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -3648,6 +3647,62 @@ impl NotesApp {
         msg
     }
 
+    /// « Lancer une IA » on a project's page: the same start as its line in Orchestration,
+    /// with the choices kept for that project (AI, ceiling, commits, endless). What needs a
+    /// decision first (an endless session merging into main) opens Orchestration instead.
+    pub(super) fn launch_from_project(
+        &mut self,
+        ctx: &egui::Context,
+        id: &str,
+    ) -> Option<super::notices::Notice> {
+        if self.orch.runs.iter().any(|r| r.project == id) {
+            self.view = View::Orchestra;
+            return None;
+        }
+        let dc = self.ws.settings.orch.allow_commits;
+        let pr = self.ws.page(id).and_then(|p| p.project.as_ref())?;
+        let main = on_main(pr);
+        let d = self
+            .orch
+            .drafts
+            .entry(id.to_string())
+            .or_insert_with(|| Draft::new(Some(pr), dc))
+            .clone();
+        if endless_on_main(d.endless, main) {
+            self.orch.confirm_main = Some(id.to_string());
+            self.view = View::Orchestra;
+            return None;
+        }
+        let title = self
+            .ws
+            .page(id)
+            .map(|p| p.display_title())
+            .unwrap_or_default();
+        let global = self.ws.settings.orch.global_limit;
+        let figs = self.figures_by_agent();
+        let five = figs.get(&d.agent).and_then(|f| f.five);
+        if !room_left(five, global) {
+            return Some(super::notices::Notice::Error(crate::trf!(
+                "La fenêtre de 5 h a atteint la limite globale ({global:.0} %) : attendez qu'elle reparte à zéro.",
+                "The 5-hour window has reached the global limit ({global:.0} %): wait for it to reset."
+            )));
+        }
+        let ceilings_run: Vec<(Agent, Option<f32>)> =
+            self.orch.runs.iter().map(|r| (r.agent, r.ceiling)).collect();
+        let want = draft_ceiling(&d, running_ceiling_of(&ceilings_run, d.agent));
+        let ceiling = ceiling_choice(want, five, self.ws.settings.orch.default_limit, global);
+        let endless = if d.endless { Some(d.end.clone()) } else { None };
+        Some(
+            match self.launch_run(ctx, id, &d.mission, ceiling, d.commits, endless, d.agent, false, "") {
+                Ok(()) => super::notices::Notice::Ack(crate::trf!(
+                    "Session autonome lancée sur {title} (arrêt à {ceiling:.0} % de la fenêtre de 5 h).",
+                    "Autonomous session started on {title} (stops at {ceiling:.0} % of the 5-hour window)."
+                )),
+                Err(e) => super::notices::Notice::Error(format!("{title} : {e}.")),
+            },
+        )
+    }
+
     // ------------------------------------------------------------------ the inbox
 
     pub(super) fn inbox_view(&mut self, ui: &mut egui::Ui, actions: &mut Vec<Action>) {
@@ -3667,35 +3722,34 @@ impl NotesApp {
             ui.vertical(|ui| {
                 ui.set_width(width);
                 ui.horizontal(|ui| {
-                    ui.label(RichText::new(crate::tr!("Boîte de réception", "Inbox")).font(bold(30.0)).color(t.text));
+                    ui.label(RichText::new(crate::tr!("Boîte de réception", "Inbox")).font(bold(super::style::TITLE)).color(t.text));
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         // "Tout supprimer": a second click confirms, nothing goes on one slip.
                         let confirm_id = egui::Id::unique("inbox-clear-confirm");
                         let confirming = ui.data(|d| d.get_temp::<bool>(confirm_id)).unwrap_or(false);
                         if !self.ws.inbox.is_empty() {
                             if confirming {
-                                if super::projects::action_link(ui, crate::tr!("Annuler", "Cancel")).clicked() {
+                                if super::style::quiet(ui, crate::tr!("Annuler", "Cancel")).clicked() {
                                     ui.data_mut(|d| d.insert_temp(confirm_id, false));
                                 }
                                 let n = self.ws.inbox.len();
                                 let sure = crate::trf!("Confirmer : supprimer les {n} messages", "Confirm: delete the {n} messages");
-                                if ui.add(egui::Label::new(RichText::new(sure).size(13.0).color(Color32::from_rgb(224, 62, 62))).sense(egui::Sense::click())).on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
+                                if ui.add(egui::Label::new(RichText::new(sure).size(13.0).color(super::style::RED)).sense(egui::Sense::click())).on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
                                     clear_all = true;
                                     ui.data_mut(|d| d.insert_temp(confirm_id, false));
                                 }
-                            } else if super::projects::action_link(ui, crate::tr!("Tout supprimer", "Delete all")).clicked() {
+                            } else if super::style::quiet(ui, crate::tr!("Tout supprimer", "Delete all")).clicked() {
                                 ui.data_mut(|d| d.insert_temp(confirm_id, true));
                             }
                         }
                         if !confirming && self.ws.unread() > 0 {
-                            ui.label(RichText::new("·").color(t.tertiary));
-                            if super::projects::action_link(ui, crate::tr!("Tout marquer comme lu", "Mark all as read")).clicked() {
+                            if super::style::quiet(ui, crate::tr!("Tout marquer comme lu", "Mark all as read")).clicked() {
                                 all_read = true;
                             }
                         }
                     });
                 });
-                ui.label(RichText::new(crate::tr!("Les questions des IA, la fin de leurs sessions de travail, les rapports (rangés dans la page « Rapports des IA ») et les messages de l'application, dont les erreurs.", "The AIs' questions, the end of their work sessions, the reports (kept in the « AI reports » page) and the app's messages, errors included.")).color(t.secondary));
+                ui.label(RichText::new(crate::tr!("Questions des IA, fins de session, rapports et messages de l'application.", "AI questions, session ends, reports and the app's messages.")).color(t.secondary));
                 ui.add_space(14.0);
                 // Filters: everything, the questions still waiting for an answer, the unread.
                 let filter_id = egui::Id::unique("inbox-filter");
@@ -3756,10 +3810,10 @@ impl NotesApp {
                     }
                     let to_answer = m.waits_for_person();
                     let (accent, kind) = match m.kind.as_str() {
-                        "question" => (Color32::from_rgb(144, 101, 176), crate::tr!("Question", "Question")),
+                        "question" => (super::style::PURPLE, crate::tr!("Question", "Question")),
                         "fin" => (super::projects::GREEN, crate::tr!("Session", "Session")),
                         "rapport" => (super::projects::BLUE, crate::tr!("Rapport", "Report")),
-                        "erreur" => (Color32::from_rgb(224, 62, 62), crate::tr!("Erreur", "Error")),
+                        "erreur" => (super::style::RED, crate::tr!("Erreur", "Error")),
                         _ => (t.tertiary, crate::tr!("Info", "Info")),
                     };
                     let project = (!m.project.is_empty()).then(|| self.ws.page(&m.project).map(|p| p.display_title())).flatten();
@@ -4838,7 +4892,7 @@ pub(super) fn question_list(
     project_of: impl Fn(&crate::model::InboxMsg) -> Option<String>,
     t: &Tone,
 ) -> Option<(String, String)> {
-    let accent = Color32::from_rgb(144, 101, 176);
+    let accent = super::style::PURPLE;
     let mut out = None;
     for (k, m) in msgs.iter().enumerate() {
         if k > 0 {
@@ -5172,7 +5226,7 @@ fn ring(
                 0.0,
                 v,
                 if v >= limit {
-                    Color32::from_rgb(224, 62, 62)
+                    super::style::RED
                 } else {
                     color
                 },
@@ -5204,11 +5258,11 @@ fn working_mark(ui: &mut egui::Ui, t: &Tone) {
 /// A colour per project, stable (from its name).
 fn project_color(title: &str) -> Color32 {
     const HUES: [Color32; 6] = [
-        Color32::from_rgb(35, 131, 226),
+        super::style::BLUE,
         Color32::from_rgb(68, 160, 110),
-        Color32::from_rgb(212, 76, 125),
-        Color32::from_rgb(217, 115, 13),
-        Color32::from_rgb(144, 101, 176),
+        super::style::PINK,
+        super::style::ORANGE,
+        super::style::PURPLE,
         Color32::from_rgb(0, 150, 160),
     ];
     HUES[(hash(title) % HUES.len() as u64) as usize]

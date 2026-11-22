@@ -281,12 +281,12 @@ pub(super) fn switch(ui: &mut egui::Ui, on: &mut bool, l: &Look) -> egui::Respon
     }
     let k = ui.ctx().animate_bool(resp.id, *on);
     let track = if *on {
-        Color32::from_rgb(35, 131, 226)
+        super::style::BLUE
     } else {
         l.switch_off
     };
     let track = if k > 0.0 && k < 1.0 {
-        lerp_color(l.switch_off, Color32::from_rgb(35, 131, 226), k)
+        lerp_color(l.switch_off, super::style::BLUE, k)
     } else {
         track
     };

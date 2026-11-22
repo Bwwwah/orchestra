@@ -383,7 +383,7 @@ fn ai_row(
     label: &str,
     t: &Tone,
 ) -> egui::Response {
-    let accent = Color32::from_rgb(144, 101, 176);
+    let accent = super::style::PURPLE;
     let (rect, resp) = ui.allocate_exact_size(
         egui::vec2(WIDTH, 42.0),
         if enabled {
@@ -478,7 +478,7 @@ fn answer_view(ui: &mut egui::Ui, ask: &mut Ask, t: &Tone) {
                     ui.add(
                         egui::Label::new(
                             RichText::new(crate::sync::auth_error_text())
-                                .color(Color32::from_rgb(217, 115, 13)),
+                                .color(super::style::ORANGE),
                         )
                         .wrap(),
                     );
@@ -527,7 +527,7 @@ fn answer_view(ui: &mut egui::Ui, ask: &mut Ask, t: &Tone) {
                 Some(Err(e)) => {
                     ui.label(
                         RichText::new(crate::trf!("Pas de réponse : {e}", "No answer: {e}"))
-                            .color(Color32::from_rgb(224, 62, 62)),
+                            .color(super::style::RED),
                     );
                 }
                 Some(Ok((text, by))) => {

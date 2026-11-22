@@ -7,7 +7,7 @@ use crate::model::ChatMsg;
 use crate::sessions::{SessionInfo, Turn, Who};
 use std::sync::Arc;
 
-const BLUE: Color32 = Color32::from_rgb(35, 131, 226);
+const BLUE: Color32 = super::style::BLUE;
 
 /// « Poursuivre la conversation » of a quick question: its AI conversation, to show in
 /// this panel (« Conversation IA »), asked from a card deep in the project page.
@@ -71,7 +71,7 @@ fn thread(ui: &mut egui::Ui, q: &str, a: &Result<String, String>, by: &str, step
         ui.label(
             RichText::new("●")
                 .size(10.0)
-                .color(Color32::from_rgb(204, 120, 92)),
+                .color(super::style::CORAL),
         );
         let w = ui.available_width();
         ui.vertical(|ui| {
@@ -89,7 +89,7 @@ fn thread(ui: &mut egui::Ui, q: &str, a: &Result<String, String>, by: &str, step
                                 steps
                             ))
                             .size(12.5)
-                            .color(Color32::from_rgb(68, 131, 97)),
+                            .color(super::style::GREEN),
                         );
                     }
                     if !by.is_empty() {
@@ -105,7 +105,7 @@ fn thread(ui: &mut egui::Ui, q: &str, a: &Result<String, String>, by: &str, step
                         egui::Label::new(
                             RichText::new(crate::trf!("Pas de réponse : {e}", "No answer: {e}"))
                                 .size(12.5)
-                                .color(Color32::from_rgb(217, 115, 13)),
+                                .color(super::style::ORANGE),
                         )
                         .wrap(),
                     );
@@ -363,7 +363,7 @@ impl NotesApp {
         } else if self.live.is_some() {
             (
                 crate::tr!("En direct avec l'équipe.", "Live with the team."),
-                Color32::from_rgb(68, 131, 97),
+                super::style::GREEN,
             )
         } else if self.ws.settings.collab.connector != ConnectorKind::None {
             (
@@ -379,7 +379,7 @@ impl NotesApp {
                     "Partagé, mais aucune collaboration n'est branchée (Réglages › Collaboration).",
                     "Shared, but no collaboration is set up (Settings › Collaboration)."
                 ),
-                Color32::from_rgb(217, 115, 13),
+                super::style::ORANGE,
             )
         };
         ui.add(egui::Label::new(RichText::new(status).size(12.0).color(color)).wrap());
@@ -742,7 +742,7 @@ impl NotesApp {
                                 ui.label(
                                     RichText::new("●")
                                         .size(10.0)
-                                        .color(Color32::from_rgb(204, 120, 92)),
+                                        .color(super::style::CORAL),
                                 );
                                 let w = ui.available_width();
                                 ui.vertical(|ui| {

@@ -141,7 +141,7 @@ pub(super) fn request_fix(ctx: &egui::Context, req: FixRequest) {
     ctx.data_mut(|d| d.insert_temp(fix_key(), req));
 }
 
-const RED: Color32 = Color32::from_rgb(224, 62, 62);
+const RED: Color32 = super::style::RED;
 /// Findings listed before « … et N autres ».
 const SHOWN: usize = 6;
 

@@ -546,7 +546,7 @@ pub(super) fn terminal_view(
                 egui::Align2::RIGHT_TOP,
                 label,
                 FontId::proportional(11.5),
-                Color32::from_rgb(35, 131, 226),
+                super::style::BLUE,
             );
         }
     });

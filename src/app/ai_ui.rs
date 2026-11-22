@@ -298,15 +298,18 @@ impl NotesApp {
 
 fn level_color(pct: f32) -> Color32 {
     if pct >= 90.0 {
-        Color32::from_rgb(224, 62, 62)
+        super::style::RED
     } else if pct >= 70.0 {
-        Color32::from_rgb(217, 115, 13)
+        super::style::ORANGE
     } else {
-        Color32::from_rgb(68, 131, 97)
+        super::style::GREEN
     }
 }
 
-const CLAUDE: Color32 = Color32::from_rgb(204, 120, 92);
+const CLAUDE: Color32 = super::style::CORAL;
+
+/// Height of one AI's line in the sidebar's usage block.
+const USAGE_ROW: f32 = 26.0;
 
 /// "repart dans 2 h 14": the time left before the 5-hour window (or a budget's month) resets, for the header of
 /// the subscription tile. None when that time isn't known or has passed.
@@ -406,16 +409,44 @@ mod reset_tests {
 impl NotesApp {
     /// Bottom of the sidebar: the Claude subscription, then the quota of every other plugged
     /// AI (Codex, Gemini, Mistral Vibe…), each in its own tile; details on hover.
+    /// All in one frame, one line per AI (its mark, its name, its 5-hour figure), so the
+    /// block keeps the same small height whatever is read; the details show on hover.
     pub(super) fn usage_widget(&mut self, ui: &mut egui::Ui, t: &Tone) {
         self.rtk_tick(ui.ctx());
-        self.claude_usage_tile(ui, t);
-        for (agent, usage) in self.ais.others.clone() {
-            let vibe = self.ais.vibe.as_ref().filter(|_| agent == crate::auto::Agent::Vibe);
-            let rtk = self.rtk_line_of(agent);
-            if other_usage_tile(ui, agent, usage.as_ref(), vibe, rtk, t).clicked() {
-                self.open_settings(SettingsTab::Ai);
-            }
+        let claude = {
+            let plugged = self.ais.plugged().contains(&Ai::ClaudeCode);
+            self.ais.usage.is_some() || plugged || self.ais.tracking
+        };
+        if !claude && self.ais.others.is_empty() {
+            return;
         }
+        // The sidebar's bottom is laid out bottom-up: the block gets its exact height (one
+        // row per AI), so its rows read top-down without the block growing up the sidebar.
+        ui.add_space(6.0);
+        let rows = usize::from(claude) + self.ais.others.len();
+        let h = USAGE_ROW * rows as f32 + 10.0;
+        let w = ui.available_width();
+        ui.allocate_ui_with_layout(egui::vec2(w, h), egui::Layout::top_down(egui::Align::Min), |ui| {
+            let r = egui::Rect::from_min_size(ui.max_rect().min, egui::vec2(w, h));
+            ui.painter().rect_stroke(r, 10.0, egui::Stroke::new(1.0, t.border), egui::StrokeKind::Inside);
+            ui.spacing_mut().item_spacing.y = 0.0;
+            ui.add_space(5.0);
+            ui.horizontal(|ui| {
+                ui.add_space(4.0);
+                ui.vertical(|ui| {
+                    ui.spacing_mut().item_spacing.y = 0.0;
+                    ui.set_width(w - 8.0);
+                    self.claude_usage_tile(ui, t);
+                    for (agent, usage) in self.ais.others.clone() {
+                        let vibe = self.ais.vibe.as_ref().filter(|_| agent == crate::auto::Agent::Vibe);
+                        let rtk = self.rtk_line_of(agent);
+                        if other_usage_tile(ui, agent, usage.as_ref(), vibe, rtk, t).clicked() {
+                            self.open_settings(SettingsTab::Ai);
+                        }
+                    }
+                });
+            });
+        });
     }
 
     /// Every minute, in the background: what RTK saved this week for each AI.
@@ -448,108 +479,30 @@ impl NotesApp {
         if usage.is_none() && !plugged && !self.ais.tracking {
             return;
         }
-        ui.add_space(6.0);
-        let w = ui.available_width();
-        let shown: Vec<crate::usage::Window> = usage
-            .as_ref()
-            .map(|u| u.windows.iter().take(2).cloned().collect())
-            .unwrap_or_default();
-        let h = if shown.is_empty() {
-            34.0
-        } else {
-            26.0 + 20.0 * shown.len() as f32
-        };
         let rtk = self.rtk_line_of(crate::auto::Agent::ClaudeCode);
-        let note = rtk_note(ui, rtk, w, t);
-        let has_rtk = note.is_some();
-        let h = h + note.as_ref().map_or(0.0, |g| g.size().y + 6.0);
-        let (rect, resp) = ui.allocate_exact_size(egui::vec2(w, h), egui::Sense::click());
-        let hov = ui
-            .ctx()
-            .animate_bool_with_time(resp.id.with("hov"), resp.hovered(), 0.15);
-        let p = ui.painter();
-        p.rect_filled(rect, 10.0, t.hover.gamma_multiply(0.4 + 0.6 * hov));
-        p.rect_stroke(
-            rect,
-            10.0,
-            egui::Stroke::new(1.0, t.border.lerp_to_gamma(CLAUDE, 0.35 * hov)),
-            egui::StrokeKind::Inside,
-        );
-        draw_rtk_note(p, rect, note);
-        // Header: a small mark, "Claude", and the time since the last reading.
-        let top = rect.top() + 14.0;
-        p.circle_filled(egui::pos2(rect.left() + 16.0, top), 4.0, CLAUDE);
-        p.text(
-            egui::pos2(rect.left() + 28.0, top),
-            egui::Align2::LEFT_CENTER,
-            crate::auto::Agent::ClaudeCode.short_name(),
-            semibold(12.5),
-            t.text,
-        );
-        if shown.is_empty() {
-            let (text, color) = if self.ais.tracking {
-                (crate::tr!("en attente…", "waiting…"), t.tertiary)
-            } else {
-                (crate::tr!("Afficher", "Show"), super::projects::BLUE)
-            };
-            p.text(
-                egui::pos2(rect.right() - 12.0, top),
-                egui::Align2::RIGHT_CENTER,
-                text,
-                FontId::proportional(12.0),
-                color,
-            );
-        } else if let Some(u) = &usage {
-            // The time left before the 5-hour window starts again; the reading's age when
-            // that time isn't known (or has passed: the next reading brings the new one).
-            let head = five_reset_in(u, crate::model::now_ms())
-                .unwrap_or_else(|| super::chrome::relative_time(u.at));
-            p.text(
-                egui::pos2(rect.right() - 12.0, top),
-                egui::Align2::RIGHT_CENTER,
-                head,
-                FontId::proportional(11.0),
-                t.tertiary,
-            );
-            ui.ctx()
-                .request_repaint_after(std::time::Duration::from_secs(30));
-        }
-        for (i, win) in shown.iter().enumerate() {
-            let y = rect.top() + 34.0 + 20.0 * i as f32;
-            let short = if win.label.starts_with("Session") {
-                "5 h".to_string()
-            } else {
-                win.label.replace("Semaine", crate::tr!("Sem.", "Wk"))
-            };
-            p.text(
-                egui::pos2(rect.left() + 12.0, y),
-                egui::Align2::LEFT_CENTER,
-                short,
-                FontId::proportional(11.5),
-                t.secondary,
-            );
-            let pct_x = rect.right() - 12.0;
-            let color = level_color(win.pct);
-            p.text(
-                egui::pos2(pct_x, y),
-                egui::Align2::RIGHT_CENTER,
-                format!("{:.0} %", win.pct),
-                semibold(11.5),
-                color,
-            );
-            let bar = egui::Rect::from_min_max(
-                egui::pos2(rect.left() + 58.0, y - 2.5),
-                egui::pos2(pct_x - 40.0, y + 2.5),
-            );
-            let frac =
+        let has_rtk = rtk.is_some();
+        let first = usage.as_ref().and_then(|u| u.windows.first().cloned());
+        let (rect, resp) = usage_row(ui, CLAUDE, crate::auto::Agent::ClaudeCode.short_name(), t);
+        match &first {
+            Some(win) => {
+                row_figure(ui, rect, resp.id, win, t);
                 ui.ctx()
-                    .animate_value_with_time(resp.id.with(("bar", i)), win.pct / 100.0, 0.8);
-            p.rect_filled(bar, 2.5, t.fill);
-            p.rect_filled(
-                egui::Rect::from_min_size(bar.min, egui::vec2(bar.width() * frac, bar.height())),
-                2.5,
-                color,
-            );
+                    .request_repaint_after(std::time::Duration::from_secs(30));
+            }
+            None => {
+                let (text, color) = if self.ais.tracking {
+                    (crate::tr!("en attente…", "waiting…"), t.tertiary)
+                } else {
+                    (crate::tr!("Afficher", "Show"), super::projects::BLUE)
+                };
+                ui.painter().text(
+                    egui::pos2(rect.right() - 10.0, rect.center().y),
+                    egui::Align2::RIGHT_CENTER,
+                    text,
+                    FontId::proportional(12.0),
+                    color,
+                );
+            }
         }
         let resp = resp.on_hover_ui(|ui| {
             ui.set_min_width(240.0);
@@ -580,8 +533,15 @@ impl NotesApp {
                         ui.label(RichText::new(format!("{left:.0} % restant{reset}")).size(12.0).color(t.tertiary));
                         ui.add_space(6.0);
                     }
+                    if let Some(r) = five_reset_in(u, crate::model::now_ms()) {
+                        ui.label(RichText::new(crate::trf!("Fenêtre de 5 h : {r}", "5-hour window: {r}")).size(12.0).color(t.secondary));
+                    }
                     ui.label(RichText::new(crate::trf!("Relevé par Claude Code {}", "Read from Claude Code {}", super::chrome::relative_time(u.at))).size(11.5).color(t.tertiary));
                 }
+            }
+            if let Some(line) = &rtk {
+                ui.add_space(4.0);
+                ui.label(RichText::new(line).size(12.0).color(t.secondary));
             }
             if has_rtk {
                 rtk_explanation(ui, t);
@@ -594,30 +554,6 @@ impl NotesApp {
                 self.open_settings(SettingsTab::Ai);
             }
         }
-    }
-}
-
-/// The RTK line of a tile, laid out to fit the tile's width (it wraps).
-fn rtk_note(
-    ui: &egui::Ui,
-    line: Option<String>,
-    width: f32,
-    t: &Tone,
-) -> Option<std::sync::Arc<egui::Galley>> {
-    let line = line?;
-    Some(ui.painter().layout(
-        line,
-        FontId::proportional(10.5),
-        t.tertiary,
-        (width - 24.0).max(40.0),
-    ))
-}
-
-/// Draw the RTK line at the bottom of a tile.
-fn draw_rtk_note(p: &egui::Painter, rect: egui::Rect, note: Option<std::sync::Arc<egui::Galley>>) {
-    if let Some(g) = note {
-        let pos = egui::pos2(rect.left() + 12.0, rect.bottom() - g.size().y - 6.0);
-        p.galley(pos, g, Color32::PLACEHOLDER);
     }
 }
 
@@ -696,119 +632,32 @@ fn other_usage_tile(
 ) -> egui::Response {
     let (r, g, b) = agent.ai().accent();
     let accent = Color32::from_rgb(r, g, b);
-    ui.add_space(6.0);
-    let w = ui.available_width();
-    let shown: Vec<crate::usage::Window> = usage
-        .map(|u| u.windows.iter().take(2).cloned().collect())
-        .unwrap_or_default();
-    let h = if shown.is_empty() && vibe.is_some() {
-        62.0
-    } else if shown.is_empty() {
-        28.0
-    } else {
-        26.0 + 20.0 * shown.len() as f32
-    };
-    let note = rtk_note(ui, rtk, w, t);
-    let has_rtk = note.is_some();
-    let h = h + note.as_ref().map_or(0.0, |g| g.size().y + 6.0);
-    let (rect, resp) = ui.allocate_exact_size(egui::vec2(w, h), egui::Sense::click());
-    let hov = ui
-        .ctx()
-        .animate_bool_with_time(resp.id.with("hov"), resp.hovered(), 0.15);
-    let p = ui.painter();
-    p.rect_filled(rect, 10.0, t.hover.gamma_multiply(0.4 + 0.6 * hov));
-    p.rect_stroke(
-        rect,
-        10.0,
-        egui::Stroke::new(1.0, t.border.lerp_to_gamma(accent, 0.35 * hov)),
-        egui::StrokeKind::Inside,
-    );
-    draw_rtk_note(p, rect, note);
-    let top = rect.top() + 14.0;
-    p.circle_filled(egui::pos2(rect.left() + 16.0, top), 4.0, accent);
-    p.text(
-        egui::pos2(rect.left() + 28.0, top),
-        egui::Align2::LEFT_CENTER,
-        agent.short_name(),
-        semibold(12.5),
-        t.text,
-    );
-    let head = match (usage, vibe) {
-        (Some(u), _) => five_reset_in(u, crate::model::now_ms())
-            .unwrap_or_else(|| super::chrome::relative_time(u.at)),
-        (None, Some(v)) => v.plan.clone().unwrap_or_default(),
-        (None, None) if crate::usage::reports_usage(agent) => crate::tr!("en attente…", "waiting…").into(),
-        (None, None) => crate::tr!("non lisible", "not readable").into(),
-    };
-    if let (true, Some(v)) = (shown.is_empty(), vibe) {
-        // No share of a limit to show: the tokens used, over a day and a week.
-        p.text(
-            egui::pos2(rect.left() + 12.0, rect.top() + 33.0),
-            egui::Align2::LEFT_CENTER,
-            crate::trf!(
-                "24 h : {} jetons · 7 j : {}",
-                "24 h: {} tokens · 7 d: {}",
-                crate::usage::tokens_short(v.tokens_day),
-                crate::usage::tokens_short(v.tokens_week)
-            ),
-            FontId::proportional(11.5),
-            t.secondary,
-        );
-        // Why there is no percentage like Claude's, said on the tile, not only on hover.
-        p.text(
-            egui::pos2(rect.left() + 12.0, rect.top() + 49.0),
-            egui::Align2::LEFT_CENTER,
-            vibe_no_pct_note(v),
-            FontId::proportional(10.5),
-            t.tertiary,
-        );
+    let has_rtk = rtk.is_some();
+    let (rect, resp) = usage_row(ui, accent, agent.short_name(), t);
+    match (usage.and_then(|u| u.windows.first()), vibe) {
+        (Some(win), _) => row_figure(ui, rect, resp.id, win, t),
+        (None, v) => {
+            let text = match v {
+                Some(v) => crate::trf!(
+                    "{} jetons / 24 h",
+                    "{} tokens / 24 h",
+                    crate::usage::tokens_short(v.tokens_day)
+                ),
+                None if crate::usage::reports_usage(agent) => {
+                    crate::tr!("en attente…", "waiting…").into()
+                }
+                None => crate::tr!("non lisible", "not readable").into(),
+            };
+            ui.painter().text(
+                egui::pos2(rect.right() - 10.0, rect.center().y),
+                egui::Align2::RIGHT_CENTER,
+                text,
+                FontId::proportional(11.5),
+                t.tertiary,
+            );
+        }
     }
-    p.text(
-        egui::pos2(rect.right() - 12.0, top),
-        egui::Align2::RIGHT_CENTER,
-        head,
-        FontId::proportional(11.0),
-        t.tertiary,
-    );
-    for (i, win) in shown.iter().enumerate() {
-        let y = rect.top() + 34.0 + 20.0 * i as f32;
-        let short = if win.label.starts_with("Session") {
-            "5 h".to_string()
-        } else if win.label == crate::usage::MONTH {
-            crate::tr!("Mois", "Month").to_string()
-        } else {
-            win.label.replace("Semaine", crate::tr!("Sem.", "Wk"))
-        };
-        p.text(
-            egui::pos2(rect.left() + 12.0, y),
-            egui::Align2::LEFT_CENTER,
-            short,
-            FontId::proportional(11.5),
-            t.secondary,
-        );
-        let pct_x = rect.right() - 12.0;
-        let color = level_color(win.pct);
-        p.text(
-            egui::pos2(pct_x, y),
-            egui::Align2::RIGHT_CENTER,
-            format!("{:.0} %", win.pct),
-            semibold(11.5),
-            color,
-        );
-        let bar = egui::Rect::from_min_max(
-            egui::pos2(rect.left() + 58.0, y - 2.5),
-            egui::pos2(pct_x - 40.0, y + 2.5),
-        );
-        p.rect_filled(bar, 2.5, t.fill);
-        p.rect_filled(
-            egui::Rect::from_min_size(
-                bar.min,
-                egui::vec2(bar.width() * win.pct / 100.0, bar.height()),
-            ),
-            2.5,
-            color,
-        );
-    }
+    let rtk_line = rtk;
     resp.on_hover_ui(|ui| {
         ui.set_min_width(240.0);
         ui.label(RichText::new(quota_title(agent)).font(semibold(14.0)));
@@ -823,6 +672,7 @@ fn other_usage_tile(
             (None, None) if vibe.is_some() => {
                 if let Some(v) = vibe {
                     vibe_details(ui, v, t);
+                    ui.label(RichText::new(vibe_no_pct_note(v)).size(12.0).color(t.tertiary));
                     vibe_budget_note(ui, v, t);
                 }
             }
@@ -848,6 +698,9 @@ fn other_usage_tile(
                         .size(13.0),
                     );
                 }
+                if let Some(r) = five_reset_in(u, crate::model::now_ms()) {
+                    ui.label(RichText::new(r).size(12.0).color(t.secondary));
+                }
                 let from = if agent == crate::auto::Agent::Vibe {
                     "Mistral".to_string()
                 } else {
@@ -869,10 +722,77 @@ fn other_usage_tile(
                 }
             }
         }
+        if let Some(line) = &rtk_line {
+            ui.add_space(4.0);
+            ui.label(RichText::new(line).size(12.0).color(t.secondary));
+        }
         if has_rtk {
             rtk_explanation(ui, t);
         }
     })
+}
+
+/// One AI's line in the sidebar's usage block: its mark and its name; the figure is drawn
+/// on the right by the caller. Returns the row and its response (hover tint included).
+fn usage_row(ui: &mut egui::Ui, accent: Color32, name: &str, t: &Tone) -> (egui::Rect, egui::Response) {
+    let w = ui.available_width();
+    let (rect, resp) = ui.allocate_exact_size(egui::vec2(w, USAGE_ROW), egui::Sense::click());
+    let hov = ui
+        .ctx()
+        .animate_bool_with_time(resp.id.with("hov"), resp.hovered(), 0.15);
+    let p = ui.painter();
+    if hov > 0.0 {
+        p.rect_filled(rect, 7.0, t.hover.gamma_multiply(hov));
+    }
+    let cy = rect.center().y;
+    p.circle_filled(egui::pos2(rect.left() + 12.0, cy), 3.5, accent);
+    p.text(
+        egui::pos2(rect.left() + 22.0, cy),
+        egui::Align2::LEFT_CENTER,
+        name,
+        FontId::proportional(12.5),
+        t.text,
+    );
+    (rect, resp.on_hover_cursor(egui::CursorIcon::PointingHand))
+}
+
+/// The right of a usage line: « 5 h » or « Sem. », a short bar and the percentage.
+fn row_figure(ui: &egui::Ui, rect: egui::Rect, id: egui::Id, win: &crate::usage::Window, t: &Tone) {
+    let p = ui.painter();
+    let cy = rect.center().y;
+    let color = level_color(win.pct);
+    let right = rect.right() - 10.0;
+    p.text(
+        egui::pos2(right, cy),
+        egui::Align2::RIGHT_CENTER,
+        format!("{:.0} %", win.pct),
+        semibold(11.5),
+        color,
+    );
+    let bar = egui::Rect::from_min_max(egui::pos2(right - 72.0, cy - 2.0), egui::pos2(right - 36.0, cy + 2.0));
+    let frac = ui
+        .ctx()
+        .animate_value_with_time(id.with("bar"), (win.pct / 100.0).clamp(0.0, 1.0), 0.8);
+    p.rect_filled(bar, 2.0, t.fill);
+    p.rect_filled(
+        egui::Rect::from_min_size(bar.min, egui::vec2(bar.width() * frac, bar.height())),
+        2.0,
+        color,
+    );
+    let short = if win.label.starts_with("Session") {
+        "5 h".to_string()
+    } else if win.label == crate::usage::MONTH {
+        crate::tr!("Mois", "Month").to_string()
+    } else {
+        win.label.replace("Semaine", crate::tr!("Sem.", "Wk"))
+    };
+    p.text(
+        egui::pos2(bar.left() - 6.0, cy),
+        egui::Align2::RIGHT_CENTER,
+        short,
+        FontId::proportional(11.0),
+        t.tertiary,
+    );
 }
 
 /// The hover paragraph under a tile's RTK line: how the estimate is calculated.
@@ -897,11 +817,11 @@ pub(super) fn usage_strip(ui: &mut egui::Ui, title: &str, u: &crate::usage::Usag
         ui.label(RichText::new(title).size(12.5).color(t.tertiary));
         for w in &u.windows {
             let color = if w.pct >= 90.0 {
-                Color32::from_rgb(224, 62, 62)
+                super::style::RED
             } else if w.pct >= 70.0 {
-                Color32::from_rgb(217, 115, 13)
+                super::style::ORANGE
             } else {
-                Color32::from_rgb(68, 131, 97)
+                super::style::GREEN
             };
             let resp = ui.horizontal(|ui| {
                 ui.spacing_mut().item_spacing.x = 5.0;

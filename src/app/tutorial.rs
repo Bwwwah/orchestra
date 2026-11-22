@@ -96,6 +96,16 @@ pub fn project_cards_stops() -> Vec<Stop> {
 pub fn orchestration_stops() -> Vec<Stop> {
     vec![
         Stop {
+            target: "orch:running",
+            title: "En cours",
+            text: "Les IA qui travaillent en ce moment, chacune dans sa copie à part. Vous pouvez les suivre et les arrêter.",
+        },
+        Stop {
+            target: "orch:launch",
+            title: "Lancer une IA",
+            text: "Choisissez un projet et une IA, puis lancez-la : elle prend les étapes une à une.",
+        },
+        Stop {
             target: "orch:week",
             title: "Réserve de la semaine",
             text: "La part de votre abonnement consommée cette semaine, et la réserve que les IA vous laissent : elles s'arrêtent avant de l'entamer.",
@@ -106,19 +116,9 @@ pub fn orchestration_stops() -> Vec<Stop> {
             text: "Ce que les IA autonomes ont fait : sessions, étapes terminées, consommation.",
         },
         Stop {
-            target: "orch:running",
-            title: "En cours",
-            text: "Les IA qui travaillent en ce moment, chacune dans sa copie à part. Vous pouvez les suivre et les arrêter.",
-        },
-        Stop {
             target: "orch:limits",
             title: "Limites",
             text: "Les réglages qui encadrent chaque lancement : budget par session, modèles, commits.",
-        },
-        Stop {
-            target: "orch:launch",
-            title: "Lancer une IA",
-            text: "Choisissez un projet et une IA, puis lancez-la : elle prend les étapes une à une.",
         },
     ]
 }
@@ -162,6 +162,11 @@ pub fn inbox_stops() -> Vec<Stop> {
 
 fn mark_key(name: &str) -> egui::Id {
     egui::Id::unique(("tutorial-area", name))
+}
+
+/// The mark a tour is pointing at now, if any (a page shows the part that holds it).
+pub fn wanted(ctx: &egui::Context) -> Option<String> {
+    ctx.data(|d| d.get_temp(want_key()))
 }
 
 fn want_key() -> egui::Id {

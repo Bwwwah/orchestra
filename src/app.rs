@@ -47,6 +47,10 @@ enum Action {
     NewProject(String, String),
     RevertDoc(String),
     LocalCopy(String),
+    /// « Lancer une IA » on a project's page: an autonomous session with its kept choices.
+    LaunchAuto(String),
+    /// Show the Orchestration page.
+    ShowOrchestra,
 }
 
 pub struct NotesApp {
@@ -937,6 +941,8 @@ impl NotesApp {
                     self.navigate(target);
                     self.view = View::Page;
                 }
+                Action::LaunchAuto(_) => {}
+                Action::ShowOrchestra => self.view = View::Orchestra,
                 Action::LocalCopy(id) => {
                     if let Some(n) = self.ws.local_copy(&id) {
                         self.info(crate::tr!("Copie locale créée : elle reste privée et ne suit plus le projet partagé.", "Local copy created: it stays private and no longer follows the shared project."));
@@ -1209,6 +1215,8 @@ impl NotesApp {
                                         .map(Vec::as_slice)
                                         .unwrap_or(&[]);
                                     let reviewing = self.reviews.contains_key(&page_id);
+                                    let running = self.orch.runs.iter().any(|r| r.project == page_id);
+                                    let can_launch = self.ais.plugged().contains(&crate::setup::Ai::ClaudeCode);
                                     let peers = peers.clone();
                                     let launchers = self.ais.launchers();
                                     let mut cx = projects::Cx {
@@ -1221,6 +1229,8 @@ impl NotesApp {
                                         actions,
                                         msg: None,
                                         reviewing,
+                                        running,
+                                        can_launch,
                                         peers,
                                         vers: &mut self.versions,
                                         launchers,
@@ -1699,7 +1709,20 @@ impl eframe::App for NotesApp {
         self.search_window(&ctx, &mut actions);
         self.settings_window(&ctx, &mut actions);
         let had_actions = !actions.is_empty();
+        // Starting a session needs the context (its terminal, its repaints): done here.
+        let launches: Vec<String> = actions
+            .iter()
+            .filter_map(|a| match a {
+                Action::LaunchAuto(id) => Some(id.clone()),
+                _ => None,
+            })
+            .collect();
         self.apply(actions);
+        for id in launches {
+            if let Some(n) = self.launch_from_project(&ctx, &id) {
+                self.notice(n);
+            }
+        }
         // Keep the active tab and the list of open tabs in the settings (restored at start).
         if let Some(t) = self.tabs.get_mut(self.active_tab) {
             t.page = self.current.clone();
@@ -2994,6 +3017,7 @@ mod search;
 mod settings;
 mod side;
 mod slash;
+mod style;
 mod term_ui;
 mod tutorial;
 mod update_ui;

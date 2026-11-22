@@ -186,6 +186,18 @@ pub fn window_drag_area(ui: &mut egui::Ui, rect: egui::Rect, id: egui::Id) {
     }
 }
 
+/// The name of a view that isn't a page, for the open tab's title.
+fn view_label(v: View) -> Option<&'static str> {
+    match v {
+        View::Page => None,
+        View::Home => Some(crate::tr!("Accueil", "Home")),
+        View::Trash => Some(crate::tr!("Corbeille", "Trash")),
+        View::Projects => Some(crate::tr!("Projets", "Projects")),
+        View::Orchestra => Some(crate::tr!("Orchestration", "Orchestration")),
+        View::Inbox => Some(crate::tr!("Boîte de réception", "Inbox")),
+    }
+}
+
 pub(super) fn relative_time(ms: u64) -> String {
     let now = now_ms();
     let d = now.saturating_sub(ms) / 1000;
@@ -485,14 +497,40 @@ impl NotesApp {
                     self.reorder_roots(ui, &rows);
                     ui.add_space(10.0);
                 }
-                section_header(ui, crate::tr!("Pages privées", "Private pages"), &t);
+                // Projects apart from the notes: they are what the AIs work on, each with a
+                // dot when something happens there (an AI at work, a question waiting).
+                let own_projects: Vec<String> = self
+                    .ws
+                    .children(None)
+                    .iter()
+                    .filter(|p| !is_shared(p) && p.project.is_some())
+                    .map(|p| p.id.clone())
+                    .collect();
+                section_header(ui, crate::tr!("Projets", "Projects"), &t);
+                let mut rows = vec![];
+                for id in own_projects {
+                    let r = self.tree_row(ui, &id, 0, actions, &t);
+                    rows.push((id, r));
+                }
+                self.reorder_roots(ui, &rows);
+                if add_row(ui, &t)
+                    .on_hover_text(crate::tr!("Nouveau projet", "New project"))
+                    .clicked()
+                {
+                    self.view = View::Projects;
+                    if self.new_project.is_none() {
+                        self.new_project = Some((String::new(), String::new()));
+                    }
+                }
+                ui.add_space(10.0);
+                section_header(ui, crate::tr!("Pages", "Pages"), &t);
                 // « Rapports des IA » stays last, and can't be dragged nor dropped around.
                 let reports = self.ws.settings.orch.reports_page.clone();
                 let (pinned, roots): (Vec<String>, Vec<String>) = self
                     .ws
                     .children(None)
                     .iter()
-                    .filter(|p| !is_shared(p))
+                    .filter(|p| !is_shared(p) && p.project.is_none())
                     .map(|p| p.id.clone())
                     .partition(|id| !reports.is_empty() && *id == reports);
                 let mut rows = vec![];
@@ -766,6 +804,20 @@ impl NotesApp {
             t,
         );
         let rect = row.rect;
+        // A project's live state, on the right of its row (where « + » shows on hover).
+        if depth == 0 && !ui.rect_contains_pointer(rect)
+            && let Some((color, pulse, tip)) = self.project_signal(id)
+        {
+            let c = egui::pos2(rect.right() - 16.0, rect.center().y);
+            if pulse {
+                super::projects::pulse_dot(ui, c, color);
+            } else {
+                ui.painter().circle_filled(c, 3.5, color);
+            }
+            let dot = egui::Rect::from_center_size(c, egui::vec2(14.0, 14.0));
+            ui.interact(dot, row.id.with("signal"), egui::Sense::hover())
+                .on_hover_text(tip);
+        }
         let icon_rect = egui::Rect::from_center_size(
             egui::pos2(rect.left() + 18.0 + indent, rect.center().y),
             egui::vec2(22.0, 22.0),
@@ -884,6 +936,31 @@ impl NotesApp {
         drag.map(|d| d.with_new_rect(rect))
     }
 
+    /// What a project's dot in the sidebar says: an AI at work there (green, pulsing), else
+    /// a question of the AIs waiting for the person (orange). None: nothing to say.
+    fn project_signal(&self, id: &str) -> Option<(Color32, bool, &'static str)> {
+        if self.orch.runs.iter().any(|r| r.project == id) {
+            return Some((
+                super::style::GREEN,
+                true,
+                crate::tr!("Une IA travaille sur ce projet", "An AI is working on this project"),
+            ));
+        }
+        if self
+            .ws
+            .inbox
+            .iter()
+            .any(|m| m.project == id && m.waits_for_person())
+        {
+            return Some((
+                super::style::ORANGE,
+                false,
+                crate::tr!("Une question attend votre réponse", "A question is waiting for your answer"),
+            ));
+        }
+        None
+    }
+
     /// The tab strip: back/forward, Firefox-like tabs (the open one is a rounded card joining the page),
     /// "+", and the rest of the strip moves the window.
     pub(super) fn tab_strip(&mut self, ui: &mut egui::Ui) {
@@ -962,13 +1039,25 @@ impl NotesApp {
                 } else {
                     self.tabs[i].page.clone()
                 };
-                let (icon, title) = page
-                    .and_then(|id| {
-                        self.ws
-                            .page(&id)
-                            .map(|p| (page_icon(p).to_string(), p.display_title()))
-                    })
-                    .unwrap_or_else(|| ("".into(), crate::tr!("Nouvel onglet", "New tab").into()));
+                // The open tab shows the view on screen (Accueil, Projets…) rather than the
+                // page it last held: the title always says what is shown.
+                let view_title = if i == self.active_tab {
+                    view_label(self.view)
+                } else {
+                    None
+                };
+                let (icon, title) = match view_title {
+                    Some(v) => ("".to_string(), v.to_string()),
+                    None => page
+                        .and_then(|id| {
+                            self.ws
+                                .page(&id)
+                                .map(|p| (page_icon(p).to_string(), p.display_title()))
+                        })
+                        .unwrap_or_else(|| {
+                            ("".into(), crate::tr!("Nouvel onglet", "New tab").into())
+                        }),
+                };
                 let (rect, resp) =
                     ui.allocate_exact_size(egui::vec2(w, full.height()), egui::Sense::click());
                 let active = i == self.active_tab;
@@ -1153,16 +1242,20 @@ impl NotesApp {
                 }
             }
             ui.add_space(4.0);
-            let label = if live_on { crate::tr!("En direct", "Live") } else if shared { crate::tr!("Partagée", "Shared") } else { crate::tr!("Privée", "Private") };
-            let (rect, resp) = ui.allocate_exact_size(egui::vec2(if live_on { 108.0 } else if shared { 104.0 } else { 86.0 }, 26.0), egui::Sense::click());
+            // « Partagée » or « En direct » when the page leaves this computer; a private page
+            // says nothing here (« Partager », on the right, opens the same menu).
+            if shared || live_on {
+            let label = if live_on { crate::tr!("En direct", "Live") } else { crate::tr!("Partagée", "Shared") };
+            let (rect, resp) = ui.allocate_exact_size(egui::vec2(if live_on { 108.0 } else { 104.0 }, 26.0), egui::Sense::click());
             if resp.hovered() {
                 ui.painter().rect_filled(rect, 6.0, t.hover);
             }
             icons::paint(ui.painter(), egui::Rect::from_center_size(rect.left_center() + egui::vec2(12.0, 0.0), egui::vec2(15.0, 15.0)), if shared { Icon::People } else { Icon::Lock }, t.tertiary);
-            ui.painter().text(rect.left_center() + egui::vec2(24.0, 0.0), egui::Align2::LEFT_CENTER, label, FontId::proportional(14.0), if live_on { Color32::from_rgb(68, 131, 97) } else { t.tertiary });
+            ui.painter().text(rect.left_center() + egui::vec2(24.0, 0.0), egui::Align2::LEFT_CENTER, label, FontId::proportional(14.0), if live_on { super::style::GREEN } else { t.tertiary });
             icons::paint(ui.painter(), egui::Rect::from_center_size(rect.right_center() - egui::vec2(10.0, 0.0), egui::vec2(11.0, 11.0)), Icon::ChevronDown, t.tertiary);
             let resp = resp.on_hover_text(crate::tr!("Qui voit cette page", "Who sees this page"));
             egui::Popup::menu(&resp).show(|ui| self.share_menu(ui, cur, actions));
+            }
 
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 ui.spacing_mut().item_spacing.x = 4.0;
@@ -1232,7 +1325,7 @@ impl NotesApp {
                 // The project's side panel (team discussion, AI conversation).
                 if in_project.is_some() {
                     let on = self.side_open;
-                    if icons::button(ui, Icon::People, 28.0, if on { Color32::from_rgb(35, 131, 226) } else { t.text }, t.hover, crate::tr!("Discussion et conversation IA du projet", "Project discussion and AI conversation")).clicked() {
+                    if icons::button(ui, Icon::People, 28.0, if on { super::style::BLUE } else { t.text }, t.hover, crate::tr!("Discussion et conversation IA du projet", "Project discussion and AI conversation")).clicked() {
                         self.side_open = !on;
                     }
                 }
@@ -1273,7 +1366,7 @@ impl NotesApp {
                     "Shared: the project, its pages and its discussion go to the team."
                 ))
                 .size(12.5)
-                .color(Color32::from_rgb(68, 131, 97)),
+                .color(super::style::GREEN),
             );
             ui.horizontal(|ui| {
                 if ui
@@ -1310,7 +1403,7 @@ impl NotesApp {
                         RichText::new(crate::tr!("Partager avec l'équipe", "Share with the team"))
                             .color(Color32::WHITE),
                     )
-                    .fill(Color32::from_rgb(35, 131, 226)),
+                    .fill(super::style::BLUE),
                 )
                 .clicked()
             {
@@ -1477,12 +1570,12 @@ impl NotesApp {
             ui.add_space(((avail - width) / 2.0).max(20.0));
             ui.vertical(|ui| {
                 ui.set_width(width);
-                ui.label(RichText::new(crate::tr!("Bonjour !", "Hello!")).font(bold(30.0)).color(t.text));
+                ui.label(RichText::new(crate::tr!("Bonjour !", "Hello!")).font(bold(super::style::TITLE)).color(t.text));
                 ui.add_space(6.0);
                 ui.add(
                     egui::Label::new(RichText::new(crate::tr!(
-                        "Orchestra fait avancer vos projets avec vos IA de code. Chaque projet a son dossier, son état des lieux et ses étapes ; Claude Code, Codex, Gemini CLI ou Mistral Vibe les lisent et les tiennent à jour par MCP, avec vous ou seules, dans les limites de votre abonnement. Leurs questions arrivent dans la boîte de réception ; vos notes vivent dans des pages, à côté.",
-                        "Orchestra moves your projects forward with your coding AIs. Each project has its folder, its state of play and its steps; Claude Code, Codex, Gemini CLI or Mistral Vibe read them and keep them up to date through MCP, with you or on their own, within your subscription's limits. Their questions arrive in the inbox; your notes live in pages, alongside."
+                        "Vos projets, les IA qui travaillent dessus, et ce qui attend votre réponse.",
+                        "Your projects, the AIs working on them, and what is waiting for your answer."
                     )).size(14.5).color(t.secondary))
                     .wrap(),
                 );
@@ -1513,7 +1606,7 @@ impl NotesApp {
                     let steps = [
                         (crate::tr!("Brancher une IA", "Plug in an AI"), crate::tr!("Paramètres › IA : installez et branchez Claude Code, Codex, Gemini CLI ou Mistral Vibe.", "Settings › AI: install and plug in Claude Code, Codex, Gemini CLI or Mistral Vibe."), HomeGo::Ais),
                         (crate::tr!("Créer un projet", "Create a project"), crate::tr!("Donnez son dossier de code ; l'IA remplit l'état des lieux et propose des étapes.", "Give its code folder; the AI fills in the state of play and proposes steps."), HomeGo::Projects),
-                        (crate::tr!("Lancer une IA en autonomie", "Start an AI on its own"), crate::tr!("Orchestration : elle avance étape par étape dans une copie à part, jusqu'au plafond choisi.", "Orchestration: it goes step by step in a separate copy, up to the ceiling chosen."), HomeGo::Orchestra),
+                        (crate::tr!("Lancer une IA en autonomie", "Start an AI on its own"), crate::tr!("« Lancer une IA » sur la page du projet : elle avance étape par étape dans une copie à part.", "« Start an AI » on the project's page: it goes step by step in a separate copy."), HomeGo::Orchestra),
                         (crate::tr!("Répondre à ses questions", "Answer its questions"), crate::tr!("Boîte de réception : votre réponse lui parvient au prochain état des lieux.", "Inbox: your answer reaches it at the next state of play."), HomeGo::Inbox),
                     ];
                     for (i, ((title, what, target), ok)) in steps.into_iter().zip(done).enumerate() {

@@ -140,9 +140,9 @@ fn now() -> u64 {
     crate::model::now_ms()
 }
 
-pub(super) const BLUE: Color32 = Color32::from_rgb(35, 131, 226);
-pub(super) const GREEN: Color32 = Color32::from_rgb(68, 131, 97);
-pub(super) const ORANGE: Color32 = Color32::from_rgb(217, 115, 13);
+pub(super) const BLUE: Color32 = super::style::BLUE;
+pub(super) const GREEN: Color32 = super::style::GREEN;
+pub(super) const ORANGE: Color32 = super::style::ORANGE;
 
 fn status_color(s: ProjectStatus, t: &Tone) -> Color32 {
     match s {
@@ -228,10 +228,10 @@ impl NotesApp {
             ui.vertical(|ui| {
                 ui.set_width(width);
                 ui.horizontal(|ui| {
-                    ui.label(RichText::new(crate::tr!("Projets", "Projects")).font(bold(30.0)).color(t.text));
+                    ui.label(RichText::new(crate::tr!("Projets", "Projects")).font(bold(super::style::TITLE)).color(t.text));
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         if self.new_project.is_none() {
-                            let r = ui.button(RichText::new(crate::tr!("+ Nouveau projet", "+ New project")).size(14.0));
+                            let r = super::style::primary(ui, crate::tr!("+ Nouveau projet", "+ New project"));
                             super::tutorial::mark(ui, "projects:new", r.rect);
                             if r.clicked() {
                                 self.new_project = Some((String::new(), String::new()));
@@ -239,7 +239,8 @@ impl NotesApp {
                         }
                         let busy = self.sync_dialog.is_some() || self.sync_run.is_some();
                         let sync = ui
-                            .add_enabled(!busy, egui::Button::new(RichText::new(crate::tr!("Synchroniser avec les IA", "Sync with the AIs")).size(14.0)))
+                            .add_enabled_ui(!busy, |ui| super::style::secondary(ui, crate::tr!("Synchroniser avec les IA", "Sync with the AIs")))
+                            .inner
                             .on_hover_text(crate::tr!("Demande à Claude Code (ou Codex) de se brancher au tableau de bord et de faire l'état des lieux de vos projets", "Asks Claude Code (or Codex) to plug into the dashboard and write where each of your projects stands"));
                         super::tutorial::mark(ui, "projects:sync", sync.rect);
                         if sync.clicked() {
@@ -247,7 +248,7 @@ impl NotesApp {
                         }
                     });
                 });
-                ui.label(RichText::new(crate::tr!("Où en est chaque projet, ce qu'il reste à faire, et les sessions IA qui y ont travaillé.", "Where each project stands, what is left to do, and the AI sessions that worked on it.")).color(t.secondary));
+                ui.label(RichText::new(crate::tr!("Où en est chaque projet et ce qu'il reste à faire.", "Where each project stands and what is left to do.")).color(t.secondary));
                 self.mcp_line(ui, &t);
                 ui.add_space(16.0);
 
@@ -397,17 +398,20 @@ impl NotesApp {
                         ui2.spacing_mut().item_spacing.y = 6.0;
                         ui2.horizontal(|ui| {
                             ui.label(RichText::new(icon).size(20.0));
-                            let mut job = egui::text::LayoutJob::single_section(title.clone(), egui::TextFormat::simple(semibold(16.0), t.text));
+                            let mut job = egui::text::LayoutJob::single_section(title.clone(), egui::TextFormat::simple(semibold(super::style::HEADING), t.text));
                             job.wrap = egui::text::TextWrapping::truncate_at_width(card_w - 140.0);
                             cut_label(ui, job);
                             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                                 chip(ui, pr.status.label(), status_color(pr.status, &t), egui::Sense::hover());
                             });
                         });
-                        let folder = if pr.folder.is_empty() { crate::tr!("Pas de dossier", "No folder").to_string() } else { pr.folder.clone() };
-                        let mut job = egui::text::LayoutJob::single_section(folder, egui::TextFormat::simple(FontId::monospace(11.0), t.tertiary));
+                        let folder = if pr.folder.trim().is_empty() { crate::tr!("Pas de dossier", "No folder").to_string() } else { format!("📁 {}", short_folder(&pr.folder)) };
+                        let mut job = egui::text::LayoutJob::single_section(folder, egui::TextFormat::simple(FontId::proportional(12.0), t.tertiary));
                         job.wrap = egui::text::TextWrapping::truncate_at_width(card_w - 34.0);
-                        ui2.label(job);
+                        let r = ui2.label(job);
+                        if !pr.folder.trim().is_empty() {
+                            r.on_hover_text(tilde(&pr.folder));
+                        }
                         // Progress bar.
                         let (done, total) = pr.progress();
                         let (bar, _) = ui2.allocate_exact_size(egui::vec2(card_w - 32.0, 6.0), egui::Sense::hover());
@@ -462,8 +466,13 @@ impl NotesApp {
         if self.sync_dialog.is_some() || self.sync_run.is_some() || self.new_project.is_some() {
             return;
         }
-        ui.add_space(28.0);
         let waiting = self.agents.unassigned.len();
+        // The head of the page already offers both actions: this box only speaks up when it
+        // has news (folders where an AI worked, with no project yet) or when the list is empty.
+        if waiting == 0 && !self.ws.projects().is_empty() {
+            return;
+        }
+        ui.add_space(28.0);
         egui::Frame::new().fill(t.card).stroke(egui::Stroke::new(1.0, t.border)).corner_radius(14.0).inner_margin(egui::Margin::symmetric(24, 22)).show(ui, |ui| {
             ui.set_width(width - 50.0);
             ui.vertical_centered(|ui| {
@@ -477,28 +486,18 @@ impl NotesApp {
                 ui.label(RichText::new(line).size(13.5).color(t.secondary));
                 ui.add_space(14.0);
                 // Two buttons side by side, centred.
-                let (bw, bh, gap) = (220.0, 38.0, 12.0);
-                let total = bw * 2.0 + gap;
+                let gap = 12.0;
+                let total = 340.0;
                 ui.horizontal(|ui| {
                     ui.add_space(((ui.available_width() - total) / 2.0).max(0.0));
                     ui.spacing_mut().item_spacing.x = gap;
-                    let sync = egui::Button::new(RichText::new(crate::tr!("Synchroniser avec l'IA", "Sync with the AI")).size(14.5).color(Color32::WHITE))
-                        .fill(BLUE)
-                        .corner_radius(10.0)
-                        .min_size(egui::vec2(bw, bh));
-                    if ui
-                        .add(sync)
+                    if super::style::primary(ui, crate::tr!("Synchroniser avec les IA", "Sync with the AIs"))
                         .on_hover_text(crate::tr!("Choisissez les dossiers : Claude Code (ou Codex) crée les projets et fait leur état des lieux", "Pick the folders: Claude Code (or Codex) creates the projects and writes where they stand"))
                         .clicked()
                     {
                         self.sync_dialog = Some(self.sync_candidates());
                     }
-                    let add = egui::Button::new(RichText::new(crate::tr!("+ Ajouter un projet", "+ Add a project")).size(14.5).color(t.text))
-                        .fill(t.fill)
-                        .stroke(egui::Stroke::new(1.0, t.border))
-                        .corner_radius(10.0)
-                        .min_size(egui::vec2(bw, bh));
-                    if ui.add(add).on_hover_text(crate::tr!("À partir d'un dossier ; astuce : glissez-le sur la fenêtre", "From a folder; tip: drop it on the window")).clicked() {
+                    if super::style::secondary(ui, crate::tr!("+ Nouveau projet", "+ New project")).on_hover_text(crate::tr!("À partir d'un dossier ; astuce : glissez-le sur la fenêtre", "From a folder; tip: drop it on the window")).clicked() {
                         self.new_project = Some((String::new(), String::new()));
                     }
                 });
@@ -553,24 +552,6 @@ pub(super) fn card(
     r.response.rect.height() - extra.max(0.0)
 }
 
-/// Accent of each card, shown as a small bar before its title.
-pub(super) fn accent_of(title: &str) -> Color32 {
-    match title {
-        "ÉTAT DES LIEUX" | "CURRENT STATE" => Color32::from_rgb(144, 101, 176),
-        "ÉTAPES" | "STEPS" => GREEN,
-        "SESSIONS IA" | "AI SESSIONS" | "NOUVELLE SESSION" | "NEW SESSION" => {
-            Color32::from_rgb(204, 120, 92)
-        }
-        "VERSIONS" | "PROJETS" | "PROJECTS" => BLUE,
-        "VEILLE · CVE" | "WATCH · CVE" => Color32::from_rgb(224, 62, 62),
-        "POUR COMMENCER" | "TO GET GOING" => GREEN,
-        "PAGES" | "CONTENU" | "CONTENTS" | "PAGES RÉCENTES" | "RECENT PAGES" => {
-            Color32::from_rgb(160, 160, 160)
-        }
-        _ => Color32::from_rgb(212, 76, 125),
-    }
-}
-
 /// A row's background that fades in under the pointer: call `hover_begin` before drawing
 /// the row, `hover_end` with its rect after.
 pub(super) fn hover_begin(ui: &egui::Ui) -> egui::layers::ShapeIdx {
@@ -584,6 +565,23 @@ pub(super) fn tilde(path: &str) -> String {
         .or_else(|_| std::env::var("USERPROFILE"))
         .unwrap_or_default();
     tilde_in(path.trim(), &home)
+}
+
+/// A folder as shown in lists and headers: its last name only (« ~/Code/site » reads « site »),
+/// the full path being left for the tooltip.
+pub(super) fn short_folder(path: &str) -> String {
+    let p = path.trim().trim_end_matches(['/', '\\']);
+    match p.rsplit(['/', '\\']).next() {
+        Some(name) if !name.is_empty() => name.to_string(),
+        _ => tilde(path),
+    }
+}
+
+#[test]
+fn short_folder_keeps_the_last_name() {
+    assert_eq!(short_folder("/Users/a/Code/site/"), "site");
+    assert_eq!(short_folder("C:\\Code\\appli"), "appli");
+    assert_eq!(short_folder("site"), "site");
 }
 
 fn tilde_in(path: &str, home: &str) -> String {
@@ -650,14 +648,12 @@ pub(super) fn smooth(
 
 /// "ÉTAPES        3 / 10" style header: small caps on the left, extra on the right.
 pub(super) fn card_title(ui: &mut egui::Ui, title: &str, extra: &str, t: &Tone) {
+    // A plain title: colour is kept for meaning (running, waiting, error), not decoration.
     ui.horizontal(|ui| {
-        let (r, _) = ui.allocate_exact_size(egui::vec2(4.0, 14.0), egui::Sense::hover());
-        ui.painter().rect_filled(r, 2.0, accent_of(title));
-        ui.add_space(2.0);
-        ui.label(RichText::new(title).font(semibold(12.5)).color(t.secondary));
+        ui.label(RichText::new(title).font(semibold(super::style::SMALL)).color(t.secondary));
         if !extra.is_empty() {
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                ui.label(RichText::new(extra).size(12.5).color(t.tertiary));
+                ui.label(RichText::new(extra).size(super::style::SMALL).color(t.tertiary));
             });
         }
     });
@@ -1028,6 +1024,10 @@ pub(super) struct Cx<'a> {
     pub msg: Option<super::notices::Notice>,
     /// A "Regard extérieur" is being written for this project.
     pub reviewing: bool,
+    /// An autonomous session runs on this project now.
+    pub running: bool,
+    /// An AI able to work alone is plugged in (Claude Code): « Lancer une IA » can start.
+    pub can_launch: bool,
     /// Who else is in this (shared) project right now, and whether their AI is at work.
     pub peers: Vec<(String, bool)>,
     pub vers: &'a mut super::versions::Versions,
@@ -1153,44 +1153,6 @@ fn card_key_name(k: CardKind) -> &'static str {
     }
 }
 
-/// Put `cards` (the new session's, or none) right above the sessions' list, in whichever
-/// column it landed: the two stay together.
-fn above_sessions(cols: &mut [Vec<CardKind>], cards: &[CardKind]) {
-    for col in cols.iter_mut() {
-        if let Some(i) = col.iter().position(|k| matches!(k, CardKind::Sessions)) {
-            for (j, k) in cards.iter().enumerate() {
-                col.insert(i + j, *k);
-            }
-            return;
-        }
-    }
-}
-
-/// One card at the top of each column, then each other card under the column that is
-/// shortest so far (heights from the last frame), so no column stays half empty.
-fn balance<const N: usize>(
-    ui: &egui::Ui,
-    page_id: &str,
-    heads: [CardKind; N],
-    rest: &[CardKind],
-) -> Vec<Vec<CardKind>> {
-    let h = |k: CardKind| -> f32 {
-        ui.ctx()
-            .data(|d| d.get_temp(card_key(page_id, k)))
-            .unwrap_or(200.0)
-    };
-    let mut cols: Vec<Vec<CardKind>> = heads.iter().map(|k| vec![*k]).collect();
-    let mut tot: Vec<f32> = heads.iter().map(|k| h(*k)).collect();
-    for k in rest {
-        let i = (0..N)
-            .min_by(|a, b| tot[*a].total_cmp(&tot[*b]))
-            .unwrap_or(0);
-        cols[i].push(*k);
-        tot[i] += h(*k) + 16.0;
-    }
-    cols
-}
-
 /// Columns of cards whose bottoms line up: the last card of each column is stretched to
 /// the tallest column (measured on the previous frame).
 fn columns(ui: &mut egui::Ui, cx: &mut Cx, cols: &[Vec<CardKind>], gap: f32) {
@@ -1249,91 +1211,132 @@ pub(super) fn project_panel(ui: &mut egui::Ui, cx: &mut Cx) -> Option<super::not
             .data_mut(|d| d.insert_temp(appear_key(), (cx.page_id.to_string(), now_t)));
     }
     let mut cx_copy = false;
+    let (cx_launch, cx_follow);
     {
         let (page_id, t, live) = (cx.page_id, cx.t, cx.live);
         let peers = cx.peers.clone();
         let filling = cx.ai.filling(page_id);
         let prefer = live.first().map(|s| s.tool);
+        let (cx_running, cx_can_launch) = (cx.running, cx.can_launch);
         let pr = &mut *cx.pr;
         // ---- Header: status, progress, activity, tokens; folder below, small.
         let (done, total) = pr.progress();
         let (last, _, tokens) = activity(pr, 0, live);
-        ui.horizontal_wrapped(|ui| {
-            ui.spacing_mut().item_spacing.x = 10.0;
-            ui.add_enabled_ui(!pr.read_only, |ui| {
-                egui::ComboBox::from_id_salt(("project-status", page_id))
-                    .selected_text(RichText::new(pr.status.label()).color(status_color(pr.status, t)))
-                    .width(100.0)
-                    .show_ui(ui, |ui| {
-                        for st in ProjectStatus::ALL {
-                            ui.selectable_value(&mut pr.status, st, st.label());
-                        }
+        // Line 1: where the project stands on the left; on the right its main action,
+        // « Lancer une IA » (or where to follow the one at work), then « Remplir avec l'IA ».
+        let mut launch = false;
+        let mut follow = false;
+        ui.horizontal(|ui| {
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                ui.spacing_mut().item_spacing.x = 8.0;
+                if cx_running {
+                    if super::style::secondary(ui, crate::tr!("IA au travail · Suivre", "AI at work · Follow"))
+                        .on_hover_text(crate::tr!("Voir la session dans Orchestration", "See the session in Orchestration"))
+                        .clicked()
+                    {
+                        follow = true;
+                    }
+                } else if !pr.read_only {
+                    let folder_ok = !pr.folder.trim().is_empty();
+                    let open = pr.steps.iter().any(|s| s.status != StepStatus::Done);
+                    let endless = pr.launch.as_ref().is_some_and(|l| l.endless);
+                    let ok = cx_can_launch && folder_ok && (open || endless);
+                    let r = ui
+                        .add_enabled_ui(ok, |ui| super::style::primary(ui, crate::tr!("▶  Lancer une IA", "▶  Start an AI")))
+                        .inner;
+                    let why = if !cx_can_launch {
+                        crate::tr!("Branchez d'abord Claude Code (Paramètres › IA)", "Plug in Claude Code first (Settings › AI)")
+                    } else if !folder_ok {
+                        crate::tr!("Indiquez d'abord le dossier du projet", "Set the project's folder first")
+                    } else {
+                        crate::tr!("Aucune étape ouverte : ajoutez-en une, l'IA les prend une à une", "No open step: add one, the AI takes them one by one")
+                    };
+                    let r = r.on_disabled_hover_text(why).on_hover_text(crate::tr!(
+                        "Une IA avance seule sur les étapes ouvertes, dans une copie à part du dossier, avec les réglages de ce projet dans Orchestration.",
+                        "An AI works alone on the open steps, in a separate copy of the folder, with this project's settings in Orchestration."
+                    ));
+                    if r.clicked() {
+                        launch = true;
+                    }
+                }
+                    // Fill (again) the cards with the AI: after a warning, since it replaces them.
+                    if filling {
+                        ui.add(egui::Spinner::new().size(12.0));
+                        ui.label(RichText::new(crate::tr!("L'IA remplit le projet… (1 à 3 min)", "The AI is filling in the project… (1 to 3 min)")).size(12.5).color(BLUE));
+                    } else if !pr.read_only {
+                        let folder = pr.folder.trim().to_string();
+                        let ok = !folder.is_empty() && crate::project::normalize_folder(&folder).is_dir();
+                        let r = ui.add_enabled_ui(ok, |ui| super::style::secondary(ui, crate::tr!("Remplir avec l'IA", "Fill in with the AI"))).inner;
+                        let r = r.on_disabled_hover_text(crate::tr!("Indiquez d'abord le dossier du projet", "Set the project's folder first"));
+                        egui::Popup::menu(&r).show(|ui| {
+                            ui.set_max_width(300.0);
+                            ui.label(RichText::new(crate::tr!("Tout faire remplir par l'IA ?", "Have the AI fill everything in?")).font(semibold(14.0)).color(t.text));
+                            ui.add_space(2.0);
+                            let has = !pr.summary.trim().is_empty() || pr.review.is_some();
+                            ui.add(
+                                egui::Label::new(
+                                    RichText::new(if has {
+                                        crate::tr!("L'état des lieux, le statut et le regard extérieur actuels seront remplacés. Les étapes ne sont pas touchées.", "The current state, status and outside view will be replaced. The steps aren't touched.")
+                                    } else {
+                                        crate::tr!("L'IA lit le projet sans rien modifier et écrit l'état des lieux, le statut et un regard extérieur. Les étapes ne sont pas touchées.", "The AI reads the project without changing anything and writes the current state, the status and an outside view. The steps aren't touched.")
+                                    })
+                                    .size(12.5)
+                                    .color(if has { ORANGE } else { t.secondary }),
+                                )
+                                .wrap(),
+                            );
+                            ui.add_space(6.0);
+                            ui.horizontal(|ui| {
+                                if ui.button(if has { crate::tr!("Remplacer", "Replace") } else { crate::tr!("Remplir", "Fill in") }).clicked() {
+                                    super::ai_fill::request(ui.ctx(), super::ai_fill::AiReq::Fill { page_id: page_id.to_string(), folder: folder.clone(), prefer });
+                                    ui.close();
+                                }
+                                if ui.button(crate::tr!("Annuler", "Cancel")).clicked() {
+                                    ui.close();
+                                }
+                            });
+                        });
+                    }
+                ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
+                    ui.spacing_mut().item_spacing.x = 10.0;
+                    ui.add_enabled_ui(!pr.read_only, |ui| {
+                        egui::ComboBox::from_id_salt(("project-status", page_id))
+                            .selected_text(RichText::new(pr.status.label()).color(status_color(pr.status, t)))
+                            .width(100.0)
+                            .show_ui(ui, |ui| {
+                                for st in ProjectStatus::ALL {
+                                    ui.selectable_value(&mut pr.status, st, st.label());
+                                }
+                            });
                     });
-            });
-            let (bar, _) = ui.allocate_exact_size(egui::vec2(120.0, 6.0), egui::Sense::hover());
-            ui.painter().rect_filled(bar, 3.0, t.fill);
-            let frac = smooth(ui, ("progress", page_id), if total > 0 { done as f32 / total as f32 } else { 0.0 });
-            if frac > 0.001 {
-                ui.painter().rect_filled(egui::Rect::from_min_size(bar.min, egui::vec2(bar.width() * frac, 6.0)), 3.0, GREEN);
-            }
-            ui.label(RichText::new(crate::trf!("{done}/{total} étapes", "{done}/{total} steps")).color(t.secondary));
-            ui.label(RichText::new(format!("· {}", relative_time(last))).color(t.tertiary));
-            if tokens > 0 {
-                ui.label(RichText::new(crate::trf!("· {} tokens", "· {} tokens", human_tokens(tokens))).color(t.tertiary))
-                    .on_hover_text(crate::tr!("Total des sessions Claude Code / Codex de ce projet (hors lectures de cache)", "Total of this project's Claude Code / Codex sessions (cache reads excluded)"));
-            }
-            if live.iter().any(|s| s.is_live(now())) {
-                let (r, _) = ui.allocate_exact_size(egui::vec2(12.0, 14.0), egui::Sense::hover());
-                pulse_dot(ui, r.center(), GREEN);
-                ui.label(RichText::new(crate::tr!("IA au travail", "AI at work")).color(GREEN));
-            }
-            // The team, live: who is in the project, and whose AI is working.
-            if !peers.is_empty() {
-                ui.label(RichText::new("·").color(t.tertiary));
-                let names: Vec<String> = peers.iter().map(|(n, _)| n.clone()).collect();
-                super::live_ui::faces(ui, &names, t.card);
-                let working: Vec<&str> = peers.iter().filter(|(_, ai)| *ai).map(|(n, _)| n.as_str()).collect();
-                let text = if working.is_empty() { crate::trf!("{} ici", "{} here", names.join(", ")) } else { crate::trf!("IA au travail chez {}", "AI at work at {}", working.join(", ")) };
-                ui.label(RichText::new(text).size(12.5).color(if working.is_empty() { t.secondary } else { GREEN }));
-            }
-            // Fill (again) the cards with the AI: after a warning, since it replaces them.
-            if filling {
-                ui.add(egui::Spinner::new().size(12.0));
-                ui.label(RichText::new(crate::tr!("L'IA remplit le projet… (1 à 3 min)", "The AI is filling in the project… (1 to 3 min)")).size(12.5).color(BLUE));
-            } else if !pr.read_only {
-                let folder = pr.folder.trim().to_string();
-                let ok = !folder.is_empty() && crate::project::normalize_folder(&folder).is_dir();
-                let r = ui.add_enabled_ui(ok, |ui| action_link(ui, crate::tr!("Remplir avec l'IA", "Fill in with the AI"))).inner;
-                let r = r.on_disabled_hover_text(crate::tr!("Indiquez d'abord le dossier du projet", "Set the project's folder first"));
-                egui::Popup::menu(&r).show(|ui| {
-                    ui.set_max_width(300.0);
-                    ui.label(RichText::new(crate::tr!("Tout faire remplir par l'IA ?", "Have the AI fill everything in?")).font(semibold(14.0)).color(t.text));
-                    ui.add_space(2.0);
-                    let has = !pr.summary.trim().is_empty() || pr.review.is_some();
-                    ui.add(
-                        egui::Label::new(
-                            RichText::new(if has {
-                                crate::tr!("L'état des lieux, le statut et le regard extérieur actuels seront remplacés. Les étapes ne sont pas touchées.", "The current state, status and outside view will be replaced. The steps aren't touched.")
-                            } else {
-                                crate::tr!("L'IA lit le projet sans rien modifier et écrit l'état des lieux, le statut et un regard extérieur. Les étapes ne sont pas touchées.", "The AI reads the project without changing anything and writes the current state, the status and an outside view. The steps aren't touched.")
-                            })
-                            .size(12.5)
-                            .color(if has { ORANGE } else { t.secondary }),
-                        )
-                        .wrap(),
-                    );
-                    ui.add_space(6.0);
-                    ui.horizontal(|ui| {
-                        if ui.button(if has { crate::tr!("Remplacer", "Replace") } else { crate::tr!("Remplir", "Fill in") }).clicked() {
-                            super::ai_fill::request(ui.ctx(), super::ai_fill::AiReq::Fill { page_id: page_id.to_string(), folder: folder.clone(), prefer });
-                            ui.close();
-                        }
-                        if ui.button(crate::tr!("Annuler", "Cancel")).clicked() {
-                            ui.close();
-                        }
-                    });
+                    let (bar, _) = ui.allocate_exact_size(egui::vec2(120.0, 6.0), egui::Sense::hover());
+                    ui.painter().rect_filled(bar, 3.0, t.fill);
+                    let frac = smooth(ui, ("progress", page_id), if total > 0 { done as f32 / total as f32 } else { 0.0 });
+                    if frac > 0.001 {
+                        ui.painter().rect_filled(egui::Rect::from_min_size(bar.min, egui::vec2(bar.width() * frac, 6.0)), 3.0, GREEN);
+                    }
+                    ui.label(RichText::new(crate::trf!("{done}/{total} étapes", "{done}/{total} steps")).color(t.secondary));
+                    ui.label(RichText::new(format!("· {}", relative_time(last))).color(t.tertiary));
+                    if tokens > 0 {
+                        ui.label(RichText::new(crate::trf!("· {} tokens", "· {} tokens", human_tokens(tokens))).color(t.tertiary))
+                            .on_hover_text(crate::tr!("Total des sessions Claude Code / Codex de ce projet (hors lectures de cache)", "Total of this project's Claude Code / Codex sessions (cache reads excluded)"));
+                    }
+                    if live.iter().any(|s| s.is_live(now())) {
+                        let (r, _) = ui.allocate_exact_size(egui::vec2(12.0, 14.0), egui::Sense::hover());
+                        pulse_dot(ui, r.center(), GREEN);
+                        ui.label(RichText::new(crate::tr!("IA au travail", "AI at work")).color(GREEN));
+                    }
+                    // The team, live: who is in the project, and whose AI is working.
+                    if !peers.is_empty() {
+                        ui.label(RichText::new("·").color(t.tertiary));
+                        let names: Vec<String> = peers.iter().map(|(n, _)| n.clone()).collect();
+                        super::live_ui::faces(ui, &names, t.card);
+                        let working: Vec<&str> = peers.iter().filter(|(_, ai)| *ai).map(|(n, _)| n.as_str()).collect();
+                        let text = if working.is_empty() { crate::trf!("{} ici", "{} here", names.join(", ")) } else { crate::trf!("IA au travail chez {}", "AI at work at {}", working.join(", ")) };
+                        ui.label(RichText::new(text).size(12.5).color(if working.is_empty() { t.secondary } else { GREEN }));
+                    }
                 });
-            }
+            });
         });
         let editing_folder =
             !pr.read_only && (flag(ui, ("edit-folder", page_id)) || pr.folder.trim().is_empty());
@@ -1341,7 +1344,7 @@ pub(super) fn project_panel(ui: &mut egui::Ui, cx: &mut Cx) -> Option<super::not
             // Lecture seule, on the right of the folder line.
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 // Privé / Partagé, with the local copy.
-                let (label, color) = if pr.shared { (crate::tr!("👥 Partagé ▾", "👥 Shared ▾"), Color32::from_rgb(35, 131, 226)) } else { (crate::tr!("Privé ▾", "Private ▾"), t.tertiary) };
+                let (label, color) = if pr.shared { (crate::tr!("👥 Partagé ▾", "👥 Shared ▾"), super::style::BLUE) } else { (crate::tr!("Privé ▾", "Private ▾"), t.tertiary) };
                 let btn = ui.add(egui::Button::new(RichText::new(label).size(12.5).color(color)).frame(false)).on_hover_text(
                     crate::tr!("Seuls les projets partagés quittent cette machine (collaboration). Les autres restent privés.", "Only shared projects leave this computer (collaboration). The others stay private."),
                 );
@@ -1400,8 +1403,11 @@ pub(super) fn project_panel(ui: &mut egui::Ui, cx: &mut Cx) -> Option<super::not
                     toggle_flag(ui, ("edit-folder", page_id));
                 }
             } else {
-                let r = ui.add(egui::Label::new(RichText::new(tilde(&pr.folder)).font(FontId::monospace(12.5)).color(t.tertiary)).sense(egui::Sense::click()));
-                if r.on_hover_text(if pr.read_only { crate::tr!("Lecture seule", "Read-only") } else { crate::tr!("Cliquer pour modifier le dossier", "Click to change the folder") }).clicked() && !pr.read_only {
+                // The folder's name only, cut to the room left of the settings on the right
+                // (the full path, which could run under them, shows under the pointer).
+                let r = ui.add(egui::Label::new(RichText::new(format!("📁 {}", short_folder(&pr.folder))).size(12.5).color(t.tertiary)).sense(egui::Sense::click()).truncate());
+                let tip = if pr.read_only { crate::tr!("Lecture seule", "Read-only") } else { crate::tr!("Cliquer pour modifier le dossier", "Click to change the folder") };
+                if r.on_hover_text(format!("{}\n{tip}", tilde(&pr.folder))).clicked() && !pr.read_only {
                     toggle_flag(ui, ("edit-folder", page_id));
                 }
             }
@@ -1409,64 +1415,188 @@ pub(super) fn project_panel(ui: &mut egui::Ui, cx: &mut Cx) -> Option<super::not
             });
         });
         ui.add_space(12.0);
+        cx_launch = launch;
+        cx_follow = follow;
     }
     if cx_copy {
         cx.actions.push(Action::LocalCopy(cx.page_id.to_string()));
     }
+    if cx_launch {
+        cx.actions.push(Action::LaunchAuto(cx.page_id.to_string()));
+    }
+    if cx_follow {
+        cx.actions.push(Action::ShowOrchestra);
+    }
     quick_question(ui, cx);
-    ui.add_space(16.0);
-    let w = ui.available_width();
+    ui.add_space(14.0);
+    // The rest in tabs: the overview (where it stands, what is left, the sessions) is what
+    // one comes for; versions, the watch, the pages and the outside view are a click away.
+    let code = shows_git(ui.ctx(), cx.pr);
+    let tabs = project_tabs(code);
+    let tab_key = egui::Id::unique(("project-tab", cx.page_id));
+    let mut tab: ProjectTab = ui.ctx().data(|d| d.get_temp(tab_key)).unwrap_or_default();
+    // A tour pointing at a card shows its tab.
+    if let Some(want) = super::tutorial::wanted(ui.ctx())
+        && let Some(to) = tab_of_mark(&want)
+    {
+        tab = to;
+    }
+    if !tabs.contains(&tab) {
+        tab = ProjectTab::Overview;
+    }
+    let counts = |k: ProjectTab| -> Option<usize> {
+        match k {
+            ProjectTab::Pages => Some(cx.pages.len()).filter(|n| *n > 0),
+            _ => None,
+        }
+    };
+    if let Some(t2) = tab_bar(ui, &tabs, tab, counts, cx.t) {
+        tab = t2;
+    }
+    ui.ctx().data_mut(|d| d.insert_temp(tab_key, tab));
+    ui.add_space(14.0);
     let gap = 16.0;
     use CardKind::*;
-    // The AIs' questions, when there are some: first of the cards placed after the heads.
-    let asked: &[CardKind] = if cx.questions.is_empty() {
-        &[]
-    } else {
-        &[Questions]
-    };
-    // The git card (Versions) and the vulnerability watch only for code projects.
-    let vers: &[CardKind] = if shows_git(ui.ctx(), cx.pr) {
-        &[Versions, Watch]
-    } else {
-        &[]
-    };
-    // Starting a session in a card of its own, apart from the list of sessions; none without
-    // a folder to start it in (the list then says to set one).
-    let new_session: &[CardKind] = if cx.pr.folder.trim().is_empty() {
-        &[]
-    } else {
-        &[NewSession]
-    };
-    if w >= 1380.0 {
-        let rest: Vec<CardKind> = asked.iter().chain(vers).copied().chain([Pages]).collect();
-        let mut cols = balance(ui, cx.page_id, [Summary(420.0), Steps, Sessions], &rest);
-        above_sessions(&mut cols, new_session);
-        columns(ui, cx, &cols, gap);
-    } else if w >= 860.0 {
-        let rest: Vec<CardKind> = asked
-            .iter()
-            .copied()
-            .chain([Sessions])
-            .chain(vers.iter().copied())
-            .chain([Pages])
-            .collect();
-        let mut cols = balance(ui, cx.page_id, [Summary(380.0), Steps], &rest);
-        above_sessions(&mut cols, new_session);
-        columns(ui, cx, &cols, gap);
-    } else {
-        let one: Vec<CardKind> = [Summary(210.0), Steps]
-            .into_iter()
-            .chain(asked.iter().copied())
-            .chain(new_session.iter().copied())
-            .chain([Sessions])
-            .chain(vers.iter().copied())
-            .chain([Pages])
-            .collect();
-        columns(ui, cx, &[one], gap);
+    match tab {
+        ProjectTab::Overview => {
+            let w = ui.available_width();
+            // The AIs' questions, when there are some, come first: they wait for the person.
+            if !cx.questions.is_empty() {
+                columns(ui, cx, &[vec![Questions]], gap);
+                ui.add_space(gap);
+            }
+            if w >= 860.0 {
+                columns(ui, cx, &[vec![Summary(380.0)], vec![Steps]], gap);
+            } else {
+                columns(ui, cx, &[vec![Summary(210.0), Steps]], gap);
+            }
+            ui.add_space(gap);
+            // The activity: starting a session, and those that ran here.
+            let mut act = vec![];
+            if !cx.pr.folder.trim().is_empty() {
+                act.push(NewSession);
+            }
+            act.push(Sessions);
+            columns(ui, cx, &[act], gap);
+        }
+        ProjectTab::Versions => {
+            columns(ui, cx, &[vec![Versions]], gap);
+        }
+        ProjectTab::Watch => {
+            columns(ui, cx, &[vec![Watch]], gap);
+        }
+        ProjectTab::Pages => {
+            columns(ui, cx, &[vec![Pages]], gap);
+        }
+        ProjectTab::Review => review_card(ui, cx),
     }
-    ui.add_space(gap);
-    review_card(ui, cx);
     cx.msg.take()
+}
+
+/// The tabs of a project's page.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(super) enum ProjectTab {
+    #[default]
+    Overview,
+    Versions,
+    Watch,
+    Pages,
+    Review,
+}
+
+impl ProjectTab {
+    fn label(self) -> &'static str {
+        match self {
+            ProjectTab::Overview => crate::tr!("Vue d'ensemble", "Overview"),
+            ProjectTab::Versions => crate::tr!("Versions", "Versions"),
+            ProjectTab::Watch => crate::tr!("Veille CVE", "CVE watch"),
+            ProjectTab::Pages => crate::tr!("Pages", "Pages"),
+            ProjectTab::Review => crate::tr!("Regard extérieur", "Outside view"),
+        }
+    }
+}
+
+/// The tabs shown: versions and the vulnerability watch only for code projects.
+pub(super) fn project_tabs(code: bool) -> Vec<ProjectTab> {
+    let mut v = vec![ProjectTab::Overview];
+    if code {
+        v.extend([ProjectTab::Versions, ProjectTab::Watch]);
+    }
+    v.extend([ProjectTab::Pages, ProjectTab::Review]);
+    v
+}
+
+/// The tab holding a tour's mark (« card:versions »…).
+fn tab_of_mark(mark: &str) -> Option<ProjectTab> {
+    Some(match mark {
+        "card:summary" | "card:steps" | "card:questions" | "card:sessions"
+        | "card:new-session" => ProjectTab::Overview,
+        "card:versions" => ProjectTab::Versions,
+        "card:watch" => ProjectTab::Watch,
+        "card:pages" => ProjectTab::Pages,
+        _ => return None,
+    })
+}
+
+/// A row of text tabs, the open one underlined in the accent; returns the one clicked.
+fn tab_bar(
+    ui: &mut egui::Ui,
+    tabs: &[ProjectTab],
+    open: ProjectTab,
+    count: impl Fn(ProjectTab) -> Option<usize>,
+    t: &Tone,
+) -> Option<ProjectTab> {
+    let mut picked = None;
+    let top = ui.cursor().min.y;
+    let r = ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing.x = 22.0;
+        for &k in tabs {
+            let on = k == open;
+            let text = match count(k) {
+                Some(n) => format!("{}  {n}", k.label()),
+                None => k.label().to_string(),
+            };
+            let font = if on { semibold(super::style::BODY) } else { FontId::proportional(super::style::BODY) };
+            let g = ui.painter().layout_no_wrap(text.clone(), font, t.text);
+            let (rect, resp) =
+                ui.allocate_exact_size(egui::vec2(g.size().x, 30.0), egui::Sense::click());
+            let color = if on {
+                t.text
+            } else if resp.hovered() {
+                t.secondary.lerp_to_gamma(t.text, 0.5)
+            } else {
+                t.secondary
+            };
+            ui.painter().galley_with_override_text_color(
+                egui::pos2(rect.left(), rect.center().y - g.size().y / 2.0 - 2.0),
+                g,
+                color,
+            );
+            if on {
+                ui.painter().rect_filled(
+                    egui::Rect::from_min_max(
+                        egui::pos2(rect.left(), rect.bottom() - 2.0),
+                        egui::pos2(rect.right(), rect.bottom()),
+                    ),
+                    1.0,
+                    super::style::BLUE,
+                );
+            }
+            resp.widget_info(|| egui::WidgetInfo::selected(egui::Role::Tab, true, on, &text));
+            if resp.on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
+                picked = Some(k);
+            }
+        }
+    });
+    // A hairline under the whole row, the open tab's line sitting on it.
+    let y = r.response.rect.bottom();
+    let _ = top;
+    ui.painter().hline(
+        ui.max_rect().x_range(),
+        y - 0.5,
+        egui::Stroke::new(1.0, t.border),
+    );
+    picked
 }
 
 /// Whether the project page shows the git card, re-detected every few seconds per folder
@@ -1945,7 +2075,7 @@ fn steps_card(ui: &mut egui::Ui, cx: &mut Cx, extra: f32) -> f32 {
                             egui::Label::new(
                                 RichText::new(sure)
                                     .size(13.0)
-                                    .color(Color32::from_rgb(224, 62, 62)),
+                                    .color(super::style::RED),
                             )
                             .sense(egui::Sense::click()),
                         )
@@ -2262,6 +2392,8 @@ mod new_step_field_tests {
                     actions: &mut s.actions,
                     msg: None,
                     reviewing: false,
+                    running: false,
+                    can_launch: true,
                     peers: vec![],
                     vers: &mut s.vers,
                     launchers: vec![],
@@ -2354,26 +2486,7 @@ mod new_step_field_tests {
 
 #[cfg(test)]
 mod card_layout_tests {
-    use super::{CardKind, above_sessions};
-
-    fn names(cols: &[Vec<CardKind>]) -> Vec<Vec<&'static str>> {
-        cols.iter()
-            .map(|c| {
-                c.iter()
-                    .map(|k| match k {
-                        CardKind::Summary(_) => "summary",
-                        CardKind::Steps => "steps",
-                        CardKind::NewSession => "new",
-                        CardKind::Sessions => "sessions",
-                        CardKind::Pages => "pages",
-                        CardKind::Versions => "versions",
-                        CardKind::Watch => "watch",
-                        CardKind::Questions => "questions",
-                    })
-                    .collect()
-            })
-            .collect()
-    }
+    use super::{ProjectTab, project_tabs, tab_of_mark};
 
     /// The sessions are grouped by AI provider, in the order each first comes (the live
     /// ones first), so each gets a box of its own.
@@ -2392,20 +2505,18 @@ mod card_layout_tests {
         assert!(provider_groups(&[], &[]).is_empty());
     }
 
-    /// Starting a session is a card of its own, always right above the sessions' list,
-    /// whichever column the list landed in; without a folder, nothing is added.
+    /// The page opens on the overview; versions and the watch only for code projects; a
+    /// tour pointing at a card finds it in its tab.
     #[test]
-    fn the_new_session_card_sits_above_the_list() {
-        use CardKind::*;
-        let mut cols = vec![vec![Summary(0.0), Pages], vec![Steps, Questions, Sessions]];
-        above_sessions(&mut cols, &[NewSession]);
-        assert_eq!(names(&cols), vec![vec!["summary", "pages"], vec!["steps", "questions", "new", "sessions"]]);
-        let mut cols = vec![vec![Summary(0.0)], vec![Steps], vec![Sessions, Pages]];
-        above_sessions(&mut cols, &[NewSession]);
-        assert_eq!(names(&cols)[2], vec!["new", "sessions", "pages"]);
-        let mut cols = vec![vec![Steps, Sessions]];
-        above_sessions(&mut cols, &[]);
-        assert_eq!(names(&cols), vec![vec!["steps", "sessions"]]);
+    fn project_tabs_follow_the_kind_of_project() {
+        use ProjectTab::*;
+        assert_eq!(project_tabs(true), [Overview, Versions, Watch, Pages, Review]);
+        assert_eq!(project_tabs(false), [Overview, Pages, Review]);
+        assert_eq!(ProjectTab::default(), Overview);
+        assert_eq!(tab_of_mark("card:versions"), Some(Versions));
+        assert_eq!(tab_of_mark("card:sessions"), Some(Overview));
+        assert_eq!(tab_of_mark("card:pages"), Some(Pages));
+        assert_eq!(tab_of_mark("orch:week"), None);
     }
 }
 
@@ -2909,7 +3020,7 @@ fn sessions_card(ui: &mut egui::Ui, cx: &mut Cx, extra: f32) -> f32 {
                 }
             };
             if boxed {
-                let accent = accent_of("SESSIONS IA");
+                let accent = t.secondary;
                 egui::Frame::new()
                     .stroke(egui::Stroke::new(1.0, t.border))
                     .corner_radius(10.0)
@@ -2970,7 +3081,7 @@ fn sessions_card(ui: &mut egui::Ui, cx: &mut Cx, extra: f32) -> f32 {
                             egui::Label::new(
                                 RichText::new(sure)
                                     .size(13.0)
-                                    .color(Color32::from_rgb(224, 62, 62)),
+                                    .color(super::style::RED),
                             )
                             .sense(egui::Sense::click()),
                         )
@@ -3148,7 +3259,7 @@ impl NotesApp {
                             Waiting => ("○", t.tertiary),
                             Running => ("◐", BLUE),
                             Done(_) => ("✔", GREEN),
-                            Failed(_) => ("✖", Color32::from_rgb(224, 62, 62)),
+                            Failed(_) => ("✖", super::style::RED),
                         };
                         ui.label(RichText::new(mark).color(color));
                         let name = std::path::Path::new(&j.folder).file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
@@ -3241,7 +3352,7 @@ impl NotesApp {
                                 .label(
                                     RichText::new(format!("{} ✖", x.ai.label()))
                                         .size(12.5)
-                                        .color(Color32::from_rgb(224, 62, 62)),
+                                        .color(super::style::RED),
                                 )
                                 .on_hover_text(e),
                             None => ui.label(
@@ -3706,8 +3817,8 @@ fn review_sections(ui: &mut egui::Ui, text: &str, t: &Tone) {
         return;
     }
     let accents = [
-        Color32::from_rgb(212, 76, 125),
-        Color32::from_rgb(144, 101, 176),
+        super::style::PINK,
+        super::style::PURPLE,
         GREEN,
     ];
     let gap = 12.0;
@@ -3801,7 +3912,7 @@ fn quick_question(ui: &mut egui::Ui, cx: &mut Cx) {
                 egui::Align2::CENTER_CENTER,
                 "?",
                 semibold(15.0),
-                Color32::from_rgb(144, 101, 176),
+                super::style::PURPLE,
             );
             let send_w = 180.0;
             let edit = ui.add_enabled(

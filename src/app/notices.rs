@@ -117,7 +117,7 @@ impl NotesApp {
             return;
         }
         let t = tone(ctx.global_style().visuals.dark_mode);
-        let red = Color32::from_rgb(224, 62, 62);
+        let red = super::style::RED;
         let mut close: Vec<u64> = vec![];
         let mut open_inbox = false;
         let mut next_wake = f32::MAX;

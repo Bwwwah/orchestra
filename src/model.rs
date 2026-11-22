@@ -1274,8 +1274,8 @@ impl Workspace {
             Block::new(
                 BlockKind::Bullet,
                 crate::tr!(
-                    "**Pages privées** : vos notes, comme celle-ci ; elles ne quittent jamais votre ordinateur.",
-                    "**Private pages**: your notes, like this one; they never leave your computer."
+                    "**Projets** puis **Pages** : vos projets (un point vert quand une IA y travaille, orange quand elle attend votre réponse), puis vos notes, comme celle-ci ; elles ne quittent jamais votre ordinateur.",
+                    "**Projects** then **Pages**: your projects (a green dot while an AI works on one, orange when it waits for your answer), then your notes, like this one; they never leave your computer."
                 ),
             ),
             Block::new(
@@ -2259,7 +2259,7 @@ mod starter_tests {
             ("Projets", "Projects"),
             ("Orchestration", "Orchestration"),
             ("Boîte de réception", "Inbox"),
-            ("Pages privées", "Private pages"),
+            ("Pages", "Pages"),
             ("Étapes", "Steps"),
             ("Fusionner", "Merge"),
             ("MCP", "MCP"),

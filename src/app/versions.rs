@@ -1110,7 +1110,7 @@ fn commit_list(ui: &mut egui::Ui, s: &GitState, t: &Tone) {
 /// GitHub Actions for the current commit: one pill per branch or tag, colour by result;
 /// a click opens the run on GitHub.
 fn run_pills(ui: &mut egui::Ui, runs: &[crate::git::Run], t: &Tone) {
-    let red = Color32::from_rgb(224, 62, 62);
+    let red = super::style::RED;
     ui.horizontal_wrapped(|ui| {
         ui.spacing_mut().item_spacing.x = 6.0;
         row_label(ui, crate::tr!("Actions", "Actions"), t);

@@ -134,7 +134,7 @@ impl NotesApp {
             return;
         };
         ui.add_space(6.0);
-        let accent = Color32::from_rgb(144, 101, 176);
+        let accent = super::style::PURPLE;
         let ctx = ui.ctx().clone();
         let mut act = 0;
         egui::Frame::new()
