@@ -498,6 +498,13 @@ pub fn choosable(agent: Agent) -> Vec<ModelInfo> {
     }
 }
 
+/// Whether the AI takes a thinking level when started alone: Claude Code through `--effort`,
+/// Codex through `-c model_reasoning_effort=…`. Gemini CLI and Mistral Vibe have no such
+/// option, so the saving slider only acts on them through the choice of model.
+pub fn accepts_effort(agent: Agent) -> bool {
+    matches!(agent, Agent::ClaudeCode | Agent::Codex)
+}
+
 /// The model the person imposed, and why it is used.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Imposed {
@@ -565,6 +572,12 @@ fn plain(s: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_claude_and_codex_take_a_thinking_level() {
+        let yes: Vec<Agent> = Agent::ALL.into_iter().filter(|a| accepts_effort(*a)).collect();
+        assert_eq!(yes, vec![Agent::ClaudeCode, Agent::Codex]);
+    }
 
     #[test]
     fn every_ai_has_models_and_the_written_ones_match_the_session_card() {
