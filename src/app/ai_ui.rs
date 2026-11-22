@@ -434,7 +434,7 @@ impl NotesApp {
         });
     }
 
-    /// The tile line « ≈ X % de consommation économisée grâce à RTK… » of an AI, if it has one.
+    /// The tile line « ≈ X % déjà économisé avec RTK… » of an AI, if it has one.
     fn rtk_line_of(&self, agent: crate::auto::Agent) -> Option<String> {
         let all = self.ais.rtk_week.lock_or_recover();
         let (_, w) = all.iter().find(|(a, _)| *a == agent)?;

@@ -163,13 +163,13 @@ pub fn week_savings_all(
 /// Under this share of consumption saved, an AI's tile shows no line.
 const MIN_SHOWN_PERCENT: f64 = 1.0;
 
-/// « ≈ 12 % de consommation économisée grâce à RTK (7 jours, estimation) ».
+/// « ≈ 12 % déjà économisé avec RTK (7 jours, estimation) ».
 pub fn saving_line(w: &WeekSaving) -> Option<String> {
     // Hidden without any RTK session in the week, and under 1 % (too small to be worth a line).
     let pct = w.percent().filter(|p| w.rtk_sessions > 0 && *p >= MIN_SHOWN_PERCENT)?;
     Some(crate::trf!(
-        "≈ {} % de consommation économisée grâce à RTK (7 jours, estimation)",
-        "≈ {} % of consumption saved thanks to RTK (7 days, estimate)",
+        "≈ {} % déjà économisé avec RTK (7 jours, estimation)",
+        "≈ {} % already saved with RTK (7 days, estimate)",
         format!("{pct:.0}")
     ))
 }
