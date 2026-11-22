@@ -3627,7 +3627,7 @@ impl NotesApp {
                 let mut filter = ui.data(|d| d.get_temp::<u8>(filter_id)).unwrap_or(0);
                 let waiting = self.ws.inbox.iter().filter(|m| m.waits_for_person()).count();
                 let unread = self.ws.unread();
-                ui.horizontal(|ui| {
+                let filters = ui.horizontal(|ui| {
                     for (k, label, n) in [
                         (0u8, crate::tr!("Tout", "All"), self.ws.inbox.iter().filter(|m| !m.being_sorted()).count()),
                         (1, crate::tr!("À répondre", "To answer"), waiting),
@@ -3638,6 +3638,7 @@ impl NotesApp {
                         }
                     }
                 });
+                super::tutorial::mark(ui.ctx(), "inbox:filters", filters.response.rect);
                 ui.data_mut(|d| d.insert_temp(filter_id, filter));
                 ui.add_space(12.0);
                 let shown: Vec<usize> = (0..self.ws.inbox.len())
@@ -3665,6 +3666,7 @@ impl NotesApp {
                 }
                 let (now, offset) = (crate::model::now_ms(), auto::local_offset_ms());
                 let mut group = "";
+                let mut first_card = true;
                 for i in shown {
                     let m = &self.ws.inbox[i];
                     // A heading per day, newest first.
@@ -3792,6 +3794,9 @@ impl NotesApp {
                             }
                         });
                     let rect = card.response.rect;
+                    if std::mem::take(&mut first_card) {
+                        super::tutorial::mark(ui.ctx(), "inbox:message", rect);
+                    }
                     // A coloured edge on the left: the kind at a glance.
                     ui.painter().rect_filled(
                         egui::Rect::from_min_max(rect.left_top() + egui::vec2(0.0, 8.0), egui::pos2(rect.left() + 3.0, rect.bottom() - 8.0)),
