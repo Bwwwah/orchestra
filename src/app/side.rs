@@ -482,6 +482,18 @@ impl NotesApp {
                             ui.add(egui::Label::new(RichText::new(q).size(13.5).color(t.text)).wrap());
                         });
                 }
+                // The AI is working on it: a spinner and a line, until its answer comes.
+                if busy {
+                    ui.add_space(8.0);
+                    ui.horizontal(|ui| {
+                        ui.add(egui::Spinner::new().size(12.0));
+                        ui.label(
+                            RichText::new(crate::tr!("L'IA répond…", "The AI is answering…"))
+                                .size(12.5)
+                                .color(t.secondary),
+                        );
+                    });
+                }
             });
         ui.add_space(6.0);
         let hint = crate::tr!(
