@@ -936,6 +936,15 @@ impl Workspace {
             .map(|p| p.id.clone())
     }
 
+    /// `tutorial_project`, or, when no project exists at all, a new example project (so the
+    /// tutorial always has something to show).
+    pub fn ensure_tutorial_project(&mut self) -> String {
+        match self.tutorial_project() {
+            Some(id) => id,
+            None => self.create_example_project(),
+        }
+    }
+
     /// The project a page belongs to (itself, or its nearest parent that is a project).
     pub fn project_of(&self, id: &str) -> Option<&Page> {
         let mut cur = self.page(id);
@@ -1346,6 +1355,19 @@ mod tests {
         assert_eq!(ws.tutorial_project(), Some(other.clone()));
         ws.set_trashed(&other, true);
         assert_eq!(ws.tutorial_project(), None);
+    }
+
+    /// With no project left, the tutorial gets a new example project; otherwise it reuses one.
+    #[test]
+    fn tutorial_project_is_recreated_when_none_exists() {
+        let mut ws = Workspace::default();
+        let ex = ws.ensure_tutorial_project();
+        assert!(ws.page(&ex).and_then(|p| p.project.as_ref()).is_some_and(|x| x.example));
+        assert_eq!(ws.ensure_tutorial_project(), ex, "reused, not duplicated");
+        ws.set_trashed(&ex, true);
+        let again = ws.ensure_tutorial_project();
+        assert_ne!(again, ex);
+        assert!(ws.page(&again).and_then(|p| p.project.as_ref()).is_some_and(|x| x.example));
     }
 
     /// The budget per session is saved with the project, comes back on loading, and stays
