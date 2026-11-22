@@ -1063,6 +1063,30 @@ fn question_prompt(folder: &str, question: &str, code: bool) -> String {
     p
 }
 
+/// The prompt that opens a framing conversation about an idea: the AI gives its frank
+/// opinion, then asks its questions, and proposes no step yet (read-only).
+fn framing_prompt(folder: &str, idea: &str, code: bool) -> String {
+    let i: String = idea.trim().chars().take(QUESTION_MAX).collect();
+    let what = if code {
+        crate::tr!("du code et de l'historique", "the code and history")
+    } else {
+        crate::tr!("des documents", "the documents")
+    };
+    crate::trf!(
+        "Cadrage d'une idée pour le projet du dossier « {folder} ». Ne modifie RIEN. Regarde {what} du dossier \
+         seulement si c'est utile. Réponds dans la langue de l'idée, en 200 mots au plus : 1) ton avis franc \
+         (l'idée vaut-elle le coup ? points forts, risques) ; 2) puis 3 à 5 questions précises, numérotées, \
+         dont les réponses te manquent pour définir l'objectif, le périmètre et ce qui est hors périmètre. \
+         Ne propose AUCUNE étape et n'écris aucun bloc de code : la personne répondra à tes questions \
+         avant tout plan.\n\nIdée :\n{i}",
+        "Framing an idea for the project in the folder « {folder} ». Change NOTHING. Look at {what} of the \
+         folder only if it helps. Answer in the idea's language, in 200 words at most: 1) your frank opinion \
+         (is the idea worth it? strengths, risks); 2) then 3 to 5 precise, numbered questions whose answers you \
+         lack to define the goal, the scope and what is out of scope. Propose NO step and write no code block: \
+         the person will answer your questions before any plan.\n\nIdea:\n{i}"
+    )
+}
+
 /// The most steps one answer may propose.
 pub const ANSWER_STEPS_MAX: usize = 10;
 
@@ -1106,6 +1130,57 @@ pub fn split_answer_steps(answer: &str) -> (String, Vec<String>) {
         text.extend(&lines[close + 1..]);
     }
     (text.join("\n").trim().to_string(), steps)
+}
+
+/// The reply that asks the AI of a framing conversation to write the validated plan.
+pub fn plan_request() -> &'static str {
+    crate::tr!(
+        "Valide le plan. D'après nos échanges, écris le plan du projet dans un bloc de code ```plan, en \
+         Markdown, avec exactement ces trois parties : « ## Objectif », « ## Périmètre » et « ## Hors \
+         périmètre » (des puces courtes). Écris-le dans la langue de la conversation. Ne propose aucune \
+         étape et ne modifie rien.",
+        "Validate the plan. From our exchanges, write the project's plan in a ```plan code block, in \
+         Markdown, with exactly these three parts: « ## Goal », « ## Scope » and « ## Out of scope » \
+         (short bullets). Write it in the conversation's language. Propose no step and change nothing."
+    )
+}
+
+/// The reply that asks the AI of a framing conversation for the steps of the validated plan.
+/// They come back as a ```etapes block, which goes to the Steps box where the person ticks
+/// the ones to add (nothing is added by itself).
+pub fn plan_steps_request() -> &'static str {
+    crate::tr!(
+        "À partir du plan validé (objectif, périmètre, hors périmètre), propose les étapes du projet. \
+         Termine ta réponse par un bloc de code ```etapes avec une étape par ligne, au format « Thème : \
+         action à l'infinitif », une seule action par étape, dans l'ordre où les faire, 10 au plus, rien \
+         de ce qui est hors périmètre. Ne modifie rien.",
+        "From the validated plan (goal, scope, out of scope), propose the project's steps. End your answer \
+         with a ```steps code block, one step per line, written « Theme: action », one action per step, in \
+         the order to do them, 10 at most, nothing that is out of scope. Change nothing."
+    )
+}
+
+/// An answer split into the text to show and the plan it holds: the content of its last
+/// ```plan block (None when there is none or it is empty); the block is taken out of the text.
+pub fn split_answer_plan(answer: &str) -> (String, Option<String>) {
+    let lines: Vec<&str> = answer.lines().collect();
+    let Some(open) = lines
+        .iter()
+        .rposition(|l| l.trim().strip_prefix("```").is_some_and(|t| t.trim().eq_ignore_ascii_case("plan")))
+    else {
+        return (answer.trim().to_string(), None);
+    };
+    let close = lines[open + 1..]
+        .iter()
+        .position(|l| l.trim().starts_with("```"))
+        .map(|i| open + 1 + i)
+        .unwrap_or(lines.len());
+    let plan = lines[open + 1..close].join("\n").trim().to_string();
+    let mut text: Vec<&str> = lines[..open].to_vec();
+    if close < lines.len() {
+        text.extend(&lines[close + 1..]);
+    }
+    (text.join("\n").trim().to_string(), (!plan.is_empty()).then_some(plan))
 }
 
 fn question_prompt_base(folder: &str, question: &str, code: bool) -> String {
@@ -1162,6 +1237,7 @@ pub fn ask_question(
     question: &str,
     code: Option<bool>,
     prefer: Option<Tool>,
+    framing: bool,
 ) -> Result<QuestionReply, String> {
     if question.trim().is_empty() {
         return Err(crate::tr!("question vide", "empty question").into());
@@ -1176,7 +1252,11 @@ pub fn ask_question(
     let code = crate::project::code_kind(&dir, code);
     let (answer, tool, session) = ask_full(
         &dir,
-        question_prompt(&dir, question, code),
+        if framing {
+            framing_prompt(&dir, question, code)
+        } else {
+            question_prompt(&dir, question, code)
+        },
         "Read,Glob,Grep,Bash(git log:*),Bash(ls:*)",
         12,
         prefer,
@@ -1661,6 +1741,41 @@ mod tests {
     }
 
     #[test]
+    fn the_plan_block_is_taken_out_of_the_answer() {
+        let a = "Voici.\n```plan\n## Objectif\n- X\n## Périmètre\n- Y\n## Hors périmètre\n- Z\n```\nFin.";
+        let (text, plan) = split_answer_plan(a);
+        assert_eq!(text, "Voici.\nFin.");
+        let plan = plan.unwrap();
+        assert!(plan.starts_with("## Objectif") && plan.ends_with("- Z"));
+        assert_eq!(split_answer_plan("Pas de plan."), ("Pas de plan.".to_string(), None));
+        assert_eq!(split_answer_plan("```plan\n\n```").1, None);
+        assert!(plan_request().contains("```plan"));
+        // The steps asked for come back in a block the thread already knows how to read.
+        let ask = plan_steps_request();
+        assert!(ask.contains("```etapes") || ask.contains("```steps"));
+        let (_, steps) = split_answer_steps("Voici.\n```etapes\n- Tests : écrire le test du plan\n```");
+        assert_eq!(steps, vec!["Tests : écrire le test du plan".to_string()]);
+    }
+
+    #[test]
+    fn framing_gives_an_opinion_and_questions_but_no_step() {
+        let long = "é".repeat(QUESTION_MAX + 500);
+        for code in [true, false] {
+            let p = framing_prompt("/tmp/x", &long, code);
+            assert!(p.contains("/tmp/x"));
+            assert!(p.contains("RIEN") || p.contains("NOTHING"));
+            assert!(p.contains("AUCUNE étape") || p.contains("NO step"));
+            assert!(p.contains("questions"));
+            assert_eq!(
+                p.matches('é').count() - framing_prompt("/tmp/x", "", code).matches('é').count(),
+                QUESTION_MAX,
+                "the idea is cut at QUESTION_MAX"
+            );
+        }
+        assert!(ask_question("/tmp/x", " ", None, None, true).is_err());
+    }
+
+    #[test]
     fn quick_questions_are_bounded_and_read_only() {
         let long = "é".repeat(QUESTION_MAX + 500);
         for code in [true, false] {
@@ -1682,7 +1797,7 @@ mod tests {
         assert!(p.contains("documents"));
         assert!(question_prompt("/tmp/x", "?", true).contains("code"));
         assert!(
-            ask_question("/tmp/x", "   ", None, None).is_err(),
+            ask_question("/tmp/x", "   ", None, None, false).is_err(),
             "an empty question never reaches an agent"
         );
     }

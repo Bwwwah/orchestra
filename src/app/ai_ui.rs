@@ -881,8 +881,8 @@ fn rtk_explanation(ui: &mut egui::Ui, t: &Tone) {
     ui.separator();
     ui.label(
         RichText::new(crate::tr!(
-            "Estimation RTK sur 7 jours glissants : RTK raccourcit les sorties des commandes que l'IA lance dans les sessions autonomes d'Orchestra. Chaque sortie raccourcie est comptée autant de fois qu'elle aurait été renvoyée au modèle. Le pourcentage est « jetons économisés ÷ (jetons consommés + jetons économisés) », calculé séparément pour chaque IA. Il se masque sous 1 % ou sans session RTK dans la semaine.",
-            "RTK estimate over a rolling 7 days: RTK shortens the outputs of the commands the AI runs in Orchestra's autonomous sessions. Each shortened output is counted as many times as it would have been sent back to the model. The share is \"tokens saved ÷ (tokens consumed + tokens saved)\", worked out for each AI separately. It is hidden under 1 % or without an RTK session in the week."
+            "Estimation RTK sur 7 jours glissants : RTK raccourcit les sorties des commandes que l'IA lance dans les sessions autonomes d'Orchestra. Chaque sortie raccourcie est comptée autant de fois qu'elle aurait été renvoyée au modèle. Le pourcentage est « jetons économisés ÷ (jetons consommés, cache compris + jetons économisés) », calculé séparément pour chaque IA. Ce sont des jetons, pas un pourcentage de votre abonnement : une lecture en cache pèse moins que les jetons neufs, et RTK estime lui-même ses économies. Il se masque sous 1 % ou sans session RTK dans la semaine.",
+            "RTK estimate over a rolling 7 days: RTK shortens the outputs of the commands the AI runs in Orchestra's autonomous sessions. Each shortened output is counted as many times as it would have been sent back to the model. The share is \"tokens saved ÷ (tokens consumed, cache included + tokens saved)\", worked out for each AI separately. These are tokens, not a share of your subscription: a cache read weighs less than new tokens, and RTK itself estimates its savings. It is hidden under 1 % or without an RTK session in the week."
         ))
         .size(11.5)
         .color(t.tertiary),

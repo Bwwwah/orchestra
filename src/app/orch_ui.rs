@@ -504,6 +504,8 @@ struct CopyJob {
     /// The project's repository.
     root: String,
     done: std::sync::mpsc::Receiver<Result<String, String>>,
+    /// The cross review's opinion, set by the thread when there was one.
+    review: std::sync::Arc<std::sync::Mutex<Option<crate::review::Review>>>,
 }
 
 /// The figures of one agent's subscription, as last read.
@@ -631,6 +633,37 @@ fn hash(s: &str) -> u64 {
 }
 
 impl NotesApp {
+    /// The project's effort level (economy slider) as the launch card shows it: the draft
+    /// of the card and the choices kept in the project change together.
+    pub(super) fn project_saving(&self, pid: &str) -> crate::model::Saving {
+        self.orch
+            .drafts
+            .get(pid)
+            .map(|d| d.saving)
+            .or_else(|| {
+                let p = self.ws.page(pid)?.project.as_ref()?;
+                Some(p.launch.as_ref().map(|l| l.saving).unwrap_or_default())
+            })
+            .unwrap_or_default()
+    }
+
+    /// Sets the project's effort level for its next sessions (the end of the framing).
+    pub(super) fn set_project_saving(&mut self, pid: &str, s: crate::model::Saving) {
+        if let Some(d) = self.orch.drafts.get_mut(pid) {
+            d.saving = s;
+        }
+        let commits = self.ws.settings.orch.allow_commits;
+        if let Some(p) = self.ws.page_mut(pid).and_then(|p| p.project.as_mut()) {
+            let mut prefs = p.launch.clone().unwrap_or_else(|| default_prefs(commits));
+            if prefs.saving == s {
+                return;
+            }
+            prefs.saving = s;
+            p.launch = Some(prefs);
+            self.dirty_since.get_or_insert_with(Instant::now);
+        }
+    }
+
     /// « Veille automatique » (Veille · CVE card): every watched code project is checked
     /// once a day; a check that finds an important vulnerability no step names yet asks for
     /// a fix session (`cve_fix_tick`), unless a session already runs on the project (the
@@ -738,13 +771,6 @@ impl NotesApp {
         fix: bool,
         model: &str,
     ) -> Result<(), String> {
-        if self.orch.runs.iter().any(|r| r.project == project) {
-            return Err(crate::tr!(
-                "une session tourne déjà sur ce projet",
-                "a session is already running on this project"
-            )
-            .into());
-        }
         let page = self
             .ws
             .page(project)
@@ -778,6 +804,21 @@ impl NotesApp {
         }
         // The AI assigned to the step taken first wins over the card's; none: the card's.
         let agent = pr.agent_for_next(agent, &crate::store::computer_id(), crate::model::now_ms());
+        // One session at a time per project and per AI. Two different AIs go in parallel: each
+        // works in its own copy and reserves its steps under its own name (`Agent::holder`), so
+        // they never take the same step. Merging stays per branch.
+        if self
+            .orch
+            .runs
+            .iter()
+            .any(|r| r.project == project && r.agent == agent)
+        {
+            return Err(crate::tr!(
+                "une session tourne déjà sur ce projet avec cette IA",
+                "a session is already running on this project with this AI"
+            )
+            .into());
+        }
         // The AI chosen: wired for working alone, and plugged in.
         if !agent.ready() {
             return Err(crate::trf!(
@@ -1717,6 +1758,7 @@ impl NotesApp {
             return false;
         }
         let (tx, rx) = std::sync::mpsc::channel();
+        let review_slot = std::sync::Arc::new(std::sync::Mutex::new(None));
         self.orch.copy_jobs.push(CopyJob {
             id: rec.id.clone(),
             merge: op != CopyOp::Discard,
@@ -1724,12 +1766,32 @@ impl NotesApp {
             title: rec.title.clone(),
             root: rec.root.clone(),
             done: rx,
+            review: review_slot.clone(),
         });
         let ctx = ctx.clone();
         std::thread::spawn(move || {
             let res = match op {
                 CopyOp::Merge => auto::merge(&rec),
-                CopyOp::ToMain => auto::merge_into_main(&rec),
+                CopyOp::ToMain => match crate::review::review_run(&rec) {
+                    // Another AI found a defect: no automatic merge, the person decides.
+                    Ok(rv) if rv.verdict == crate::review::Verdict::Blocking => {
+                        let msg = crate::trf!(
+                            "relecture par {} : défaut bloquant, fusion laissée à faire à la main. {}",
+                            "review by {}: blocking defect, merge left to do by hand. {}",
+                            rv.reviewer,
+                            rv.text
+                        );
+                        *review_slot.lock().unwrap() = Some(rv);
+                        Err(msg)
+                    }
+                    // Approved, remarks: the merge goes on.
+                    Ok(rv) => {
+                        *review_slot.lock().unwrap() = Some(rv);
+                        auto::merge_into_main(&rec)
+                    }
+                    // No reviewer available: the merge goes on.
+                    Err(_) => auto::merge_into_main(&rec),
+                },
                 CopyOp::Park => auto::park(&rec),
                 CopyOp::Discard => auto::discard(&rec),
             };
@@ -2736,7 +2798,10 @@ impl NotesApp {
             .iter()
             .filter_map(|r| {
                 let steps = &self.ws.page(&r.project)?.project.as_ref()?.steps;
-                Some((r.id.clone(), current_step(steps, &me)?.to_string()))
+                // Under the name of this session's AI, so two sessions each show their own step.
+                let holder = r.agent.holder();
+                let who = if holder.is_empty() { me.clone() } else { format!("{me}#{holder}") };
+                Some((r.id.clone(), current_step(steps, &who)?.to_string()))
             })
             .collect();
         // Each session's model, and why it was chosen (its record, written at launch).
@@ -3933,8 +3998,12 @@ impl NotesApp {
     /// The merges and discards finished in the background: their outcome recorded.
     fn copy_jobs_tick(&mut self) {
         let mut finished = vec![];
+        let mut reviews = vec![];
         self.orch.copy_jobs.retain(|j| match j.done.try_recv() {
             Ok(res) => {
+                if let Some(rv) = j.review.lock().ok().and_then(|mut g| g.take()) {
+                    reviews.push((j.id.clone(), rv));
+                }
                 finished.push((
                     j.id.clone(),
                     if j.park { 2 } else { j.merge as u8 },
@@ -3954,6 +4023,24 @@ impl NotesApp {
                 false
             }
         });
+        // The reviewer's opinion goes at the end of the session's report.
+        for (id, rv) in reviews {
+            let page = self
+                .ws
+                .runs
+                .iter()
+                .find(|x| x.id == id)
+                .and_then(|x| x.report.clone());
+            if let Some(page) = page {
+                let extra = crate::store::page_from_markdown(
+                    &crate::review::report_section(&rv),
+                    "",
+                );
+                if let Some(p) = self.ws.pages.iter_mut().find(|p| p.id == page) {
+                    p.blocks.extend(extra.blocks);
+                }
+            }
+        }
         for (id, merge, title, res) in finished {
             match res {
                 Ok(m) => {
@@ -5785,7 +5872,7 @@ mod tests {
         }
         // Gemini: the reason names what's missing, the % behind « arrêt à ». Mistral Vibe
         // gives it (its monthly budget) and its turns are driven: it can be picked.
-        let why = agent_unavailable(Agent::Gemini).unwrap();
+        let why = agent_unavailable(Agent::Antigravity).unwrap();
         assert!(why.contains("arrêt à") || why.contains("stop at"), "{why}");
         assert_eq!(agent_unavailable(Agent::Vibe).is_none(), cfg!(unix));
         // Only the plugged AIs are listed, in the usual order, plus the one already chosen.
@@ -5807,7 +5894,7 @@ mod tests {
         let runs = [(Agent::ClaudeCode, Some(50.0)), (Agent::Codex, Some(30.0)), (Agent::Codex, None)];
         assert_eq!(running_ceiling_of(&runs, Agent::ClaudeCode), Some(50.0));
         assert_eq!(running_ceiling_of(&runs, Agent::Codex), Some(30.0));
-        assert_eq!(running_ceiling_of(&runs, Agent::Gemini), None);
+        assert_eq!(running_ceiling_of(&runs, Agent::Antigravity), None);
         // Claude's window at 45 %, Codex's at 10 %: a Codex project starts from Codex's own
         // running ceiling (30 %) and counts from Codex's window, not Claude's.
         let mut d = Draft::new(None, true);

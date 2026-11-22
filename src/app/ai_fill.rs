@@ -37,6 +37,8 @@ pub enum AiReq {
         folder: String,
         question: String,
         prefer: Option<Tool>,
+        /// Framing: the AI gives its opinion on an idea and asks its questions, no step yet.
+        framing: bool,
     },
 }
 
@@ -89,6 +91,8 @@ pub struct AiJobs {
     /// Replies being sent on a thread: the thread so far, kept until the AI's answer comes
     /// to be added to it.
     carried: HashMap<String, QuickAnswer>,
+    /// Projects whose reply being sent asks for the validated plan.
+    plan_asked: std::collections::HashSet<String>,
 }
 
 impl AiJobs {
@@ -154,7 +158,58 @@ pub fn apply_fill(pr: &mut crate::project::Project, f: &Fill, by: &str) {
     pr.touch();
 }
 
+/// Write a validated plan (Markdown) into a project's page, under a « Plan validé » heading;
+/// an earlier plan (that heading and what follows up to the next heading 1) is replaced.
+pub fn put_plan(page: &mut crate::model::Page, plan: &str, by: &str) {
+    use crate::model::BlockKind;
+    let title = crate::tr!("Plan validé", "Validated plan");
+    // The first heading of a Markdown text is taken as the page's title: a throwaway one first.
+    // The parser reads « ## » as a heading 1: the plan's headings go one level down, so that
+    // they stay inside the section.
+    let plan: String = plan
+        .lines()
+        .map(|l| match l.trim_start() {
+            h if h.starts_with('#') => format!("###{}", h.trim_start_matches('#')),
+            _ => l.to_string(),
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    let md = format!("# _\n# {title}\n{}\n\n{plan}\n", crate::trf!("Par {by}", "By {by}"));
+    let mut blocks = crate::store::page_from_markdown(&md, "_").blocks;
+    blocks.retain(|b| !(b.kind == BlockKind::Paragraph && b.text.is_empty()));
+    if let Some(start) = page
+        .blocks
+        .iter()
+        .position(|b| b.kind == BlockKind::Heading1 && b.text.trim() == title)
+    {
+        let end = page.blocks[start + 1..]
+            .iter()
+            .position(|b| b.kind == BlockKind::Heading1)
+            .map_or(page.blocks.len(), |i| start + 1 + i);
+        let t = crate::model::now_ms();
+        for b in page.blocks.drain(start..end) {
+            page.deleted_blocks.insert(b.id, t);
+        }
+        for (i, b) in blocks.into_iter().enumerate() {
+            page.blocks.insert(start + i, b);
+        }
+    } else {
+        if page.blocks.len() == 1 && page.blocks[0].text.is_empty() && page.blocks[0].kind == BlockKind::Paragraph {
+            page.blocks.clear();
+        }
+        page.blocks.extend(blocks);
+    }
+    page.touch();
+}
+
 impl NotesApp {
+    fn write_plan(&mut self, page_id: &str, plan: &str, by: &str) {
+        if let Some(p) = self.ws.page_mut(page_id) {
+            put_plan(p, plan, by);
+            self.dirty_since.get_or_insert_with(Instant::now);
+        }
+    }
+
     pub(super) fn ai_tick(&mut self, ctx: &egui::Context) {
         let reqs: Vec<AiReq> = ctx
             .data_mut(|d| d.remove_temp::<Vec<AiReq>>(req_key()))
@@ -189,6 +244,7 @@ impl NotesApp {
                     folder,
                     question,
                     prefer,
+                    framing,
                 } => {
                     if self.ai.questions.contains_key(&page_id) || question.trim().is_empty() {
                         continue;
@@ -196,7 +252,7 @@ impl NotesApp {
                     let q = question.clone();
                     let code = self.code_forced(&page_id);
                     let slot = spawn(ctx, move || {
-                        crate::sync::ask_question(&folder, &q, code, prefer)
+                        crate::sync::ask_question(&folder, &q, code, prefer, framing)
                     });
                     self.ai.answers.remove(&page_id);
                     self.ai.questions.insert(page_id, (question, slot));
@@ -224,7 +280,14 @@ impl NotesApp {
             let text = r.text.clone();
             let slot = spawn(ctx, move || crate::sync::ask_followup(&resume, tool, &text));
             self.ai.carried.insert(r.project.clone(), prev);
-            self.ai.questions.insert(r.project, (r.text, slot));
+            // The plan's long request shows in the thread as a short line.
+            let shown = if r.plan {
+                self.ai.plan_asked.insert(r.project.clone());
+                crate::tr!("Valider le plan", "Validate the plan").to_string()
+            } else {
+                r.text
+            };
+            self.ai.questions.insert(r.project, (shown, slot));
         }
         // Answered quick questions.
         let done: Vec<String> = self
@@ -248,9 +311,33 @@ impl NotesApp {
                 Ok(r) => Some(r.tool),
                 Err(_) => carried.as_ref().and_then(|c| c.tool),
             };
+            let plan_asked = self.ai.plan_asked.remove(&id);
             let (answer, steps, resume) = match res {
                 Ok(r) => {
                     let (text, steps) = crate::sync::split_answer_steps(&r.answer);
+                    // The validated plan goes into the project's notes, out of the thread.
+                    let text = if plan_asked {
+                        let (rest, plan) = crate::sync::split_answer_plan(&text);
+                        match plan {
+                            Some(p) => {
+                                self.write_plan(&id, &p, &r.tool.label());
+                                let done = crate::tr!(
+                                    "Plan écrit dans les notes du projet.",
+                                    "Plan written into the project's notes."
+                                );
+                                if rest.is_empty() { done.to_string() } else { format!("{rest}\n\n{done}") }
+                            }
+                            None => format!(
+                                "{rest}\n\n{}",
+                                crate::tr!(
+                                    "L'IA n'a pas écrit de plan : réessayez « Valider le plan ».",
+                                    "The AI wrote no plan: try « Validate the plan » again."
+                                )
+                            ),
+                        }
+                    } else {
+                        text
+                    };
                     (Ok(text), steps, r.resume)
                 }
                 // A reply that failed keeps the conversation it was sent on.
@@ -420,6 +507,21 @@ impl NotesApp {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_validated_plan_is_written_once_and_replaced_by_the_next() {
+        let mut page = crate::store::page_from_markdown("# Projet\nIntro\n\n# Autre\nFin", "P");
+        super::put_plan(&mut page, "## Objectif\n- A\n## Périmètre\n- B", "Claude Code");
+        let titles = |p: &crate::model::Page| p.blocks.iter().map(|b| b.text.clone()).collect::<Vec<_>>();
+        let n = page.blocks.len();
+        assert!(titles(&page).iter().any(|t| t == "Objectif" || t == "A"));
+        super::put_plan(&mut page, "## Objectif\n- A2", "Codex");
+        let t = titles(&page);
+        assert!(t.iter().any(|x| x == "A2") && !t.iter().any(|x| x == "A"), "{t:?}");
+        assert!(t.iter().any(|x| x == "Autre") && t.iter().any(|x| x == "Intro"));
+        assert_eq!(t.iter().filter(|x| x.starts_with("Plan") || x.starts_with("Validated")).count(), 1);
+        assert!(page.blocks.len() < n);
+    }
+
     #[test]
     fn steps_of_an_answer_join_the_proposals_once() {
         let mut p = vec![("Tests : écrire le test du lecteur".to_string(), false)];

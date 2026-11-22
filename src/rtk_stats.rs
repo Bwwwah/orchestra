@@ -124,7 +124,9 @@ pub fn week_saving(
             w.rtk_sessions += 1;
         }
         w.saved += repeated_savings(&savings, &requests);
-        w.consumed += crate::sessions::consumption(sessions, tool, folder, since).billed;
+        // The savings are counted at every resend, cached or not: so is the consumption.
+        let used = crate::sessions::consumption(sessions, tool, folder, since);
+        w.consumed += used.billed + used.cached;
     }
     w
 }
@@ -168,8 +170,8 @@ pub fn saving_line(w: &WeekSaving) -> Option<String> {
     // Hidden without any RTK session in the week, and under 1 % (too small to be worth a line).
     let pct = w.percent().filter(|p| w.rtk_sessions > 0 && *p >= MIN_SHOWN_PERCENT)?;
     Some(crate::trf!(
-        "≈ {} % déjà économisé avec RTK (7 jours, estimation)",
-        "≈ {} % already saved with RTK (7 days, estimate)",
+        "≈ {} % de jetons déjà économisés avec RTK (7 jours, estimation)",
+        "≈ {} % of tokens already saved with RTK (7 days, estimate)",
         format!("{pct:.0}")
     ))
 }

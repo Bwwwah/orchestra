@@ -24,6 +24,16 @@ pub fn data_dir() -> PathBuf {
     dir
 }
 
+/// Who reserves steps in this process: the computer's id, followed by `#` and the AI's name
+/// when the MCP server was started for an autonomous session (ORCHESTRA_HOLDER). Two AIs
+/// working at once on one computer thus never take the same step.
+pub fn holder_id() -> String {
+    match std::env::var("ORCHESTRA_HOLDER") {
+        Ok(h) if !h.trim().is_empty() => format!("{}#{}", computer_id(), h.trim()),
+        _ => computer_id(),
+    }
+}
+
 /// This computer's id, made once and kept in the data folder (never in workspace.json,
 /// which copies of a shared project exchange): it tells whose AI reserved a step.
 pub fn computer_id() -> String {

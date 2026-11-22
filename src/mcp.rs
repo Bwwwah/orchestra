@@ -702,7 +702,7 @@ fn call_tool(name: &str, args: &Value) -> Result<String, ToolError> {
                     json!({
                         "id": p.id, "title": p.display_title(), "status": pr.status, "folder": pr.folder,
                         "steps_done": done, "steps_total": total,
-                        "next_step": pr.next_step_for(&crate::store::computer_id(), crate::model::now_ms()).map(|s| s.title.clone()),
+                        "next_step": pr.next_step_for(&crate::store::holder_id(), crate::model::now_ms()).map(|s| s.title.clone()),
                         "sessions": pr.sessions.len(),
                         "last_activity_ms": pr.last_activity.max(p.updated),
                     })
@@ -878,7 +878,7 @@ fn call_tool(name: &str, args: &Value) -> Result<String, ToolError> {
                     .ok_or_else(|| format!("unknown step status {st}"))?;
                 if st == project::StepStatus::Doing {
                     // Reserved for this computer's AI; refused if another computer's AI has it.
-                    pr.claim_step(&sid, &crate::store::computer_id())?;
+                    pr.claim_step(&sid, &crate::store::holder_id())?;
                 } else {
                     pr.set_step_status(&sid, st);
                 }

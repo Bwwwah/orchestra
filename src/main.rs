@@ -24,6 +24,7 @@ mod model;
 mod opener;
 mod proc;
 mod project;
+mod review;
 mod richtext;
 mod rtk_stats;
 mod screen;

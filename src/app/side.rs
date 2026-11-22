@@ -38,6 +38,8 @@ fn pending_key() -> egui::Id {
 pub struct ThreadReply {
     pub project: String,
     pub text: String,
+    /// The reply asks for the validated plan, which is written into the project's notes.
+    pub plan: bool,
 }
 
 pub fn reply_key() -> egui::Id {
@@ -518,8 +520,73 @@ impl NotesApp {
                     .push(ThreadReply {
                         project: pid.to_string(),
                         text,
+                        plan: false,
                     })
             });
+        }
+        // The validated plan turned into proposed steps, ticked by the person before any is added.
+        if ui
+            .add_enabled_ui(!busy, |ui| {
+                super::projects::action_link(ui, crate::tr!("Proposer les étapes", "Propose the steps"))
+                    .on_hover_text(crate::tr!(
+                        "L'IA propose les étapes du plan validé dans l'encadré Étapes ; vous cochez celles à ajouter.",
+                        "The AI proposes the validated plan's steps in the Steps box; you tick the ones to add."
+                    ))
+            })
+            .inner
+            .clicked()
+        {
+            ui.ctx().data_mut(|d| {
+                d.get_temp_mut_or_default::<Vec<ThreadReply>>(reply_key())
+                    .push(ThreadReply {
+                        project: pid.to_string(),
+                        text: crate::sync::plan_steps_request().to_string(),
+                        plan: false,
+                    })
+            });
+        }
+        // Once the questions are answered: the AI writes the plan into the project's notes.
+        if ui
+            .add_enabled_ui(!busy, |ui| {
+                super::projects::action_link(ui, crate::tr!("Valider le plan", "Validate the plan"))
+                    .on_hover_text(crate::tr!(
+                        "L'IA écrit l'objectif, le périmètre et le hors périmètre dans les notes du projet.",
+                        "The AI writes the goal, scope and out-of-scope into the project's notes."
+                    ))
+            })
+            .inner
+            .clicked()
+        {
+            ui.ctx().data_mut(|d| {
+                d.get_temp_mut_or_default::<Vec<ThreadReply>>(reply_key())
+                    .push(ThreadReply {
+                        project: pid.to_string(),
+                        text: crate::sync::plan_request().to_string(),
+                        plan: true,
+                    })
+            });
+        }
+        // The end of the framing: how much effort the project's sessions will put in.
+        let mut saving = self.project_saving(pid);
+        let before = saving;
+        ui.horizontal(|ui| {
+            ui.label(RichText::new(crate::tr!("Effort", "Effort")).size(12.5).color(t.secondary));
+            egui::ComboBox::from_id_salt(("frame-saving", pid))
+                .selected_text(RichText::new(saving.label()).size(12.5))
+                .width(100.0)
+                .show_ui(ui, |ui| {
+                    for s in crate::model::Saving::ALL {
+                        ui.selectable_value(&mut saving, s, s.label());
+                    }
+                })
+                .response
+                .on_hover_text(crate::tr!(
+                    "Économe = modèle plus léger et peu de réflexion, Qualité = modèle plus haut et plus de réflexion. Gardé pour les prochaines sessions du projet (modifiable dans le lancement autonome).",
+                    "Economical = lighter model and little thinking, Quality = higher model and more thinking. Kept for the project's next sessions (also editable in the autonomous launch card)."
+                ));
+        });
+        if saving != before {
+            self.set_project_saving(pid, saving);
         }
         true
     }

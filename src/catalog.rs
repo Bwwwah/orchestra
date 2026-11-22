@@ -141,7 +141,7 @@ pub fn builtin(agent: Agent) -> Vec<ModelInfo> {
             ("haiku", "Claude Haiku"),
         ],
         Agent::Codex => &[("gpt-5-codex", "GPT-5 Codex"), ("gpt-5", "GPT-5")],
-        Agent::Gemini => &[
+        Agent::Antigravity => &[
             ("gemini-2.5-pro", "Gemini 2.5 Pro"),
             ("gemini-2.5-flash", "Gemini 2.5 Flash"),
         ],
@@ -172,7 +172,7 @@ pub fn available(agent: Agent) -> Vec<ModelInfo> {
             }
             list
         }
-        Agent::ClaudeCode | Agent::Gemini => Vec::new(),
+        Agent::ClaudeCode | Agent::Antigravity => Vec::new(),
     };
     if found.is_empty() {
         builtin(agent)
@@ -531,7 +531,8 @@ pub fn choosable(agent: Agent) -> Vec<ModelInfo> {
 /// Codex through `-c model_reasoning_effort=…`. Gemini CLI and Mistral Vibe have no such
 /// option, so the saving slider only acts on them through the choice of model.
 pub fn accepts_effort(agent: Agent) -> bool {
-    matches!(agent, Agent::ClaudeCode | Agent::Codex)
+    // Antigravity: `--effort low|medium|high|xhigh|max`.
+    matches!(agent, Agent::ClaudeCode | Agent::Codex | Agent::Antigravity)
 }
 
 /// The model the person imposed, and why it is used.
@@ -605,7 +606,7 @@ mod tests {
     #[test]
     fn only_claude_and_codex_take_a_thinking_level() {
         let yes: Vec<Agent> = Agent::ALL.into_iter().filter(|a| accepts_effort(*a)).collect();
-        assert_eq!(yes, vec![Agent::ClaudeCode, Agent::Codex]);
+        assert_eq!(yes, vec![Agent::ClaudeCode, Agent::Codex, Agent::Antigravity]);
     }
 
     #[test]
@@ -774,7 +775,7 @@ mod tests {
     fn the_cheapest_able_model_is_chosen_across_ais() {
         let m = |id: &str| ModelInfo::new(id, id);
         let claude = (Agent::ClaudeCode, builtin(Agent::ClaudeCode));
-        let gemini = (Agent::Gemini, builtin(Agent::Gemini));
+        let gemini = (Agent::Antigravity, builtin(Agent::Antigravity));
         let only = |c: &(Agent, Vec<ModelInfo>), t| choose(std::slice::from_ref(c), t).unwrap();
         // On Claude alone: Haiku for light work, Sonnet for ordinary, Opus for hard.
         let c = only(&claude, Tier::Light);
@@ -786,7 +787,7 @@ mod tests {
         let c = choose(&[claude.clone(), gemini], Tier::Mid).unwrap();
         assert_eq!(
             (c.agent, c.model.id.as_str()),
-            (Agent::Gemini, "gemini-2.5-flash")
+            (Agent::Antigravity, "gemini-2.5-flash")
         );
         // A model outside the plan is never chosen; none reaching the tier: the most capable
         // there is, and the reason says so.
@@ -873,7 +874,7 @@ mod tests {
         // Another AI's model is set aside: the project's is used, else nothing.
         assert_eq!(got("gemini-2.5-pro", "opus", cc).unwrap().model, "opus");
         assert_eq!(got("gemini-2.5-pro", "", cc), None);
-        assert_eq!(got("gemini-2.5-pro", "", Agent::Gemini).unwrap().model, "gemini-2.5-pro");
+        assert_eq!(got("gemini-2.5-pro", "", Agent::Antigravity).unwrap().model, "gemini-2.5-pro");
         // A name no list knows is kept (a newer model); one unsafe on a command line isn't.
         assert_eq!(got("claude-opus-9", "", cc).unwrap().model, "claude-opus-9");
         assert_eq!(got("opus; rm -rf ~", "sonnet", cc).unwrap().model, "sonnet");
