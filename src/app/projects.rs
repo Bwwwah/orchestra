@@ -1444,13 +1444,7 @@ pub(super) fn project_panel(ui: &mut egui::Ui, cx: &mut Cx) -> Option<super::not
     if !tabs.contains(&tab) {
         tab = ProjectTab::Overview;
     }
-    let counts = |k: ProjectTab| -> Option<usize> {
-        match k {
-            ProjectTab::Pages => Some(cx.pages.len()).filter(|n| *n > 0),
-            _ => None,
-        }
-    };
-    if let Some(t2) = tab_bar(ui, &tabs, tab, counts, cx.t) {
+    if let Some(t2) = tab_bar(ui, &tabs, tab, cx.t) {
         tab = t2;
     }
     ui.ctx().data_mut(|d| d.insert_temp(tab_key, tab));
@@ -1543,7 +1537,6 @@ fn tab_bar(
     ui: &mut egui::Ui,
     tabs: &[ProjectTab],
     open: ProjectTab,
-    count: impl Fn(ProjectTab) -> Option<usize>,
     t: &Tone,
 ) -> Option<ProjectTab> {
     let mut picked = None;
@@ -1552,10 +1545,7 @@ fn tab_bar(
         ui.spacing_mut().item_spacing.x = 22.0;
         for &k in tabs {
             let on = k == open;
-            let text = match count(k) {
-                Some(n) => format!("{}  {n}", k.label()),
-                None => k.label().to_string(),
-            };
+            let text = k.label().to_string();
             let font = if on { semibold(super::style::BODY) } else { FontId::proportional(super::style::BODY) };
             let g = ui.painter().layout_no_wrap(text.clone(), font, t.text);
             let (rect, resp) =
