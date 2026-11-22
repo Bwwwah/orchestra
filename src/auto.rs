@@ -143,7 +143,12 @@ impl Agent {
             // Orchestra's MCP server, and only it, on the command line (`codex_command`).
             Agent::Codex => {
                 let git_dirs = if allow_commits { codex_git_dirs(cwd) } else { Vec::new() };
-                codex_command(&git_dirs, model)
+                let mut c = codex_command(&git_dirs, model);
+                if let Some(e) = saving.effort() {
+                    c.push_str(" -c ");
+                    c.push_str(&crate::sessions::shell_quote(&format!("model_reasoning_effort=\"{e}\"")));
+                }
+                c
             }
             // Its settings of the session (`config_files`) as the « system » settings, which
             // win over the person's and the repository's; only Orchestra's MCP server.
@@ -3569,6 +3574,18 @@ mod tests {
         assert!(run(Saving::Economical).ends_with(" --effort low"));
         assert!(run(Saving::Quality).ends_with(" --effort high"));
         assert_eq!(run(Saving::Balanced), Agent::ClaudeCode.command(cwd, false, "", ""));
+    }
+
+    /// The slider's thinking level reaches Codex as `-c model_reasoning_effort="…"`.
+    #[test]
+    fn the_slider_reaches_codex_as_reasoning_effort() {
+        use crate::model::Saving;
+        let cwd = Path::new("/x");
+        let run = |s| Agent::Codex.command_saving(cwd, false, "", "", s);
+        assert!(!run(Saving::Balanced).contains("model_reasoning_effort"));
+        assert!(run(Saving::Economical).ends_with("model_reasoning_effort=\"low\"'"), "{}", run(Saving::Economical));
+        assert!(run(Saving::Quality).ends_with("model_reasoning_effort=\"high\"'"));
+        assert_eq!(run(Saving::Balanced), Agent::Codex.command(cwd, false, "", ""));
     }
 
     /// The model chosen for a session reaches Gemini CLI as `--model`, quoted; no model or a
