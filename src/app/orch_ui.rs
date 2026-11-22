@@ -5785,7 +5785,7 @@ mod tests {
         }
         // Gemini: the reason names what's missing, the % behind « arrêt à ». Mistral Vibe
         // gives it (its monthly budget) and its turns are driven: it can be picked.
-        let why = agent_unavailable(Agent::Gemini).unwrap();
+        let why = agent_unavailable(Agent::Antigravity).unwrap();
         assert!(why.contains("arrêt à") || why.contains("stop at"), "{why}");
         assert_eq!(agent_unavailable(Agent::Vibe).is_none(), cfg!(unix));
         // Only the plugged AIs are listed, in the usual order, plus the one already chosen.
@@ -5807,7 +5807,7 @@ mod tests {
         let runs = [(Agent::ClaudeCode, Some(50.0)), (Agent::Codex, Some(30.0)), (Agent::Codex, None)];
         assert_eq!(running_ceiling_of(&runs, Agent::ClaudeCode), Some(50.0));
         assert_eq!(running_ceiling_of(&runs, Agent::Codex), Some(30.0));
-        assert_eq!(running_ceiling_of(&runs, Agent::Gemini), None);
+        assert_eq!(running_ceiling_of(&runs, Agent::Antigravity), None);
         // Claude's window at 45 %, Codex's at 10 %: a Codex project starts from Codex's own
         // running ceiling (30 %) and counts from Codex's window, not Claude's.
         let mut d = Draft::new(None, true);

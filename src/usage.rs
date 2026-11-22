@@ -244,9 +244,9 @@ pub fn unreadable_reason(agent: crate::auto::Agent) -> Option<&'static str> {
     use crate::auto::Agent;
     match agent {
         Agent::ClaudeCode | Agent::Codex | Agent::Vibe => None,
-        Agent::Gemini => Some(crate::tr!(
-            "Quota compté par Google en requêtes par jour, jamais écrit sur cet ordinateur.",
-            "Quota counted by Google in requests per day, never written on this computer."
+        Agent::Antigravity => Some(crate::tr!(
+            "Quota compté par Google, jamais écrit sur cet ordinateur.",
+            "Quota counted by Google, never written on this computer."
         )),
     }
 }
@@ -258,7 +258,7 @@ pub fn read_for(agent: crate::auto::Agent) -> Option<Usage> {
         Agent::ClaudeCode => read(),
         Agent::Codex => read_codex(),
         Agent::Vibe => vibe_budget_state().0,
-        Agent::Gemini => None,
+        Agent::Antigravity => None,
     }
 }
 
@@ -1447,8 +1447,8 @@ mod tests {
         assert!(codex_usage(r#"{"payload":{"rate_limits":null}}"#, 0).is_none());
         assert!(codex_usage(r#"{"payload":{"rate_limits":{"primary":{}}}}"#, 0).is_none());
         assert!(reports_usage(Agent::ClaudeCode) && reports_usage(Agent::Codex));
-        assert!(reports_usage(Agent::Vibe) && !reports_usage(Agent::Gemini));
-        assert!(read_for(Agent::Gemini).is_none());
+        assert!(reports_usage(Agent::Vibe) && !reports_usage(Agent::Antigravity));
+        assert!(read_for(Agent::Antigravity).is_none());
         // Every agent either has its figures read or says why not, never both.
         for a in Agent::ALL {
             assert_eq!(unreadable_reason(a).is_none(), reports_usage(a), "{a:?}");

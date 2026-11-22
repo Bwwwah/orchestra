@@ -386,7 +386,8 @@ impl Ai {
             // Claude Code's aliases follow the latest model of each family.
             Ai::ClaudeCode => &["opus", "sonnet", "haiku"],
             Ai::Codex => &["gpt-5-codex", "gpt-5"],
-            Ai::Gemini => &["gemini-2.5-pro", "gemini-2.5-flash"],
+            // To check against `agy models` once it can be run.
+            Ai::Gemini | Ai::Antigravity => &["gemini-2.5-pro", "gemini-2.5-flash"],
             // Mistral Vibe picks its model in its own settings (active_model).
             _ => &[],
         }

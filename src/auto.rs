@@ -9,7 +9,7 @@
 //! one until the work is done, a limit is reached or it is stopped.
 //!
 //! What depends on the agent is in `Agent` (command, session files) and `Reader` (the format
-//! of its sessions). Codex, Gemini CLI and Mistral Vibe have theirs, with their permissions and
+//! of its sessions). Codex, Antigravity CLI and Mistral Vibe have theirs, with their permissions and
 //! Orchestra's MCP server (`Agent::config_files`), but are not started alone until these are
 //! checked on the real programs and their limits are read (`Agent::ready`).
 
@@ -20,7 +20,7 @@ use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 
-// Codex, Gemini and Vibe are chosen from the « Sessions IA » card once it has its list of
+// Codex, Antigravity and Vibe are chosen from the « Sessions IA » card once it has its list of
 // AIs (a later step); until then only the tests name them.
 #[allow(dead_code)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
@@ -28,25 +28,28 @@ use std::process::Stdio;
 pub enum Agent {
     ClaudeCode,
     Codex,
-    Gemini,
+    /// Antigravity CLI (`agy`), which replaces Gemini CLI; files written with « gemini » still
+    /// read as this one.
+    #[serde(alias = "gemini")]
+    Antigravity,
     Vibe,
 }
 
 #[allow(dead_code)]
 impl Agent {
-    pub const ALL: [Agent; 4] = [Agent::ClaudeCode, Agent::Codex, Agent::Gemini, Agent::Vibe];
+    pub const ALL: [Agent; 4] = [Agent::ClaudeCode, Agent::Codex, Agent::Antigravity, Agent::Vibe];
 
     pub fn label(self) -> &'static str {
         self.ai().label()
     }
 
     /// The bare name of the AI's maker or model, for the sidebar usage tiles: "Claude",
-    /// "Codex", "Gemini", "Mistral".
+    /// "Codex", "Antigravity", "Mistral".
     pub fn short_name(self) -> &'static str {
         match self {
             Agent::ClaudeCode => "Claude",
             Agent::Codex => "Codex",
-            Agent::Gemini => "Gemini",
+            Agent::Antigravity => "Antigravity",
             Agent::Vibe => "Mistral",
         }
     }
@@ -57,7 +60,7 @@ impl Agent {
         match self {
             Agent::ClaudeCode => Ai::ClaudeCode,
             Agent::Codex => Ai::Codex,
-            Agent::Gemini => Ai::Gemini,
+            Agent::Antigravity => Ai::Antigravity,
             Agent::Vibe => Ai::Vibe,
         }
     }
@@ -72,7 +75,7 @@ impl Agent {
         match self {
             Agent::ClaudeCode => "claude",
             Agent::Codex => "codex",
-            Agent::Gemini => "gemini",
+            Agent::Antigravity => "agy",
             Agent::Vibe => "vibe",
         }
     }
@@ -80,7 +83,7 @@ impl Agent {
     /// Autonomous work is wired for it: its command (with permissions), its session files
     /// and the reading of its turns. Claude Code, and Mistral Vibe driven turn by turn in its
     /// headless mode (`headless`; a POSIX shell runs its turns, so not on Windows); Codex in
-    /// its sandbox (`codex_command`); Gemini is listed so the rest of the program can name
+    /// its sandbox (`codex_command`); Antigravity is listed so the rest of the program can name
     /// it, and is never started alone until this is true. Never true for an agent whose use Orchestra can't read
     /// (`usage::reports_usage`): its sessions could not be stopped at their ceiling.
     pub fn ready(self) -> bool {
@@ -88,7 +91,7 @@ impl Agent {
             Agent::ClaudeCode => true,
             Agent::Vibe => cfg!(unix),
             Agent::Codex => true,
-            Agent::Gemini => false,
+            Agent::Antigravity => false,
         };
         wired && crate::usage::reports_usage(self)
     }
@@ -151,17 +154,19 @@ impl Agent {
                 }
                 c
             }
-            // Its settings of the session (`config_files`) as the « system » settings, which
-            // win over the person's and the repository's; only Orchestra's MCP server.
+            // Its own sandbox (`--sandbox`), edits accepted but nothing else approved by itself
+            // (`--mode accept-edits`; never `--dangerously-skip-permissions`). Its MCP servers
+            // are global (`~/.gemini/config/mcp_config.json`): none can be set per session yet.
             // With a model, `--model` rather than the person's default.
-            Agent::Gemini => {
-                let mut c = format!(
-                    "GEMINI_CLI_SYSTEM_SETTINGS_PATH={} gemini --approval-mode default --allowed-mcp-server-names orchestra",
-                    crate::sessions::shell_quote(&self.config_dir(cwd).join("settings.json").display().to_string())
-                );
+            Agent::Antigravity => {
+                let mut c = "agy --sandbox --mode accept-edits".to_string();
                 if let Some(m) = model_arg(model) {
                     c.push_str(" --model ");
                     c.push_str(&crate::sessions::shell_quote(m));
+                }
+                if let Some(e) = saving.effort() {
+                    c.push_str(" --effort ");
+                    c.push_str(e);
                 }
                 c
             }
@@ -209,19 +214,14 @@ impl Agent {
                 .map(PathBuf::from)
                 .unwrap_or_else(|| dirs::home_dir().unwrap_or_default().join(".codex"))
                 .join("sessions"),
-            // Gemini CLI: `tmp/<sha256 of the folder>/chats/session-….json`.
-            Agent::Gemini => {
-                use sha2::Digest;
-                let hash = sha2::Sha256::digest(cwd.display().to_string().as_bytes());
-                let hex: String = hash.iter().map(|b| format!("{b:02x}")).collect();
-                std::env::var_os("GEMINI_CLI_HOME")
-                    .map(PathBuf::from)
-                    .unwrap_or_else(|| dirs::home_dir().unwrap_or_default())
-                    .join(".gemini")
-                    .join("tmp")
-                    .join(hex)
-                    .join("chats")
-            }
+            // Antigravity CLI: its logs name `~/.gemini/antigravity/conversations/`; the
+            // format of what it writes there is not verified yet (never signed in on this
+            // machine), which is one reason it is not `ready`.
+            Agent::Antigravity => dirs::home_dir()
+                .unwrap_or_default()
+                .join(".gemini")
+                .join("antigravity")
+                .join("conversations"),
             // Mistral Vibe: `logs/session/session_….json`, in the home of the session
             // (`config_dir`, given as VIBE_HOME by `command`).
             Agent::Vibe => self.config_dir(cwd).join("logs").join("session"),
@@ -249,28 +249,16 @@ impl Agent {
     /// The files of the session's settings, with their text: Orchestra's MCP server (the only
     /// one) and the rules of `rules_config`, in the agent's own format.
     ///
-    /// - Gemini CLI: `settings.json`, read as its system settings: `mcpServers` with only
-    ///   Orchestra (trusted: its tools don't ask, as `mcp__orchestra` for Claude Code) and the
-    ///   `tools` rules.
     /// - Mistral Vibe: `config.toml` of its own home: the rules and one `[[mcp_servers]]`
     ///   table. Its sign-in (`.env`) stays in the person's home, linked by `write_config`.
     ///   With `model` (see `model_arg`), its `active_model` rather than the person's.
-    /// - Claude Code and Codex: none, everything is on their command line.
+    /// - Claude Code, Codex and Antigravity: none, everything is on their command line.
     pub fn config_files(self, cwd: &Path, allow_commits: bool, extra: &str, model: &str) -> Vec<(PathBuf, String)> {
         let dir = self.config_dir(cwd);
         match self {
             // Claude Code: its settings on its command line; RTK's for its hook, if shipped.
             Agent::ClaudeCode if rtk_binary().is_some() => rtk_config_files(&rtk_home()),
-            Agent::ClaudeCode | Agent::Codex => Vec::new(),
-            Agent::Gemini => {
-                let mut v: Value =
-                    serde_json::from_str(&self.rules_config(allow_commits, extra)).unwrap_or_default();
-                let mut server = mcp_server();
-                server["trust"] = Value::Bool(true);
-                v["mcpServers"] = serde_json::json!({ "orchestra": server });
-                let text = serde_json::to_string_pretty(&v).unwrap_or_default() + "\n";
-                vec![(dir.join("settings.json"), text)]
-            }
+            Agent::ClaudeCode | Agent::Codex | Agent::Antigravity => Vec::new(),
             Agent::Vibe => {
                 let s = mcp_server();
                 let mut ours = format!(
@@ -316,7 +304,7 @@ impl Agent {
     }
 
     /// Its session files: one JSON record per line, appended (Claude Code, Codex), or one
-    /// JSON document rewritten after each message (Gemini, Vibe).
+    /// JSON document rewritten after each message (Vibe).
     fn appends(self) -> bool {
         matches!(self, Agent::ClaudeCode | Agent::Codex)
     }
@@ -1016,7 +1004,7 @@ pub fn permissions(allow_commits: bool, extra: &str) -> (Vec<String>, Vec<String
 ///   one; a tool it has not is left out (nothing to allow or refuse);
 /// - a path (`Read(~/.ssh/**)`, `Edit(~/.zshrc)`): none of the three filters its file tools by
 ///   path, so these are kept apart (`paths`) for the sandbox (Codex) or the agent's own
-///   restriction to the working folder (Gemini, Vibe);
+///   restriction to the working folder (Vibe);
 /// - Orchestra's MCP server (`mcp__orchestra`): wired with the MCP configuration of each agent.
 ///
 /// The person's extra rules go through the same filter as for Claude Code first.
@@ -1045,11 +1033,6 @@ fn command_prefix(rule: &str) -> Option<String> {
 /// The agent's tool doing what a tool of Claude Code does, if it has one.
 fn agent_tool(agent: Agent, claude_tool: &str) -> Option<&'static str> {
     match (agent, claude_tool) {
-        (Agent::Gemini, "Glob") => Some("glob"),
-        (Agent::Gemini, "Grep") => Some("search_file_content"),
-        (Agent::Gemini, "TodoWrite") => Some("write_todos"),
-        (Agent::Gemini, "WebFetch") => Some("web_fetch"),
-        (Agent::Gemini, "WebSearch") => Some("google_web_search"),
         (Agent::Vibe, "Grep") => Some("grep"),
         (Agent::Vibe, "TodoWrite") => Some("todo"),
         (Agent::Vibe, "WebFetch") => Some("web_fetch"),
@@ -1094,8 +1077,7 @@ impl Agent {
         r
     }
 
-    /// The rules as the agent reads them: Gemini CLI's `tools` settings (`allowed`, `exclude`,
-    /// shell commands as `run_shell_command(prefix)`), Mistral Vibe's `config.toml`
+    /// The rules as the agent reads them: Mistral Vibe's `config.toml`
     /// (`[tools.bash]` allowlist and denylist, `permission = "always"` for the allowed tools,
     /// `"never"` for the refused ones), Codex's execution policy (`prefix_rule` lines of a
     /// `.rules` file, `allow` or `forbidden`). Empty for Claude Code, whose rules are passed
@@ -1131,20 +1113,8 @@ impl Agent {
             }
         }
         match self {
-            Agent::ClaudeCode => String::new(),
-            Agent::Gemini => {
-                let shell = |v: &[String]| -> Vec<String> {
-                    v.iter().map(|c| format!("run_shell_command({c})")).collect()
-                };
-                let mut allowed = r.allowed_tools.clone();
-                allowed.extend(shell(&r.allowed_commands));
-                let mut exclude = r.denied_tools.clone();
-                exclude.extend(shell(&r.denied_commands));
-                serde_json::to_string_pretty(&serde_json::json!({
-                    "tools": { "allowed": allowed, "exclude": exclude }
-                }))
-                .unwrap_or_default()
-            }
+            // No per-session rules file known for Antigravity: its sandbox and mode do the work.
+            Agent::ClaudeCode | Agent::Antigravity => String::new(),
             Agent::Vibe => {
                 let list = |v: &[String]| -> String {
                     let items: Vec<String> = v.iter().map(|s| toml_string(s)).collect();
@@ -2277,7 +2247,7 @@ impl Reader {
         }
     }
 
-    /// A session written as one JSON document, rewritten after each message (Gemini, Vibe):
+    /// A session written as one JSON document, rewritten after each message (Vibe):
     /// read again whole whenever it changes.
     fn poll_document(&mut self, agent: Agent, path: &Path) {
         let Ok(meta) = std::fs::metadata(path) else { return };
@@ -2302,35 +2272,6 @@ impl Reader {
         self.records = messages.len();
         self.turn_over = false;
         match agent {
-            Agent::Gemini => {
-                // Messages {type: user|gemini|info|error, content, toolCalls, tokens}.
-                let mut tokens = 0;
-                for m in messages {
-                    let t = &m["tokens"];
-                    let n = |k: &str| t[k].as_u64().unwrap_or(0);
-                    tokens += n("input").saturating_sub(n("cached")) + n("output") + n("thoughts");
-                    let text = content_text(&m["content"]);
-                    match m["type"].as_str() {
-                        Some("gemini") => {
-                            if !text.trim().is_empty() {
-                                self.last_text = text.clone();
-                            }
-                            // After its tools have run the model answers again.
-                            let calls = m["toolCalls"].as_array().is_some_and(|a| !a.is_empty());
-                            self.turn_over = !calls && !text.trim().is_empty();
-                        }
-                        Some("error") => {
-                            if is_limit_message(&text) {
-                                self.limit_hit = Some(text);
-                                self.turn_over = true;
-                            }
-                        }
-                        Some("user") => self.turn_over = false,
-                        _ => {}
-                    }
-                }
-                self.tokens = self.tokens.max(self.tokens_before + tokens);
-            }
             Agent::Vibe if v["format"].as_str().is_some_and(|f| f.starts_with("harness.public-session-state/")) => {
                 self.vibe_state(&v);
             }
@@ -2356,7 +2297,8 @@ impl Reader {
                     .tokens
                     .max(self.tokens_before + n("session_prompt_tokens") + n("session_completion_tokens"));
             }
-            Agent::ClaudeCode | Agent::Codex => {}
+            // Antigravity's session format is not known yet (nothing to read).
+            Agent::ClaudeCode | Agent::Codex | Agent::Antigravity => {}
         }
     }
 
@@ -2734,7 +2676,7 @@ pub fn is_limit_message(text: &str) -> bool {
         || t.contains("hit your limit")
         || t.contains("reached your usage limit")
         || t.contains("usage limit")
-        // Gemini CLI (Google's quota) and Mistral Vibe (the API's rate limit).
+        // Antigravity CLI (Google's quota) and Mistral Vibe (the API's rate limit).
         || t.contains("quota exceeded")
         || t.contains("resource_exhausted")
         || t.contains("rate limit exceeded")
@@ -3101,7 +3043,7 @@ mod tests {
     #[test]
     fn short_names_have_no_subscription_or_quota_prefix() {
         let names: Vec<_> = Agent::ALL.iter().map(|a| a.short_name()).collect();
-        assert_eq!(names, ["Claude", "Codex", "Gemini", "Mistral"]);
+        assert_eq!(names, ["Claude", "Codex", "Antigravity", "Mistral"]);
     }
 
     #[test]
@@ -3240,7 +3182,7 @@ mod tests {
         // Mistral Vibe, turn by turn in headless mode (a POSIX shell runs its turns).
         assert_eq!(Agent::Vibe.ready(), cfg!(unix));
         assert!(Agent::Vibe.headless() && !Agent::ClaudeCode.headless());
-        for a in [Agent::Codex, Agent::Gemini, Agent::Vibe] {
+        for a in [Agent::Codex, Agent::Antigravity, Agent::Vibe] {
             assert!(a == Agent::Vibe || a == Agent::Codex || !a.ready());
             // Its program, in its strictest mode.
             let cmd = a.command(Path::new("/x"), true, "", "");
@@ -3254,21 +3196,25 @@ mod tests {
             assert!(!cmd.contains("yolo") && !cmd.contains("never") && !cmd.contains("danger"), "{cmd}");
             assert_ne!(a.session_dir(Path::new("/x")), Agent::ClaudeCode.session_dir(Path::new("/x")));
         }
-        // Gemini keeps a folder per project.
-        assert_ne!(
-            Agent::Gemini.session_dir(Path::new("/x")),
-            Agent::Gemini.session_dir(Path::new("/y"))
-        );
+    }
+
+    /// A file written when the agent was still called « gemini » reads as Antigravity.
+    #[test]
+    fn an_old_gemini_agent_reads_as_antigravity() {
+        let old: Agent = serde_json::from_str("\"gemini\"").unwrap();
+        assert_eq!(old, Agent::Antigravity);
+        let new: Agent = serde_json::from_str("\"antigravity\"").unwrap();
+        assert_eq!(new, Agent::Antigravity);
+        assert_eq!(serde_json::to_string(&Agent::Antigravity).unwrap(), "\"antigravity\"");
     }
 
     #[test]
-    fn reader_reads_codex_gemini_and_vibe() {
+    fn reader_reads_codex_and_vibe() {
         let dir = std::env::temp_dir().join(format!("orch-agents-{}", uuid::Uuid::new_v4().simple()));
         let cwd = dir.join("wt");
         let since = std::time::SystemTime::now() - std::time::Duration::from_secs(5);
         unsafe {
             std::env::set_var("CODEX_HOME", dir.join("codex"));
-            std::env::set_var("GEMINI_CLI_HOME", dir.join("gemini"));
             std::env::set_var("VIBE_HOME", dir.join("vibe"));
         }
         // Codex: dated folders; a session of another project is not ours.
@@ -3295,41 +3241,6 @@ mod tests {
         assert!(r.turn_over);
         assert_eq!(r.tokens, 47);
         assert_eq!(signal(&r.last_text), Signal::Done);
-
-        // Gemini: one document, rewritten.
-        let gd = Agent::Gemini.session_dir(&cwd);
-        std::fs::create_dir_all(&gd).unwrap();
-        let gf = gd.join("session-1.json");
-        std::fs::write(&gf, r#"{"messages":[{"type":"user","content":"go"},
-            {"type":"gemini","content":"","toolCalls":[{"name":"ls"}],"tokens":{"input":50,"cached":10,"output":5,"thoughts":5}}]}"#).unwrap();
-        let mut r = Reader::default();
-        r.poll(Agent::Gemini, &cwd, since);
-        assert!(!r.turn_over);
-        assert_eq!(r.tokens, 50);
-        std::thread::sleep(std::time::Duration::from_millis(20));
-        std::fs::write(&gf, r#"{"messages":[{"type":"user","content":"go"},
-            {"type":"gemini","content":"","toolCalls":[{"name":"ls"}],"tokens":{"input":50,"cached":10,"output":5,"thoughts":5}},
-            {"type":"gemini","content":[{"text":"ok [[CONTINUER]]"}],"tokens":{"input":20,"output":2}}]}"#).unwrap();
-        r.poll(Agent::Gemini, &cwd, since);
-        assert!(r.turn_over);
-        assert_eq!(r.tokens, 72);
-        assert_eq!(signal(&r.last_text), Signal::Continue);
-        // A new conversation (short sessions): the old file is no longer read, even rewritten,
-        // and the tokens already used still count.
-        r.new_conversation();
-        assert!(!r.turn_over && r.last_text.is_empty());
-        std::thread::sleep(std::time::Duration::from_millis(20));
-        std::fs::write(&gf, r#"{"messages":[{"type":"gemini","content":"vieux [[FINI]]","tokens":{"input":900}}]}"#).unwrap();
-        r.poll(Agent::Gemini, &cwd, since);
-        assert!(r.path.is_none() && r.last_text.is_empty());
-        let gf2 = gd.join("session-2.json");
-        std::fs::write(&gf2, r#"{"messages":[{"type":"user","content":"go"},
-            {"type":"gemini","content":[{"text":"neuf [[CONTINUER]]"}],"tokens":{"input":10,"output":3}}]}"#).unwrap();
-        r.poll(Agent::Gemini, &cwd, since);
-        assert_eq!(r.path.as_deref(), Some(gf2.as_path()));
-        assert!(r.turn_over);
-        assert_eq!(r.tokens, 85);
-        assert_eq!(r.last_text, "neuf [[CONTINUER]]");
 
         // Vibe: chat messages, totals in the metadata.
         let vd = Agent::Vibe.session_dir(&cwd);
@@ -3638,17 +3549,17 @@ mod tests {
         }
     }
 
-    /// The model chosen for a session reaches Gemini CLI as `--model`, quoted; no model or a
+    /// The model chosen for a session reaches Antigravity CLI as `--model`, quoted; no model or a
     /// name that isn't one adds nothing.
     #[test]
-    fn the_chosen_model_reaches_gemini() {
+    fn the_chosen_model_reaches_antigravity() {
         let cwd = Path::new("/x");
-        let plain = Agent::Gemini.command(cwd, false, "", "");
+        let plain = Agent::Antigravity.command(cwd, false, "", "");
         assert!(!plain.contains("--model"), "{plain}");
-        let c = Agent::Gemini.command(cwd, false, "", "gemini-2.5-flash");
-        assert!(c.ends_with(" --allowed-mcp-server-names orchestra --model gemini-2.5-flash"), "{c}");
+        let c = Agent::Antigravity.command(cwd, false, "", "gemini-2.5-flash");
+        assert!(c.ends_with(" --model gemini-2.5-flash"), "{c}");
         for bad in ["--yolo", "x; echo hi", "$(id)", "a b"] {
-            let c = Agent::Gemini.command(cwd, false, "", bad);
+            let c = Agent::Antigravity.command(cwd, false, "", bad);
             assert!(!c.contains("--model"), "{c}");
         }
     }
@@ -3937,33 +3848,24 @@ mod tests {
     fn every_agent_gets_only_orchestras_mcp_server() {
         let cwd = Path::new("/w/copy");
         // One folder per agent and per copy, outside the copy.
-        for a in [Agent::Gemini, Agent::Vibe] {
+        for a in [Agent::Antigravity, Agent::Vibe] {
             assert!(!a.config_dir(cwd).starts_with(cwd));
             assert_ne!(a.config_dir(cwd), a.config_dir(Path::new("/w/other")));
         }
-        assert_ne!(Agent::Gemini.config_dir(cwd), Agent::Vibe.config_dir(cwd));
+        assert_ne!(Agent::Antigravity.config_dir(cwd), Agent::Vibe.config_dir(cwd));
         assert!(Agent::ClaudeCode.config_files(cwd, true, "", "").is_empty());
         assert!(Agent::Codex.config_files(cwd, true, "", "").is_empty());
+        assert!(Agent::Antigravity.config_files(cwd, true, "", "").is_empty());
 
         // Codex: the whole table of MCP servers replaced on its command line.
         let c = Agent::Codex.command(cwd, false, "", "");
         assert!(c.contains(" -c 'mcp_servers={orchestra={command=\""), "{c}");
         assert!(c.contains(",args=[\"mcp\"]}}'"), "{c}");
 
-        // Gemini: its system settings, with Orchestra trusted and the rules.
-        let files = Agent::Gemini.config_files(cwd, false, "", "");
-        assert_eq!(files.len(), 1);
-        let (path, text) = &files[0];
-        let v: Value = serde_json::from_str(text).unwrap();
-        let servers = v["mcpServers"].as_object().unwrap();
-        assert_eq!(servers.len(), 1);
-        assert_eq!(v["mcpServers"]["orchestra"]["args"][0], "mcp");
-        assert_eq!(v["mcpServers"]["orchestra"]["trust"], true);
-        assert!(v["tools"]["exclude"].as_array().unwrap().iter().any(|x| x == "run_shell_command(rm)"));
-        let g = Agent::Gemini.command(cwd, false, "", "");
-        assert!(g.starts_with("GEMINI_CLI_SYSTEM_SETTINGS_PATH="), "{g}");
-        assert!(g.contains(&path.display().to_string()), "{g}");
-        assert!(g.ends_with(" gemini --approval-mode default --allowed-mcp-server-names orchestra"));
+        // Antigravity: its sandbox, edits accepted, never everything approved.
+        let g = Agent::Antigravity.command(cwd, false, "", "");
+        assert_eq!(g, "agy --sandbox --mode accept-edits");
+        assert!(!g.contains("dangerously"));
 
         // Vibe: its own home, with one MCP table and the rules; its sessions are read there.
         let files = Agent::Vibe.config_files(cwd, false, "", "");
@@ -4015,7 +3917,7 @@ mod tests {
     #[test]
     fn rules_are_translated_for_every_agent() {
         let extra = "Bash(just test:*), Bash(rm -i:*), Bash, Read";
-        for agent in [Agent::Codex, Agent::Gemini, Agent::Vibe] {
+        for agent in [Agent::Codex, Agent::Antigravity, Agent::Vibe] {
             let r = agent.rules(true, extra);
             // Every shell rule of Claude Code is there, as a prefix.
             for c in ["git status", "cargo test", "pwd", "git commit", "just test"] {
@@ -4040,17 +3942,9 @@ mod tests {
         let r = Agent::Codex.rules(false, "");
         assert!(r.allowed_tools.is_empty() && r.denied_tools.is_empty());
         assert!(!r.allowed_commands.iter().any(|a| a == "git commit"));
-        assert_eq!(Agent::Gemini.rules(false, "").denied_tools, ["web_fetch", "google_web_search"]);
+        assert!(Agent::Antigravity.rules(false, "").denied_tools.is_empty());
         assert!(Agent::Vibe.rules(false, "").allowed_tools.contains(&"grep".to_string()));
-
-        // Gemini: a JSON settings document.
-        let g: Value = serde_json::from_str(&Agent::Gemini.rules_config(false, "")).unwrap();
-        let allowed = g["tools"]["allowed"].as_array().unwrap();
-        assert!(allowed.iter().any(|a| a == "run_shell_command(git status)"));
-        assert!(allowed.iter().any(|a| a == "glob"));
-        let exclude = g["tools"]["exclude"].as_array().unwrap();
-        assert!(exclude.iter().any(|a| a == "run_shell_command(rm)"));
-        assert!(exclude.iter().any(|a| a == "web_fetch"));
+        assert!(Agent::Antigravity.rules_config(false, "").is_empty());
         // Vibe: TOML tables.
         let v = Agent::Vibe.rules_config(false, "");
         assert!(v.starts_with("[tools.bash]\nallowlist = [\"ls\", \"pwd\", \"git status\""));
