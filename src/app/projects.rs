@@ -1836,7 +1836,7 @@ fn steps_card(ui: &mut egui::Ui, cx: &mut Cx, extra: f32) -> f32 {
             .filter(|s| s.status != StepStatus::Done)
             .count();
         let mut open_rows: Vec<(String, egui::Rect)> = vec![];
-        let mut set_model: Option<(String, String)> = None;
+        let mut set_assign: Option<(String, Option<crate::auto::Agent>, String)> = None;
         for i in rows {
             let s = &pr.steps[i];
             let open_key = ("step-open", s.id.as_str());
@@ -1881,6 +1881,12 @@ fn steps_card(ui: &mut egui::Ui, cx: &mut Cx, extra: f32) -> f32 {
                 }
                 if let Some(a) = area {
                     chip(ui, a, t.secondary, egui::Sense::hover());
+                }
+                // Entrusted to an AI: said on the row, in that AI's colour.
+                if let Some(ag) = s.agent.filter(|_| s.status != StepStatus::Done) {
+                    let (r, g, b) = ag.ai().accent();
+                    chip(ui, ag.short_name(), Color32::from_rgb(r, g, b), egui::Sense::hover())
+                        .on_hover_text(crate::trf!("Confiée à {}", "Entrusted to {}", ag.label()));
                 }
                 let room = ui.available_width() - 26.0;
                 let mut job = super::rich::inline_job(text, TEXT, color, false, t);
@@ -1932,10 +1938,10 @@ fn steps_card(ui: &mut egui::Ui, cx: &mut Cx, extra: f32) -> f32 {
                             ui.label(RichText::new(line).size(12.0).color(t.tertiary));
                         }
                         if !ro && s.status != StepStatus::Done {
-                            let mut m = s.model.clone();
-                            step_model_pick(ui, &s.id, &mut m, t);
-                            if m != s.model {
-                                set_model = Some((s.id.clone(), m));
+                            let (mut a, mut m) = (s.agent, s.model.clone());
+                            step_assign_pick(ui, &s.id, &mut a, &mut m, t);
+                            if a != s.agent || m != s.model {
+                                set_assign = Some((s.id.clone(), a, m));
                             }
                         }
                         r
@@ -2120,7 +2126,8 @@ fn steps_card(ui: &mut egui::Ui, cx: &mut Cx, extra: f32) -> f32 {
         if let Some(id) = remove {
             pr.remove_step(&id);
         }
-        if let Some((id, m)) = set_model {
+        if let Some((id, a, m)) = set_assign {
+            pr.set_step_agent(&id, a);
             pr.set_step_model(&id, &m);
         }
         // "+ Ajouter une étape": a quiet line aligned with the steps; click to type.
@@ -2247,45 +2254,82 @@ fn steps_card(ui: &mut egui::Ui, cx: &mut Cx, extra: f32) -> f32 {
     h
 }
 
-/// The model imposed on a step (empty: that of the project, else Orchestra's choice), among
-/// those of every AI; one of an AI other than the session's is set aside at launch.
-fn step_model_pick(ui: &mut egui::Ui, step_id: &str, model: &mut String, t: &Tone) {
+/// « Confiée à »: who takes a step, in one menu. « Automatique » (the project's choice:
+/// its AI, or Orchestra's pick), an AI with its model chosen by Orchestra, or an AI and one
+/// of its models. Only the AIs able to work alone are offered.
+fn step_assign_pick(
+    ui: &mut egui::Ui,
+    step_id: &str,
+    agent: &mut Option<crate::auto::Agent>,
+    model: &mut String,
+    t: &Tone,
+) {
+    use crate::auto::Agent;
+    let shown = match (&agent, model.is_empty()) {
+        (None, true) => crate::tr!("Automatique", "Automatic").to_string(),
+        (None, false) => model.clone(),
+        (Some(a), true) => a.label().to_string(),
+        (Some(a), false) => format!("{} · {}", a.label(), model),
+    };
     ui.horizontal(|ui| {
         ui.label(
-            RichText::new(crate::tr!("Modèle", "Model"))
+            RichText::new(crate::tr!("Confiée à", "Entrusted to"))
                 .size(12.0)
                 .color(t.tertiary),
         );
-        egui::ComboBox::from_id_salt(("step-model", step_id))
-            .selected_text(RichText::new(if model.is_empty() {
-                crate::tr!("automatique", "automatic")
-            } else {
-                model.as_str()
-            }).size(12.0))
-            .width(150.0)
+        egui::ComboBox::from_id_salt(("step-assign", step_id))
+            .selected_text(RichText::new(shown).size(12.0))
+            .width(170.0)
             .show_ui(ui, |ui| {
-                ui.set_min_width(220.0);
-                ui.selectable_value(
-                    model,
-                    String::new(),
-                    crate::tr!("Automatique", "Automatic"),
-                );
+                ui.set_min_width(240.0);
+                if ui
+                    .add(egui::Button::selectable(
+                        agent.is_none() && model.is_empty(),
+                        crate::tr!("✨ Automatique", "✨ Automatic"),
+                    ))
+                    .on_hover_text(crate::tr!(
+                        "Comme le projet : son IA, ou celle qu'Orchestra choisit au lancement.",
+                        "As the project: its AI, or the one Orchestra picks at the start."
+                    ))
+                    .clicked()
+                {
+                    *agent = None;
+                    model.clear();
+                }
                 // Read only while open: the lists come from the AIs' files.
-                for a in crate::auto::Agent::ALL {
+                for a in Agent::ALL.into_iter().filter(|a| a.ready()) {
                     ui.separator();
-                    ui.label(RichText::new(a.label()).size(11.5).color(t.tertiary));
+                    let whole = *agent == Some(a) && model.is_empty();
+                    if ui
+                        .add(egui::Button::selectable(
+                            whole,
+                            RichText::new(a.label()).strong(),
+                        ))
+                        .on_hover_text(crate::tr!(
+                            "Cette IA, le modèle choisi par Orchestra",
+                            "This AI, the model picked by Orchestra"
+                        ))
+                        .clicked()
+                    {
+                        *agent = Some(a);
+                        model.clear();
+                    }
                     for m in crate::catalog::available(a) {
-                        let text = format!("{} · {}", m.label, m.tier.label());
-                        ui.add_enabled_ui(!m.needs_higher_plan, |ui| {
-                            ui.selectable_value(model, m.id.clone(), text);
-                        });
+                        let on = *agent == Some(a) && *model == m.id;
+                        let text = RichText::new(format!("    {} · {}", m.label, m.tier.label()))
+                            .size(12.5);
+                        let r = ui.add_enabled(!m.needs_higher_plan, egui::Button::selectable(on, text));
+                        if r.clicked() {
+                            *agent = Some(a);
+                            *model = m.id.clone();
+                        }
                     }
                 }
             })
             .response
             .on_hover_text(crate::tr!(
-                "Le modèle de la session qui prendra cette étape. « Automatique » : celui du projet (Orchestration › Options), sinon le moins cher capable de la faire. Un modèle d'une autre IA que celle de la session est ignoré.",
-                "The model of the session that takes this step. « Automatic »: the project's (Orchestration › Options), else the cheapest able to do it. A model of another AI than the session's is ignored."
+                "L'IA (et le modèle) de la session qui prendra cette étape. « Automatique » : comme le projet.",
+                "The AI (and model) of the session that takes this step. « Automatic »: as the project."
             ));
     });
 }

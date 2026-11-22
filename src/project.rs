@@ -371,6 +371,11 @@ pub struct LaunchPrefs {
     /// The economy slider (Économe / Équilibré / Qualité); Balanced isn't written.
     #[serde(default, skip_serializing_if = "is_balanced")]
     pub saving: crate::model::Saving,
+    /// « IA : Automatique »: at each start Orchestra picks the AI (and its model) among those
+    /// with room under their limits, the cheapest able to do the step; `agent` is then only
+    /// the fallback. Choices kept before it existed read false: their AI stays theirs.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub auto_agent: bool,
 }
 
 fn is_balanced(s: &crate::model::Saving) -> bool {
@@ -1478,7 +1483,7 @@ mod tests {
                 turns: Some(12),
                 ..Default::default()
             },
-            agent: None, model: "opus".into(), saving: Default::default(),
+            agent: None, model: "opus".into(), saving: Default::default(), auto_agent: false,
         };
         let p = Project {
             session_limit: Some(95.0),
@@ -1498,7 +1503,7 @@ mod tests {
                 commits: false,
                 endless: false,
                 end: Default::default(),
-                agent: None, model: String::new(), saving: Default::default(),
+                agent: None, model: String::new(), saving: Default::default(), auto_agent: false,
             }),
             ..Default::default()
         };
@@ -1819,7 +1824,7 @@ mod tests {
                 commits: true,
                 endless: true,
                 end: Default::default(),
-                agent: None, model: String::new(), saving: Default::default(),
+                agent: None, model: String::new(), saving: Default::default(), auto_agent: false,
             });
             p.sessions.push(SessionRef {
                 tool: "claude-code".into(),

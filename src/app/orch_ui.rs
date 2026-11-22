@@ -294,8 +294,10 @@ struct Draft {
     /// Endless mode, and its end conditions as set in the launch card.
     endless: bool,
     end: crate::model::EndConditions,
-    /// The AI the session is started with.
+    /// The AI the session is started with (the fallback when `auto`).
     agent: Agent,
+    /// « Automatique »: the AI is picked at the start (see `pick_agent`).
+    auto: bool,
     /// The model imposed for the project's sessions (empty: Orchestra chooses).
     model: String,
     saving: crate::model::Saving,
@@ -317,6 +319,7 @@ impl Draft {
             endless: prefs.endless,
             end: prefs.end,
             agent: prefs.agent.unwrap_or(Agent::ClaudeCode),
+            auto: prefs.auto_agent,
             model: prefs.model,
             saving: prefs.saving,
         }
@@ -332,6 +335,7 @@ impl Draft {
             agent: (self.agent != Agent::ClaudeCode).then_some(self.agent),
             model: self.model.clone(),
             saving: self.saving,
+            auto_agent: self.auto,
         }
     }
 }
@@ -349,6 +353,8 @@ fn default_prefs(commits: bool) -> crate::project::LaunchPrefs {
         agent: None,
         model: String::new(),
         saving: Default::default(),
+        // A project never set: Orchestra picks its AI at each start.
+        auto_agent: true,
     }
 }
 
@@ -3254,7 +3260,7 @@ impl NotesApp {
                     if !busy {
                         ui.horizontal_wrapped(|ui| {
                             ui.add_space(70.0);
-                            let mut s = options_summary(d.agent, d.endless, !d.mission.trim().is_empty(), to_main.get(id).copied(), d.commits);
+                            let mut s = options_summary((!d.auto).then_some(d.agent), d.endless, !d.mission.trim().is_empty(), to_main.get(id).copied(), d.commits);
                             // A model imposed: said beside its AI.
                             if !d.model.is_empty() {
                                 let at = usize::from(d.agent != Agent::ClaudeCode);
@@ -3432,6 +3438,9 @@ impl NotesApp {
         start.dedup();
         for id in start {
             let d = self.orch.drafts.get(&id).cloned().unwrap();
+            // « Automatique »: the AI picked now, measured on its own subscription.
+            let (agent, why) = self.pick_agent(&id, &d);
+            let d = Draft { agent, ..d };
             let title = self
                 .ws
                 .page(&id)
@@ -3448,15 +3457,85 @@ impl NotesApp {
                     if let Some(x) = self.orch.drafts.get_mut(&id) {
                         x.pick = false;
                     }
-                    msg = Some(super::notices::Notice::Ack(crate::trf!(
-                        "Session autonome lancée sur {title}.",
-                        "Autonomous session started on {title}."
-                    )));
+                    msg = Some(super::notices::Notice::Ack(match &why {
+                        Some(w) => crate::trf!(
+                            "Session autonome lancée sur {title} · IA choisie : {w}.",
+                            "Autonomous session started on {title} · AI picked: {w}."
+                        ),
+                        None => crate::trf!(
+                            "Session autonome lancée sur {title}.",
+                            "Autonomous session started on {title}."
+                        ),
+                    }));
                 }
                 Err(e) => msg = Some(super::notices::Notice::Error(format!("{title} : {e}."))),
             }
         }
         msg
+    }
+
+    /// The AI a project's next session starts with: the one chosen, or with « Automatique »
+    /// the one Orchestra picks now (see `pick_auto`), with the reason to tell the person.
+    fn pick_agent(&self, id: &str, d: &Draft) -> (Agent, Option<String>) {
+        if !d.auto {
+            return (d.agent, None);
+        }
+        let Some(pr) = self.ws.page(id).and_then(|p| p.project.as_ref()) else {
+            return (d.agent, None);
+        };
+        // The step taken first is entrusted to an AI: that one (the start does the same).
+        let me = crate::store::computer_id();
+        if let Some(a) = pr
+            .next_step_for(&me, crate::model::now_ms())
+            .and_then(|s| s.agent)
+        {
+            return (
+                a,
+                Some(crate::trf!(
+                    "{}, à qui la première étape est confiée",
+                    "{}, entrusted with the first step",
+                    a.label()
+                )),
+            );
+        }
+        let figs = self.figures_by_agent();
+        let o = &self.ws.settings.orch;
+        let plugged = self.ais.plugged();
+        let cands: Vec<AutoCandidate> = Agent::ALL
+            .into_iter()
+            .filter(|a| plugged.contains(&a.ai()) && agent_unavailable(*a).is_none())
+            .map(|a| {
+                let f = figs.get(&a).copied().unwrap_or_default();
+                AutoCandidate {
+                    agent: a,
+                    room: o.five_limit(a) - f.five.unwrap_or(0.0),
+                    week_full: f
+                        .week
+                        .is_some_and(|w| crate::usage::near_reserve(w, o.week_limit_of(a), 0.0)),
+                    models: crate::catalog::choosable(a),
+                }
+            })
+            .collect();
+        let need = crate::catalog::estimate_session(
+            pr,
+            &d.mission,
+            false,
+            &crate::store::computer_id(),
+            crate::model::now_ms(),
+        )
+        .with_saving(d.saving, false)
+        .tier;
+        match pick_auto(cands, need) {
+            Some((a, why)) => (a, Some(why)),
+            None => (
+                d.agent,
+                Some(crate::trf!(
+                    "aucune IA n'a de marge sous ses limites : {} par défaut",
+                    "no AI has room under its limits: {} by default",
+                    d.agent.label()
+                )),
+            ),
+        }
     }
 
     /// « Lancer une IA » on a project's page: the same start as its line in Orchestration,
@@ -3490,6 +3569,9 @@ impl NotesApp {
             .page(id)
             .map(|p| p.display_title())
             .unwrap_or_default();
+        // « Automatique »: the AI picked now; the rest is measured on its subscription.
+        let (agent, why) = self.pick_agent(id, &d);
+        let d = Draft { agent, ..d };
         let global = self.ws.settings.orch.five_limit(d.agent);
         let figs = self.figures_by_agent();
         let five = figs.get(&d.agent).and_then(|f| f.five);
@@ -3507,10 +3589,16 @@ impl NotesApp {
         let endless = if d.endless { Some(d.end.clone()) } else { None };
         Some(
             match self.launch_run(ctx, id, &d.mission, ceiling, d.commits, endless, d.agent, false, "") {
-                Ok(()) => super::notices::Notice::Ack(crate::trf!(
-                    "Session autonome lancée sur {title} (arrêt à {ceiling:.0} % de la fenêtre de 5 h).",
-                    "Autonomous session started on {title} (stops at {ceiling:.0} % of the 5-hour window)."
-                )),
+                Ok(()) => super::notices::Notice::Ack(match &why {
+                    Some(w) => crate::trf!(
+                        "Session autonome lancée sur {title} · IA choisie : {w}.",
+                        "Autonomous session started on {title} · AI picked: {w}."
+                    ),
+                    None => crate::trf!(
+                        "Session autonome lancée sur {title} (arrêt à {ceiling:.0} % de la fenêtre de 5 h).",
+                        "Autonomous session started on {title} (stops at {ceiling:.0} % of the 5-hour window)."
+                    ),
+                }),
                 Err(e) => super::notices::Notice::Error(format!("{title} : {e}.")),
             },
         )
@@ -5670,6 +5758,48 @@ fn launch_controls(ui: &mut egui::Ui, c: LaunchCx<'_>) {
     }
 }
 
+/// An AI « Automatique » may pick: its room left under its 5-hour limit (points of its
+/// window), whether its week's reserve is near, and the models it offers here.
+struct AutoCandidate {
+    agent: Agent,
+    room: f32,
+    week_full: bool,
+    models: Vec<crate::catalog::ModelInfo>,
+}
+
+/// « IA : Automatique »: among the AIs with room (at least a point under their 5-hour
+/// limit, their week's reserve not near), the cheapest model able to do work of tier `need`;
+/// on equal cost the AI with the most room. None when no AI has room. With the reason, in
+/// a few words: « Codex · GPT-5 mini, le moins cher des modèles moyen ou plus ».
+fn pick_auto(
+    mut cands: Vec<AutoCandidate>,
+    need: crate::catalog::Tier,
+) -> Option<(Agent, String)> {
+    cands.retain(|c| c.room >= 1.0 && !c.week_full);
+    if cands.is_empty() {
+        return None;
+    }
+    // The most room first: `choose` keeps the first AI on equal cost.
+    cands.sort_by(|a, b| b.room.total_cmp(&a.room));
+    let lists: Vec<(Agent, Vec<crate::catalog::ModelInfo>)> =
+        cands.iter().map(|c| (c.agent, c.models.clone())).collect();
+    Some(match crate::catalog::choose(&lists, need) {
+        Some(c) => (
+            c.agent,
+            format!("{} · {}, {}", c.agent.label(), c.model.label, c.reason),
+        ),
+        // No model list read (an AI that doesn't give one): the one with the most room.
+        None => (
+            cands[0].agent,
+            crate::trf!(
+                "{}, la plus de marge sous ses limites",
+                "{}, the most room under its limits",
+                cands[0].agent.label()
+            ),
+        ),
+    })
+}
+
 /// Why an AI can't be chosen for a session started alone, if it can't (None: it can).
 fn agent_unavailable(agent: Agent) -> Option<&'static str> {
     if agent.ready() {
@@ -5736,15 +5866,17 @@ fn launch_options(
 /// nothing set there is forgotten: another AI than Claude Code, endless, a mission of its
 /// own, « sur main », no commits.
 fn options_summary(
-    agent: Agent,
+    agent: Option<Agent>,
     endless: bool,
     mission: bool,
     on_main: Option<bool>,
     commits: bool,
 ) -> Vec<String> {
     let mut v = vec![];
-    if agent != Agent::ClaudeCode {
-        v.push(agent.label().to_string());
+    match agent {
+        None => v.push(crate::tr!("✨ IA auto", "✨ auto AI").to_string()),
+        Some(a) if a != Agent::ClaudeCode => v.push(a.label().to_string()),
+        Some(_) => {}
     }
     if endless {
         v.push(crate::tr!("∞ sans fin", "∞ endless").to_string());
@@ -5763,13 +5895,38 @@ fn options_summary(
 
 fn agent_pick(ui: &mut egui::Ui, id: &str, d: &mut Draft, busy: bool, connected: &[Agent]) {
     ui.add_enabled_ui(!busy, |ui| {
+        let shown = if d.auto {
+            crate::tr!("✨ Automatique", "✨ Automatic")
+        } else {
+            d.agent.label()
+        };
         egui::ComboBox::from_id_salt(("run-agent", id))
-            .selected_text(RichText::new(d.agent.label()).size(12.5))
-            .width(110.0)
+            .selected_text(RichText::new(shown).size(12.5))
+            .width(130.0)
             .show_ui(ui, |ui| {
                 // Wide enough for the reason written under an AI that can't be chosen.
                 ui.set_min_width(260.0);
                 ui.set_max_width(260.0);
+                // First and by default: Orchestra picks the AI and its model at each start.
+                if ui
+                    .add(egui::Button::selectable(d.auto, crate::tr!("✨ Automatique", "✨ Automatic")))
+                    .clicked()
+                {
+                    d.auto = true;
+                    d.model.clear();
+                }
+                ui.add(
+                    egui::Label::new(
+                        RichText::new(crate::tr!(
+                            "À chaque lancement, l'IA et le modèle les moins chers capables de l'étape, parmi celles qui ont de la marge sous leurs limites.",
+                            "At each start, the cheapest AI and model able to do the step, among those with room under their limits."
+                        ))
+                        .size(11.5)
+                        .color(ui.visuals().weak_text_color()),
+                    )
+                    .wrap(),
+                );
+                ui.separator();
                 for a in agent_choices(connected, d.agent) {
                     let why = if connected.contains(&a) {
                         agent_unavailable(a)
@@ -5781,14 +5938,15 @@ fn agent_pick(ui: &mut egui::Ui, id: &str, d: &mut Draft, busy: bool, connected:
                     };
                     let r = ui.add_enabled(
                         why.is_none(),
-                        egui::Button::selectable(d.agent == a, a.label()),
+                        egui::Button::selectable(!d.auto && d.agent == a, a.label()),
                     );
                     if r.clicked() {
                         // Another AI: its own models, so back to Orchestra's choice.
-                        if d.agent != a {
+                        if d.agent != a || d.auto {
                             d.model.clear();
                         }
                         d.agent = a;
+                        d.auto = false;
                     }
                     // Said under it, not only on hover: a greyed AI with no word looks broken.
                     if let Some(w) = why {
@@ -5804,8 +5962,8 @@ fn agent_pick(ui: &mut egui::Ui, id: &str, d: &mut Draft, busy: bool, connected:
             })
             .response
             .on_hover_text(crate::tr!(
-                "L'IA qui travaille sur ce projet. Gardée pour les prochaines sessions de ce projet.",
-                "The AI working on this project. Kept for this project's next sessions."
+                "L'IA qui travaille sur ce projet : choisie par Orchestra à chaque lancement (« Automatique »), ou toujours la même. Une étape confiée à une IA passe avant. Gardé pour les prochaines sessions de ce projet.",
+                "The AI working on this project: picked by Orchestra at each start (« Automatic »), or always the same. A step entrusted to an AI comes first. Kept for this project's next sessions."
             ));
     });
 }
@@ -5813,6 +5971,15 @@ fn agent_pick(ui: &mut egui::Ui, id: &str, d: &mut Draft, busy: bool, connected:
 /// The model of the project's sessions: « Automatique » (the cheapest able to do the step,
 /// see `catalog::choose`), or one the AI offers, imposed. A step's own model wins over it.
 fn model_pick(ui: &mut egui::Ui, id: &str, d: &mut Draft, busy: bool) {
+    if d.auto {
+        // Chosen with the AI, at each start.
+        ui.label(
+            RichText::new(crate::tr!("modèle choisi avec l'IA", "model picked with the AI"))
+                .size(12.0)
+                .color(ui.visuals().weak_text_color()),
+        );
+        return;
+    }
     ui.add_enabled_ui(!busy, |ui| {
         egui::ComboBox::from_id_salt(("run-model", id))
             .selected_text(RichText::new(if d.model.is_empty() {
@@ -5945,6 +6112,7 @@ mod tests {
             },
             agent: None, model: String::new(),
             saving: crate::model::Saving::Economical,
+            auto_agent: false,
         };
         let p = Project {
             session_ceiling: Some(95.0),
@@ -6478,7 +6646,7 @@ mod tests {
                     pick: false,
                     endless: false,
                     end: Default::default(),
-                    agent: super::Agent::ClaudeCode, model: String::new(),
+                    agent: super::Agent::ClaudeCode, auto: false, model: String::new(),
                     saving: Default::default(),
                 };
                 let mut to_main: super::HashMap<String, bool> =
@@ -6550,7 +6718,7 @@ mod tests {
                     pick: false,
                     endless: false,
                     end: Default::default(),
-                    agent: super::Agent::ClaudeCode, model: String::new(),
+                    agent: super::Agent::ClaudeCode, auto: false, model: String::new(),
                     saving: Default::default(),
                 };
                 let mut to_main: super::HashMap<String, bool> = super::HashMap::new();
@@ -6582,12 +6750,51 @@ mod tests {
     fn folded_options_still_show_what_differs() {
         use super::{Agent, options_summary};
         // All as usual: nothing beside « Options ».
-        assert!(options_summary(Agent::ClaudeCode, false, false, Some(false), true).is_empty());
-        assert!(options_summary(Agent::ClaudeCode, false, false, None, false).is_empty());
+        assert!(options_summary(Some(Agent::ClaudeCode), false, false, Some(false), true).is_empty());
+        assert!(options_summary(Some(Agent::ClaudeCode), false, false, None, false).is_empty());
         // Each choice that differs is named, so nothing set there is forgotten.
-        let s = options_summary(Agent::Codex, true, true, Some(true), false);
+        let s = options_summary(Some(Agent::Codex), true, true, Some(true), false);
         assert_eq!(s.len(), 5, "{s:?}");
         assert_eq!(s[0], "Codex");
+        // « Automatique » says so.
+        assert!(options_summary(None, false, false, None, true)[0].contains("auto"));
+    }
+
+    /// « IA : Automatique » takes the cheapest model able to do the step among the AIs with
+    /// room; on equal cost the one with the most room; none with room: nothing picked.
+    #[test]
+    fn the_automatic_ai_is_the_cheapest_with_room() {
+        use super::{Agent, AutoCandidate, pick_auto};
+        use crate::catalog::{ModelInfo, Tier};
+        let m = |id: &str, tier: Tier, cost: u32| ModelInfo {
+            id: id.into(),
+            label: id.into(),
+            needs_higher_plan: false,
+            tier,
+            cost_cents: cost,
+        };
+        let c = |agent, room: f32, week_full, models| AutoCandidate { agent, room, week_full, models };
+        let claude = || vec![m("haiku", Tier::Light, 1), m("sonnet", Tier::Mid, 5), m("opus", Tier::High, 20)];
+        let codex = || vec![m("mini", Tier::Mid, 3), m("gpt", Tier::High, 15)];
+        // A medium step: Codex's mini is the cheapest able to do it.
+        let (a, why) = pick_auto(vec![c(Agent::ClaudeCode, 30.0, false, claude()), c(Agent::Codex, 30.0, false, codex())], Tier::Mid).unwrap();
+        assert_eq!(a, Agent::Codex);
+        assert!(why.contains("mini"), "{why}");
+        // Codex out of room: Claude's sonnet.
+        let (a, _) = pick_auto(vec![c(Agent::ClaudeCode, 30.0, false, claude()), c(Agent::Codex, 0.5, false, codex())], Tier::Mid).unwrap();
+        assert_eq!(a, Agent::ClaudeCode);
+        // Its week's reserve near: left out too.
+        let (a, _) = pick_auto(vec![c(Agent::ClaudeCode, 30.0, false, claude()), c(Agent::Codex, 50.0, true, codex())], Tier::Mid).unwrap();
+        assert_eq!(a, Agent::ClaudeCode);
+        // Same cost on both: the one with the most room.
+        let same = || vec![m("x", Tier::Mid, 5)];
+        let (a, _) = pick_auto(vec![c(Agent::ClaudeCode, 10.0, false, same()), c(Agent::Codex, 40.0, false, same())], Tier::Mid).unwrap();
+        assert_eq!(a, Agent::Codex);
+        // No model list anywhere: the most room.
+        let (a, _) = pick_auto(vec![c(Agent::Vibe, 40.0, false, vec![]), c(Agent::Codex, 10.0, false, vec![])], Tier::Mid).unwrap();
+        assert_eq!(a, Agent::Vibe);
+        // Nobody with room.
+        assert!(pick_auto(vec![c(Agent::ClaudeCode, 0.0, false, claude())], Tier::Mid).is_none());
     }
 
     /// The case reported: the 5-hour window already at 75 % when a session starts with a
