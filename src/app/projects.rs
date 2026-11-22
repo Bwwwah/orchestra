@@ -3949,6 +3949,25 @@ fn quick_question(ui: &mut egui::Ui, cx: &mut Cx) {
                                     resume.clone(),
                                 );
                             }
+                            if let Some(resume) = &a.resume
+                                && quiet_link(
+                                    ui,
+                                    crate::tr!("Ouvrir dans un terminal", "Open in a terminal"),
+                                    t,
+                                )
+                                .on_hover_text(crate::tr!(
+                                    "Reprendre cette conversation dans le terminal intégré",
+                                    "Carry this conversation on in the built-in terminal"
+                                ))
+                                .clicked()
+                            {
+                                super::term_ui::request(
+                                    ui.ctx(),
+                                    &resume_title(&a.question),
+                                    &resume.cwd,
+                                    Some(resume.cmd.clone()),
+                                );
+                            }
                         });
                     }
                 }
