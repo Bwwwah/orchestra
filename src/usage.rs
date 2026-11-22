@@ -711,6 +711,8 @@ fn codex_usage(text: &str, file_ms: u64) -> Option<Usage> {
                 let label = match (minutes, *k) {
                     (Some(300), _) | (None, "primary") => label_for("five_hour"),
                     (Some(10080), _) | (None, _) => label_for("seven_day"),
+                    // A monthly window (the free plan's): measured like Mistral's budget.
+                    (Some(m), _) if (28 * 1440..=31 * 1440).contains(&m) => MONTH.into(),
                     (Some(m), _) if m % 1440 == 0 => format!("{} j", m / 1440),
                     (Some(m), _) if m % 60 == 0 => format!("{} h", m / 60),
                     (Some(m), _) => format!("{m} min"),
@@ -1435,6 +1437,11 @@ mod tests {
         let first = text.lines().nth(1).unwrap();
         let u = codex_usage(first, 0).unwrap();
         assert_eq!(u.five().unwrap().resets_at, Some(1_795_000_000_000));
+        // The free plan (real record): one monthly window, which measures the session.
+        let free = r#"{"payload":{"rate_limits":{"limit_id":"codex","primary":{"used_percent":2.0,"window_minutes":43200,"resets_at":1797943155},"secondary":null}}}"#;
+        let u = codex_usage(free, 0).unwrap();
+        assert_eq!(u.measured().unwrap().label, MONTH);
+        assert_eq!(u.measured().unwrap().pct, 2.0);
         // Nothing to read: no figures, never a made-up 0 %.
         assert!(codex_usage("", 0).is_none());
         assert!(codex_usage(r#"{"payload":{"rate_limits":null}}"#, 0).is_none());
