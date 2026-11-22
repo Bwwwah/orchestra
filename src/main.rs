@@ -35,6 +35,7 @@ mod shot;
 mod store;
 mod sync;
 mod terminal;
+mod triage;
 mod update;
 mod usage;
 
@@ -97,6 +98,8 @@ fn main() {
             0
         }
         Some("mcp") => mcp::run(),
+        // The responder, started by the MCP server for a question an AI asked (see triage.rs).
+        Some("trier") => triage::run(args.get(1).map(String::as_str)),
         Some("statusline") => {
             usage::statusline_main();
             0

@@ -711,12 +711,16 @@ pub enum Weight {
     /// Reading and judging a project (filling it in, proposing steps, an outside view, a
     /// search): the person's own default model.
     Full,
+    /// Answering another AI's question from the whole project, where a wrong answer sends a
+    /// session the wrong way: the cheapest high-end model (`catalog::strong`), high effort.
+    Strong,
 }
 
 /// The command line for one question to an agent. Images: Codex takes them with `--image`;
 /// Claude Code reads them itself, from their folders added with `--add-dir`. A light
-/// question runs on `light_model` (the agent's cheapest light model, see `light_model`),
-/// and with low reasoning effort on Codex; without one the agent keeps its default.
+/// or strong question runs on `model` (chosen by the catalog, see `weight_model`),
+/// with low (light) or high (strong) reasoning effort on Codex; without one the agent keeps
+/// its default.
 fn ask_args(
     tool: Tool,
     prompt: String,
@@ -724,10 +728,10 @@ fn ask_args(
     max_turns: u32,
     images: &[String],
     weight: Weight,
-    light_model: Option<&str>,
+    model: Option<&str>,
 ) -> Vec<String> {
-    let model = light_model
-        .filter(|_| weight == Weight::Light)
+    let model = model
+        .filter(|_| weight != Weight::Full)
         .and_then(crate::auto::model_arg);
     match tool {
         Tool::ClaudeCode => {
@@ -769,9 +773,14 @@ fn ask_args(
                 "read-only".into(),
                 "--skip-git-repo-check".into(),
             ];
-            if weight == Weight::Light {
+            let effort = match weight {
+                Weight::Light => Some("low"),
+                Weight::Strong => Some("high"),
+                Weight::Full => None,
+            };
+            if let Some(e) = effort {
                 a.push("-c".into());
-                a.push("model_reasoning_effort=\"low\"".into());
+                a.push(format!("model_reasoning_effort=\"{e}\""));
             }
             if let Some(m) = model {
                 a.push("--model".into());
@@ -787,14 +796,22 @@ fn ask_args(
     }
 }
 
-/// The model a light question runs on: the cheapest light model `tool` can be started with
-/// (Claude Code: Haiku; Codex: a mini model of its own list). None: it keeps its default.
-fn light_model(tool: Tool) -> Option<String> {
+/// The model a question of `weight` runs on, chosen by the catalog: a light one the cheapest
+/// light model `tool` can be started with (Claude Code: Haiku; Codex: a mini model of its own
+/// list), a strong one the cheapest high-end model (Claude Code: Opus). None: it keeps its
+/// default.
+fn weight_model(tool: Tool, weight: Weight) -> Option<String> {
     let agent = match tool {
         Tool::ClaudeCode => crate::auto::Agent::ClaudeCode,
         Tool::Codex => crate::auto::Agent::Codex,
     };
-    crate::catalog::light(&crate::catalog::available(agent)).map(|m| m.id.clone())
+    let models = crate::catalog::available(agent);
+    match weight {
+        Weight::Light => crate::catalog::light(&models),
+        Weight::Strong => crate::catalog::strong(&models),
+        Weight::Full => None,
+    }
+    .map(|m| m.id.clone())
 }
 
 /// The image files a person may join to a text (by their extension).
@@ -949,9 +966,7 @@ fn ask_full(
             "Neither Claude Code nor Codex was found on this computer."
         ))?;
     let prompt_copy = prompt.clone();
-    let light = (weight == Weight::Light)
-        .then(|| light_model(agent.tool))
-        .flatten();
+    let light = weight_model(agent.tool, weight);
     let args = ask_args(
         agent.tool,
         prompt,
@@ -1447,6 +1462,22 @@ mod tests {
             Some("gpt-5.2-mini"),
         );
         assert!(!x.contains(&"-c".to_string()) && !x.contains(&"--model".to_string()));
+    }
+
+    #[test]
+    fn strong_questions_use_the_catalogs_high_end_model() {
+        assert_eq!(
+            weight_model(Tool::ClaudeCode, Weight::Strong).as_deref(),
+            Some("opus")
+        );
+        assert_eq!(weight_model(Tool::ClaudeCode, Weight::Full), None);
+        let c = ask_args(Tool::ClaudeCode, "p".into(), "Read", 3, &[], Weight::Strong, Some("opus"));
+        assert!(c.windows(2).any(|w| w[0] == "--model" && w[1] == "opus"));
+        let x = ask_args(Tool::Codex, "p".into(), "Read", 3, &[], Weight::Strong, None);
+        assert!(
+            x.windows(2)
+                .any(|w| w[0] == "-c" && w[1] == "model_reasoning_effort=\"high\"")
+        );
     }
 
     #[test]

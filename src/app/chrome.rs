@@ -1465,7 +1465,7 @@ impl NotesApp {
                 .ws
                 .inbox
                 .iter()
-                .filter(|m| m.kind == "question" && m.answer.trim().is_empty())
+                .filter(|m| m.waits_for_person())
                 .count(),
             checking: self.ais.states.lock_or_recover().is_none(),
         };

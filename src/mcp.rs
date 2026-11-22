@@ -915,14 +915,23 @@ fn call_tool(name: &str, args: &Value) -> Result<String, ToolError> {
         }
         "ask_human" => {
             let q = need(args, "question")?.trim().to_string();
-            let (pid, title) = match s(args, "project").filter(|x| !x.is_empty()) {
+            let (pid, title, folder) = match s(args, "project").filter(|x| !x.is_empty()) {
                 Some(k) => {
                     let id = project_id(&ws, k)?;
-                    let t = ws.page(&id).map(|p| p.display_title()).unwrap_or_default();
-                    (id, t)
+                    let p = ws.page(&id);
+                    let t = p.map(|p| p.display_title()).unwrap_or_default();
+                    let f = p
+                        .and_then(|p| p.project.as_ref())
+                        .map(|x| x.folder.clone())
+                        .unwrap_or_default();
+                    (id, t, f)
                 }
-                None => (String::new(), String::new()),
+                None => (String::new(), String::new(), String::new()),
             };
+            // Asked again while the first one is still open: one question, not two.
+            if !pid.is_empty() && crate::model::same_open_question(&ws.inbox, &pid, &q).is_some() {
+                return Ok("the same question is already open; its answer will show up in get_project_state. Go on with something else meanwhile".into());
+            }
             let head = if title.is_empty() {
                 "Question d'une IA".to_string()
             } else {
@@ -935,7 +944,26 @@ fn call_tool(name: &str, args: &Value) -> Result<String, ToolError> {
                 &crate::richtext::clean(&q, 1500),
                 None,
             );
+            // First to the responder, a stronger AI that reads the whole project: it answers
+            // what the project holds, and only choices and actions reach the person.
+            let sorting = !pid.is_empty() && crate::triage::enabled(&folder);
+            let id = ws.inbox.last().map(|m| m.id.clone()).unwrap_or_default();
+            if sorting && let Some(m) = ws.inbox.last_mut() {
+                m.triage = crate::model::TRIAGE_RUNNING.into();
+                m.read = true;
+            }
             save(&ws)?;
+            if sorting && crate::triage::spawn(&id) {
+                return Ok("question sent to a stronger AI that reads the whole project (the main folder, not your copy); what it can't answer goes to the person. Its answer will show up in get_project_state. Go on with something else meanwhile".into());
+            }
+            if sorting {
+                // It couldn't start: the question goes to the person as it is.
+                if let Some(m) = ws.inbox.iter_mut().find(|m| m.id == id) {
+                    m.triage.clear();
+                    m.read = false;
+                }
+                save(&ws)?;
+            }
             Ok("question posted in the inbox; go on with something else meanwhile".into())
         }
         _ => Err(ToolError::Unknown),

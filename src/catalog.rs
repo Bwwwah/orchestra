@@ -67,15 +67,19 @@ pub fn classify(id: &str, label: &str) -> (Tier, u32) {
         .filter(|w| !w.is_empty())
         .collect();
     let has = |w: &str| words.contains(&w);
-    // Claude
+    // Claude (prices of the 5.5 / 5.2 generation). Fable and Mythos are above Opus, at twice
+    // its price: the same tier, so the cheaper Opus is the one chosen for high-end work.
+    if has("fable") || has("mythos") {
+        return (Tier::High, 4000);
+    }
     if has("opus") {
-        return (Tier::High, 2500);
+        return (Tier::High, 2000);
     }
     if has("sonnet") {
-        return (Tier::Mid, 1500);
+        return (Tier::Mid, 1000);
     }
     if has("haiku") {
-        return (Tier::Light, 500);
+        return (Tier::Light, 50);
     }
     // Gemini (word by word, so « gemini » isn't read as « mini »)
     if has("gemini") {
@@ -469,6 +473,20 @@ pub fn light(models: &[ModelInfo]) -> Option<&ModelInfo> {
         })
 }
 
+/// The model for work that must be right the first time but stays short (answering an AI's
+/// question from the whole project): the cheapest high-end model of `models` within the plan,
+/// Opus rather than Fable at twice its price. None when the list has no high-end model: the
+/// AI then keeps the person's default.
+pub fn strong(models: &[ModelInfo]) -> Option<&ModelInfo> {
+    models
+        .iter()
+        .filter(|m| m.tier == Tier::High && !m.needs_higher_plan)
+        .fold(None, |best: Option<&ModelInfo>, m| match best {
+            Some(b) if b.cost_cents <= m.cost_cents => Some(b),
+            _ => Some(m),
+        })
+}
+
 /// The models Orchestra may choose from for `agent`. Vibe without a list of its own on this
 /// computer gives none: the written name would only replace the person's own setting.
 pub fn choosable(agent: Agent) -> Vec<ModelInfo> {
@@ -762,6 +780,25 @@ mod tests {
         let codex = vec![nano, ModelInfo::new("gpt-5.2-mini", "mini")];
         assert_eq!(light(&codex).map(|m| m.id.as_str()), Some("gpt-5.2-mini"));
         assert!(light(&[]).is_none());
+    }
+
+    #[test]
+    fn the_strong_model_is_the_cheapest_high_end_one() {
+        // Claude Code: Opus, never Sonnet; Fable, twice dearer, only when there is no Opus.
+        assert_eq!(
+            strong(&builtin(Agent::ClaudeCode)).map(|m| m.id.as_str()),
+            Some("opus")
+        );
+        let claude = vec![
+            ModelInfo::new("claude-fable-5-2", "Claude Fable 5.2"),
+            ModelInfo::new("claude-opus-5-5", "Claude Opus 5.5"),
+            ModelInfo::new("claude-sonnet-5-5", "Claude Sonnet 5.5"),
+        ];
+        assert_eq!(strong(&claude).map(|m| m.id.as_str()), Some("claude-opus-5-5"));
+        let fable_only = vec![ModelInfo::new("claude-fable-5-2", "Claude Fable 5.2")];
+        assert_eq!(strong(&fable_only).map(|m| m.id.as_str()), Some("claude-fable-5-2"));
+        // No high-end model: none, the AI keeps the person's default.
+        assert!(strong(&[ModelInfo::new("haiku", "Claude Haiku")]).is_none());
     }
 
     #[test]

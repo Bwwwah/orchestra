@@ -3603,11 +3603,11 @@ impl NotesApp {
                 // Filters: everything, the questions still waiting for an answer, the unread.
                 let filter_id = egui::Id::unique("inbox-filter");
                 let mut filter = ui.data(|d| d.get_temp::<u8>(filter_id)).unwrap_or(0);
-                let waiting = self.ws.inbox.iter().filter(|m| m.kind == "question" && m.answer.trim().is_empty()).count();
+                let waiting = self.ws.inbox.iter().filter(|m| m.waits_for_person()).count();
                 let unread = self.ws.unread();
                 ui.horizontal(|ui| {
                     for (k, label, n) in [
-                        (0u8, crate::tr!("Tout", "All"), self.ws.inbox.len()),
+                        (0u8, crate::tr!("Tout", "All"), self.ws.inbox.iter().filter(|m| !m.being_sorted()).count()),
                         (1, crate::tr!("À répondre", "To answer"), waiting),
                         (2, crate::tr!("Non lus", "Unread"), unread),
                     ] {
@@ -3622,8 +3622,12 @@ impl NotesApp {
                     .rev()
                     .filter(|&i| {
                         let m = &self.ws.inbox[i];
+                        // With the responder: not the person's yet.
+                        if m.being_sorted() {
+                            return false;
+                        }
                         match filter {
-                            1 => m.kind == "question" && m.answer.trim().is_empty(),
+                            1 => m.waits_for_person(),
                             2 => !m.read,
                             _ => true,
                         }
@@ -3651,7 +3655,7 @@ impl NotesApp {
                         ui.label(RichText::new(g.to_uppercase()).font(semibold(11.5)).color(t.tertiary));
                         ui.add_space(6.0);
                     }
-                    let to_answer = m.kind == "question" && m.answer.trim().is_empty();
+                    let to_answer = m.waits_for_person();
                     let (accent, kind) = match m.kind.as_str() {
                         "question" => (Color32::from_rgb(144, 101, 176), crate::tr!("Question", "Question")),
                         "fin" => (super::projects::GREEN, crate::tr!("Session", "Session")),
@@ -3678,8 +3682,12 @@ impl NotesApp {
                                         kind_badge(ui, kind, accent);
                                         // A question says at once whether it still waits for the person.
                                         if m.kind == "question" {
-                                            if to_answer {
+                                            if to_answer && m.triage == crate::model::TRIAGE_ACTION {
+                                                kind_badge(ui, crate::tr!("À faire", "To do"), super::projects::ORANGE);
+                                            } else if to_answer {
                                                 kind_badge(ui, crate::tr!("À répondre", "To answer"), super::projects::ORANGE);
+                                            } else if m.triage == crate::model::TRIAGE_ANSWERED {
+                                                kind_badge(ui, crate::tr!("Répondue par l'IA", "Answered by the AI"), super::projects::GREEN);
                                             } else {
                                                 kind_badge(ui, crate::tr!("Répondue", "Answered"), super::projects::GREEN);
                                             }
@@ -4637,8 +4645,7 @@ pub(super) fn orch_questions(
     let newest = |a: &usize, b: &usize| inbox[*b].at.cmp(&inbox[*a].at);
     let q = |i: &usize| inbox[*i].kind == "question";
     let mut open: Vec<usize> = (0..inbox.len())
-        .filter(q)
-        .filter(|&i| inbox[i].answer.trim().is_empty())
+        .filter(|&i| inbox[i].waits_for_person())
         .collect();
     let mut answered: Vec<usize> = (0..inbox.len())
         .filter(q)

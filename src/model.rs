@@ -624,9 +624,30 @@ pub struct InboxMsg {
     /// the answer, or its last edit, has not reached an AI yet.
     #[serde(default, skip_serializing_if = "is_zero")]
     pub seen_at: u64,
+    /// A question's sorting by the responder (`crate::triage`): `TRIAGE_RUNNING` while it
+    /// looks for the answer in the project (not shown to the person yet), `TRIAGE_ANSWERED`
+    /// when it answered, `TRIAGE_CHOICE` / `TRIAGE_ACTION` when the person must decide or
+    /// act. Empty: never sorted (asked before, or the responder couldn't run).
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub triage: String,
 }
 
+pub const TRIAGE_RUNNING: &str = "en_cours";
+pub const TRIAGE_ANSWERED: &str = "repondu";
+pub const TRIAGE_CHOICE: &str = "choix";
+pub const TRIAGE_ACTION: &str = "action";
+
 impl InboxMsg {
+    /// A question the person has to answer: unanswered, and not with the responder.
+    pub fn waits_for_person(&self) -> bool {
+        self.kind == "question" && self.answer.trim().is_empty() && self.triage != TRIAGE_RUNNING
+    }
+
+    /// Still with the responder: kept out of the person's sight until it is sorted.
+    pub fn being_sorted(&self) -> bool {
+        self.kind == "question" && self.triage == TRIAGE_RUNNING
+    }
+
     /// An answer was given and an AI has received it since its last edit.
     pub fn answer_seen(&self) -> bool {
         !self.answer.trim().is_empty() && self.seen_at > 0 && self.seen_at >= self.answered_at
@@ -882,6 +903,34 @@ pub fn question_pending(inbox: &[InboxMsg], project: &str, since: u64) -> bool {
     })
 }
 
+/// The open question of `project` (unanswered, sorted or not) that `text` repeats, if any:
+/// most of its words are the same. Sessions often ask again what they already asked.
+pub fn same_open_question<'a>(
+    inbox: &'a [InboxMsg],
+    project: &str,
+    text: &str,
+) -> Option<&'a InboxMsg> {
+    fn words(t: &str) -> std::collections::HashSet<String> {
+        t.split(|c: char| !c.is_alphanumeric())
+            .filter(|w| w.chars().count() > 2)
+            .map(str::to_lowercase)
+            .collect()
+    }
+    let new = words(text);
+    if new.is_empty() {
+        return None;
+    }
+    inbox.iter().rev().find(|m| {
+        if m.kind != "question" || m.project != project || !m.answer.trim().is_empty() {
+            return false;
+        }
+        let old = words(&m.text);
+        let common = new.intersection(&old).count();
+        let all = new.union(&old).count();
+        all > 0 && common * 10 >= all * 6
+    })
+}
+
 /// How many of a project's latest questions its state of play shows the AIs.
 const QUESTIONS_SHOWN: usize = 15;
 
@@ -926,14 +975,20 @@ impl Workspace {
         for m in qs {
             let q = m.text.trim().replace('\n', "\n  ");
             if m.answer.trim().is_empty() {
-                out.push_str(&format!(
-                    "- Question : {q}\n  Réponse : (pas encore de réponse)\n"
-                ));
+                let wait = if m.triage == TRIAGE_RUNNING {
+                    "(une autre IA la cherche dans le projet ; passe à autre chose)"
+                } else {
+                    "(pas encore de réponse)"
+                };
+                out.push_str(&format!("- Question : {q}\n  Réponse : {wait}\n"));
             } else {
                 let a = m.answer.trim().replace('\n', "\n  ");
-                out.push_str(&format!(
-                    "- Question : {q}\n  Réponse de la personne : {a}\n"
-                ));
+                let who = if m.triage == TRIAGE_ANSWERED {
+                    "Réponse d'une IA qui a lu le projet (vérifie-la avant de t'appuyer dessus)"
+                } else {
+                    "Réponse de la personne"
+                };
+                out.push_str(&format!("- Question : {q}\n  {who} : {a}\n"));
             }
         }
         Some(out)
@@ -2014,6 +2069,28 @@ mod tests {
         // A project already at work isn't started twice.
         assert_eq!(due_resumes(&runs, 100_000, &["a"]), vec![4]);
         assert!(due_resumes(&runs, 5, &[]).is_empty());
+    }
+
+    #[test]
+    fn a_question_asked_again_is_recognised_and_sorting_is_shown() {
+        let mut ws = super::Workspace::default();
+        ws.notify("question", "p", "Q", "Dans cette copie autonome, vendor/rtk est vide : peux-tu le remplir ou me dire la commande du hook Codex ?", None);
+        let again = "Dans cette copie autonome (orchestra-1), vendor/rtk est encore vide : peux-tu le remplir, ou me dire la commande du hook Codex ?";
+        assert!(super::same_open_question(&ws.inbox, "p", again).is_some());
+        assert!(super::same_open_question(&ws.inbox, "x", again).is_none());
+        assert!(super::same_open_question(&ws.inbox, "p", "Quel format a la table commands de RTK ?").is_none());
+        let m = &mut ws.inbox[0];
+        m.triage = super::TRIAGE_RUNNING.into();
+        assert!(m.being_sorted() && !m.waits_for_person());
+        assert!(ws.questions_markdown("p").unwrap().contains("une autre IA la cherche"));
+        // Still unanswered: the session waits for the responder as for the person.
+        assert!(super::question_pending(&ws.inbox, "p", 0));
+        let m = &mut ws.inbox[0];
+        m.triage = super::TRIAGE_ANSWERED.into();
+        m.answer = "rtk init --codex".into();
+        assert!(!m.waits_for_person());
+        assert!(ws.questions_markdown("p").unwrap().contains("IA qui a lu le projet"));
+        assert!(super::same_open_question(&ws.inbox, "p", again).is_none());
     }
 
     #[test]
