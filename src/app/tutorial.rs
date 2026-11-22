@@ -131,6 +131,13 @@ impl NotesApp {
         self.tour = Some(Tour::new(stops));
     }
 
+    /// Open the tutorial's project and begin the tour of its page's cards.
+    pub(super) fn start_project_cards_tour(&mut self) {
+        let id = self.ws.ensure_tutorial_project();
+        self.navigate(id);
+        self.start_tour(project_cards_stops());
+    }
+
     /// Draw the tour in progress, if any.
     pub(super) fn tutorial_ui(&mut self, ctx: &egui::Context) {
         let Some(tour) = self.tour.as_mut() else { return };
