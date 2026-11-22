@@ -37,6 +37,8 @@ pub enum AiReq {
         folder: String,
         question: String,
         prefer: Option<Tool>,
+        /// Framing: the AI gives its opinion on an idea and asks its questions, no step yet.
+        framing: bool,
     },
 }
 
@@ -189,6 +191,7 @@ impl NotesApp {
                     folder,
                     question,
                     prefer,
+                    framing,
                 } => {
                     if self.ai.questions.contains_key(&page_id) || question.trim().is_empty() {
                         continue;
@@ -196,7 +199,7 @@ impl NotesApp {
                     let q = question.clone();
                     let code = self.code_forced(&page_id);
                     let slot = spawn(ctx, move || {
-                        crate::sync::ask_question(&folder, &q, code, prefer)
+                        crate::sync::ask_question(&folder, &q, code, prefer, framing)
                     });
                     self.ai.answers.remove(&page_id);
                     self.ai.questions.insert(page_id, (question, slot));

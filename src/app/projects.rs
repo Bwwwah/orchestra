@@ -3803,7 +3803,7 @@ fn quick_question(ui: &mut egui::Ui, cx: &mut Cx) {
                 semibold(15.0),
                 Color32::from_rgb(144, 101, 176),
             );
-            let send_w = 90.0;
+            let send_w = 180.0;
             let edit = ui.add_enabled(
                 asking.is_none(),
                 inline_edit(egui::TextEdit::singleline(&mut text))
@@ -3817,7 +3817,17 @@ fn quick_question(ui: &mut egui::Ui, cx: &mut Cx) {
                 .add_enabled_ui(ready, |ui| action_link(ui, crate::tr!("Demander", "Ask")))
                 .inner
                 .clicked();
-            if ready && (sent || enter) {
+            // « Cadrer »: the AI gives its opinion on the idea and asks its questions first.
+            let framed = ui
+                .add_enabled_ui(ready, |ui| {
+                    action_link(ui, crate::tr!("Cadrer", "Frame")).on_hover_text(crate::tr!(
+                        "L'IA donne son avis sur l'idée et pose ses questions avant toute étape.",
+                        "The AI gives its opinion on the idea and asks its questions before any step."
+                    ))
+                })
+                .inner
+                .clicked();
+            if ready && (sent || enter || framed) {
                 super::ai_fill::request(
                     ui.ctx(),
                     super::ai_fill::AiReq::Question {
@@ -3825,6 +3835,7 @@ fn quick_question(ui: &mut egui::Ui, cx: &mut Cx) {
                         folder: folder.clone(),
                         question: text.trim().to_string(),
                         prefer,
+                        framing: framed,
                     },
                 );
                 text.clear();

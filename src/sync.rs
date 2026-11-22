@@ -1063,6 +1063,30 @@ fn question_prompt(folder: &str, question: &str, code: bool) -> String {
     p
 }
 
+/// The prompt that opens a framing conversation about an idea: the AI gives its frank
+/// opinion, then asks its questions, and proposes no step yet (read-only).
+fn framing_prompt(folder: &str, idea: &str, code: bool) -> String {
+    let i: String = idea.trim().chars().take(QUESTION_MAX).collect();
+    let what = if code {
+        crate::tr!("du code et de l'historique", "the code and history")
+    } else {
+        crate::tr!("des documents", "the documents")
+    };
+    crate::trf!(
+        "Cadrage d'une idée pour le projet du dossier « {folder} ». Ne modifie RIEN. Regarde {what} du dossier \
+         seulement si c'est utile. Réponds dans la langue de l'idée, en 200 mots au plus : 1) ton avis franc \
+         (l'idée vaut-elle le coup ? points forts, risques) ; 2) puis 3 à 5 questions précises, numérotées, \
+         dont les réponses te manquent pour définir l'objectif, le périmètre et ce qui est hors périmètre. \
+         Ne propose AUCUNE étape et n'écris aucun bloc de code : la personne répondra à tes questions \
+         avant tout plan.\n\nIdée :\n{i}",
+        "Framing an idea for the project in the folder « {folder} ». Change NOTHING. Look at {what} of the \
+         folder only if it helps. Answer in the idea's language, in 200 words at most: 1) your frank opinion \
+         (is the idea worth it? strengths, risks); 2) then 3 to 5 precise, numbered questions whose answers you \
+         lack to define the goal, the scope and what is out of scope. Propose NO step and write no code block: \
+         the person will answer your questions before any plan.\n\nIdea:\n{i}"
+    )
+}
+
 /// The most steps one answer may propose.
 pub const ANSWER_STEPS_MAX: usize = 10;
 
@@ -1162,6 +1186,7 @@ pub fn ask_question(
     question: &str,
     code: Option<bool>,
     prefer: Option<Tool>,
+    framing: bool,
 ) -> Result<QuestionReply, String> {
     if question.trim().is_empty() {
         return Err(crate::tr!("question vide", "empty question").into());
@@ -1176,7 +1201,11 @@ pub fn ask_question(
     let code = crate::project::code_kind(&dir, code);
     let (answer, tool, session) = ask_full(
         &dir,
-        question_prompt(&dir, question, code),
+        if framing {
+            framing_prompt(&dir, question, code)
+        } else {
+            question_prompt(&dir, question, code)
+        },
         "Read,Glob,Grep,Bash(git log:*),Bash(ls:*)",
         12,
         prefer,
@@ -1661,6 +1690,24 @@ mod tests {
     }
 
     #[test]
+    fn framing_gives_an_opinion_and_questions_but_no_step() {
+        let long = "é".repeat(QUESTION_MAX + 500);
+        for code in [true, false] {
+            let p = framing_prompt("/tmp/x", &long, code);
+            assert!(p.contains("/tmp/x"));
+            assert!(p.contains("RIEN") || p.contains("NOTHING"));
+            assert!(p.contains("AUCUNE étape") || p.contains("NO step"));
+            assert!(p.contains("questions"));
+            assert_eq!(
+                p.matches('é').count() - framing_prompt("/tmp/x", "", code).matches('é').count(),
+                QUESTION_MAX,
+                "the idea is cut at QUESTION_MAX"
+            );
+        }
+        assert!(ask_question("/tmp/x", " ", None, None, true).is_err());
+    }
+
+    #[test]
     fn quick_questions_are_bounded_and_read_only() {
         let long = "é".repeat(QUESTION_MAX + 500);
         for code in [true, false] {
@@ -1682,7 +1729,7 @@ mod tests {
         assert!(p.contains("documents"));
         assert!(question_prompt("/tmp/x", "?", true).contains("code"));
         assert!(
-            ask_question("/tmp/x", "   ", None, None).is_err(),
+            ask_question("/tmp/x", "   ", None, None, false).is_err(),
             "an empty question never reaches an agent"
         );
     }
