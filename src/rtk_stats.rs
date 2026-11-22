@@ -160,9 +160,13 @@ pub fn week_savings_all(
         .collect()
 }
 
+/// Under this share of consumption saved, an AI's tile shows no line.
+const MIN_SHOWN_PERCENT: f64 = 1.0;
+
 /// « ≈ 12 % de consommation économisée grâce à RTK (7 jours, estimation) ».
 pub fn saving_line(w: &WeekSaving) -> Option<String> {
-    let pct = w.percent().filter(|_| w.rtk_sessions > 0)?;
+    // Hidden without any RTK session in the week, and under 1 % (too small to be worth a line).
+    let pct = w.percent().filter(|p| w.rtk_sessions > 0 && *p >= MIN_SHOWN_PERCENT)?;
     Some(crate::trf!(
         "≈ {} % de consommation économisée grâce à RTK (7 jours, estimation)",
         "≈ {} % of consumption saved thanks to RTK (7 days, estimate)",
@@ -180,6 +184,16 @@ mod tests {
     }
 
     use super::*;
+
+    #[test]
+    fn the_line_is_hidden_under_one_percent_or_without_rtk_session() {
+        let tiny = WeekSaving { saved: 9, consumed: 991, rtk_sessions: 1 };
+        assert!(saving_line(&tiny).is_none());
+        let one = WeekSaving { saved: 10, consumed: 990, rtk_sessions: 1 };
+        assert!(saving_line(&one).unwrap().contains("1 %"));
+        let none = WeekSaving { saved: 50, consumed: 50, rtk_sessions: 0 };
+        assert!(saving_line(&none).is_none());
+    }
 
     #[test]
     fn percent_of_a_week() {
