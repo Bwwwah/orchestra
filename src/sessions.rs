@@ -47,6 +47,8 @@ pub struct Tokens {
     pub billed: u64,
     /// Cache reads (cheap, shown apart).
     pub cached: u64,
+    /// What it would cost at API prices (micro-dollars, see pricing.rs): an estimate.
+    pub cost_micro: u64,
 }
 
 #[derive(Clone, Debug)]
@@ -481,6 +483,20 @@ fn claude_line(info: &mut SessionInfo, seen: &mut HashSet<String>, v: &Value) {
                 + u64_at(u, &["output_tokens"])
                 + u64_at(u, &["cache_creation_input_tokens"]);
             info.tokens.cached += u64_at(u, &["cache_read_input_tokens"]);
+            let model = msg
+                .get("model")
+                .and_then(Value::as_str)
+                .filter(|m| !m.starts_with('<'))
+                .unwrap_or(&info.model);
+            info.tokens.cost_micro += crate::pricing::cost_micro(
+                model,
+                crate::pricing::Counts {
+                    input: u64_at(u, &["input_tokens"]),
+                    output: u64_at(u, &["output_tokens"]),
+                    cache_write: u64_at(u, &["cache_creation_input_tokens"]),
+                    cache_read: u64_at(u, &["cache_read_input_tokens"]),
+                },
+            );
         }
         if let Some(m) = msg
             .get("model")
@@ -555,7 +571,20 @@ fn codex_line(info: &mut SessionInfo, v: &Value) {
                 let input = u64_at(t, &["input_tokens"]);
                 let billed = input.saturating_sub(cached) + u64_at(t, &["output_tokens"]);
                 if billed + cached > 0 {
-                    info.tokens = Tokens { billed, cached };
+                    let cost_micro = crate::pricing::cost_micro(
+                        &info.model,
+                        crate::pricing::Counts {
+                            input: input.saturating_sub(cached),
+                            output: u64_at(t, &["output_tokens"]),
+                            cache_write: 0,
+                            cache_read: cached,
+                        },
+                    );
+                    info.tokens = Tokens {
+                        billed,
+                        cached,
+                        cost_micro,
+                    };
                 }
             }
         }
@@ -817,6 +846,7 @@ pub fn consumption(sessions: &[SessionInfo], tool: Tool, folder: &Path, since_ms
     {
         total.billed += s.tokens.billed;
         total.cached += s.tokens.cached;
+        total.cost_micro += s.tokens.cost_micro;
     }
     total
 }
@@ -915,7 +945,7 @@ mod tests {
             last_activity: last,
             user_messages: 0,
             agent_messages: 0,
-            tokens: Tokens { billed, cached },
+            tokens: Tokens { billed, cached, cost_micro: 0 },
             path: PathBuf::new(),
         };
         let all = vec![
@@ -927,7 +957,7 @@ mod tests {
         ];
         assert_eq!(
             consumption(&all, Tool::ClaudeCode, Path::new("/w/copy"), 50),
-            Tokens { billed: 15, cached: 1050 }
+            Tokens { billed: 15, cached: 1050, cost_micro: 0 }
         );
     }
 
@@ -965,7 +995,9 @@ mod tests {
             s.tokens,
             Tokens {
                 billed: 35,
-                cached: 1000
+                cached: 1000,
+                // Opus ($4 in, $20 out per million): 10 in, 20 out, 5 written, 1000 read.
+                cost_micro: 865
             }
         );
         assert_eq!(s.model, "claude-opus-5-5");
@@ -1036,7 +1068,9 @@ mod tests {
             s.tokens,
             Tokens {
                 billed: 1300,
-                cached: 4000
+                cached: 4000,
+                // GPT ($2 in, $10 out): 1000 in, 300 out, 4000 read.
+                cost_micro: 5800
             }
         );
         assert_eq!(
@@ -1061,7 +1095,8 @@ mod tests {
         sc.scan();
         let all = sc.sessions();
         let t = consumption(&all, Tool::Codex, Path::new("/home/me/Code/app"), 0);
-        assert_eq!(t, Tokens { billed: 1300, cached: 4000 });
+        // No model known: intermediate ($1 in, $5 out).
+        assert_eq!(t, Tokens { billed: 1300, cached: 4000, cost_micro: 2900 });
         // Not counted as another tool's consumption, nor before `since`.
         assert_eq!(consumption(&all, Tool::ClaudeCode, Path::new("/home/me/Code/app"), 0), Tokens::default());
         assert_eq!(consumption(&all, Tool::Codex, Path::new("/home/me/Code/app"), u64::MAX), Tokens::default());

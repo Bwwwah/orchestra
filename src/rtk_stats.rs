@@ -332,7 +332,7 @@ mod tests {
             last_activity: 432_000_000 + 20_000,
             user_messages: 1,
             agent_messages: 1,
-            tokens: Tokens { billed, cached: 0 },
+            tokens: Tokens { billed, cached: 0, cost_micro: 0 },
             path: conv.clone(),
         };
         let sessions = [
