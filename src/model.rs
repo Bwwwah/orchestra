@@ -510,6 +510,10 @@ pub struct Settings {
     /// AIs the person unplugged in the settings (by key): never plugged back automatically.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub ai_off: Vec<String>,
+    /// AIs (by key) the person runs with an API key instead of their subscription. Absent:
+    /// subscription, the default; the key itself is in the Keychain (secret.rs).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub ai_api: Vec<String>,
     #[serde(default)]
     pub orch: OrchSettings,
     /// Repository the updates come from (owner/name); empty: the one built in.
@@ -520,6 +524,20 @@ pub struct Settings {
     /// "" or "auto" (the system's language), "fr", "en".
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub language: String,
+}
+
+impl Settings {
+    /// This AI (its `setup::Ai::key`) runs with an API key rather than the subscription.
+    pub fn api_mode(&self, ai_key: &str) -> bool {
+        self.ai_api.iter().any(|k| k == ai_key)
+    }
+
+    pub fn set_api_mode(&mut self, ai_key: &str, on: bool) {
+        self.ai_api.retain(|k| k != ai_key);
+        if on {
+            self.ai_api.push(ai_key.to_string());
+        }
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Default)]

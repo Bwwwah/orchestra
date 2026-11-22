@@ -1423,6 +1423,30 @@ impl NotesApp {
                 }
             },
         );
+        // Subscription or API key, for each AI that bills by key.
+        section(ui, crate::tr!("Abonnement ou clé API", "Subscription or API key"), t, l);
+        for agent in crate::auto::Agent::ALL {
+            if !crate::sync::API_KEY_AGENTS.contains(&agent) {
+                continue;
+            }
+            let key = agent.ai().key();
+            let mut api = self.ws.settings.api_mode(key);
+            row(
+                ui,
+                &crate::trf!("{} : clé API", "{}: API key", agent.label()),
+                crate::tr!(
+                    "Désactivé : l'IA utilise votre abonnement. Activé : elle utilise la clé API gardée dans le trousseau et la dépense est facturée en dollars.",
+                    "Off: the AI uses your subscription. On: it uses the API key kept in the Keychain and the spend is billed in dollars."
+                ),
+                t,
+                |ui| {
+                    if switch(ui, &mut api, l).changed() {
+                        self.ws.settings.set_api_mode(key, api);
+                        self.dirty_since.get_or_insert_with(Instant::now);
+                    }
+                },
+            );
+        }
         // The Claude subscription.
         section(
             ui,

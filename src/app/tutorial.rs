@@ -164,12 +164,34 @@ fn mark_key(name: &str) -> egui::Id {
     egui::Id::unique(("tutorial-area", name))
 }
 
-/// Record where `name` was drawn this frame.
-pub fn mark(ctx: &egui::Context, name: &str, rect: egui::Rect) {
+fn want_key() -> egui::Id {
+    egui::Id::new("tutorial-want")
+}
+
+fn scrolled_key() -> egui::Id {
+    egui::Id::new("tutorial-scrolled")
+}
+
+/// Record where `name` was drawn this frame. If the tour is presenting it and it isn't fully
+/// visible in the scroll area drawing it, scroll it into view (once per stop).
+pub fn mark(ui: &egui::Ui, name: &str, rect: egui::Rect) {
+    let ctx = ui.ctx();
     // Read the pass number first: calling `ctx` inside `data_mut` locks the context twice and
     // freezes the app.
     let pass = ctx.cumulative_pass_nr();
     ctx.data_mut(|d| d.insert_temp(mark_key(name), (rect, pass)));
+    let want: Option<String> = ctx.data(|d| d.get_temp(want_key()));
+    if want.as_deref() != Some(name) {
+        return;
+    }
+    let done: Option<String> = ctx.data(|d| d.get_temp(scrolled_key()));
+    if done.as_deref() == Some(name) {
+        return;
+    }
+    ctx.data_mut(|d| d.insert_temp(scrolled_key(), name.to_string()));
+    if !ui.clip_rect().contains_rect(rect) {
+        ui.scroll_to_rect(rect, Some(egui::Align::Center));
+    }
 }
 
 /// Where `name` was drawn, if it was on the last frames.
@@ -238,8 +260,19 @@ impl NotesApp {
         }
         let Some(stop) = tour.current().cloned() else {
             self.tour = None;
+            ctx.data_mut(|d| {
+                d.remove::<String>(want_key());
+                d.remove::<String>(scrolled_key());
+            });
             return;
         };
+        // Tell the screens which area is presented, so the one drawing it can scroll to it.
+        ctx.data_mut(|d| {
+            if d.get_temp::<String>(want_key()).as_deref() != Some(stop.target) {
+                d.remove::<String>(scrolled_key());
+                d.insert_temp(want_key(), stop.target.to_string());
+            }
+        });
         let Some(target) = area(ctx, stop.target) else {
             // Nothing of the tour is on screen (another page): wait for it.
             ctx.request_repaint();

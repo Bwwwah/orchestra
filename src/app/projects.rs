@@ -232,7 +232,7 @@ impl NotesApp {
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         if self.new_project.is_none() {
                             let r = ui.button(RichText::new(crate::tr!("+ Nouveau projet", "+ New project")).size(14.0));
-                            super::tutorial::mark(ui.ctx(), "projects:new", r.rect);
+                            super::tutorial::mark(ui, "projects:new", r.rect);
                             if r.clicked() {
                                 self.new_project = Some((String::new(), String::new()));
                             }
@@ -241,7 +241,7 @@ impl NotesApp {
                         let sync = ui
                             .add_enabled(!busy, egui::Button::new(RichText::new(crate::tr!("Synchroniser avec les IA", "Sync with the AIs")).size(14.0)))
                             .on_hover_text(crate::tr!("Demande à Claude Code (ou Codex) de se brancher au tableau de bord et de faire l'état des lieux de vos projets", "Asks Claude Code (or Codex) to plug into the dashboard and write where each of your projects stands"));
-                        super::tutorial::mark(ui.ctx(), "projects:sync", sync.rect);
+                        super::tutorial::mark(ui, "projects:sync", sync.rect);
                         if sync.clicked() {
                             self.sync_dialog = Some(self.sync_candidates());
                         }
@@ -387,7 +387,7 @@ impl NotesApp {
                     for (id, icon, title, pr, updated) in &projects {
                         let (rect, resp) = ui.allocate_exact_size(egui::vec2(card_w, 168.0), egui::Sense::click());
                         if projects.first().is_some_and(|f| f.0 == *id) {
-                            super::tutorial::mark(ui.ctx(), "projects:card", rect);
+                            super::tutorial::mark(ui, "projects:card", rect);
                         }
                         let p = ui.painter();
                         p.rect_filled(rect, 12.0, if resp.hovered() { t.selected } else { t.card });
@@ -1079,7 +1079,7 @@ fn draw(ui: &mut egui::Ui, cx: &mut Cx, k: CardKind, extra: f32) -> f32 {
         // Where the card is, for the tutorial to point at.
         let w = ui.min_rect().width().max(ui.available_width().min(ui.min_rect().width()));
         super::tutorial::mark(
-            ui.ctx(),
+            ui,
             card_key_name(k),
             egui::Rect::from_min_size(top, egui::vec2(w, h)),
         );

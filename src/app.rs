@@ -152,7 +152,13 @@ impl NotesApp {
     pub fn new(cc: &eframe::CreationContext<'_>, open: Option<String>) -> Self {
         // The system's language first (for a brand-new workspace), then the chosen one.
         crate::i18n::set("auto");
-        let ws = store::load();
+        // A workspace file that already exists belongs to someone who has used the app: the
+        // tutorial must not start by itself after an update (older files lack `tutorial_seen`).
+        let had_workspace = store::workspace_path().exists();
+        let mut ws = store::load();
+        if had_workspace {
+            ws.settings.tutorial_seen = true;
+        }
         crate::i18n::set(&ws.settings.language);
         let first = ws
             .pages
