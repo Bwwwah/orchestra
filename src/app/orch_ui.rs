@@ -118,6 +118,8 @@ pub struct LiveRun {
     steps_done: u32,
     /// When the pause began (wall clock, ms: a Mac asleep still lets the cache expire).
     paused_wall: u64,
+    /// The most it may spend in dollars (micro-dollars): only for an AI run with an API key.
+    budget_micro: Option<u64>,
 }
 
 /// How long the agent's prompt cache keeps a conversation (Claude Code on a subscription: one
@@ -913,10 +915,12 @@ impl NotesApp {
         };
         let cmd = agent.command_saving(cwd, commits, &o.extra_tools, model, saving);
         let c2 = ctx.clone();
-        let mut term = Term::spawn_once(
+        let envs = crate::sync::api_env(&self.ws.settings, agent);
+        let mut term = Term::spawn_once_env(
             &crate::trf!("Autonome · {title}", "Autonomous · {title}"),
             &copy.worktree,
             &cmd,
+            &envs,
             move || c2.request_repaint_after(Duration::from_millis(200)),
         )?;
         term.resize(42, 140);
@@ -1006,6 +1010,7 @@ impl NotesApp {
             steps_at_turn,
             waiting: None,
             paused_screen: 0,
+            budget_micro: o.budget_micro(self.ws.settings.api_mode(agent.ai().key())),
         });
         Ok(())
     }
@@ -1399,9 +1404,12 @@ impl NotesApp {
                             week: fig.week,
                             week_limit,
                             week_turn: r.week_turn,
-                            measured: r.measured,
+                            // Its dollars are a measure of their own in API mode.
+                            measured: r.measured || r.budget_micro.is_some(),
                             turns: r.turns,
                             max_turns: r.max_turns,
+                            spent_micro: r.reader.cost_micro,
+                            budget_micro: r.budget_micro,
                         });
                         // Stopped by a quota: when it resets, to start again then.
                         match stop.as_ref().map(Stop::quota) {
@@ -4287,6 +4295,9 @@ struct TurnEnd {
     measured: bool,
     turns: u32,
     max_turns: u32,
+    /// An API-mode session's estimated spend and its budget, in micro-dollars.
+    spent_micro: u64,
+    budget_micro: Option<u64>,
 }
 
 /// Why a session stops after a turn.
@@ -4298,6 +4309,8 @@ enum Stop {
     MissionDone,
     Blocked,
     Budget(f32),
+    /// An API-mode session spent its budget in dollars (micro-dollars).
+    Dollars(u64),
     /// The session's own ceiling on the 5-hour window (absolute %), under the global limit.
     Ceiling(f32),
     GlobalLimit(f32),
@@ -4337,6 +4350,11 @@ impl Stop {
             Stop::Budget(l) => crate::trf!(
                 "limite du projet atteinte ({l:.0} %)",
                 "project limit reached ({l:.0} %)"
+            ),
+            Stop::Dollars(b) => crate::trf!(
+                "budget en dollars atteint ({})",
+                "dollar budget reached ({})",
+                crate::pricing::dollars(*b)
             ),
             Stop::Ceiling(c) => crate::trf!(
                 "plafond de la session atteint ({c:.0} % de la fenêtre de 5 h)",
@@ -4380,6 +4398,10 @@ fn stop_reason(t: &TurnEnd) -> Option<Stop> {
         Stop::MissionDone
     } else if t.signal == Signal::Blocked {
         Stop::Blocked
+    } else if let Some(b) = t.budget_micro
+        && t.spent_micro >= b
+    {
+        Stop::Dollars(b)
     } else if let Some(c) = t.ceiling
         && c < t.global
         && t.five.is_some_and(|f| f >= c)
@@ -6619,7 +6641,26 @@ mod tests {
             measured: true,
             turns: 3,
             max_turns: 30,
+            spent_micro: 0,
+            budget_micro: None,
         }
+    }
+
+    /// An API-mode session stops once its estimated spend reaches its dollar budget, and one
+    /// with no budget (subscription) never stops on dollars.
+    #[test]
+    fn a_session_stops_at_its_dollar_budget() {
+        use super::{Stop, stop_reason};
+        let mut t = calm();
+        t.spent_micro = 9_000_000;
+        assert_eq!(stop_reason(&t), None);
+        t.budget_micro = Some(5_000_000);
+        assert_eq!(stop_reason(&t), Some(Stop::Dollars(5_000_000)));
+        t.spent_micro = 4_990_000;
+        assert_eq!(stop_reason(&t), None);
+        let s = crate::model::OrchSettings::default();
+        assert_eq!(s.budget_micro(false), None);
+        assert_eq!(s.budget_micro(true), Some(5_000_000));
     }
 
     #[test]

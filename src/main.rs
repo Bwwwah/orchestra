@@ -29,6 +29,7 @@ mod rtk_stats;
 mod screen;
 mod secret;
 mod secure;
+mod pricing;
 mod sessions;
 mod setup;
 mod shot;

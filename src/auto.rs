@@ -79,15 +79,16 @@ impl Agent {
 
     /// Autonomous work is wired for it: its command (with permissions), its session files
     /// and the reading of its turns. Claude Code, and Mistral Vibe driven turn by turn in its
-    /// headless mode (`headless`; a POSIX shell runs its turns, so not on Windows); Codex and
-    /// Gemini are listed so the rest of the program can name them, and are never started
-    /// alone until this is true. Never true for an agent whose use Orchestra can't read
+    /// headless mode (`headless`; a POSIX shell runs its turns, so not on Windows); Codex in
+    /// its sandbox (`codex_command`); Gemini is listed so the rest of the program can name
+    /// it, and is never started alone until this is true. Never true for an agent whose use Orchestra can't read
     /// (`usage::reports_usage`): its sessions could not be stopped at their ceiling.
     pub fn ready(self) -> bool {
         let wired = match self {
             Agent::ClaudeCode => true,
             Agent::Vibe => cfg!(unix),
-            Agent::Codex | Agent::Gemini => false,
+            Agent::Codex => true,
+            Agent::Gemini => false,
         };
         wired && crate::usage::reports_usage(self)
     }
@@ -457,11 +458,11 @@ fn content_text(c: &Value) -> String {
 ///
 /// - `--sandbox workspace-write`: its commands write only in the copy (and the temporary
 ///   folder), never elsewhere on the disk; never `danger-full-access`.
-/// - `--ask-for-approval untrusted`: every command outside Codex's short list of harmless
-///   ones (and the `allow` prefix rules of `rules_config`, once written) asks first, and
-///   Orchestra refuses what is not allowed. Never `on-failure` (a command the sandbox stopped
-///   is offered again *outside* the sandbox), `on-request` (the model decides alone when to
-///   leave it) nor `never`; never `--full-auto` nor `--dangerously-bypass-approvals-and-sandbox`.
+/// - `--ask-for-approval on-request`: Codex 0.171 removed `untrusted` (every command asks),
+///   so the model decides when to ask, and Orchestra refuses what is not allowed (the prefix
+///   rules of `rules_config`). The sandbox above stays the hard barrier. Never `never`,
+///   `--approve-for-me` (an automatic review of Codex's own replaces our filter) nor
+///   `--full-auto` nor `--dangerously-bypass-approvals-and-sandbox`.
 /// - no network for its commands (`curl`, `git push`, `npm install` are refused anyway), and
 ///   no web search (`WebSearch` is refused to Claude Code too).
 /// - commands get only the core environment variables (`HOME`, `PATH`, `USER`…): no tokens
@@ -476,7 +477,7 @@ fn content_text(c: &Value) -> String {
 /// With `model`, Codex works with it (`--model`) rather than the person's default.
 fn codex_command(git_dirs: &[PathBuf], model: &str) -> String {
     let mut c = String::from(
-        "codex --sandbox workspace-write --ask-for-approval untrusted \
+        "codex --sandbox workspace-write --ask-for-approval on-request \
          -c sandbox_workspace_write.network_access=false \
          -c tools.web_search=false \
          -c shell_environment_policy.inherit=core",
@@ -2031,6 +2032,10 @@ pub struct Reader {
     /// Tokens of the session's earlier conversations (`new_conversation`): the agents that
     /// give a conversation's total add theirs to it.
     tokens_before: u64,
+    /// What the session would cost at API prices so far (micro-dollars), and the part that
+    /// belongs to its earlier conversations.
+    pub cost_micro: u64,
+    cost_before: u64,
     /// The earlier conversations of the session (their file, or for Vibe their folder):
     /// never read again.
     old: Vec<PathBuf>,
@@ -2044,6 +2049,7 @@ impl Reader {
             self.old.push(conversation_root(&p));
         }
         self.tokens_before = self.tokens;
+        self.cost_before = self.cost_micro;
         self.offset = 0;
         self.carry.clear();
         self.turn_over = false;
@@ -2164,6 +2170,16 @@ impl Reader {
                     let id = m["id"].as_str().unwrap_or("").to_string();
                     if !id.is_empty() && self.seen.insert(id) {
                         let u = &m["usage"];
+                        let n = |k: &str| u[k].as_u64().unwrap_or(0);
+                        self.cost_micro += crate::pricing::cost_micro(
+                            m["model"].as_str().unwrap_or(""),
+                            crate::pricing::Counts {
+                                input: n("input_tokens"),
+                                output: n("output_tokens"),
+                                cache_write: n("cache_creation_input_tokens"),
+                                cache_read: n("cache_read_input_tokens"),
+                            },
+                        );
                         self.tokens += [
                             "input_tokens",
                             "output_tokens",
@@ -2214,6 +2230,17 @@ impl Reader {
                 let n = |k: &str| u[k].as_u64().unwrap_or(0);
                 let total = n("input_tokens").saturating_sub(n("cached_input_tokens")) + n("output_tokens");
                 self.tokens = self.tokens.max(self.tokens_before + total);
+                // Codex doesn't name its model here: priced as an intermediate one.
+                let cost = crate::pricing::cost_micro(
+                    "",
+                    crate::pricing::Counts {
+                        input: n("input_tokens").saturating_sub(n("cached_input_tokens")),
+                        output: n("output_tokens"),
+                        cache_write: 0,
+                        cache_read: n("cached_input_tokens"),
+                    },
+                );
+                self.cost_micro = self.cost_micro.max(self.cost_before + cost);
             }
             (Some("event_msg"), Some("agent_message")) => {
                 let text = p["message"].as_str().unwrap_or("");
@@ -3214,7 +3241,7 @@ mod tests {
         assert_eq!(Agent::Vibe.ready(), cfg!(unix));
         assert!(Agent::Vibe.headless() && !Agent::ClaudeCode.headless());
         for a in [Agent::Codex, Agent::Gemini, Agent::Vibe] {
-            assert!(a == Agent::Vibe || !a.ready());
+            assert!(a == Agent::Vibe || a == Agent::Codex || !a.ready());
             // Its program, in its strictest mode.
             let cmd = a.command(Path::new("/x"), true, "", "");
             // Its program, after the variables pointing to its settings of the session.
@@ -3881,11 +3908,11 @@ mod tests {
     fn codex_stays_in_its_sandbox() {
         // Without commits: no folder outside the copy, whatever the copy.
         let c = Agent::Codex.command(Path::new("/x"), false, "", "");
-        assert!(c.starts_with("codex --sandbox workspace-write --ask-for-approval untrusted "));
+        assert!(c.starts_with("codex --sandbox workspace-write --ask-for-approval on-request "));
         assert!(c.contains("network_access=false") && c.contains("web_search=false"));
         assert!(c.contains("shell_environment_policy.inherit=core"));
         assert!(!c.contains("writable_roots"));
-        for bad in ["danger", "full-auto", "on-failure", "on-request", "never", "yolo", "bypass"] {
+        for bad in ["danger", "full-auto", "on-failure", "untrusted", "approve-for-me", "never", "yolo", "bypass"] {
             assert!(!c.contains(bad), "{bad}");
         }
         // A copy of a repository (git worktree): its git folder and the repository's objects

@@ -924,6 +924,10 @@ fn session_row(
                         human_tokens(s.tokens.billed)
                     ));
                 }
+                let spent = crate::pricing::dollars(s.tokens.cost_micro);
+                if !spent.is_empty() {
+                    meta.push_str(&format!(" · ≈ {spent}"));
+                }
                 for x in [&s.git_branch, &s.model] {
                     if !x.is_empty() {
                         meta.push_str(&format!(" · {x}"));

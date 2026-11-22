@@ -124,7 +124,6 @@ fn key_account(var: &str) -> String {
 
 /// The API key kept for `var` ("" when none was ever set). Only to be handed to an AI that
 /// runs in API mode; subscription sessions never get it.
-#[allow(dead_code)]
 pub fn api_key(var: &str) -> String {
     get(&key_account(var))
 }
