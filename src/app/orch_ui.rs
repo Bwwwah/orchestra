@@ -861,7 +861,8 @@ impl NotesApp {
             fix,
             &crate::store::computer_id(),
             crate::model::now_ms(),
-        );
+        )
+        .with_saving(pr.launch.as_ref().map(|l| l.saving).unwrap_or_default(), fix);
         // A restart keeps the model first chosen. Else the one the person imposed for the
         // step taken first, or for the project. Else the cheapest able to do the step, among
         // the models of the AI chosen in the card, whose limits were just checked. None found
