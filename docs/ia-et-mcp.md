@@ -8,7 +8,7 @@ code dans `src/mcp.rs`). Une IA branchée peut lire et écrire les pages et les 
 Au démarrage (`src/setup.rs`), Orchestra s'ajoute aux IA trouvées sur la machine :
 
 - **Claude Code** et **Codex** par leur propre commande `mcp add` ;
-- **Gemini CLI** et l'**app Claude** en ajoutant une entrée à leur fichier de réglages JSON
+- **Antigravity CLI** (`agy`, fichier `~/.gemini/config/mcp_config.json`) et l'**app Claude** en ajoutant une entrée à leur fichier de réglages JSON
   (une copie `.bak` est gardée la première fois ; rien d'autre n'est modifié).
 
 Une entrée qui pointe déjà vers ce programme est laissée telle quelle ; une qui pointe vers

@@ -46,7 +46,7 @@ pourtant relancer par d'autres après sa suppression :
 
 - la **ligne d'état de Claude Code** (`statusLine` dans `~/.claude/settings.json`), lancée à chaque
   rafraîchissement ;
-- son **serveur MCP**, branché dans Claude Code, Codex, Gemini CLI, l'app Claude…, lancé à chaque
+- son **serveur MCP**, branché dans Claude Code, Codex, Antigravity CLI, l'app Claude…, lancé à chaque
   session d'IA.
 
 `orchestra nettoyer` défait les deux : la ligne d'état d'avant revient (ou aucune), mais seulement
