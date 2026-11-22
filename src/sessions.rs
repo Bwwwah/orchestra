@@ -806,6 +806,21 @@ pub fn sessions_in(folder: &Path) -> Vec<SessionInfo> {
         .collect()
 }
 
+/// What the sessions of `tool` working in `folder` (or inside it) consumed since `since_ms`
+/// (by last activity), read from their conversation files: the base to compare with what RTK
+/// saved in the database of that folder's session (`Agent::rtk_db`).
+pub fn consumption(sessions: &[SessionInfo], tool: Tool, folder: &Path, since_ms: u64) -> Tokens {
+    let mut total = Tokens::default();
+    for s in sessions
+        .iter()
+        .filter(|s| s.tool == tool && s.last_activity >= since_ms && Path::new(&s.cwd).starts_with(folder))
+    {
+        total.billed += s.tokens.billed;
+        total.cached += s.tokens.cached;
+    }
+    total
+}
+
 /// "12 k", "1,4 M"
 pub fn human_tokens(n: u64) -> String {
     match n {
@@ -884,6 +899,36 @@ mod tests {
             Some(1_794_986_102_123)
         );
         assert_eq!(parse_iso_ms("nope"), None);
+    }
+
+    #[test]
+    fn consumption_sums_sessions_of_a_folder_since_a_date() {
+        let mk = |tool, cwd: &str, last, billed, cached| SessionInfo {
+            tool,
+            id: String::new(),
+            cwd: cwd.into(),
+            title: String::new(),
+            last_reply: String::new(),
+            model: String::new(),
+            git_branch: String::new(),
+            started: 0,
+            last_activity: last,
+            user_messages: 0,
+            agent_messages: 0,
+            tokens: Tokens { billed, cached },
+            path: PathBuf::new(),
+        };
+        let all = vec![
+            mk(Tool::ClaudeCode, "/w/copy", 100, 10, 1000),
+            mk(Tool::ClaudeCode, "/w/copy/sub", 200, 5, 50),
+            mk(Tool::ClaudeCode, "/w/copy", 10, 99, 99), // too old
+            mk(Tool::ClaudeCode, "/w/copy2", 200, 99, 99), // another folder
+            mk(Tool::Codex, "/w/copy", 200, 99, 99),      // another AI
+        ];
+        assert_eq!(
+            consumption(&all, Tool::ClaudeCode, Path::new("/w/copy"), 50),
+            Tokens { billed: 15, cached: 1050 }
+        );
     }
 
     #[test]
@@ -998,6 +1043,28 @@ mod tests {
             s.resume_command().as_deref(),
             Some("cd /home/me/Code/app && codex resume 0199a1b2-c3d4-7e5f-8a9b-0c1d2e3f4a5b")
         );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn codex_consumption_of_a_folder() {
+        let root = tmp("codex-consumption");
+        let dir = root.join("2026/11/18");
+        std::fs::create_dir_all(&dir).unwrap();
+        for (name, cwd, input) in [("a", "/home/me/Code/app", 5000), ("b", "/home/me/Code/other", 900)] {
+            let mut f = File::create(dir.join(format!("rollout-2026-11-18T07-00-00-{name}.jsonl"))).unwrap();
+            writeln!(f, r#"{{"timestamp":"2026-11-18T07:00:00Z","type":"session_meta","payload":{{"id":"{name}","cwd":"{cwd}"}}}}"#).unwrap();
+            writeln!(f, r#"{{"timestamp":"2026-11-18T07:00:09Z","type":"response_item","payload":{{"type":"message","role":"assistant","content":[{{"type":"output_text","text":"ok"}}]}}}}"#).unwrap();
+            writeln!(f, r#"{{"timestamp":"2026-11-18T07:00:10Z","type":"event_msg","payload":{{"type":"token_count","info":{{"total_token_usage":{{"input_tokens":{input},"cached_input_tokens":4000,"output_tokens":300}}}}}}}}"#).unwrap();
+        }
+        let mut sc = Scanner::new(vec![(Tool::Codex, root.clone())]);
+        sc.scan();
+        let all = sc.sessions();
+        let t = consumption(&all, Tool::Codex, Path::new("/home/me/Code/app"), 0);
+        assert_eq!(t, Tokens { billed: 1300, cached: 4000 });
+        // Not counted as another tool's consumption, nor before `since`.
+        assert_eq!(consumption(&all, Tool::ClaudeCode, Path::new("/home/me/Code/app"), 0), Tokens::default());
+        assert_eq!(consumption(&all, Tool::Codex, Path::new("/home/me/Code/app"), u64::MAX), Tokens::default());
         let _ = std::fs::remove_dir_all(root);
     }
 

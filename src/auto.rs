@@ -158,7 +158,7 @@ impl Agent {
             }
             Agent::ClaudeCode => {
                 let (allowed, denied) = permissions(allow_commits, extra);
-                claude_command(&allowed, &denied, rtk_binary().as_deref(), model)
+                claude_command(&allowed, &denied, rtk_binary().as_deref(), &self.rtk_db(cwd), model)
             }
         }
     }
@@ -213,6 +213,12 @@ impl Agent {
         crate::store::data_dir()
             .join("agents")
             .join(format!("{}-{hex}", self.bin()))
+    }
+
+    /// RTK's database for the session in `cwd`: its savings are counted per session, apart from
+    /// the person's own RTK history.
+    pub fn rtk_db(self, cwd: &Path) -> PathBuf {
+        self.config_dir(cwd).join("rtk.db")
     }
 
     /// The files of the session's settings, with their text: Orchestra's MCP server (the only
@@ -514,7 +520,7 @@ fn git_dirs_for(cwd: &Path, own: &Path, common: &Path) -> Vec<PathBuf> {
 /// in front, or `git push` would become `rtk git push` and get round its refusal.
 ///
 /// With `model`, Claude Code works with it (`--model`) rather than the person's default.
-fn claude_command(allowed: &[String], denied: &[String], rtk: Option<&Path>, model: &str) -> String {
+fn claude_command(allowed: &[String], denied: &[String], rtk: Option<&Path>, db: &Path, model: &str) -> String {
     let q = crate::sessions::shell_quote;
     let (mut allowed, mut denied) = (allowed.to_vec(), denied.to_vec());
     denied.extend(UNUSED_TOOLS.iter().map(|t| t.to_string()));
@@ -543,7 +549,12 @@ fn claude_command(allowed: &[String], denied: &[String], rtk: Option<&Path>, mod
         settings = format!(" --settings {}", q(&hook.to_string()));
         // The rewritten commands call `rtk` by its name; no usage report ever leaves.
         let dir = rtk.parent().map(|d| d.display().to_string()).unwrap_or_default();
-        prefix = format!("PATH={}:\"$PATH\" RTK_TELEMETRY_DISABLED=1 ", q(&dir));
+        // Its savings go to a database of the session (RTK_DB_PATH), not the person's own.
+        prefix = format!(
+            "PATH={}:\"$PATH\" RTK_TELEMETRY_DISABLED=1 RTK_DB_PATH={} ",
+            q(&dir),
+            q(&db.display().to_string())
+        );
     }
     let model = model_arg(model).map(|m| format!(" --model {}", q(m))).unwrap_or_default();
     format!(
@@ -1060,7 +1071,35 @@ impl Agent {
     /// `.rules` file, `allow` or `forbidden`). Empty for Claude Code, whose rules are passed
     /// on its command line.
     pub fn rules_config(self, allow_commits: bool, extra: &str) -> String {
-        let r = self.rules(allow_commits, extra);
+        self.rules_config_rtk(allow_commits, extra, rtk_binary().is_some())
+    }
+
+    /// `rules_config`, with `rtk` telling whether RTK shortens the shell outputs: Codex's
+    /// commands are then rewritten behind `rtk` and checked as rewritten, so every shell rule is
+    /// given twice, as written and behind `rtk` (as for Claude Code, see `claude_command`), and
+    /// RTK's own ways of running any command are refused.
+    fn rules_config_rtk(self, allow_commits: bool, extra: &str, rtk: bool) -> String {
+        let mut r = self.rules(allow_commits, extra);
+        if rtk && self == Agent::Codex {
+            let twins = |v: &[String]| -> Vec<String> {
+                let mut out = Vec::with_capacity(v.len() * 2);
+                for c in v {
+                    out.push(c.clone());
+                    let twin = format!("rtk {c}");
+                    if !c.starts_with("rtk ") && !v.contains(&twin) {
+                        out.push(twin);
+                    }
+                }
+                out
+            };
+            r.allowed_commands = twins(&r.allowed_commands);
+            r.denied_commands = twins(&r.denied_commands);
+            for c in ["rtk proxy", "rtk run", "rtk init"] {
+                if !r.denied_commands.iter().any(|x| x == c) {
+                    r.denied_commands.push(c.to_string());
+                }
+            }
+        }
         match self {
             Agent::ClaudeCode => String::new(),
             Agent::Gemini => {
@@ -3420,16 +3459,17 @@ mod tests {
     #[test]
     fn the_chosen_model_reaches_claude_code() {
         let (allowed, denied) = permissions(false, "");
-        let plain = claude_command(&allowed, &denied, None, "");
+        let db = Path::new("/d/rtk.db");
+        let plain = claude_command(&allowed, &denied, None, db, "");
         assert!(!plain.contains("--model"), "{plain}");
-        let c = claude_command(&allowed, &denied, None, "claude-sonnet-5-5");
+        let c = claude_command(&allowed, &denied, None, db, "claude-sonnet-5-5");
         assert!(c.contains(" --model claude-sonnet-5-5 --permission-mode "), "{c}");
         let c = Agent::ClaudeCode.command(Path::new("/x"), false, "", "opus");
         assert!(c.contains(" --model opus "), "{c}");
         assert_eq!(model_arg(" claude-opus-5-5[1m] "), Some("claude-opus-5-5[1m]"));
         for bad in ["", "  ", "--dangerously-skip-permissions", "x; rm -rf ~", "a b", "$(id)"] {
             assert_eq!(model_arg(bad), None, "{bad}");
-            let c = claude_command(&allowed, &denied, None, bad);
+            let c = claude_command(&allowed, &denied, None, db, bad);
             assert!(!c.contains("--model"), "{c}");
         }
     }
@@ -3496,7 +3536,8 @@ mod tests {
     #[test]
     fn rtk_shortens_outputs_without_widening_the_rules() {
         let (allowed, denied) = permissions(false, "");
-        let plain = claude_command(&allowed, &denied, None, "");
+        let db = Path::new("/d/rtk.db");
+        let plain = claude_command(&allowed, &denied, None, db, "");
         assert!(plain.starts_with("claude --setting-sources user "), "{plain}");
         assert!(!plain.contains("rtk") && !plain.contains("--settings "), "{plain}");
         // Tools of no use alone are refused, so their definitions don't weigh on each start;
@@ -3511,10 +3552,12 @@ mod tests {
 
         let q = crate::sessions::shell_quote;
         let rtk = "/Applications/Orchestra.app/Contents/MacOS/rtk";
-        let c = claude_command(&allowed, &denied, Some(Path::new(rtk)), "");
+        let c = claude_command(&allowed, &denied, Some(Path::new(rtk)), db, "");
+        // Its savings go to the database of the session.
         let prefix = format!(
-            "PATH={}:\"$PATH\" RTK_TELEMETRY_DISABLED=1 claude --setting-sources user ",
-            q("/Applications/Orchestra.app/Contents/MacOS")
+            "PATH={}:\"$PATH\" RTK_TELEMETRY_DISABLED=1 RTK_DB_PATH={} claude --setting-sources user ",
+            q("/Applications/Orchestra.app/Contents/MacOS"),
+            q("/d/rtk.db")
         );
         assert!(c.starts_with(&prefix), "{c}");
         // The hook, in a --settings of its own (quoted for the shell, JSON inside), with RTK's
@@ -3679,6 +3722,22 @@ mod tests {
         // A folder that isn't there: refused.
         assert!(make_copy("/nulle/part/orch", "X", false, false).is_err());
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn codex_rules_are_doubled_behind_rtk() {
+        let plain = Agent::Codex.rules_config_rtk(false, "", false);
+        let with = Agent::Codex.rules_config_rtk(false, "", true);
+        assert!(!plain.contains("\"rtk\""), "{plain}");
+        for l in [
+            "prefix_rule(pattern=[\"git\", \"status\"], decision=\"allow\")",
+            "prefix_rule(pattern=[\"rtk\", \"git\", \"status\"], decision=\"allow\")",
+            "prefix_rule(pattern=[\"git\", \"push\"], decision=\"forbidden\")",
+            "prefix_rule(pattern=[\"rtk\", \"git\", \"push\"], decision=\"forbidden\")",
+            "prefix_rule(pattern=[\"rtk\", \"proxy\"], decision=\"forbidden\")",
+        ] {
+            assert!(with.contains(l), "{l}\n{with}");
+        }
     }
 
     #[test]
