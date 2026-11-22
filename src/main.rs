@@ -25,6 +25,7 @@ mod opener;
 mod proc;
 mod project;
 mod richtext;
+mod rtk_stats;
 mod screen;
 mod secret;
 mod secure;
