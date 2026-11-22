@@ -5450,6 +5450,7 @@ fn launch_options(
     ui.label(RichText::new(crate::tr!("IA", "AI")).size(12.0).color(t.tertiary));
     agent_pick(ui, id, d, busy, connected);
     model_pick(ui, id, d, busy);
+    saving_pick(ui, id, d, busy);
     ui.add_space(8.0);
     if to_main.contains_key(id) {
         super::settings::switch(ui, &mut d.commits, lk).on_hover_text(crate::tr!("L'IA peut faire des commits sur sa branche (Orchestra l'envoie sur GitHub après chaque tour).\nGardé pour les prochaines sessions de ce projet.", "The AI may commit on its branch (Orchestra pushes it to GitHub after each turn).\nKept for this project's next sessions."));
@@ -5572,6 +5573,25 @@ fn model_pick(ui: &mut egui::Ui, id: &str, d: &mut Draft, busy: bool) {
             .on_hover_text(crate::tr!(
                 "Le modèle des sessions de ce projet. « Automatique » : le moins cher capable de faire l'étape. Un modèle imposé sur une étape passe avant.\nGardé pour les prochaines sessions de ce projet.",
                 "The model of this project's sessions. « Automatic »: the cheapest able to do the step. A model imposed on a step comes first.\nKept for this project's next sessions."
+            ));
+    });
+}
+
+/// The economy slider of the project: Économe / Équilibré / Qualité (see `model::Saving`).
+fn saving_pick(ui: &mut egui::Ui, id: &str, d: &mut Draft, busy: bool) {
+    ui.add_enabled_ui(!busy, |ui| {
+        egui::ComboBox::from_id_salt(("run-saving", id))
+            .selected_text(RichText::new(d.saving.label()).size(12.5))
+            .width(90.0)
+            .show_ui(ui, |ui| {
+                for s in crate::model::Saving::ALL {
+                    ui.selectable_value(&mut d.saving, s, s.label());
+                }
+            })
+            .response
+            .on_hover_text(crate::tr!(
+                "Curseur d'économie : Économe = modèle plus léger et peu de réflexion, Qualité = modèle plus haut et plus de réflexion. Sans effet sur un modèle imposé.\nGardé pour les prochaines sessions de ce projet.",
+                "Economy slider: Economical = lighter model and little thinking, Quality = higher model and more thinking. No effect on an imposed model.\nKept for this project's next sessions."
             ));
     });
 }
