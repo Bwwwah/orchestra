@@ -73,10 +73,10 @@ fn groups() -> [(&'static str, &'static [SettingsTab]); 3] {
 
 /// Colours of the settings window for the current theme.
 pub(super) struct Look {
-    window: Color32,
+    pub(super) window: Color32,
     nav: Color32,
     nav_selected: Color32,
-    border: Color32,
+    pub(super) border: Color32,
     control_border: Color32,
     field: Color32,
     switch_off: Color32,

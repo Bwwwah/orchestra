@@ -3127,59 +3127,53 @@ impl NotesApp {
         true
     }
 
-    /// The AIs' questions (ask_human) on the Orchestration page: those still waiting, with
-    /// a box to answer them right here, then the recent answers. False when there is none.
-    fn questions_card(&mut self, ui: &mut egui::Ui, t: &Tone) -> bool {
-        let shown = orch_questions(&self.ws.inbox, crate::model::now_ms(), ORCH_ANSWERED_MS);
-        if shown.is_empty() {
-            return false;
-        }
-        let msgs: Vec<&crate::model::InboxMsg> = shown.iter().map(|&i| &self.ws.inbox[i]).collect();
-        let titles: HashMap<&str, String> = msgs
-            .iter()
-            .filter_map(|m| {
-                self.ws
-                    .page(&m.project)
-                    .map(|p| (m.project.as_str(), p.display_title()))
-            })
-            .collect();
-        let mut answer: Option<(String, String)> = None;
-        let mut to_inbox = false;
-        super::projects::card(ui, t, 0.0, |ui| {
-            super::projects::card_title(
-                ui,
-                crate::tr!("QUESTIONS DES IA", "THE AIS' QUESTIONS"),
-                &questions_count(&msgs),
-                t,
-            );
-            answer = question_list(ui, &msgs, |m| titles.get(m.project.as_str()).cloned(), t);
-            ui.add_space(4.0);
-            if super::projects::action_link(
-                ui,
-                crate::tr!(
-                    "Tout voir dans la boîte de réception",
-                    "See everything in the inbox"
-                ),
-            )
-            .clicked()
-            {
-                to_inbox = true;
-            }
-        });
-        if let Some((id, text)) = answer {
-            self.save_answer_to(&id, text);
-        }
-        if to_inbox {
-            self.view = View::Inbox;
-        }
-        true
-    }
-
     /// `save_answer` for the inbox message `id` (nothing if it is gone meanwhile).
     pub(super) fn save_answer_to(&mut self, id: &str, text: String) {
         if let Some(i) = self.ws.inbox.iter().position(|m| m.id == id) {
             self.save_answer(i, text);
         }
+    }
+
+    /// The AIs' questions are answered in the inbox (and on each project's page): here, one
+    /// line saying how many wait, and the way there. False when none waits.
+    fn questions_card(&mut self, ui: &mut egui::Ui, t: &Tone) -> bool {
+        let waiting = self
+            .ws
+            .inbox
+            .iter()
+            .filter(|m| m.waits_for_person())
+            .count();
+        if waiting == 0 {
+            return false;
+        }
+        let mut go = false;
+        super::projects::card(ui, t, 0.0, |ui| {
+            ui.horizontal(|ui| {
+                let (r, _) = ui.allocate_exact_size(egui::vec2(12.0, 16.0), egui::Sense::hover());
+                ui.painter().circle_filled(r.center(), 4.0, super::style::ORANGE);
+                ui.label(
+                    RichText::new(if waiting > 1 {
+                        crate::trf!("{waiting} questions des IA attendent votre réponse", "{waiting} AI questions waiting for your answer")
+                    } else {
+                        crate::tr!("Une question d'une IA attend votre réponse", "An AI question is waiting for your answer").to_string()
+                    })
+                    .font(semibold(super::style::BODY))
+                    .color(t.text),
+                );
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if super::style::secondary(ui, crate::tr!("Répondre", "Answer"))
+                        .on_hover_text(crate::tr!("Dans la boîte de réception ; une session en pause reprend une fois répondu.", "In the inbox; a paused session goes on once answered."))
+                        .clicked()
+                    {
+                        go = true;
+                    }
+                });
+            });
+        });
+        if go {
+            self.view = View::Inbox;
+        }
+        true
     }
 
     /// The person answers question `i` of the inbox (from the inbox, the Orchestration
@@ -3237,12 +3231,6 @@ impl NotesApp {
             .collect();
         let running: Vec<String> = self.orch.runs.iter().map(|r| r.project.clone()).collect();
         let plugged = self.ais.plugged().contains(&crate::setup::Ai::ClaudeCode);
-        let connected: Vec<Agent> = self
-            .ais
-            .plugged()
-            .into_iter()
-            .filter_map(Agent::from_ai)
-            .collect();
         let mut start: Vec<String> = vec![];
         let picked: Vec<String> = projects
             .iter()
@@ -3302,9 +3290,9 @@ impl NotesApp {
             })
             .collect();
         let to_main_before = to_main.clone();
-        let lk = super::settings::look(ui.visuals().dark_mode);
         let mut confirm_main = self.orch.confirm_main.clone();
         let mut ceilings: Vec<(String, f32)> = vec![];
+        let mut open_settings: Option<String> = None;
         let drafts = &mut self.orch.drafts;
         super::projects::card(ui, t, 0.0, |ui| {
             super::projects::card_title(
@@ -3405,62 +3393,27 @@ impl NotesApp {
                             launch_controls(ui, LaunchCx { id, d: &mut *d, busy, plugged, open, five, running_at, default_share: dl, global, to_main: &mut to_main, start: &mut start, confirm_main: &mut confirm_main, ceilings: &mut ceilings, t });
                         });
                     }
-                    // The rest, set once and kept for the project's next sessions, folded under
-                    // « Options »; what differs from the usual stays in sight beside it.
-                    let opts_key = egui::Id::unique(("launch-options", id));
-                    let mut opened = ui.ctx().data(|m| m.get_temp::<bool>(opts_key)).unwrap_or(false);
+                    // Its settings live with the project (« Réglages de lancement », also on
+                    // its page): here, only what differs from the usual, and the way there.
                     if !busy {
                         ui.horizontal_wrapped(|ui| {
                             ui.add_space(70.0);
-                            if options_button(ui, opened, t)
-                                .on_hover_text(crate::tr!("L'IA, les commits, la fusion dans main, une consigne et le mode sans fin. Gardés pour les prochaines sessions de ce projet.", "The AI, commits, merging into main, a mission and endless mode. Kept for this project's next sessions."))
+                            let mut s = options_summary(d.agent, d.endless, !d.mission.trim().is_empty(), to_main.get(id).copied(), d.commits);
+                            // A model imposed: said beside its AI.
+                            if !d.model.is_empty() {
+                                let at = usize::from(d.agent != Agent::ClaudeCode);
+                                s.insert(at, d.model.clone());
+                            }
+                            if !s.is_empty() {
+                                ui.label(RichText::new(s.join(" · ")).size(12.0).color(t.tertiary));
+                            }
+                            if super::style::quiet(ui, crate::tr!("Réglages…", "Settings…"))
+                                .on_hover_text(crate::tr!("L'IA, le modèle, les commits, une consigne, le mode sans fin : les réglages de lancement de ce projet.", "The AI, the model, commits, a mission, endless mode: this project's launch settings."))
                                 .clicked()
                             {
-                                opened = !opened;
-                                ui.ctx().data_mut(|m| m.insert_temp(opts_key, opened));
-                            }
-                            if !opened {
-                                let mut s = options_summary(d.agent, d.endless, !d.mission.trim().is_empty(), to_main.get(id).copied(), d.commits);
-                                // A model imposed: said beside its AI.
-                                if !d.model.is_empty() {
-                                    let at = usize::from(d.agent != Agent::ClaudeCode);
-                                    s.insert(at, d.model.clone());
-                                }
-                                if !s.is_empty() {
-                                    ui.label(RichText::new(s.join(" · ")).size(12.0).color(t.tertiary));
-                                }
+                                open_settings = Some(id.clone());
                             }
                         });
-                    }
-                    if opened && !busy {
-                        ui.horizontal_wrapped(|ui| {
-                            ui.add_space(70.0);
-                            ui.spacing_mut().item_spacing.x = 6.0;
-                            launch_options(ui, id, d, busy, &connected, &mut to_main, &lk, t);
-                        });
-                        ui.horizontal(|ui| {
-                            ui.add_space(70.0);
-                            ui.label(RichText::new(crate::tr!("Consigne (facultatif)", "Mission (optional)")).size(12.0).color(t.tertiary));
-                            ui.add(egui::TextEdit::singleline(&mut d.mission).hint_text(default_mission()).desired_width(f32::INFINITY).font(FontId::proportional(13.0)).margin(egui::Margin::symmetric(8, 5)))
-                                .on_hover_text(crate::tr!("Ce que l'IA doit faire pendant la session. Vide : la consigne grisée, avancer sur les étapes ouvertes dans l'ordre.", "What the AI should do during the session. Empty: the greyed one, move forward on the open steps in order."));
-                        });
-                    }
-                    if !busy {
-                        if opened {
-                        ui.horizontal_wrapped(|ui| {
-                            ui.add_space(70.0);
-                            ui.spacing_mut().item_spacing.x = 6.0;
-                            super::settings::switch(ui, &mut d.endless, &lk).on_hover_text(crate::tr!(
-                                "La session ne s'arrête ni au nombre de tours des réglages ni à la fin des étapes : quand il n'y en a plus, l'IA trouve elle-même les suivantes (3 à la fois au plus) et continue. Elle s'arrête seulement sur les conditions choisies ici, ou à son plafond, la limite globale et la réserve de la semaine.\nCe choix et ses conditions sont gardés pour les prochaines sessions de ce projet.",
-                                "The session stops neither at the settings' number of turns nor when the steps run out: then the AI finds the next ones itself (3 at a time at most) and goes on. It only stops on the conditions chosen here, or at its ceiling, the global limit and the week's reserve.\nThis choice and its conditions are kept for this project's next sessions."
-                            ));
-                            ui.label(RichText::new(crate::tr!("sans fin", "endless")).size(12.0).color(if d.endless { t.text } else { t.tertiary }));
-                            if d.endless {
-                                ui.label(RichText::new(crate::tr!("· s'arrête dès que l'une est atteinte :", "· stops as soon as one is reached:")).size(12.0).color(t.tertiary));
-                                end_conditions(ui, &mut d.end, t);
-                            }
-                        });
-                        }
                         let risky =endless_on_main(d.endless, to_main.get(id).copied().unwrap_or(false));
                         if !risky && confirm_main.as_deref() == Some(id.as_str()) {
                             confirm_main = None;
@@ -3596,6 +3549,9 @@ impl NotesApp {
             }
             self.dirty_since.get_or_insert_with(Instant::now);
         }
+        if open_settings.is_some() {
+            self.launch_settings = open_settings;
+        }
         // A ceiling chosen by the person stays for the next sessions, and after a restart.
         for (id, ceiling) in ceilings {
             if let Some(p) = self.ws.page_mut(&id).and_then(|p| p.project.as_mut()) {
@@ -3701,6 +3657,181 @@ impl NotesApp {
                 Err(e) => super::notices::Notice::Error(format!("{title} : {e}.")),
             },
         )
+    }
+
+    /// « Réglages de lancement » of one project, in a window: the AI, its model and economy,
+    /// commits and « sur main » (code projects), the ceiling, a mission, endless mode. Opened
+    /// from the project's page or its line in Orchestration; kept in the project.
+    pub(super) fn launch_settings_window(&mut self, ctx: &egui::Context) {
+        let Some(id) = self.launch_settings.clone() else {
+            return;
+        };
+        let Some((title, code, on_main_before, pr_launch, pr_ceiling)) =
+            self.ws.page(&id).and_then(|p| {
+                let pr = p.project.as_ref()?;
+                Some((
+                    p.display_title(),
+                    super::projects::shows_git(ctx, pr),
+                    pr.commit_to_main,
+                    pr.launch.clone(),
+                    pr.session_ceiling,
+                ))
+            })
+        else {
+            self.launch_settings = None;
+            return;
+        };
+        let dark = ctx.global_style().visuals.dark_mode;
+        let t = tone(dark);
+        let lk = super::settings::look(dark);
+        let busy = self.orch.runs.iter().any(|r| r.project == id);
+        let connected: Vec<Agent> = self
+            .ais
+            .plugged()
+            .into_iter()
+            .filter_map(Agent::from_ai)
+            .collect();
+        let figs = self.figures_by_agent();
+        let global = self.ws.settings.orch.global_limit;
+        let default_share = self.ws.settings.orch.default_limit;
+        let ceilings_run: Vec<(Agent, Option<f32>)> =
+            self.orch.runs.iter().map(|r| (r.agent, r.ceiling)).collect();
+        let dc = self.ws.settings.orch.allow_commits;
+        if !self.orch.drafts.contains_key(&id) {
+            let d = Draft::new(self.ws.page(&id).and_then(|p| p.project.as_ref()), dc);
+            self.orch.drafts.insert(id.clone(), d);
+        }
+        let d = self.orch.drafts.get_mut(&id).unwrap();
+        let mut to_main: HashMap<String, bool> = HashMap::new();
+        if code {
+            to_main.insert(id.clone(), on_main_before);
+        }
+        let (mut close, mut launch) = (false, false);
+        let resp = egui::Modal::new(egui::Id::unique("launch-settings"))
+            .backdrop_color(Color32::from_black_alpha(100))
+            .frame(
+                egui::Frame::new()
+                    .fill(lk.window)
+                    .stroke(egui::Stroke::new(1.0, lk.border))
+                    .corner_radius(12.0)
+                    .inner_margin(egui::Margin::same(22)),
+            )
+            .show(ctx, |ui| {
+                ui.set_width(560.0);
+                ui.spacing_mut().item_spacing.y = 10.0;
+                ui.label(
+                    RichText::new(crate::tr!("Réglages de lancement", "Launch settings"))
+                        .font(semibold(super::style::HEADING + 2.0))
+                        .color(t.text),
+                );
+                ui.label(
+                    RichText::new(crate::trf!(
+                        "{title} · gardés pour les prochaines sessions de ce projet",
+                        "{title} · kept for this project's next sessions"
+                    ))
+                    .size(super::style::SMALL)
+                    .color(t.secondary),
+                );
+                ui.add_space(4.0);
+                ui.horizontal_wrapped(|ui| {
+                    ui.spacing_mut().item_spacing.x = 6.0;
+                    launch_options(ui, &id, d, busy, &connected, &mut to_main, &lk, &t);
+                });
+                // The ceiling, on the subscription of the AI chosen.
+                let five = figs.get(&d.agent).and_then(|f| f.five);
+                let running_at = running_ceiling_of(&ceilings_run, d.agent);
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new(crate::tr!("Arrêt à", "Stops at")).size(12.5).color(t.secondary));
+                    let floor = ceiling_floor(five, global);
+                    let mut shown = ceiling_choice(draft_ceiling(d, running_at), five, default_share, global);
+                    let dv = ui.add_enabled(
+                        !busy,
+                        egui::DragValue::new(&mut shown)
+                            .range(floor..=global.max(floor))
+                            .speed(0.5)
+                            .suffix(" %"),
+                    );
+                    if dv.changed() {
+                        d.ceiling = Some(shown);
+                        d.touched = true;
+                    }
+                    ui.label(
+                        RichText::new(crate::tr!("de la fenêtre de 5 h de l'abonnement", "of the subscription's 5-hour window"))
+                            .size(12.5)
+                            .color(t.tertiary),
+                    );
+                });
+                ui.label(RichText::new(crate::tr!("Consigne (facultatif)", "Mission (optional)")).size(12.5).color(t.secondary));
+                ui.add(
+                    egui::TextEdit::multiline(&mut d.mission)
+                        .hint_text(default_mission())
+                        .desired_rows(2)
+                        .desired_width(f32::INFINITY)
+                        .font(FontId::proportional(13.0)),
+                );
+                ui.horizontal_wrapped(|ui| {
+                    ui.spacing_mut().item_spacing.x = 6.0;
+                    super::settings::switch(ui, &mut d.endless, &lk).on_hover_text(crate::tr!(
+                        "Quand les étapes sont finies, l'IA trouve elle-même les suivantes et continue, jusqu'aux conditions choisies, son plafond, la limite globale ou la réserve de la semaine.",
+                        "When the steps run out, the AI finds the next ones itself and goes on, until the conditions chosen, its ceiling, the global limit or the week's reserve."
+                    ));
+                    ui.label(RichText::new(crate::tr!("sans fin", "endless")).size(12.5).color(if d.endless { t.text } else { t.tertiary }));
+                    if d.endless {
+                        ui.label(RichText::new(crate::tr!("· s'arrête dès que l'une est atteinte :", "· stops as soon as one is reached:")).size(12.0).color(t.tertiary));
+                        end_conditions(ui, &mut d.end, &t);
+                    }
+                });
+                if endless_on_main(d.endless, to_main.get(&id).copied().unwrap_or(false)) {
+                    ui.add(
+                        egui::Label::new(
+                            RichText::new(format!("⚠ {}", endless_main_warning()))
+                                .size(12.5)
+                                .color(super::style::ORANGE),
+                        )
+                        .wrap(),
+                    );
+                }
+                ui.add_space(6.0);
+                ui.horizontal(|ui| {
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        ui.spacing_mut().item_spacing.x = 8.0;
+                        if !busy && super::style::primary(ui, crate::tr!("▶  Lancer", "▶  Start")).clicked() {
+                            launch = true;
+                        }
+                        if super::style::secondary(ui, crate::tr!("Fermer", "Close")).clicked() {
+                            close = true;
+                        }
+                    });
+                });
+            });
+        let d = self.orch.drafts.get(&id).cloned().unwrap();
+        // Kept in the project, as Orchestration's line does.
+        if let Some(p) = self.ws.page_mut(&id).and_then(|p| p.project.as_mut()) {
+            let mut changed = false;
+            if pr_launch.as_ref() != Some(&d.prefs()) {
+                p.launch = Some(d.prefs());
+                changed = true;
+            }
+            if d.touched && d.ceiling != pr_ceiling {
+                p.session_ceiling = d.ceiling;
+                changed = true;
+            }
+            if let Some(m) = to_main.get(&id)
+                && *m != on_main_before
+            {
+                p.commit_to_main = *m;
+                changed = true;
+            }
+            if changed {
+                self.dirty_since.get_or_insert_with(Instant::now);
+            }
+        }
+        if close || launch || resp.should_close() {
+            self.launch_settings = None;
+        }
+        if launch && let Some(n) = self.launch_from_project(ctx, &id) {
+            self.notice(n);
+        }
     }
 
     // ------------------------------------------------------------------ the inbox
@@ -4838,7 +4969,9 @@ fn share_row(
 
 /// Most questions shown on the Orchestration page.
 const ORCH_QUESTIONS: usize = 5;
-/// How long an answered question stays on the Orchestration page.
+/// How long an answered question stayed on the Orchestration page (its questions now live
+/// in the inbox; kept for the tests of `orch_questions`).
+#[cfg(test)]
 const ORCH_ANSWERED_MS: u64 = 3 * 86_400_000;
 
 /// The inbox questions to show (indexes in `inbox`): first those waiting for an answer,
@@ -5532,47 +5665,6 @@ fn launch_controls(ui: &mut egui::Ui, c: LaunchCx<'_>) {
     }
 }
 
-/// « Options » of a launch row: a framed button (sliders, the word, a chevron), as legible
-/// as the row's other controls; it stays lit while the options are open.
-fn options_button(ui: &mut egui::Ui, opened: bool, t: &Tone) -> egui::Response {
-    let text = crate::tr!("Options", "Options");
-    let font = FontId::proportional(13.5);
-    let g = ui.painter().layout_no_wrap(text.to_string(), font, t.secondary);
-    // icon 16 · gap 6 · text · gap 6 · chevron 10, padded 10 on each side.
-    let size = egui::vec2(10.0 + 16.0 + 6.0 + g.size().x + 6.0 + 10.0 + 10.0, 28.0);
-    let (rect, resp) = ui.allocate_exact_size(size, egui::Sense::click());
-    let a = ui
-        .ctx()
-        .animate_bool_with_time(resp.id.with("hov"), resp.hovered() || opened, 0.14);
-    let p = ui.painter();
-    p.rect_filled(rect, 7.0, t.hover.gamma_multiply(0.5 + 0.5 * a));
-    p.rect_stroke(
-        rect,
-        7.0,
-        egui::Stroke::new(1.0, t.border.lerp_to_gamma(t.secondary, 0.35 * a)),
-        egui::StrokeKind::Inside,
-    );
-    let color = t.secondary.lerp_to_gamma(t.text, a);
-    let cy = rect.center().y;
-    let icon = egui::Rect::from_center_size(egui::pos2(rect.left() + 18.0, cy), egui::vec2(16.0, 16.0));
-    icons::paint(p, icon, icons::Icon::Sliders, color);
-    let tx = icon.right() + 6.0;
-    p.galley_with_override_text_color(egui::pos2(tx, cy - g.size().y / 2.0), g.clone(), color);
-    // Chevron: down when folded, up when open.
-    let cx = tx + g.size().x + 6.0 + 5.0;
-    let dy = if opened { -2.0 } else { 2.0 };
-    let stroke = egui::Stroke::new(1.5, color);
-    p.line_segment([egui::pos2(cx - 4.0, cy - dy), egui::pos2(cx, cy + dy)], stroke);
-    p.line_segment([egui::pos2(cx, cy + dy), egui::pos2(cx + 4.0, cy - dy)], stroke);
-    let label = if opened {
-        crate::tr!("Options, ouvertes", "Options, open")
-    } else {
-        crate::tr!("Options, repliées", "Options, folded")
-    };
-    resp.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, label));
-    resp.on_hover_cursor(egui::CursorIcon::PointingHand)
-}
-
 /// Why an AI can't be chosen for a session started alone, if it can't (None: it can).
 fn agent_unavailable(agent: Agent) -> Option<&'static str> {
     if agent.ready() {
@@ -6234,27 +6326,6 @@ mod tests {
     }
 
     use eframe::egui;
-
-    /// « Options » is a real button: as tall as the row's controls (28 px), wider than the
-    /// word alone (icon, chevron, padding), the same size folded or open.
-    #[test]
-    fn the_options_button_is_large_enough_to_read_and_hit() {
-        let t = crate::app::tone(false);
-        let mut sizes = vec![];
-        for opened in [false, true] {
-            column(400.0, |ui| {
-                let word = ui
-                    .painter()
-                    .layout_no_wrap("Options".into(), egui::FontId::proportional(12.5), t.text)
-                    .size();
-                let r = super::options_button(ui, opened, &t).rect;
-                assert!(r.height() >= 28.0, "{r:?}");
-                assert!(r.width() >= word.x + 40.0, "{r:?} {word:?}");
-                sizes.push(r.size());
-            });
-        }
-        assert!(sizes.len() >= 2 && sizes.windows(2).all(|w| w[0] == w[1]), "{sizes:?}");
-    }
 
     /// Runs `add` in a column of `width` px, as `orchestra_view` sets it (`ui.set_width`),
     /// without a window. Two passes: egui settles sizes on the second.

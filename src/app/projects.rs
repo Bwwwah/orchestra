@@ -1211,7 +1211,7 @@ pub(super) fn project_panel(ui: &mut egui::Ui, cx: &mut Cx) -> Option<super::not
             .data_mut(|d| d.insert_temp(appear_key(), (cx.page_id.to_string(), now_t)));
     }
     let mut cx_copy = false;
-    let (cx_launch, cx_follow);
+    let (cx_launch, cx_follow, cx_settings);
     {
         let (page_id, t, live) = (cx.page_id, cx.t, cx.live);
         let peers = cx.peers.clone();
@@ -1226,6 +1226,7 @@ pub(super) fn project_panel(ui: &mut egui::Ui, cx: &mut Cx) -> Option<super::not
         // « Lancer une IA » (or where to follow the one at work), then « Remplir avec l'IA ».
         let mut launch = false;
         let mut follow = false;
+        let mut settings = false;
         ui.horizontal(|ui| {
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 ui.spacing_mut().item_spacing.x = 8.0;
@@ -1257,6 +1258,12 @@ pub(super) fn project_panel(ui: &mut egui::Ui, cx: &mut Cx) -> Option<super::not
                     ));
                     if r.clicked() {
                         launch = true;
+                    }
+                    if super::style::secondary(ui, crate::tr!("Réglages…", "Settings…"))
+                        .on_hover_text(crate::tr!("L'IA, le modèle, le plafond, une consigne, le mode sans fin : gardés pour les prochaines sessions de ce projet.", "The AI, the model, the ceiling, a mission, endless mode: kept for this project's next sessions."))
+                        .clicked()
+                    {
+                        settings = true;
                     }
                 }
                     // Fill (again) the cards with the AI: after a warning, since it replaces them.
@@ -1417,6 +1424,7 @@ pub(super) fn project_panel(ui: &mut egui::Ui, cx: &mut Cx) -> Option<super::not
         ui.add_space(12.0);
         cx_launch = launch;
         cx_follow = follow;
+        cx_settings = settings;
     }
     if cx_copy {
         cx.actions.push(Action::LocalCopy(cx.page_id.to_string()));
@@ -1426,6 +1434,9 @@ pub(super) fn project_panel(ui: &mut egui::Ui, cx: &mut Cx) -> Option<super::not
     }
     if cx_follow {
         cx.actions.push(Action::ShowOrchestra);
+    }
+    if cx_settings {
+        cx.actions.push(Action::LaunchSettings(cx.page_id.to_string()));
     }
     quick_question(ui, cx);
     ui.add_space(14.0);

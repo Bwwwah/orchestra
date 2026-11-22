@@ -51,6 +51,8 @@ enum Action {
     LaunchAuto(String),
     /// Show the Orchestration page.
     ShowOrchestra,
+    /// Open a project's « Réglages de lancement ».
+    LaunchSettings(String),
 }
 
 pub struct NotesApp {
@@ -98,6 +100,8 @@ pub struct NotesApp {
     closed_tabs: Vec<Tab>,
     /// "Nouveau projet" form: (name, folder).
     new_project: Option<(String, String)>,
+    /// The project whose « Réglages de lancement » window is open.
+    launch_settings: Option<String>,
     /// Text of the "add a step" field on a project page.
     new_step: String,
     /// Claude Code / Codex sessions read live from disk, and which project each belongs to.
@@ -214,6 +218,7 @@ impl NotesApp {
             active_tab: 0,
             closed_tabs: vec![],
             new_project: None,
+            launch_settings: None,
             new_step: String::new(),
             watcher: None,
             agents: Default::default(),
@@ -943,6 +948,7 @@ impl NotesApp {
                 }
                 Action::LaunchAuto(_) => {}
                 Action::ShowOrchestra => self.view = View::Orchestra,
+                Action::LaunchSettings(id) => self.launch_settings = Some(id),
                 Action::LocalCopy(id) => {
                     if let Some(n) = self.ws.local_copy(&id) {
                         self.info(crate::tr!("Copie locale créée : elle reste privée et ne suit plus le projet partagé.", "Local copy created: it stays private and no longer follows the shared project."));
@@ -1708,6 +1714,7 @@ impl eframe::App for NotesApp {
         self.tutorial_ui(&ctx);
         self.search_window(&ctx, &mut actions);
         self.settings_window(&ctx, &mut actions);
+        self.launch_settings_window(&ctx);
         let had_actions = !actions.is_empty();
         // Starting a session needs the context (its terminal, its repaints): done here.
         let launches: Vec<String> = actions
