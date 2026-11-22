@@ -92,6 +92,37 @@ pub fn project_cards_stops() -> Vec<Stop> {
     ]
 }
 
+/// The stops presenting the Orchestration page.
+pub fn orchestration_stops() -> Vec<Stop> {
+    vec![
+        Stop {
+            target: "orch:week",
+            title: "Réserve de la semaine",
+            text: "La part de votre abonnement consommée cette semaine, et la réserve que les IA vous laissent : elles s'arrêtent avant de l'entamer.",
+        },
+        Stop {
+            target: "orch:stats",
+            title: "Vue d'ensemble",
+            text: "Ce que les IA autonomes ont fait : sessions, étapes terminées, consommation.",
+        },
+        Stop {
+            target: "orch:running",
+            title: "En cours",
+            text: "Les IA qui travaillent en ce moment, chacune dans sa copie à part. Vous pouvez les suivre et les arrêter.",
+        },
+        Stop {
+            target: "orch:limits",
+            title: "Limites",
+            text: "Les réglages qui encadrent chaque lancement : budget par session, modèles, commits.",
+        },
+        Stop {
+            target: "orch:launch",
+            title: "Lancer une IA",
+            text: "Choisissez un projet et une IA, puis lancez-la : elle prend les étapes une à une.",
+        },
+    ]
+}
+
 fn mark_key(name: &str) -> egui::Id {
     egui::Id::unique(("tutorial-area", name))
 }
@@ -139,6 +170,12 @@ impl NotesApp {
         let id = self.ws.ensure_tutorial_project();
         self.navigate(id);
         self.start_tour(project_cards_stops());
+    }
+
+    /// Open the Orchestration page and begin the tour of it.
+    pub(super) fn start_orchestration_tour(&mut self) {
+        self.view = View::Orchestra;
+        self.start_tour(orchestration_stops());
     }
 
     /// Draw the tour in progress, if any.
@@ -255,6 +292,16 @@ mod tests {
         assert!(!t.next(), "no move past the last stop");
         assert!(t.previous());
         assert_eq!(t.counter(), "2/3");
+    }
+
+    #[test]
+    fn the_orchestration_stops_have_distinct_areas() {
+        let s = orchestration_stops();
+        let mut names: Vec<_> = s.iter().map(|s| s.target).collect();
+        names.sort();
+        names.dedup();
+        assert_eq!(names.len(), s.len());
+        assert!(s.iter().all(|s| s.target.starts_with("orch:")));
     }
 
     #[test]
