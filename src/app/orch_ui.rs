@@ -2053,11 +2053,17 @@ impl NotesApp {
                 ui.add_space(14.0);
                 self.screen_card(ui, &t);
                 self.measure_card(ui, &t);
+                let top = ui.cursor().min;
                 self.week_bar(ui, &t);
+                mark_from(ui, "orch:week", top);
                 ui.add_space(14.0);
+                let top = ui.cursor().min;
                 self.stats_row(ui, &t);
+                mark_from(ui, "orch:stats", top);
                 ui.add_space(14.0);
+                let top = ui.cursor().min;
                 self.running_card(ui, &t, actions);
+                mark_from(ui, "orch:running", top);
                 if !self.orch.runs.is_empty() {
                     ui.add_space(14.0);
                 }
@@ -2107,11 +2113,15 @@ impl NotesApp {
                     ui.add_space(14.0);
                 }
                 // The settings and limits come first: they frame every launch below.
+                let top = ui.cursor().min;
                 self.limits_card(ui, &t);
+                mark_from(ui, "orch:limits", top);
                 ui.add_space(14.0);
+                let top = ui.cursor().min;
                 if let Some(msg) = self.launch_card(ui, &ctx, &t) {
                     self.notice(msg);
                 }
+                mark_from(ui, "orch:launch", top);
                 ui.add_space(40.0);
             });
         });
@@ -5128,6 +5138,16 @@ fn limits_summary(o: &crate::model::OrchSettings) -> String {
 /// "Lancer": a filled button.
 /// Below this width, the week's reserve goes under the week's figure.
 const WEEK_ONE_LINE: f32 = 520.0;
+
+/// Record for the tutorial the area drawn since `top` (the column's width).
+fn mark_from(ui: &egui::Ui, name: &str, top: egui::Pos2) {
+    let bottom = ui.cursor().min.y;
+    if bottom > top.y {
+        let w = ui.max_rect().width().max(1.0);
+        let r = egui::Rect::from_min_max(top, egui::pos2(top.x + w, bottom));
+        super::tutorial::mark(ui.ctx(), name, r);
+    }
+}
 
 /// Below this width, a running session's links go under its title.
 const RUN_ONE_LINE: f32 = 460.0;
