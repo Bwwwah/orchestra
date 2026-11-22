@@ -33,6 +33,86 @@ fn pending_key() -> egui::Id {
     egui::Id::unique("side-conversation-pending")
 }
 
+/// A reply typed under a quick question's thread, waiting to be sent to the AI.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ThreadReply {
+    pub project: String,
+    pub text: String,
+}
+
+pub fn reply_key() -> egui::Id {
+    egui::Id::unique("side-quick-thread-reply")
+}
+
+fn thread_key() -> egui::Id {
+    egui::Id::unique("side-quick-thread-request")
+}
+
+/// Open this panel on the question/answer thread of a project's quick question.
+pub fn open_thread(ctx: &egui::Context, project: &str) {
+    ctx.data_mut(|d| d.insert_temp(thread_key(), project.to_string()));
+}
+
+/// A quick question and its answer as a thread of messages: the question in a bubble, the
+/// answer (Markdown) below it, or the error that came instead.
+fn thread(ui: &mut egui::Ui, q: &str, a: &Result<String, String>, by: &str, steps: usize, t: &Tone) {
+    egui::Frame::new()
+        .fill(t.fill)
+        .corner_radius(10.0)
+        .inner_margin(egui::Margin::symmetric(10, 7))
+        .show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            ui.add(egui::Label::new(RichText::new(q).size(13.5).color(t.text)).wrap());
+        });
+    ui.add_space(6.0);
+    ui.horizontal_top(|ui| {
+        ui.label(
+            RichText::new("●")
+                .size(10.0)
+                .color(Color32::from_rgb(204, 120, 92)),
+        );
+        let w = ui.available_width();
+        ui.vertical(|ui| {
+            ui.set_max_width(w);
+            match a {
+                Ok(md) => {
+                    super::rich::markdown(ui, md, 13.5, t);
+                    // Each answer of the thread proposes its steps in the Steps box.
+                    if steps > 0 {
+                        let s = crate::i18n::plural(steps);
+                        ui.label(
+                            RichText::new(crate::trf!(
+                                "{} étape{s} proposée{s} dans l'encadré Étapes : cochez celles à garder.",
+                                "{} step{s} proposed in the Steps box: tick the ones to keep.",
+                                steps
+                            ))
+                            .size(12.5)
+                            .color(Color32::from_rgb(68, 131, 97)),
+                        );
+                    }
+                    if !by.is_empty() {
+                        ui.label(
+                            RichText::new(crate::trf!("réponse de {}", "answer by {}", by))
+                                .size(11.5)
+                                .color(t.tertiary),
+                        );
+                    }
+                }
+                Err(e) => {
+                    ui.add(
+                        egui::Label::new(
+                            RichText::new(crate::trf!("Pas de réponse : {e}", "No answer: {e}"))
+                                .size(12.5)
+                                .color(Color32::from_rgb(217, 115, 13)),
+                        )
+                        .wrap(),
+                    );
+                }
+            }
+        });
+    });
+}
+
 pub fn open_conversation(
     ctx: &egui::Context,
     project: &str,
@@ -168,12 +248,19 @@ fn composer(ui: &mut egui::Ui, draft: &mut String, hint: &str, enabled: bool) ->
 impl NotesApp {
     /// Open this panel on the conversation a button asked for, if any.
     pub(super) fn take_conversation_request(&mut self, ctx: &egui::Context) {
+        if let Some(p) = ctx.data_mut(|d| d.remove_temp::<String>(thread_key())) {
+            self.thread_pid = Some(p);
+            self.side_open = true;
+            self.side_tab = 1;
+            self.ai_session = None;
+        }
         let Some(r) = ctx.data_mut(|d| d.remove_temp::<ConversationRequest>(conversation_key()))
         else {
             return;
         };
         self.side_open = true;
         self.side_tab = 1;
+        self.thread_pid = None;
         self.ai_session = Some(r.resume.session.clone());
         ctx.data_mut(|d| d.insert_temp(pending_key(), r));
     }
@@ -375,6 +462,68 @@ impl NotesApp {
         }
     }
 
+    /// The thread of the project's quick question with a field under it to answer the AI.
+    /// False when the project has no quick answer. A reply sent is queued as a
+    /// `ThreadReply`, for whoever carries the conversation on.
+    fn quick_thread_view(&mut self, ui: &mut egui::Ui, pid: &str, t: &Tone) -> bool {
+        let Some(a) = self.ai.answers.get(pid) else {
+            return false;
+        };
+        let busy = self.ai.asking(pid).is_some();
+        let composer_h = 90.0;
+        egui::ScrollArea::vertical()
+            .id_salt(("quick-thread", pid))
+            .max_height((ui.available_height() - composer_h).max(80.0))
+            .auto_shrink([false, false])
+            .stick_to_bottom(true)
+            .show(ui, |ui| {
+                for (q, ans, by, n) in &a.earlier {
+                    thread(ui, q, ans, by, *n, t);
+                    ui.add_space(10.0);
+                }
+                thread(ui, &a.question, &a.answer, &a.by, a.steps, t);
+                // A reply being sent: its bubble shows at once, the answer follows.
+                if let Some(q) = self.ai.asking(pid).filter(|q| *q != a.question) {
+                    ui.add_space(10.0);
+                    egui::Frame::new()
+                        .fill(t.fill)
+                        .corner_radius(10.0)
+                        .inner_margin(egui::Margin::symmetric(10, 7))
+                        .show(ui, |ui| {
+                            ui.set_width(ui.available_width());
+                            ui.add(egui::Label::new(RichText::new(q).size(13.5).color(t.text)).wrap());
+                        });
+                }
+                // The AI is working on it: a spinner and a line, until its answer comes.
+                if busy {
+                    ui.add_space(8.0);
+                    ui.horizontal(|ui| {
+                        ui.add(egui::Spinner::new().size(12.0));
+                        ui.label(
+                            RichText::new(crate::tr!("L'IA répond…", "The AI is answering…"))
+                                .size(12.5)
+                                .color(t.secondary),
+                        );
+                    });
+                }
+            });
+        ui.add_space(6.0);
+        let hint = crate::tr!(
+            "Répondre à l'IA… (Entrée pour envoyer)",
+            "Reply to the AI… (Enter to send)"
+        );
+        if let Some(text) = composer(ui, &mut self.thread_draft, hint, !busy) {
+            ui.ctx().data_mut(|d| {
+                d.get_temp_mut_or_default::<Vec<ThreadReply>>(reply_key())
+                    .push(ThreadReply {
+                        project: pid.to_string(),
+                        text,
+                    })
+            });
+        }
+        true
+    }
+
     fn ai_conversation(
         &mut self,
         ui: &mut egui::Ui,
@@ -383,6 +532,17 @@ impl NotesApp {
         t: &Tone,
     ) {
         let live: Vec<SessionInfo> = self.agents.by_project.get(pid).cloned().unwrap_or_default();
+        // The thread shown before the panel was closed comes back as it was (the answers and
+        // the replies live in the app, not in the panel).
+        if self.thread_pid.as_deref() == Some(pid) {
+            if self.quick_thread_view(ui, pid, t) {
+                if self.ai.asking(pid).is_some() {
+                    ui.ctx().request_repaint_after(std::time::Duration::from_millis(500));
+                }
+                return;
+            }
+            self.thread_pid = None;
+        }
         // A quick question carried on: its session shows up in the list within seconds.
         let pending = ui
             .ctx()
@@ -396,6 +556,10 @@ impl NotesApp {
                         .data_mut(|d| d.remove::<ConversationRequest>(pending_key()));
                 }
                 Waiting::Wait => {
+                    if self.quick_thread_view(ui, pid, t) {
+                        ui.ctx().request_repaint_after(std::time::Duration::from_millis(500));
+                        return;
+                    }
                     ui.add_space(10.0);
                     ui.horizontal(|ui| {
                         ui.add(egui::Spinner::new().size(12.0));
@@ -426,6 +590,9 @@ impl NotesApp {
             }
         }
         if live.is_empty() {
+            if self.quick_thread_view(ui, pid, t) {
+                return;
+            }
             ui.add_space(10.0);
             ui.add(
                 egui::Label::new(

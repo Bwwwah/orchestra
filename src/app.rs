@@ -128,6 +128,10 @@ pub struct NotesApp {
     side_tab: u8,
     chat_draft: String,
     ai_draft: String,
+    /// The reply being typed under a quick question's thread.
+    thread_draft: String,
+    /// The project whose quick-question thread the side panel shows (kept when it is closed).
+    thread_pid: Option<String>,
     ai_session: Option<String>,
     transcripts: HashMap<String, (u64, std::sync::Arc<Vec<crate::sessions::Turn>>)>,
     /// Space taken this frame by the side panel (right) and the terminal dock (bottom).
@@ -224,6 +228,8 @@ impl NotesApp {
             side_tab: 0,
             chat_draft: String::new(),
             ai_draft: String::new(),
+            thread_draft: String::new(),
+            thread_pid: None,
             ai_session: None,
             transcripts: HashMap::new(),
             side_w: 0.0,
@@ -270,6 +276,16 @@ impl NotesApp {
         }
         if let Some(id) = open.filter(|id| alive(id)) {
             app.navigate(id);
+        }
+        // First use: the tutorial starts by itself, once.
+        if !app.ws.settings.tutorial_seen
+            && std::env::var_os("ORCHESTRA_DEMO").is_none()
+            && std::env::var_os("ORCHESTRA_NO_SESSIONS").is_none()
+            && app.shot.is_none()
+        {
+            app.ws.settings.tutorial_seen = true;
+            app.dirty_since = Some(Instant::now());
+            app.start_project_cards_tour();
         }
         // Developer aid for screenshots: ORCHESTRA_DEMO=settings | ai | collab | slash[:text].
         if let Ok(demo) = std::env::var("ORCHESTRA_DEMO") {

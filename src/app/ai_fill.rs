@@ -51,7 +51,14 @@ pub struct QuickAnswer {
     pub steps: usize,
     /// The AI's conversation, to carry it on (shown in the right-hand panel).
     pub resume: Option<crate::sync::Resume>,
+    /// The AI that answered, to send replies to the same one.
+    pub tool: Option<Tool>,
+    /// The exchanges before this one in the thread (question, answer, who answered).
+    pub earlier: Vec<Exchange>,
 }
+
+/// One earlier exchange of a quick question's thread: question, answer, who answered.
+pub type Exchange = (String, Result<String, String>, String, usize);
 
 fn req_key() -> egui::Id {
     egui::Id::unique("ai-fill-requests")
@@ -79,6 +86,9 @@ pub struct AiJobs {
     questions: HashMap<String, (String, AnswerSlot)>,
     /// The last answer per project, shown in the question box until closed.
     pub answers: HashMap<String, QuickAnswer>,
+    /// Replies being sent on a thread: the thread so far, kept until the AI's answer comes
+    /// to be added to it.
+    carried: HashMap<String, QuickAnswer>,
 }
 
 impl AiJobs {
@@ -193,6 +203,29 @@ impl NotesApp {
                 }
             }
         }
+        // Replies typed under a thread: sent on the same conversation.
+        let replies: Vec<super::side::ThreadReply> = ctx
+            .data_mut(|d| d.remove_temp::<Vec<super::side::ThreadReply>>(super::side::reply_key()))
+            .unwrap_or_default();
+        for r in replies {
+            if self.ai.questions.contains_key(&r.project) || r.text.trim().is_empty() {
+                continue;
+            }
+            let Some(prev) = self.ai.answers.get(&r.project).cloned() else {
+                continue;
+            };
+            let (Some(resume), Some(tool)) = (prev.resume.clone(), prev.tool) else {
+                self.fail(crate::tr!(
+                    "Cette conversation ne peut pas être poursuivie ici.",
+                    "This conversation can't be carried on here."
+                ));
+                continue;
+            };
+            let text = r.text.clone();
+            let slot = spawn(ctx, move || crate::sync::ask_followup(&resume, tool, &text));
+            self.ai.carried.insert(r.project.clone(), prev);
+            self.ai.questions.insert(r.project, (r.text, slot));
+        }
         // Answered quick questions.
         let done: Vec<String> = self
             .ai
@@ -204,19 +237,37 @@ impl NotesApp {
         for id in done {
             let (question, slot) = self.ai.questions.remove(&id).unwrap();
             let res = slot.lock_or_recover().take().unwrap();
+            let carried = self.ai.carried.remove(&id);
             let by = res
                 .as_ref()
                 .map(|r| r.tool.label().to_string())
                 .unwrap_or_default();
             // Steps the answer proposes: to the Steps box, where they wait for the person's
             // choice like the other proposals (never added to the project by themselves).
+            let tool = match &res {
+                Ok(r) => Some(r.tool),
+                Err(_) => carried.as_ref().and_then(|c| c.tool),
+            };
             let (answer, steps, resume) = match res {
                 Ok(r) => {
                     let (text, steps) = crate::sync::split_answer_steps(&r.answer);
                     (Ok(text), steps, r.resume)
                 }
-                Err(e) => (Err(e), vec![], None),
+                // A reply that failed keeps the conversation it was sent on.
+                Err(e) => (
+                    Err(e),
+                    vec![],
+                    carried.as_ref().and_then(|c| c.resume.clone()),
+                ),
             };
+            // The thread so far, then this exchange.
+            let earlier: Vec<Exchange> = carried
+                .map(|mut c| {
+                    let mut e = std::mem::take(&mut c.earlier);
+                    e.push((c.question, c.answer, c.by, c.steps));
+                    e
+                })
+                .unwrap_or_default();
             let existing: Vec<String> = self
                 .ws
                 .page(&id)
@@ -239,6 +290,8 @@ impl NotesApp {
                     by,
                     steps: n,
                     resume,
+                    tool,
+                    earlier,
                 },
             );
         }

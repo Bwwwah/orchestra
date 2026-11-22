@@ -355,6 +355,13 @@ pub struct LaunchPrefs {
     /// the cheapest able to do the step). A step's own model wins over it.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub model: String,
+    /// The economy slider (Économe / Équilibré / Qualité); Balanced isn't written.
+    #[serde(default, skip_serializing_if = "is_balanced")]
+    pub saving: crate::model::Saving,
+}
+
+fn is_balanced(s: &crate::model::Saving) -> bool {
+    *s == crate::model::Saving::Balanced
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, Default)]
@@ -1382,7 +1389,7 @@ mod tests {
                 turns: Some(12),
                 ..Default::default()
             },
-            agent: None, model: "opus".into(),
+            agent: None, model: "opus".into(), saving: Default::default(),
         };
         let p = Project {
             session_limit: Some(95.0),
@@ -1402,7 +1409,7 @@ mod tests {
                 commits: false,
                 endless: false,
                 end: Default::default(),
-                agent: None, model: String::new(),
+                agent: None, model: String::new(), saving: Default::default(),
             }),
             ..Default::default()
         };
@@ -1723,7 +1730,7 @@ mod tests {
                 commits: true,
                 endless: true,
                 end: Default::default(),
-                agent: None, model: String::new(),
+                agent: None, model: String::new(), saving: Default::default(),
             });
             p.sessions.push(SessionRef {
                 tool: "claude-code".into(),

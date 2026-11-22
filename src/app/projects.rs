@@ -230,15 +230,19 @@ impl NotesApp {
                 ui.horizontal(|ui| {
                     ui.label(RichText::new(crate::tr!("Projets", "Projects")).font(bold(30.0)).color(t.text));
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        if self.new_project.is_none() && ui.button(RichText::new(crate::tr!("+ Nouveau projet", "+ New project")).size(14.0)).clicked() {
-                            self.new_project = Some((String::new(), String::new()));
+                        if self.new_project.is_none() {
+                            let r = ui.button(RichText::new(crate::tr!("+ Nouveau projet", "+ New project")).size(14.0));
+                            super::tutorial::mark(ui.ctx(), "projects:new", r.rect);
+                            if r.clicked() {
+                                self.new_project = Some((String::new(), String::new()));
+                            }
                         }
                         let busy = self.sync_dialog.is_some() || self.sync_run.is_some();
-                        if ui
+                        let sync = ui
                             .add_enabled(!busy, egui::Button::new(RichText::new(crate::tr!("Synchroniser avec les IA", "Sync with the AIs")).size(14.0)))
-                            .on_hover_text(crate::tr!("Demande à Claude Code (ou Codex) de se brancher au tableau de bord et de faire l'état des lieux de vos projets", "Asks Claude Code (or Codex) to plug into the dashboard and write where each of your projects stands"))
-                            .clicked()
-                        {
+                            .on_hover_text(crate::tr!("Demande à Claude Code (ou Codex) de se brancher au tableau de bord et de faire l'état des lieux de vos projets", "Asks Claude Code (or Codex) to plug into the dashboard and write where each of your projects stands"));
+                        super::tutorial::mark(ui.ctx(), "projects:sync", sync.rect);
+                        if sync.clicked() {
                             self.sync_dialog = Some(self.sync_candidates());
                         }
                     });
@@ -382,6 +386,9 @@ impl NotesApp {
                     ui.spacing_mut().item_spacing = egui::vec2(gap, gap);
                     for (id, icon, title, pr, updated) in &projects {
                         let (rect, resp) = ui.allocate_exact_size(egui::vec2(card_w, 168.0), egui::Sense::click());
+                        if projects.first().is_some_and(|f| f.0 == *id) {
+                            super::tutorial::mark(ui.ctx(), "projects:card", rect);
+                        }
                         let p = ui.painter();
                         p.rect_filled(rect, 12.0, if resp.hovered() { t.selected } else { t.card });
                         p.rect_stroke(rect, 12.0, egui::Stroke::new(1.0, t.border), egui::StrokeKind::Inside);
@@ -2279,6 +2286,8 @@ mod new_step_field_tests {
             by: "Claude Code".into(),
             steps: 0,
             resume,
+            tool: None,
+            earlier: vec![],
         };
         // No conversation id given back: no button.
         h.state_mut().ai.answers.insert("p1".into(), answer(None));
@@ -3917,6 +3926,15 @@ fn quick_question(ui: &mut egui::Ui, cx: &mut Cx) {
                                     .color(t.tertiary),
                                 );
                             }
+                            if action_link(ui, crate::tr!("Voir en fil", "View as thread"))
+                                .on_hover_text(crate::tr!(
+                                    "Afficher la question et la réponse en fil de messages dans le volet de droite",
+                                    "Show the question and answer as a message thread in the right-hand panel"
+                                ))
+                                .clicked()
+                            {
+                                super::side::open_thread(ui.ctx(), page_id);
+                            }
                             if let Some(resume) = &a.resume
                                 && action_link(
                                     ui,
@@ -3936,6 +3954,25 @@ fn quick_question(ui: &mut egui::Ui, cx: &mut Cx) {
                                     page_id,
                                     &resume_title(&a.question),
                                     resume.clone(),
+                                );
+                            }
+                            if let Some(resume) = &a.resume
+                                && quiet_link(
+                                    ui,
+                                    crate::tr!("Ouvrir dans un terminal", "Open in a terminal"),
+                                    t,
+                                )
+                                .on_hover_text(crate::tr!(
+                                    "Reprendre cette conversation dans le terminal intégré",
+                                    "Carry this conversation on in the built-in terminal"
+                                ))
+                                .clicked()
+                            {
+                                super::term_ui::request(
+                                    ui.ctx(),
+                                    &resume_title(&a.question),
+                                    &resume.cwd,
+                                    Some(resume.cmd.clone()),
                                 );
                             }
                         });

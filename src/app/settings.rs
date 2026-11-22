@@ -745,6 +745,25 @@ impl NotesApp {
                 }
             },
         );
+        section(ui, crate::tr!("Aide", "Help"), t, l);
+        let mut replay = false;
+        row(
+            ui,
+            crate::tr!("Tutoriel", "Tutorial"),
+            crate::tr!(
+                "Refaire la visite guidée de l'application depuis le début.",
+                "Take the guided tour of the app again from the start."
+            ),
+            t,
+            |ui| {
+                replay = button(ui, crate::tr!("Relancer le tuto", "Replay the tutorial"), t, l)
+                    .clicked();
+            },
+        );
+        if replay {
+            self.settings_tab = None;
+            self.start_project_cards_tour();
+        }
         section(ui, crate::tr!("Vos données", "Your data"), t, l);
         row(
             ui,

@@ -1168,6 +1168,95 @@ pub fn ask_question(
     })
 }
 
+/// The arguments that send a reply on a Claude Code conversation, headless and read-only
+/// (`claude -p <reply> --resume <id>`) or on a Codex one (`codex exec resume <id> <reply>`).
+/// None for an id unsafe on a command line.
+fn followup_args(tool: Tool, session: &str, reply: &str) -> Option<Vec<String>> {
+    if !is_session_id(session) {
+        return None;
+    }
+    match tool {
+        Tool::ClaudeCode => {
+            let r: String = reply.trim().chars().take(QUESTION_MAX).collect();
+            Some(vec![
+                "-p".into(),
+                r,
+                "--resume".into(),
+                session.into(),
+                "--output-format".into(),
+                "json".into(),
+                "--max-turns".into(),
+                "12".into(),
+                "--allowedTools".into(),
+                "Read,Glob,Grep,Bash(git log:*),Bash(ls:*)".into(),
+            ])
+        }
+        // `codex exec resume <id> <reply>`: the read-only sandbox is set before the
+        // subcommand, so it applies whatever `resume` accepts.
+        Tool::Codex => {
+            let r: String = reply.trim().chars().take(QUESTION_MAX).collect();
+            Some(vec![
+                "exec".into(),
+                "--sandbox".into(),
+                "read-only".into(),
+                "--skip-git-repo-check".into(),
+                "resume".into(),
+                session.into(),
+                "--".into(),
+                r,
+            ])
+        }
+    }
+}
+
+/// A reply to a quick question's AI, sent on the same conversation (`claude -p --resume`),
+/// run in the folder where that conversation is filed. The new answer keeps the same
+/// conversation to carry on.
+pub fn ask_followup(resume: &Resume, tool: Tool, reply: &str) -> Result<QuestionReply, String> {
+    if reply.trim().is_empty() {
+        return Err(crate::tr!("réponse vide", "empty reply").into());
+    }
+    let args = followup_args(tool, &resume.session, reply).ok_or(crate::tr!(
+        "Cette IA ne peut pas encore poursuivre la conversation ici.",
+        "This AI can't carry the conversation on here yet."
+    ))?;
+    let path = shell_path();
+    let agent = detect(&path)
+        .into_iter()
+        .find(|a| a.tool == tool)
+        .ok_or(crate::tr!(
+            "L'IA de cette conversation n'est plus installée.",
+            "The AI of this conversation is no longer installed."
+        ))?;
+    let (answer, _, session) = run_agent(
+        &agent,
+        &resume.cwd,
+        args,
+        &path,
+        &AtomicBool::new(false),
+        PER_PROJECT,
+    )?;
+    if answer.trim().is_empty() {
+        return Err(crate::tr!("l'IA n'a rien répondu", "the AI answered nothing").into());
+    }
+    Ok(QuestionReply {
+        answer: answer.trim().to_string(),
+        tool,
+        resume: next_resume(tool, resume, session),
+    })
+}
+
+/// The conversation to carry on after a reply: the id the agent gave back, or else the one
+/// the reply was sent on, always in the same folder.
+fn next_resume(tool: Tool, resume: &Resume, session: Option<String>) -> Option<Resume> {
+    let session = session.unwrap_or_else(|| resume.session.clone());
+    resume_command(tool, &session).map(|cmd| Resume {
+        session,
+        cwd: resume.cwd.clone(),
+        cmd,
+    })
+}
+
 /// Ask an agent for a short outside view of a project (read-only, web search allowed).
 /// `prefer`: the agent that worked on the project last, when it is installed.
 pub fn ask_review(
@@ -1562,6 +1651,47 @@ mod tests {
 
     /// A quick question's conversation can be carried on: the agent's id is read from its
     /// output, and only a plain id ever reaches the command line.
+    #[test]
+    fn a_reply_resumes_the_same_claude_conversation() {
+        let id = "0199a2b3-c4d5-7e6f-8a9b-0c1d2e3f4a5b";
+        let a = followup_args(Tool::ClaudeCode, id, "  et pour le reste ?  ").unwrap();
+        assert_eq!(a[0], "-p");
+        assert_eq!(a[1], "et pour le reste ?");
+        let i = a.iter().position(|x| x == "--resume").unwrap();
+        assert_eq!(a[i + 1], id);
+        assert!(a.iter().any(|x| x == "json"));
+        assert!(!a.iter().any(|x| x.contains("Edit") || x.contains("Write")));
+        assert!(followup_args(Tool::ClaudeCode, "abc;ls", "x").is_none());
+        assert!(ask_followup(&Resume::default(), Tool::ClaudeCode, "  ").is_err());
+        // Codex: same conversation through `exec resume`, still read-only.
+        let c = followup_args(Tool::Codex, id, " et ensuite ? ").unwrap();
+        let i = c.iter().position(|x| x == "resume").unwrap();
+        assert_eq!(c[i + 1], id);
+        assert_eq!(c.last().map(String::as_str), Some("et ensuite ?"));
+        assert!(c.iter().position(|x| x == "read-only").unwrap() < i);
+        assert!(followup_args(Tool::Codex, "abc;ls", "x").is_none());
+    }
+
+    #[test]
+    fn a_reply_keeps_the_conversation_to_carry_on() {
+        let id = "0199a2b3-c4d5-7e6f-8a9b-0c1d2e3f4a5b";
+        let r = Resume {
+            session: id.into(),
+            cwd: "/tmp/projet".into(),
+            cmd: format!("claude --resume {id}"),
+        };
+        // No id given back: the reply stays on the same conversation.
+        assert_eq!(next_resume(Tool::ClaudeCode, &r, None), Some(r.clone()));
+        assert_eq!(next_resume(Tool::ClaudeCode, &r, Some(id.into())), Some(r.clone()));
+        // A new id is followed, in the same folder.
+        let new = "0199ffff-aaaa-7bbb-8ccc-0d1e2f3a4b5c";
+        let n = next_resume(Tool::Codex, &r, Some(new.into())).unwrap();
+        assert_eq!(n.cwd, "/tmp/projet");
+        assert_eq!(n.cmd, format!("codex resume {new}"));
+        // An unsafe id is never offered.
+        assert_eq!(next_resume(Tool::ClaudeCode, &r, Some("x;ls".into())), None);
+    }
+
     #[test]
     fn a_quick_question_conversation_can_be_resumed() {
         let id = "0199a2b3-c4d5-7e6f-8a9b-0c1d2e3f4a5b";

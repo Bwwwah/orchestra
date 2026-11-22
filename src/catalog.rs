@@ -410,6 +410,35 @@ pub fn estimate_session(
     estimate(&text)
 }
 
+impl Tier {
+    /// This tier moved by `shift` levels (-1 lighter, +1 higher), kept within Light..High.
+    pub fn shifted(self, shift: i8) -> Tier {
+        let n = (self as i8 + shift).clamp(0, 2);
+        match n {
+            0 => Tier::Light,
+            1 => Tier::Mid,
+            _ => Tier::High,
+        }
+    }
+}
+
+impl Difficulty {
+    /// The difficulty as the economy slider reads it: the tier moves one level lighter
+    /// (Économe) or higher (Qualité), and the reason says so. A security fix is never
+    /// lightened, and Équilibré changes nothing.
+    pub fn with_saving(self, saving: crate::model::Saving, fix: bool) -> Difficulty {
+        let shift = saving.tier_shift();
+        let tier = self.tier.shifted(if fix && shift < 0 { 0 } else { shift });
+        if tier == self.tier {
+            return self;
+        }
+        Difficulty {
+            tier,
+            reason: format!("{} · curseur {}", self.reason, saving.label().to_lowercase()),
+        }
+    }
+}
+
 /// The model a session is started with, and why.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Choice {
@@ -498,6 +527,13 @@ pub fn choosable(agent: Agent) -> Vec<ModelInfo> {
     }
 }
 
+/// Whether the AI takes a thinking level when started alone: Claude Code through `--effort`,
+/// Codex through `-c model_reasoning_effort=…`. Gemini CLI and Mistral Vibe have no such
+/// option, so the saving slider only acts on them through the choice of model.
+pub fn accepts_effort(agent: Agent) -> bool {
+    matches!(agent, Agent::ClaudeCode | Agent::Codex)
+}
+
 /// The model the person imposed, and why it is used.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Imposed {
@@ -567,6 +603,12 @@ mod tests {
     use super::*;
 
     #[test]
+    fn only_claude_and_codex_take_a_thinking_level() {
+        let yes: Vec<Agent> = Agent::ALL.into_iter().filter(|a| accepts_effort(*a)).collect();
+        assert_eq!(yes, vec![Agent::ClaudeCode, Agent::Codex]);
+    }
+
+    #[test]
     fn every_ai_has_models_and_the_written_ones_match_the_session_card() {
         for a in Agent::ALL {
             let b = builtin(a);
@@ -624,6 +666,21 @@ mod tests {
         let text = "active_model = \"local\"\n\n[[models]]\nname = \"devstral-small-2\"\nprovider = \"llamacpp\"\nalias = \"local\"\n\n[[models]]\nname = \"codestral\"\nprovider = \"mistral\"\n\n[[mcp_servers]]\nname = \"fetch\"\n";
         let ids: Vec<String> = vibe_config_models(text).into_iter().map(|m| m.id).collect();
         assert_eq!(ids, ["local", "codestral"]);
+    }
+
+    #[test]
+    fn the_slider_moves_the_tier_one_level() {
+        use crate::model::Saving;
+        let mid = estimate("Ajouter un bouton");
+        assert_eq!(mid.tier, Tier::Mid);
+        assert_eq!(mid.clone().with_saving(Saving::Economical, false).tier, Tier::Light);
+        assert_eq!(mid.clone().with_saving(Saving::Quality, false).tier, Tier::High);
+        assert_eq!(mid.clone().with_saving(Saving::Balanced, false), mid);
+        let high = estimate("Refonte de la synchronisation");
+        assert_eq!(high.clone().with_saving(Saving::Quality, false).tier, Tier::High);
+        assert_eq!(high.with_saving(Saving::Economical, false).tier, Tier::Mid);
+        let fix = Difficulty { tier: Tier::High, reason: "correctif".into() };
+        assert_eq!(fix.with_saving(Saving::Economical, true).tier, Tier::High);
     }
 
     #[test]
@@ -841,6 +898,7 @@ mod tests {
             end: Default::default(),
             agent: None,
             model: "opus".into(),
+            saving: Default::default(),
         });
         assert_eq!(imposed(&pr, Agent::ClaudeCode, "", 0).unwrap().model, "opus");
         // Leaving this computer, the step's model and the launch choices stay here.

@@ -296,6 +296,7 @@ struct Draft {
     agent: Agent,
     /// The model imposed for the project's sessions (empty: Orchestra chooses).
     model: String,
+    saving: crate::model::Saving,
 }
 
 impl Draft {
@@ -315,6 +316,7 @@ impl Draft {
             end: prefs.end,
             agent: prefs.agent.unwrap_or(Agent::ClaudeCode),
             model: prefs.model,
+            saving: prefs.saving,
         }
     }
 
@@ -327,6 +329,7 @@ impl Draft {
             // Claude Code, the default, isn't written.
             agent: (self.agent != Agent::ClaudeCode).then_some(self.agent),
             model: self.model.clone(),
+            saving: self.saving,
         }
     }
 }
@@ -343,6 +346,7 @@ fn default_prefs(commits: bool) -> crate::project::LaunchPrefs {
         },
         agent: None,
         model: String::new(),
+        saving: Default::default(),
     }
 }
 
@@ -857,7 +861,8 @@ impl NotesApp {
             fix,
             &crate::store::computer_id(),
             crate::model::now_ms(),
-        );
+        )
+        .with_saving(pr.launch.as_ref().map(|l| l.saving).unwrap_or_default(), fix);
         // A restart keeps the model first chosen. Else the one the person imposed for the
         // step taken first, or for the project. Else the cheapest able to do the step, among
         // the models of the AI chosen in the card, whose limits were just checked. None found
@@ -897,7 +902,14 @@ impl NotesApp {
         let o = &self.ws.settings.orch;
         let cwd = std::path::Path::new(&copy.worktree);
         agent.write_config(cwd, commits, &o.extra_tools, model)?;
-        let cmd = agent.command(cwd, commits, &o.extra_tools, model);
+        // A model the person imposed wins over the economy slider: it picks neither the model
+        // (above) nor a thinking level, which stays the AI's own.
+        let saving = if imposed.is_some() {
+            crate::model::Saving::Balanced
+        } else {
+            pr.launch.as_ref().map(|l| l.saving).unwrap_or_default()
+        };
+        let cmd = agent.command_saving(cwd, commits, &o.extra_tools, model, saving);
         let c2 = ctx.clone();
         let mut term = Term::spawn_once(
             &crate::trf!("Autonome · {title}", "Autonomous · {title}"),
@@ -3615,7 +3627,7 @@ impl NotesApp {
                 let mut filter = ui.data(|d| d.get_temp::<u8>(filter_id)).unwrap_or(0);
                 let waiting = self.ws.inbox.iter().filter(|m| m.waits_for_person()).count();
                 let unread = self.ws.unread();
-                ui.horizontal(|ui| {
+                let filters = ui.horizontal(|ui| {
                     for (k, label, n) in [
                         (0u8, crate::tr!("Tout", "All"), self.ws.inbox.iter().filter(|m| !m.being_sorted()).count()),
                         (1, crate::tr!("À répondre", "To answer"), waiting),
@@ -3626,6 +3638,7 @@ impl NotesApp {
                         }
                     }
                 });
+                super::tutorial::mark(ui.ctx(), "inbox:filters", filters.response.rect);
                 ui.data_mut(|d| d.insert_temp(filter_id, filter));
                 ui.add_space(12.0);
                 let shown: Vec<usize> = (0..self.ws.inbox.len())
@@ -3653,6 +3666,7 @@ impl NotesApp {
                 }
                 let (now, offset) = (crate::model::now_ms(), auto::local_offset_ms());
                 let mut group = "";
+                let mut first_card = true;
                 for i in shown {
                     let m = &self.ws.inbox[i];
                     // A heading per day, newest first.
@@ -3719,7 +3733,8 @@ impl NotesApp {
                                     });
                                     ui.add_space(3.0);
                                     ui.add(egui::Label::new(RichText::new(&m.title).font(if m.read { FontId::proportional(14.5) } else { semibold(14.5) }).color(t.text)).wrap());
-                                    let body = plain_text(&m.text);
+                                    let (question_text, analysis) = split_analysis(&m.text);
+                                    let body = plain_text(question_text);
                                     if !body.is_empty() {
                                         ui.add_space(2.0);
                                         // Long texts (session summaries) folded to a few lines.
@@ -3736,6 +3751,20 @@ impl NotesApp {
                                         if (cut || all) && super::projects::action_link(ui, if all { crate::tr!("Réduire", "Show less") } else { crate::tr!("Afficher tout", "Show all") }).clicked() {
                                             ui.data_mut(|d| d.insert_temp(more_id, !all));
                                         }
+                                    }
+                                    // The responder's analysis, apart and whole: it is what helps to decide.
+                                    if let Some(a) = analysis.map(plain_text).filter(|a| !a.is_empty()) {
+                                        ui.add_space(6.0);
+                                        egui::Frame::new()
+                                            .fill(accent.gamma_multiply(0.08))
+                                            .corner_radius(8.0)
+                                            .inner_margin(egui::Margin::symmetric(10, 8))
+                                            .show(ui, |ui| {
+                                                ui.set_width(ui.available_width());
+                                                ui.label(RichText::new(crate::tr!("Analyse du répondeur", "Responder's analysis")).font(semibold(12.0)).color(accent));
+                                                ui.add_space(3.0);
+                                                ui.add(egui::Label::new(RichText::new(a).size(13.0).color(t.text)).wrap());
+                                            });
                                     }
                                 });
                                 let x = super::icons::delete_cross(ui, 22.0, t.tertiary, t.text, t.selected, crate::tr!("Supprimer", "Delete"));
@@ -3765,6 +3794,9 @@ impl NotesApp {
                             }
                         });
                     let rect = card.response.rect;
+                    if std::mem::take(&mut first_card) {
+                        super::tutorial::mark(ui.ctx(), "inbox:message", rect);
+                    }
                     // A coloured edge on the left: the kind at a glance.
                     ui.painter().rect_filled(
                         egui::Rect::from_min_max(rect.left_top() + egui::vec2(0.0, 8.0), egui::pos2(rect.left() + 3.0, rect.bottom() - 8.0)),
@@ -4782,6 +4814,16 @@ fn plain_text(text: &str) -> String {
     out.join("\n")
 }
 
+/// A question's text split from the responder's analysis appended to it by `triage`
+/// (« — Analyse du répondeur : »).
+fn split_analysis(text: &str) -> (&str, Option<&str>) {
+    const MARK: &str = "— Analyse du répondeur :";
+    match text.find(MARK) {
+        Some(i) => (text[..i].trim_end(), Some(text[i + MARK.len()..].trim())),
+        None => (text, None),
+    }
+}
+
 /// Lines of a message's text shown before « Afficher tout ».
 const TEXT_LINES: usize = 4;
 
@@ -5413,6 +5455,7 @@ fn launch_options(
     ui.label(RichText::new(crate::tr!("IA", "AI")).size(12.0).color(t.tertiary));
     agent_pick(ui, id, d, busy, connected);
     model_pick(ui, id, d, busy);
+    saving_pick(ui, id, d, busy);
     ui.add_space(8.0);
     if to_main.contains_key(id) {
         super::settings::switch(ui, &mut d.commits, lk).on_hover_text(crate::tr!("L'IA peut faire des commits sur sa branche (Orchestra l'envoie sur GitHub après chaque tour).\nGardé pour les prochaines sessions de ce projet.", "The AI may commit on its branch (Orchestra pushes it to GitHub after each turn).\nKept for this project's next sessions."));
@@ -5539,6 +5582,33 @@ fn model_pick(ui: &mut egui::Ui, id: &str, d: &mut Draft, busy: bool) {
     });
 }
 
+/// The economy slider of the project: Économe / Équilibré / Qualité (see `model::Saving`).
+fn saving_pick(ui: &mut egui::Ui, id: &str, d: &mut Draft, busy: bool) {
+    let thinks = crate::catalog::accepts_effort(d.agent);
+    ui.add_enabled_ui(!busy, |ui| {
+        egui::ComboBox::from_id_salt(("run-saving", id))
+            .selected_text(RichText::new(d.saving.label()).size(12.5))
+            .width(90.0)
+            .show_ui(ui, |ui| {
+                for s in crate::model::Saving::ALL {
+                    ui.selectable_value(&mut d.saving, s, s.label());
+                }
+            })
+            .response
+            .on_hover_text(crate::tr!(
+                "Curseur d'économie : Économe = modèle plus léger et peu de réflexion, Qualité = modèle plus haut et plus de réflexion. Sans effet sur un modèle imposé.\nGardé pour les prochaines sessions de ce projet.",
+                "Economy slider: Economical = lighter model and little thinking, Quality = higher model and more thinking. No effect on an imposed model.\nKept for this project's next sessions."
+            ));
+    });
+    if !thinks && d.saving != crate::model::Saving::Balanced {
+        ui.label(RichText::new(crate::tr!("modèle seulement", "model only")).size(11.5).weak())
+            .on_hover_text(crate::tr!(
+                "Cette IA n'a pas de niveau de réflexion réglable : le curseur n'agit que sur le choix du modèle (aucun effet si le modèle est imposé).",
+                "This AI has no adjustable thinking level: the slider only acts on the model choice (no effect if the model is imposed)."
+            ));
+    }
+}
+
 fn start_button(ui: &mut egui::Ui, enabled: bool, t: &Tone) -> egui::Response {
     let text = crate::tr!("Lancer", "Start");
     let g = ui
@@ -5612,6 +5682,7 @@ mod tests {
                 ..Default::default()
             },
             agent: None, model: String::new(),
+            saving: crate::model::Saving::Economical,
         };
         let p = Project {
             session_ceiling: Some(95.0),
@@ -6167,6 +6238,7 @@ mod tests {
                     endless: false,
                     end: Default::default(),
                     agent: super::Agent::ClaudeCode, model: String::new(),
+                    saving: Default::default(),
                 };
                 let mut to_main: super::HashMap<String, bool> =
                     [(id.clone(), false)].into_iter().collect();
@@ -6238,6 +6310,7 @@ mod tests {
                     endless: false,
                     end: Default::default(),
                     agent: super::Agent::ClaudeCode, model: String::new(),
+                    saving: Default::default(),
                 };
                 let mut to_main: super::HashMap<String, bool> = super::HashMap::new();
                 if code {
@@ -6767,6 +6840,13 @@ mod tests {
         // The next turn starts from what is there now: nothing new any more.
         let at_turn: Vec<String> = p.steps.iter().map(|s| s.id.clone()).collect();
         assert!(super::fresh_steps(&at_turn, &p.steps).is_empty());
+    }
+
+    #[test]
+    fn the_responder_analysis_is_split_from_the_question() {
+        let (q, a) = super::split_analysis("Quoi faire ?\n\n— Analyse du répondeur :\nOption C.");
+        assert_eq!((q, a), ("Quoi faire ?", Some("Option C.")));
+        assert_eq!(super::split_analysis("Sans analyse"), ("Sans analyse", None));
     }
 
     #[test]
