@@ -243,6 +243,15 @@ impl Step {
             && now < self.held_at.saturating_add(HOLD_MS)
     }
 
+    /// Like `held_elsewhere`, but only for another *computer*: an AI of this computer
+    /// (`holder_id` = computer id, then `#` and the AI's name) doesn't count.
+    pub fn held_by_other_computer(&self, computer: &str, now: u64) -> bool {
+        self.status == StepStatus::Doing
+            && !self.held_by.is_empty()
+            && self.held_by.split('#').next() != Some(computer)
+            && now < self.held_at.saturating_add(HOLD_MS)
+    }
+
     /// Order of two reservations of one step: the earlier wins, the computer id breaks a tie,
     /// so both copies of a shared project pick the same AI.
     fn hold_key(&self) -> (u64, &str) {
@@ -1233,7 +1242,7 @@ pub fn project_to_markdown(page: &Page) -> String {
         "- étapes : {done}/{total} terminées\n",
         "- steps: {done}/{total} done\n"
     ));
-    let (me, now) = (crate::store::computer_id(), now_ms());
+    let (me, now) = (crate::store::holder_id(), now_ms());
     if let Some(n) = pr.next_step_for(&me, now) {
         out.push_str(&crate::trf!(
             "- prochaine étape : {}\n",
@@ -1328,6 +1337,24 @@ pub fn project_to_markdown(page: &Page) -> String {
 mod tests {
     use super::*;
     use crate::model::Workspace;
+
+    #[test]
+    fn two_ais_of_one_computer_never_take_the_same_step() {
+        let mut p = Project::default();
+        let a = p.add_step("Une", "moi");
+        let b = p.add_step("Deux", "moi");
+        p.claim_step(&a, "pc#claude-code").unwrap();
+        // The other AI of the same computer is refused, and is offered the next step.
+        assert!(p.claim_step(&a, "pc#codex").is_err());
+        assert_eq!(p.next_step_for("pc#codex", now_ms()).map(|s| s.id.clone()), Some(b.clone()));
+        p.claim_step(&b, "pc#codex").unwrap();
+        // The same AI takes its own step again (renewal).
+        p.claim_step(&a, "pc#claude-code").unwrap();
+        // For the screen, both are « here »: only another computer counts as elsewhere.
+        let s = p.steps.iter().find(|s| s.id == a).unwrap();
+        assert!(!s.held_by_other_computer("pc", now_ms()));
+        assert!(s.held_by_other_computer("autre", now_ms()));
+    }
 
     #[test]
     fn a_step_keeps_its_assigned_ai_on_this_computer_only() {

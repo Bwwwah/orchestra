@@ -43,6 +43,18 @@ impl Agent {
         self.ai().label()
     }
 
+    /// The name under which this AI's session reserves steps (ORCHESTRA_HOLDER, see
+    /// `store::holder_id`). Antigravity's MCP isn't wired by Orchestra: it reserves as the
+    /// computer itself.
+    pub fn holder(self) -> &'static str {
+        match self {
+            Agent::ClaudeCode => "claude-code",
+            Agent::Codex => "codex",
+            Agent::Vibe => "vibe",
+            Agent::Antigravity => "",
+        }
+    }
+
     /// The bare name of the AI's maker or model, for the sidebar usage tiles: "Claude",
     /// "Codex", "Antigravity", "Mistral".
     pub fn short_name(self) -> &'static str {
@@ -260,13 +272,20 @@ impl Agent {
             Agent::ClaudeCode if rtk_binary().is_some() => rtk_config_files(&rtk_home()),
             Agent::ClaudeCode | Agent::Codex | Agent::Antigravity => Vec::new(),
             Agent::Vibe => {
-                let s = mcp_server();
+                let s = mcp_server("vibe");
                 let mut ours = format!(
                     "[[mcp_servers]]\nname = \"orchestra\"\ntransport = \"stdio\"\ncommand = {}\nargs = [\"mcp\"]\n",
                     toml_string(s["command"].as_str().unwrap_or("orchestra"))
                 );
+                let mut env = Vec::new();
                 if let Some(d) = s["env"]["ORCHESTRA_DIR"].as_str() {
-                    ours.push_str(&format!("env = {{ ORCHESTRA_DIR = {} }}\n", toml_string(d)));
+                    env.push(format!("ORCHESTRA_DIR = {}", toml_string(d)));
+                }
+                if let Some(h) = s["env"]["ORCHESTRA_HOLDER"].as_str() {
+                    env.push(format!("ORCHESTRA_HOLDER = {}", toml_string(h)));
+                }
+                if !env.is_empty() {
+                    ours.push_str(&format!("env = {{ {} }}\n", env.join(", ")));
                 }
                 ours.push('\n');
                 ours.push_str(&self.rules_config(allow_commits, extra));
@@ -572,7 +591,7 @@ fn claude_command(allowed: &[String], denied: &[String], rtk: Option<&Path>, db:
     let model = model_arg(model).map(|m| format!(" --model {}", q(m))).unwrap_or_default();
     format!(
         "{prefix}claude --setting-sources user --strict-mcp-config --mcp-config {}{settings}{model} --permission-mode acceptEdits --allowedTools {} --disallowedTools {}",
-        q(&mcp_config()),
+        q(&mcp_config("claude-code")),
         q(&allowed.join(",")),
         q(&denied.join(","))
     )
@@ -695,18 +714,27 @@ pub fn rtk_binary() -> Option<PathBuf> {
 }
 
 /// The only MCP server of an autonomous session: Orchestra itself (this program, `mcp`).
-fn mcp_config() -> String {
-    serde_json::json!({ "mcpServers": { "orchestra": mcp_server() } }).to_string()
+fn mcp_config(holder: &str) -> String {
+    serde_json::json!({ "mcpServers": { "orchestra": mcp_server(holder) } }).to_string()
 }
 
 /// Orchestra's MCP server: this program with `mcp`, and its data folder if it isn't the default.
-fn mcp_server() -> Value {
+/// `holder` (ORCHESTRA_HOLDER) names the AI of the session: the steps it takes are reserved
+/// under that name, so two AIs working at once on this computer never take the same step.
+fn mcp_server(holder: &str) -> Value {
     let exe = std::env::current_exe()
         .map(|p| p.display().to_string())
         .unwrap_or_else(|_| "orchestra".into());
     let mut server = serde_json::json!({ "command": exe, "args": ["mcp"] });
+    let mut env = serde_json::Map::new();
     if let Ok(d) = std::env::var("ORCHESTRA_DIR") {
-        server["env"] = serde_json::json!({ "ORCHESTRA_DIR": d });
+        env.insert("ORCHESTRA_DIR".into(), d.into());
+    }
+    if !holder.is_empty() {
+        env.insert("ORCHESTRA_HOLDER".into(), holder.into());
+    }
+    if !env.is_empty() {
+        server["env"] = Value::Object(env);
     }
     server
 }
@@ -714,13 +742,20 @@ fn mcp_server() -> Value {
 /// Codex's MCP servers for the session: the whole `mcp_servers` table replaced by an inline
 /// one holding only Orchestra's server, so the person's other servers are not started.
 fn codex_mcp() -> String {
-    let s = mcp_server();
+    let s = mcp_server("codex");
     let mut entry = format!(
         "command={},args=[\"mcp\"]",
         toml_string(s["command"].as_str().unwrap_or("orchestra"))
     );
+    let mut env = Vec::new();
     if let Some(d) = s["env"]["ORCHESTRA_DIR"].as_str() {
-        entry.push_str(&format!(",env={{ORCHESTRA_DIR={}}}", toml_string(d)));
+        env.push(format!("ORCHESTRA_DIR={}", toml_string(d)));
+    }
+    if let Some(h) = s["env"]["ORCHESTRA_HOLDER"].as_str() {
+        env.push(format!("ORCHESTRA_HOLDER={}", toml_string(h)));
+    }
+    if !env.is_empty() {
+        entry.push_str(&format!(",env={{{}}}", env.join(",")));
     }
     format!("mcp_servers={{orchestra={{{entry}}}}}")
 }
@@ -3493,7 +3528,7 @@ mod tests {
             cmd.contains("--setting-sources user ")
                 && cmd.contains("--strict-mcp-config --mcp-config ")
         );
-        let v: Value = serde_json::from_str(&mcp_config()).unwrap();
+        let v: Value = serde_json::from_str(&mcp_config("claude-code")).unwrap();
         assert_eq!(v["mcpServers"].as_object().unwrap().len(), 1);
         assert_eq!(v["mcpServers"]["orchestra"]["args"][0], "mcp");
     }
@@ -3872,7 +3907,7 @@ mod tests {
         // Codex: the whole table of MCP servers replaced on its command line.
         let c = Agent::Codex.command(cwd, false, "", "");
         assert!(c.contains(" -c 'mcp_servers={orchestra={command=\""), "{c}");
-        assert!(c.contains(",args=[\"mcp\"]}}'"), "{c}");
+        assert!(c.contains(",args=[\"mcp\"],env={ORCHESTRA_HOLDER=\"codex\"}}}'"), "{c}");
 
         // Antigravity: its sandbox, edits accepted, never everything approved.
         let g = Agent::Antigravity.command(cwd, false, "", "");

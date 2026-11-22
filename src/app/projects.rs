@@ -1764,7 +1764,7 @@ fn steps_card(ui: &mut egui::Ui, cx: &mut Cx, extra: f32) -> f32 {
                         let r = ui.add(egui::Label::new(job).wrap().sense(egui::Sense::click()));
                         // Another computer's AI has reserved it (shared project).
                         let held =
-                            s.held_elsewhere(&crate::store::computer_id(), crate::model::now_ms());
+                            s.held_by_other_computer(&crate::store::computer_id(), crate::model::now_ms());
                         if !s.source.is_empty() || s.received || held {
                             let by = if s.source.is_empty() {
                                 String::new()

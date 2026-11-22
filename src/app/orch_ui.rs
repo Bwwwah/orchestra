@@ -771,13 +771,6 @@ impl NotesApp {
         fix: bool,
         model: &str,
     ) -> Result<(), String> {
-        if self.orch.runs.iter().any(|r| r.project == project) {
-            return Err(crate::tr!(
-                "une session tourne déjà sur ce projet",
-                "a session is already running on this project"
-            )
-            .into());
-        }
         let page = self
             .ws
             .page(project)
@@ -811,6 +804,21 @@ impl NotesApp {
         }
         // The AI assigned to the step taken first wins over the card's; none: the card's.
         let agent = pr.agent_for_next(agent, &crate::store::computer_id(), crate::model::now_ms());
+        // One session at a time per project and per AI. Two different AIs go in parallel: each
+        // works in its own copy and reserves its steps under its own name (`Agent::holder`), so
+        // they never take the same step. Merging stays per branch.
+        if self
+            .orch
+            .runs
+            .iter()
+            .any(|r| r.project == project && r.agent == agent)
+        {
+            return Err(crate::tr!(
+                "une session tourne déjà sur ce projet avec cette IA",
+                "a session is already running on this project with this AI"
+            )
+            .into());
+        }
         // The AI chosen: wired for working alone, and plugged in.
         if !agent.ready() {
             return Err(crate::trf!(
@@ -2790,7 +2798,10 @@ impl NotesApp {
             .iter()
             .filter_map(|r| {
                 let steps = &self.ws.page(&r.project)?.project.as_ref()?.steps;
-                Some((r.id.clone(), current_step(steps, &me)?.to_string()))
+                // Under the name of this session's AI, so two sessions each show their own step.
+                let holder = r.agent.holder();
+                let who = if holder.is_empty() { me.clone() } else { format!("{me}#{holder}") };
+                Some((r.id.clone(), current_step(steps, &who)?.to_string()))
             })
             .collect();
         // Each session's model, and why it was chosen (its record, written at launch).
