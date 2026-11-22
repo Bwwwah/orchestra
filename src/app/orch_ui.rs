@@ -5579,6 +5579,7 @@ fn model_pick(ui: &mut egui::Ui, id: &str, d: &mut Draft, busy: bool) {
 
 /// The economy slider of the project: Économe / Équilibré / Qualité (see `model::Saving`).
 fn saving_pick(ui: &mut egui::Ui, id: &str, d: &mut Draft, busy: bool) {
+    let thinks = crate::catalog::accepts_effort(d.agent);
     ui.add_enabled_ui(!busy, |ui| {
         egui::ComboBox::from_id_salt(("run-saving", id))
             .selected_text(RichText::new(d.saving.label()).size(12.5))
@@ -5594,6 +5595,13 @@ fn saving_pick(ui: &mut egui::Ui, id: &str, d: &mut Draft, busy: bool) {
                 "Economy slider: Economical = lighter model and little thinking, Quality = higher model and more thinking. No effect on an imposed model.\nKept for this project's next sessions."
             ));
     });
+    if !thinks && d.saving != crate::model::Saving::Balanced {
+        ui.label(RichText::new(crate::tr!("modèle seulement", "model only")).size(11.5).weak())
+            .on_hover_text(crate::tr!(
+                "Cette IA n'a pas de niveau de réflexion réglable : le curseur n'agit que sur le choix du modèle (aucun effet si le modèle est imposé).",
+                "This AI has no adjustable thinking level: the slider only acts on the model choice (no effect if the model is imposed)."
+            ));
+    }
 }
 
 fn start_button(ui: &mut egui::Ui, enabled: bool, t: &Tone) -> egui::Response {
