@@ -913,10 +913,12 @@ impl NotesApp {
         };
         let cmd = agent.command_saving(cwd, commits, &o.extra_tools, model, saving);
         let c2 = ctx.clone();
-        let mut term = Term::spawn_once(
+        let envs = crate::sync::api_env(&self.ws.settings, agent);
+        let mut term = Term::spawn_once_env(
             &crate::trf!("Autonome · {title}", "Autonomous · {title}"),
             &copy.worktree,
             &cmd,
+            &envs,
             move || c2.request_repaint_after(Duration::from_millis(200)),
         )?;
         term.resize(42, 140);

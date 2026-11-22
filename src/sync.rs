@@ -30,6 +30,29 @@ pub const API_KEY_VARS: [&str; 3] = [
 pub const API_KEY_AGENTS: [crate::auto::Agent; 2] =
     [crate::auto::Agent::ClaudeCode, crate::auto::Agent::Codex];
 
+/// The API keys of `vars` kept in the Keychain, as (variable, key) pairs; the ones never set
+/// are left out.
+fn keys_of(vars: &[&str], get: impl Fn(&str) -> String) -> Vec<(String, String)> {
+    vars.iter()
+        .map(|v| (v.to_string(), get(v)))
+        .filter(|(_, k)| !k.is_empty())
+        .collect()
+}
+
+/// The environment variables to hand to `agent` when it runs in API mode (`Settings::api_mode`):
+/// its API key(s) from the Keychain. Empty in subscription mode, so a session never bills
+/// API credits unless the person chose it, and for an AI without API mode.
+pub fn api_env(settings: &crate::model::Settings, agent: crate::auto::Agent) -> Vec<(String, String)> {
+    if !API_KEY_AGENTS.contains(&agent) || !settings.api_mode(agent.ai().key()) {
+        return Vec::new();
+    }
+    let vars: &[&str] = match agent {
+        crate::auto::Agent::ClaudeCode => &["ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN"],
+        _ => &["OPENAI_API_KEY"],
+    };
+    keys_of(vars, crate::secret::api_key)
+}
+
 /// What a Claude Code session puts in the environment of the programs it runs. Orchestra
 /// started from one (`cargo run` in a Claude Code terminal) would hand them down: a Claude
 /// Code started with them takes itself for that session's child and saves no transcript,
@@ -1427,6 +1450,16 @@ impl SyncRun {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Only the keys that were set are handed over; subscription mode hands none.
+    #[test]
+    fn api_env_hands_over_only_set_keys_in_api_mode() {
+        let got = keys_of(&["A", "B"], |v| if v == "B" { "k".into() } else { String::new() });
+        assert_eq!(got, vec![("B".to_string(), "k".to_string())]);
+        let s = crate::model::Settings::default();
+        assert!(api_env(&s, crate::auto::Agent::ClaudeCode).is_empty());
+        assert!(api_env(&s, crate::auto::Agent::Codex).is_empty());
+    }
 
     #[test]
     fn images_reach_the_agents() {

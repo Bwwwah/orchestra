@@ -45,7 +45,7 @@ impl Term {
         cmd: Option<&str>,
         on_output: impl Fn() + Send + 'static,
     ) -> Result<Term, String> {
-        Self::spawn_with(title, cwd, cmd, true, on_output)
+        Self::spawn_with(title, cwd, cmd, true, &[], on_output)
     }
 
     /// The shell runs `cmd` and ends with it: `exited()` says when the program has quit
@@ -56,7 +56,19 @@ impl Term {
         cmd: &str,
         on_output: impl Fn() + Send + 'static,
     ) -> Result<Term, String> {
-        Self::spawn_with(title, cwd, Some(cmd), false, on_output)
+        Self::spawn_with(title, cwd, Some(cmd), false, &[], on_output)
+    }
+
+    /// `spawn_once` with environment variables handed to the program: the API key of an AI
+    /// that runs in API mode (`sync::api_env`). Without them it uses the subscription.
+    pub fn spawn_once_env(
+        title: &str,
+        cwd: &str,
+        cmd: &str,
+        envs: &[(String, String)],
+        on_output: impl Fn() + Send + 'static,
+    ) -> Result<Term, String> {
+        Self::spawn_with(title, cwd, Some(cmd), false, envs, on_output)
     }
 
     fn spawn_with(
@@ -64,6 +76,7 @@ impl Term {
         cwd: &str,
         cmd: Option<&str>,
         keep_shell: bool,
+        envs: &[(String, String)],
         on_output: impl Fn() + Send + 'static,
     ) -> Result<Term, String> {
         let (rows, cols) = (24u16, 80u16);
@@ -127,6 +140,9 @@ impl Term {
             for k in crate::sync::API_KEY_VARS {
                 c.env_remove(k);
             }
+        }
+        for (k, v) in envs {
+            c.env(k, v);
         }
         let child = pair.slave.spawn_command(c).map_err(|e| e.to_string())?;
         drop(pair.slave);
