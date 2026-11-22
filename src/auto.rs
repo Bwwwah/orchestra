@@ -79,15 +79,16 @@ impl Agent {
 
     /// Autonomous work is wired for it: its command (with permissions), its session files
     /// and the reading of its turns. Claude Code, and Mistral Vibe driven turn by turn in its
-    /// headless mode (`headless`; a POSIX shell runs its turns, so not on Windows); Codex and
-    /// Gemini are listed so the rest of the program can name them, and are never started
-    /// alone until this is true. Never true for an agent whose use Orchestra can't read
+    /// headless mode (`headless`; a POSIX shell runs its turns, so not on Windows); Codex in
+    /// its sandbox (`codex_command`); Gemini is listed so the rest of the program can name
+    /// it, and is never started alone until this is true. Never true for an agent whose use Orchestra can't read
     /// (`usage::reports_usage`): its sessions could not be stopped at their ceiling.
     pub fn ready(self) -> bool {
         let wired = match self {
             Agent::ClaudeCode => true,
             Agent::Vibe => cfg!(unix),
-            Agent::Codex | Agent::Gemini => false,
+            Agent::Codex => true,
+            Agent::Gemini => false,
         };
         wired && crate::usage::reports_usage(self)
     }
@@ -3214,7 +3215,7 @@ mod tests {
         assert_eq!(Agent::Vibe.ready(), cfg!(unix));
         assert!(Agent::Vibe.headless() && !Agent::ClaudeCode.headless());
         for a in [Agent::Codex, Agent::Gemini, Agent::Vibe] {
-            assert!(a == Agent::Vibe || !a.ready());
+            assert!(a == Agent::Vibe || a == Agent::Codex || !a.ready());
             // Its program, in its strictest mode.
             let cmd = a.command(Path::new("/x"), true, "", "");
             // Its program, after the variables pointing to its settings of the session.
