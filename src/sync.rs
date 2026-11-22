@@ -1169,8 +1169,8 @@ pub fn ask_question(
 }
 
 /// The arguments that send a reply on a Claude Code conversation, headless and read-only
-/// (`claude -p <reply> --resume <id>`). None for an id unsafe on a command line, or for
-/// an agent whose conversation isn't carried on this way (yet).
+/// (`claude -p <reply> --resume <id>`) or on a Codex one (`codex exec resume <id> <reply>`).
+/// None for an id unsafe on a command line.
 fn followup_args(tool: Tool, session: &str, reply: &str) -> Option<Vec<String>> {
     if !is_session_id(session) {
         return None;
@@ -1191,7 +1191,21 @@ fn followup_args(tool: Tool, session: &str, reply: &str) -> Option<Vec<String>> 
                 "Read,Glob,Grep,Bash(git log:*),Bash(ls:*)".into(),
             ])
         }
-        Tool::Codex => None,
+        // `codex exec resume <id> <reply>`: the read-only sandbox is set before the
+        // subcommand, so it applies whatever `resume` accepts.
+        Tool::Codex => {
+            let r: String = reply.trim().chars().take(QUESTION_MAX).collect();
+            Some(vec![
+                "exec".into(),
+                "--sandbox".into(),
+                "read-only".into(),
+                "--skip-git-repo-check".into(),
+                "resume".into(),
+                session.into(),
+                "--".into(),
+                r,
+            ])
+        }
     }
 }
 
@@ -1643,6 +1657,13 @@ mod tests {
         assert!(!a.iter().any(|x| x.contains("Edit") || x.contains("Write")));
         assert!(followup_args(Tool::ClaudeCode, "abc;ls", "x").is_none());
         assert!(ask_followup(&Resume::default(), Tool::ClaudeCode, "  ").is_err());
+        // Codex: same conversation through `exec resume`, still read-only.
+        let c = followup_args(Tool::Codex, id, " et ensuite ? ").unwrap();
+        let i = c.iter().position(|x| x == "resume").unwrap();
+        assert_eq!(c[i + 1], id);
+        assert_eq!(c.last().map(String::as_str), Some("et ensuite ?"));
+        assert!(c.iter().position(|x| x == "read-only").unwrap() < i);
+        assert!(followup_args(Tool::Codex, "abc;ls", "x").is_none());
     }
 
     #[test]
