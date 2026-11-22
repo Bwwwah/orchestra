@@ -1047,6 +1047,28 @@ mod tests {
     }
 
     #[test]
+    fn codex_consumption_of_a_folder() {
+        let root = tmp("codex-consumption");
+        let dir = root.join("2026/11/18");
+        std::fs::create_dir_all(&dir).unwrap();
+        for (name, cwd, input) in [("a", "/home/me/Code/app", 5000), ("b", "/home/me/Code/other", 900)] {
+            let mut f = File::create(dir.join(format!("rollout-2026-11-18T07-00-00-{name}.jsonl"))).unwrap();
+            writeln!(f, r#"{{"timestamp":"2026-11-18T07:00:00Z","type":"session_meta","payload":{{"id":"{name}","cwd":"{cwd}"}}}}"#).unwrap();
+            writeln!(f, r#"{{"timestamp":"2026-11-18T07:00:09Z","type":"response_item","payload":{{"type":"message","role":"assistant","content":[{{"type":"output_text","text":"ok"}}]}}}}"#).unwrap();
+            writeln!(f, r#"{{"timestamp":"2026-11-18T07:00:10Z","type":"event_msg","payload":{{"type":"token_count","info":{{"total_token_usage":{{"input_tokens":{input},"cached_input_tokens":4000,"output_tokens":300}}}}}}}}"#).unwrap();
+        }
+        let mut sc = Scanner::new(vec![(Tool::Codex, root.clone())]);
+        sc.scan();
+        let all = sc.sessions();
+        let t = consumption(&all, Tool::Codex, Path::new("/home/me/Code/app"), 0);
+        assert_eq!(t, Tokens { billed: 1300, cached: 4000 });
+        // Not counted as another tool's consumption, nor before `since`.
+        assert_eq!(consumption(&all, Tool::ClaudeCode, Path::new("/home/me/Code/app"), 0), Tokens::default());
+        assert_eq!(consumption(&all, Tool::Codex, Path::new("/home/me/Code/app"), u64::MAX), Tokens::default());
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
     fn folder_filter_skips_other_projects() {
         let root = tmp("filter");
         for (dir, cwd) in [
