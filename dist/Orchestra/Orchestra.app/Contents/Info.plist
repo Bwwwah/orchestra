@@ -1,0 +1,38 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>CFBundleName</key>
+	<string>Orchestra</string>
+	<key>CFBundleDisplayName</key>
+	<string>Orchestra</string>
+	<key>CFBundleIdentifier</key>
+	<string>app.orchestra.desktop</string>
+	<key>CFBundleExecutable</key>
+	<string>orchestra</string>
+	<key>CFBundleIconFile</key>
+	<string>AppIcon</string>
+	<key>CFBundlePackageType</key>
+	<string>APPL</string>
+	<key>CFBundleShortVersionString</key>
+	<string>0.6.18</string>
+	<key>CFBundleVersion</key>
+	<string>0.6.18</string>
+	<key>CFBundleDevelopmentRegion</key>
+	<string>fr</string>
+	<key>LSMinimumSystemVersion</key>
+	<string>11.0</string>
+	<key>LSApplicationCategoryType</key>
+	<string>public.app-category.productivity</string>
+	<!-- No App Nap: with the window hidden or the screen off, Orchestra still drives the
+	     autonomous sessions on time (see src/app/conductor.rs). -->
+	<key>NSAppSleepDisabled</key>
+	<true/>
+	<key>NSHighResolutionCapable</key>
+	<true/>
+	<key>NSAppleEventsUsageDescription</key>
+	<string>Orchestra pilote d'autres apps pour choisir un dossier, lire le presse-papiers et capturer la fenêtre d'une app à la demande d'une IA.</string>
+	<key>NSLocalNetworkUsageDescription</key>
+	<string>Orchestra se connecte aux autres ordinateurs de votre réseau pour la collaboration en direct.</string>
+</dict>
+</plist>

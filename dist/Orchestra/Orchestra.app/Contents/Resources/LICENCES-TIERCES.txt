@@ -1,0 +1,24 @@
+Licences tierces — logiciels livrés avec Orchestra
+Third-party licences — software shipped with Orchestra
+======================================================
+
+RTK (Rust Token Killer) — édition rtk-oss
+-----------------------------------------
+Projet   : https://github.com/rtk-ai/rtk
+Version  : 0.49.0 (commit ef0b734b6b2f5df26267bf05d90d71b887658580)
+Auteur   : Copyright 2026 RTK AI Labs
+Licence  : Apache License 2.0 (texte complet : rtk-LICENSE.txt, à côté de ce fichier)
+
+Orchestra livre le programme « rtk » à côté du sien, sans le modifier, compilé sans les
+fonctions par défaut (cargo build --no-default-features) : son moteur de compression
+« rtk-engine », sous licence BUSL-1.1, n'y est donc pas. Le projet RTK ne fournit pas de
+fichier NOTICE.
+
+Orchestra ships the « rtk » program next to its own, unmodified, built without its default
+features (cargo build --no-default-features): its compression engine « rtk-engine », under
+the BUSL-1.1 licence, is therefore not in it. The RTK project provides no NOTICE file.
+
+Orchestra l'utilise seulement dans ses sessions autonomes, pour raccourcir la sortie des
+commandes lancées par l'IA.
+Orchestra uses it only in its autonomous sessions, to shorten the output of the commands
+run by the AI.
