@@ -772,6 +772,41 @@ fn finished_steps(report: &Page) -> Vec<String> {
     out
 }
 
+/// The economy slider of a project: how much the sessions favour a low consumption over
+/// quality (lighter model and less thinking, or the opposite).
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum Saving {
+    /// Lighter models, little thinking.
+    Economical,
+    /// Today's behaviour.
+    #[default]
+    Balanced,
+    /// Stronger models, more thinking.
+    Quality,
+}
+
+impl Saving {
+    pub const ALL: [Saving; 3] = [Saving::Economical, Saving::Balanced, Saving::Quality];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Saving::Economical => crate::tr!("Économe", "Economical"),
+            Saving::Balanced => crate::tr!("Équilibré", "Balanced"),
+            Saving::Quality => crate::tr!("Qualité", "Quality"),
+        }
+    }
+
+    /// Shift of the model tier chosen automatically: -1 lighter, +1 higher.
+    pub fn tier_shift(self) -> i8 {
+        match self {
+            Saving::Economical => -1,
+            Saving::Balanced => 0,
+            Saving::Quality => 1,
+        }
+    }
+}
+
 /// When an endless session stops. Each one is optional; the first reached stops it. The
 /// budget of the session, the global limit and the week's reserve always apply on top.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Default)]

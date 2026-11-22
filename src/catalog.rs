@@ -841,6 +841,7 @@ mod tests {
             end: Default::default(),
             agent: None,
             model: "opus".into(),
+            saving: Default::default(),
         });
         assert_eq!(imposed(&pr, Agent::ClaudeCode, "", 0).unwrap().model, "opus");
         // Leaving this computer, the step's model and the launch choices stay here.

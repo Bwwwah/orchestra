@@ -296,6 +296,7 @@ struct Draft {
     agent: Agent,
     /// The model imposed for the project's sessions (empty: Orchestra chooses).
     model: String,
+    saving: crate::model::Saving,
 }
 
 impl Draft {
@@ -315,6 +316,7 @@ impl Draft {
             end: prefs.end,
             agent: prefs.agent.unwrap_or(Agent::ClaudeCode),
             model: prefs.model,
+            saving: prefs.saving,
         }
     }
 
@@ -327,6 +329,7 @@ impl Draft {
             // Claude Code, the default, isn't written.
             agent: (self.agent != Agent::ClaudeCode).then_some(self.agent),
             model: self.model.clone(),
+            saving: self.saving,
         }
     }
 }
@@ -343,6 +346,7 @@ fn default_prefs(commits: bool) -> crate::project::LaunchPrefs {
         },
         agent: None,
         model: String::new(),
+        saving: Default::default(),
     }
 }
 
@@ -5612,6 +5616,7 @@ mod tests {
                 ..Default::default()
             },
             agent: None, model: String::new(),
+            saving: crate::model::Saving::Economical,
         };
         let p = Project {
             session_ceiling: Some(95.0),
@@ -6167,6 +6172,7 @@ mod tests {
                     endless: false,
                     end: Default::default(),
                     agent: super::Agent::ClaudeCode, model: String::new(),
+                    saving: Default::default(),
                 };
                 let mut to_main: super::HashMap<String, bool> =
                     [(id.clone(), false)].into_iter().collect();
@@ -6238,6 +6244,7 @@ mod tests {
                     endless: false,
                     end: Default::default(),
                     agent: super::Agent::ClaudeCode, model: String::new(),
+                    saving: Default::default(),
                 };
                 let mut to_main: super::HashMap<String, bool> = super::HashMap::new();
                 if code {
