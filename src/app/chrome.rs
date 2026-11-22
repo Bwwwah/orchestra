@@ -506,6 +506,7 @@ impl NotesApp {
                     .filter(|p| !is_shared(p) && p.project.is_some())
                     .map(|p| p.id.clone())
                     .collect();
+                let projects_top = ui.cursor().min;
                 section_header(ui, crate::tr!("Projets", "Projects"), &t);
                 let mut rows = vec![];
                 for id in own_projects {
@@ -513,7 +514,13 @@ impl NotesApp {
                     rows.push((id, r));
                 }
                 self.reorder_roots(ui, &rows);
-                if add_row(ui, &t)
+                let add = add_row(ui, &t);
+                super::tutorial::mark(
+                    ui,
+                    "side:projects",
+                    egui::Rect::from_min_max(projects_top, add.rect.right_bottom()),
+                );
+                if add
                     .on_hover_text(crate::tr!("Nouveau projet", "New project"))
                     .clicked()
                 {

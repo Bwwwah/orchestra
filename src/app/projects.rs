@@ -1139,7 +1139,7 @@ fn card_key(page_id: &str, k: CardKind) -> egui::Id {
     egui::Id::unique(("card-h", page_id, name))
 }
 
-/// The name a card goes by in the tutorial (see `tutorial::project_cards_stops`).
+/// The name a card goes by in the tutorial (see `tutorial::tour_stops`).
 fn card_key_name(k: CardKind) -> &'static str {
     match k {
         CardKind::Summary(_) => "card:summary",
@@ -1259,10 +1259,10 @@ pub(super) fn project_panel(ui: &mut egui::Ui, cx: &mut Cx) -> Option<super::not
                     if r.clicked() {
                         launch = true;
                     }
-                    if super::style::secondary(ui, crate::tr!("Réglages…", "Settings…"))
-                        .on_hover_text(crate::tr!("L'IA, le modèle, le plafond, une consigne, le mode sans fin : gardés pour les prochaines sessions de ce projet.", "The AI, the model, the ceiling, a mission, endless mode: kept for this project's next sessions."))
-                        .clicked()
-                    {
+                    let rs = super::style::secondary(ui, crate::tr!("Réglages…", "Settings…"))
+                        .on_hover_text(crate::tr!("L'IA, le modèle, le plafond, une consigne, le mode sans fin : gardés pour les prochaines sessions de ce projet.", "The AI, the model, the ceiling, a mission, endless mode: kept for this project's next sessions."));
+                    super::tutorial::mark(ui, "project:actions", r.rect.union(rs.rect));
+                    if rs.clicked() {
                         settings = true;
                     }
                 }
@@ -1455,9 +1455,15 @@ pub(super) fn project_panel(ui: &mut egui::Ui, cx: &mut Cx) -> Option<super::not
     if !tabs.contains(&tab) {
         tab = ProjectTab::Overview;
     }
+    let tabs_top = ui.cursor().min;
     if let Some(t2) = tab_bar(ui, &tabs, tab, cx.t) {
         tab = t2;
     }
+    super::tutorial::mark(
+        ui,
+        "project:tabs",
+        egui::Rect::from_min_max(tabs_top, egui::pos2(ui.max_rect().right(), ui.cursor().min.y)),
+    );
     ui.ctx().data_mut(|d| d.insert_temp(tab_key, tab));
     ui.add_space(14.0);
     let gap = 16.0;
@@ -1532,7 +1538,7 @@ pub(super) fn project_tabs(code: bool) -> Vec<ProjectTab> {
 }
 
 /// The tab holding a tour's mark (« card:versions »…).
-fn tab_of_mark(mark: &str) -> Option<ProjectTab> {
+pub(super) fn tab_of_mark(mark: &str) -> Option<ProjectTab> {
     Some(match mark {
         "card:summary" | "card:steps" | "card:questions" | "card:sessions"
         | "card:new-session" => ProjectTab::Overview,

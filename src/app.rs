@@ -13,7 +13,7 @@ const ICONS: [&str; 20] = [
     "🚀", "❤", "🎵", "✈",
 ];
 
-#[derive(PartialEq, Clone, Copy)]
+#[derive(PartialEq, Clone, Copy, Debug)]
 enum View {
     Page,
     Home,
@@ -300,7 +300,7 @@ impl NotesApp {
         {
             app.ws.settings.tutorial_seen = true;
             app.dirty_since = Some(Instant::now());
-            app.start_project_cards_tour();
+            app.start_tour();
         }
         // Developer aid for screenshots: ORCHESTRA_DEMO=settings | ai | collab | slash[:text].
         if let Ok(demo) = std::env::var("ORCHESTRA_DEMO") {

@@ -762,7 +762,7 @@ impl NotesApp {
         );
         if replay {
             self.settings_tab = None;
-            self.start_project_cards_tour();
+            self.start_tour();
         }
         section(ui, crate::tr!("Vos données", "Your data"), t, l);
         row(

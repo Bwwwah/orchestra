@@ -48,8 +48,9 @@ impl Term {
         Self::spawn_with(title, cwd, cmd, true, &[], on_output)
     }
 
-    /// The shell runs `cmd` and ends with it: `exited()` says when the program has quit
-    /// (sessions driven by Orchestra, which must notice it).
+    /// The shell runs `cmd` and ends with it: `exited()` says when the program has quit.
+    /// The sessions use `spawn_once_env`; this one is left to the tests.
+    #[cfg(test)]
     pub fn spawn_once(
         title: &str,
         cwd: &str,

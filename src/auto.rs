@@ -1712,17 +1712,19 @@ pub fn conflicts_between(root: &Path, ours: &str, theirs: &str) -> Result<Vec<St
     }
 }
 
-/// The files in conflict between the session's branch and the branch checked out in the
-/// project's folder, before merging.
-pub fn merge_conflicts(r: &crate::model::RunRecord) -> Result<Vec<String>, String> {
-    if in_place(r) {
-        return Ok(Vec::new());
-    }
-    let rd = PathBuf::from(&r.root);
-    let into = git(&rd, &["rev-parse", "--abbrev-ref", "HEAD"])?
-        .trim()
-        .to_string();
-    conflicts_between(&rd, &into, &r.branch)
+/// Why a merge doesn't start: the files changed on both sides, the first few by name.
+fn conflict_message(files: &[String], into: &str) -> String {
+    let shown: Vec<&str> = files.iter().take(3).map(String::as_str).collect();
+    let more = files.len().saturating_sub(shown.len());
+    let list = if more > 0 {
+        crate::trf!("{} et {more} autre(s)", "{} and {more} more", shown.join(", "))
+    } else {
+        shown.join(", ")
+    };
+    crate::trf!(
+        "fusion arrêtée avant de commencer : {list} modifié(s) aussi dans « {into} » ; fusionnez à la main, rien n'a changé dans votre dossier",
+        "merge stopped before it began: {list} also changed in « {into} »; merge by hand, nothing changed in your folder"
+    )
 }
 
 /// Bring the session's work into the branch checked out in the project's folder.
@@ -1756,6 +1758,13 @@ pub fn merge(r: &crate::model::RunRecord) -> Result<String, String> {
         .unwrap_or_default()
         .trim()
         .to_string();
+    // Files changed on both sides, found before touching the folder: said by name, and the
+    // folder left as it is (a git too old to tell lets the merge try, as before).
+    if let Ok(files) = conflicts_between(&rd, &into, &r.branch)
+        && !files.is_empty()
+    {
+        return Err(conflict_message(&files, &into));
+    }
     if let Err(e) = git(
         &rd,
         &[
@@ -4367,6 +4376,12 @@ mod tests {
         assert!(ok(&repo, &["add", "-A"]) && ok(&repo, &["commit", "-m", "d"]));
         assert!(ok(&repo, &["checkout", "main"]));
         assert!(conflicts_between(&repo, "main", "propre").unwrap().is_empty());
+        // What the merge then says: the files by name, the first three, and the branch.
+        let files: Vec<String> = ["a.rs", "b.rs", "c.rs", "d.rs"].map(String::from).into();
+        let m = conflict_message(&files, "main");
+        assert!(m.contains("a.rs, b.rs, c.rs") && m.contains("main"), "{m}");
+        assert!(!m.contains("d.rs"), "{m}");
+        assert!(conflict_message(&files[..1], "main").contains("a.rs"));
         let _ = std::fs::remove_dir_all(base);
     }
 

@@ -103,14 +103,14 @@ mod launcher_tests {
         let st = |ai, installed, plugged| AiState { ai, installed, plugged, install: None };
         let states = [
             st(Ai::Vibe, true, false),
-            st(Ai::Gemini, false, false),
+            st(Ai::Antigravity, false, false),
             st(Ai::ClaudeCode, true, true),
             st(Ai::Cursor, true, true),
             st(Ai::Codex, true, false),
         ];
         let labels: Vec<&str> = launchers_from(&states).iter().map(|l| l.0).collect();
         // The setup list's order; installed even if not plugged; never an app (Cursor) nor
-        // an AI that isn't there (Gemini); the shell last.
+        // an AI that isn't there (Antigravity); the shell last.
         assert_eq!(labels, ["Claude Code", "Codex", "Mistral Vibe", "Shell"]);
         let l = launchers_from(&states);
         assert_eq!(l[0].1, Some("claude"));
@@ -428,6 +428,7 @@ impl NotesApp {
         let w = ui.available_width();
         ui.allocate_ui_with_layout(egui::vec2(w, h), egui::Layout::top_down(egui::Align::Min), |ui| {
             let r = egui::Rect::from_min_size(ui.max_rect().min, egui::vec2(w, h));
+            super::tutorial::mark(ui, "side:usage", r);
             ui.painter().rect_stroke(r, 10.0, egui::Stroke::new(1.0, t.border), egui::StrokeKind::Inside);
             ui.spacing_mut().item_spacing.y = 0.0;
             ui.add_space(5.0);

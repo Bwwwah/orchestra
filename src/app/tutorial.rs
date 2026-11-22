@@ -5,24 +5,40 @@
 
 use super::*;
 
-/// One stop: the area it presents and what is said about it.
+/// Where a stop is shown: the tour opens that screen before pointing at the area.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(super) enum Place {
+    /// The tutorial's example project (created if needed).
+    Project,
+    View(View),
+}
+
+/// One stop: the area it presents, the screen it is on, and what is said about it.
 #[derive(Clone, Debug, PartialEq)]
-pub struct Stop {
+pub(super) struct Stop {
     pub target: &'static str,
+    pub place: Place,
     pub title: &'static str,
     pub text: &'static str,
 }
 
 /// The tour in progress.
 #[derive(Clone, Debug, PartialEq)]
-pub struct Tour {
+pub(super) struct Tour {
     pub stops: Vec<Stop>,
     pub at: usize,
+    /// The stop whose screen was last opened, and on which pass: its area gets a few frames
+    /// to appear before the stop is skipped.
+    shown: Option<(usize, u64)>,
 }
 
 impl Tour {
     pub fn new(stops: Vec<Stop>) -> Tour {
-        Tour { stops, at: 0 }
+        Tour {
+            stops,
+            at: 0,
+            shown: None,
+        }
     }
 
     pub fn current(&self) -> Option<&Stop> {
@@ -56,106 +72,102 @@ impl Tour {
     }
 }
 
-/// The stops presenting the cards of a project's page.
-pub fn project_cards_stops() -> Vec<Stop> {
+/// Frames a stop's area gets to appear after its screen opens, before the stop is skipped.
+const ARRIVAL_PASSES: u64 = 6;
+
+/// The guided tour: one walk through the app, from a project to the dashboard, the inbox
+/// and the subscriptions, each stop on its own screen.
+pub(super) fn tour_stops() -> Vec<Stop> {
     vec![
         Stop {
+            target: "side:projects",
+            place: Place::Project,
+            title: crate::tr!("Vos projets", "Your projects"),
+            text: crate::tr!(
+                "Chaque projet que suivent vos IA. Un point vert : une IA y travaille ; orange : une question attend votre réponse.",
+                "Every project your AIs follow. A green dot: an AI is working on it; orange: a question waits for your answer."
+            ),
+        },
+        Stop {
+            target: "project:actions",
+            place: Place::Project,
+            title: crate::tr!("Lancer une IA", "Start an AI"),
+            text: crate::tr!(
+                "Une IA avance seule sur les étapes ouvertes, dans une copie à part du dossier. « Réglages… » : l'IA (ou ✨ Automatique), le modèle, le plafond, une consigne.",
+                "An AI works alone on the open steps, in a separate copy of the folder. « Settings… »: the AI (or ✨ Automatic), the model, the ceiling, a mission."
+            ),
+        },
+        Stop {
+            target: "project:tabs",
+            place: Place::Project,
+            title: crate::tr!("Les onglets", "The tabs"),
+            text: crate::tr!(
+                "La vue d'ensemble pour l'essentiel ; les versions, la veille des failles, les pages et le regard extérieur à un clic.",
+                "The overview for what matters; versions, the vulnerability watch, the pages and the outside view a click away."
+            ),
+        },
+        Stop {
             target: "card:summary",
-            title: "Résumé",
-            text: "L'état des lieux du projet : ce qui est fait, en cours, bloqué.",
+            place: Place::Project,
+            title: crate::tr!("État des lieux", "Current state"),
+            text: crate::tr!(
+                "Ce qui est fait, en cours, bloqué : tenu à jour par les IA à chaque session.",
+                "What is done, in progress, blocked: kept up to date by the AIs at each session."
+            ),
         },
         Stop {
             target: "card:steps",
-            title: "Étapes",
-            text: "Ce qu'il reste à faire. Les IA les prennent une à une et les cochent.",
-        },
-        Stop {
-            target: "card:questions",
-            title: "Questions",
-            text: "Quand une IA a besoin d'une décision, sa question arrive ici.",
+            place: Place::Project,
+            title: crate::tr!("Étapes", "Steps"),
+            text: crate::tr!(
+                "Ce qu'il reste à faire, dans l'ordre. Les IA les prennent une à une. Dépliez une étape pour la confier à une IA précise.",
+                "What is left to do, in order. The AIs take them one by one. Unfold a step to entrust it to a given AI."
+            ),
         },
         Stop {
             target: "card:sessions",
-            title: "Sessions IA",
-            text: "Les sessions lancées sur ce projet, en cours ou terminées.",
-        },
-        Stop {
-            target: "card:pages",
-            title: "Pages",
-            text: "Les notes et documents rattachés au projet.",
-        },
-        Stop {
-            target: "card:versions",
-            title: "Versions",
-            text: "L'état git du projet et la préparation de la prochaine version.",
-        },
-    ]
-}
-
-/// The stops presenting the Orchestration page.
-pub fn orchestration_stops() -> Vec<Stop> {
-    vec![
-        Stop {
-            target: "orch:running",
-            title: "En cours",
-            text: "Les IA qui travaillent en ce moment, chacune dans sa copie à part. Vous pouvez les suivre et les arrêter.",
+            place: Place::Project,
+            title: crate::tr!("Sessions", "Sessions"),
+            text: crate::tr!(
+                "Les sessions des IA sur ce projet, en cours ou passées ; reprenez-en une, ou ouvrez-en une nouvelle dans le terminal.",
+                "The AIs' sessions on this project, running or past; resume one, or open a new one in the terminal."
+            ),
         },
         Stop {
             target: "orch:launch",
-            title: "Lancer une IA",
-            text: "Choisissez un projet et une IA, puis lancez-la : elle prend les étapes une à une.",
+            place: Place::View(View::Orchestra),
+            title: crate::tr!("Orchestration", "Orchestration"),
+            text: crate::tr!(
+                "Le tableau de bord de tous les projets : ce qui tourne, et plusieurs projets lancés d'un coup.",
+                "The dashboard of every project: what runs, and several projects started at once."
+            ),
         },
         Stop {
             target: "orch:week",
-            title: "Limites par IA",
-            text: "Chaque IA sur son propre abonnement : ce qu'elle a utilisé, où ses sessions s'arrêtent et la réserve qu'elle vous laisse. Glissez les repères sur les barres.",
-        },
-        Stop {
-            target: "orch:stats",
-            title: "Vue d'ensemble",
-            text: "Les IA au travail maintenant, et ce qu'elles ont fait aujourd'hui.",
-        },
-        Stop {
-            target: "orch:limits",
-            title: "Limites",
-            text: "Les réglages qui encadrent chaque lancement : budget par session, modèles, commits.",
-        },
-    ]
-}
-
-/// The stops presenting the Projects page.
-pub fn projects_stops() -> Vec<Stop> {
-    vec![
-        Stop {
-            target: "projects:card",
-            title: "Un projet",
-            text: "Chaque projet a sa carte : statut, avancement des étapes et prochaine étape. Cliquez dessus pour ouvrir sa page.",
-        },
-        Stop {
-            target: "projects:new",
-            title: "Nouveau projet",
-            text: "Indiquez un dossier : une IA peut l'analyser et remplir le tableau de bord.",
-        },
-        Stop {
-            target: "projects:sync",
-            title: "Synchroniser avec les IA",
-            text: "Demande à votre IA de se brancher à Orchestra et de faire l'état des lieux de vos projets.",
-        },
-    ]
-}
-
-/// The stops presenting the Inbox.
-pub fn inbox_stops() -> Vec<Stop> {
-    vec![
-        Stop {
-            target: "inbox:message",
-            title: "Un message",
-            text: "Questions des IA, fins de session, rapports et messages de l'app. Cliquez sur le texte pour ouvrir la page concernée ; répondez à une question directement dans son encadré.",
+            place: Place::View(View::Orchestra),
+            title: crate::tr!("Limites par IA", "Limits per AI"),
+            text: crate::tr!(
+                "Chaque IA sur son propre abonnement : glissez les repères pour dire où ses sessions s'arrêtent et la réserve qu'elle vous laisse.",
+                "Each AI on its own subscription: drag the handles to say where its sessions stop and the reserve it leaves you."
+            ),
         },
         Stop {
             target: "inbox:filters",
-            title: "Filtres",
-            text: "Tout, les questions qui attendent une réponse, ou seulement les messages non lus.",
+            place: Place::View(View::Inbox),
+            title: crate::tr!("Boîte de réception", "Inbox"),
+            text: crate::tr!(
+                "Les questions des IA, les fins de session et les rapports. Répondez ici : une session en pause reprend.",
+                "The AIs' questions, session ends and reports. Answer here: a paused session goes on."
+            ),
+        },
+        Stop {
+            target: "side:usage",
+            place: Place::View(View::Inbox),
+            title: crate::tr!("Vos abonnements", "Your subscriptions"),
+            text: crate::tr!(
+                "Chaque IA branchée, sa fenêtre de 5 h et sa semaine, d'un coup d'œil. Le détail au survol.",
+                "Each AI plugged in, its 5-hour window and its week, at a glance. The details on hover."
+            ),
         },
     ]
 }
@@ -170,11 +182,11 @@ pub fn wanted(ctx: &egui::Context) -> Option<String> {
 }
 
 fn want_key() -> egui::Id {
-    egui::Id::new("tutorial-want")
+    egui::Id::unique("tutorial-want")
 }
 
 fn scrolled_key() -> egui::Id {
-    egui::Id::new("tutorial-scrolled")
+    egui::Id::unique("tutorial-scrolled")
 }
 
 /// Record where `name` was drawn this frame. If the tour is presenting it and it isn't fully
@@ -224,45 +236,49 @@ pub fn bubble_pos(target: egui::Rect, size: egui::Vec2, screen: egui::Rect) -> e
 }
 
 impl NotesApp {
-    /// Begin a tour.
-    pub(super) fn start_tour(&mut self, stops: Vec<Stop>) {
-        self.tour = Some(Tour::new(stops));
+    /// Begin the guided tour, from the tutorial's example project.
+    pub(super) fn start_tour(&mut self) {
+        self.tour = Some(Tour::new(tour_stops()));
     }
 
-    /// Open the tutorial's project and begin the tour of its page's cards.
-    pub(super) fn start_project_cards_tour(&mut self) {
-        let id = self.ws.ensure_tutorial_project();
-        self.navigate(id);
-        self.start_tour(project_cards_stops());
-    }
-
-    /// Open the Orchestration page and begin the tour of it.
-    pub(super) fn start_orchestration_tour(&mut self) {
-        self.view = View::Orchestra;
-        self.start_tour(orchestration_stops());
-    }
-
-    /// Open the Projects page and begin the tour of it.
-    pub(super) fn start_projects_tour(&mut self) {
-        self.view = View::Projects;
-        self.start_tour(projects_stops());
-    }
-
-    /// Open the Inbox and begin the tour of it.
-    pub(super) fn start_inbox_tour(&mut self) {
-        self.view = View::Inbox;
-        self.start_tour(inbox_stops());
+    /// Open the screen of the tour's current stop.
+    fn open_place(&mut self, place: Place) {
+        match place {
+            Place::Project => {
+                let id = self.ws.ensure_tutorial_project();
+                if self.current.as_deref() != Some(id.as_str()) || self.view != View::Page {
+                    self.navigate(id);
+                }
+                self.view = View::Page;
+            }
+            Place::View(v) => self.view = v,
+        }
     }
 
     /// Draw the tour in progress, if any.
     pub(super) fn tutorial_ui(&mut self, ctx: &egui::Context) {
-        let Some(tour) = self.tour.as_mut() else { return };
-        // Skip the stops whose area isn't on screen.
-        while tour.current().is_some_and(|s| area(ctx, s.target).is_none()) {
-            if !tour.next() {
+        let pass = ctx.cumulative_pass_nr();
+        loop {
+            let Some(tour) = self.tour.as_mut() else { return };
+            let Some(stop) = tour.current().cloned() else { break };
+            // Arriving at a stop: open its screen, and give its area a few frames.
+            if tour.shown.map(|(i, _)| i) != Some(tour.at) {
+                tour.shown = Some((tour.at, pass));
+                self.open_place(stop.place);
+                ctx.request_repaint();
                 break;
             }
+            let since = tour.shown.map_or(0, |(_, p)| pass.saturating_sub(p));
+            // Its area never came (a card the project doesn't have): on to the next stop.
+            if area(ctx, stop.target).is_none() && since > ARRIVAL_PASSES {
+                if !tour.next() {
+                    tour.at = tour.stops.len();
+                }
+                continue;
+            }
+            break;
         }
+        let Some(tour) = self.tour.as_mut() else { return };
         let Some(stop) = tour.current().cloned() else {
             self.tour = None;
             ctx.data_mut(|d| {
@@ -279,7 +295,7 @@ impl NotesApp {
             }
         });
         let Some(target) = area(ctx, stop.target) else {
-            // Nothing of the tour is on screen (another page): wait for it.
+            // Its screen is opening: wait for the area.
             ctx.request_repaint();
             return;
         };
@@ -318,7 +334,7 @@ impl NotesApp {
             });
         let (mut go_next, mut go_prev, mut stop_tour) = (false, false, false);
         let (counter, last, first) = (tour.counter(), tour.is_last(), tour.at == 0);
-        let size = egui::vec2(320.0, 150.0);
+        let size = egui::vec2(340.0, 170.0);
         let pos = bubble_pos(target, size, screen);
         egui::Area::new(egui::Id::unique("tutorial-bubble"))
             .order(egui::Order::Tooltip)
@@ -338,13 +354,18 @@ impl NotesApp {
                         ui.horizontal(|ui| {
                             ui.label(egui::RichText::new(&counter).weak());
                             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                                let label = if last { "Terminer" } else { "Suivant" };
-                                go_next = ui.button(label).clicked();
+                                ui.spacing_mut().item_spacing.x = 6.0;
+                                let label = if last {
+                                    crate::tr!("Terminer", "Finish")
+                                } else {
+                                    crate::tr!("Suivant", "Next")
+                                };
+                                go_next = super::style::primary(ui, label).clicked();
                                 if !first {
-                                    go_prev = ui.button("Précédent").clicked();
+                                    go_prev = super::style::secondary(ui, crate::tr!("Précédent", "Back")).clicked();
                                 }
                                 if !last {
-                                    stop_tour = ui.button("Passer").clicked();
+                                    stop_tour = super::style::quiet(ui, crate::tr!("Passer", "Skip")).clicked();
                                 }
                             });
                         });
@@ -365,7 +386,7 @@ mod tests {
     use super::*;
 
     fn three() -> Tour {
-        Tour::new(project_cards_stops().into_iter().take(3).collect())
+        Tour::new(tour_stops().into_iter().take(3).collect())
     }
 
     #[test]
@@ -381,43 +402,36 @@ mod tests {
         assert_eq!(t.counter(), "2/3");
     }
 
+    /// Each stop presents an area of its own; the walk starts on the project, and each
+    /// screen's stops come together (the tour doesn't go back and forth between screens).
     #[test]
-    fn the_orchestration_stops_have_distinct_areas() {
-        let s = orchestration_stops();
+    fn the_tour_walks_each_screen_once() {
+        let s = tour_stops();
         let mut names: Vec<_> = s.iter().map(|s| s.target).collect();
         names.sort();
         names.dedup();
         assert_eq!(names.len(), s.len());
-        assert!(s.iter().all(|s| s.target.starts_with("orch:")));
+        assert_eq!(s[0].place, Place::Project);
+        let mut seen: Vec<Place> = vec![];
+        for st in &s {
+            if seen.last() != Some(&st.place) {
+                assert!(!seen.contains(&st.place), "{:?} comes back", st.place);
+                seen.push(st.place);
+            }
+        }
     }
 
+    /// The marks the tour points at in a project's cards each show their tab.
     #[test]
-    fn the_inbox_stops_have_distinct_areas() {
-        let s = inbox_stops();
-        let mut names: Vec<_> = s.iter().map(|s| s.target).collect();
-        names.sort();
-        names.dedup();
-        assert_eq!(names.len(), s.len());
-        assert!(s.iter().all(|s| s.target.starts_with("inbox:")));
-    }
-
-    #[test]
-    fn the_projects_stops_have_distinct_areas() {
-        let s = projects_stops();
-        let mut names: Vec<_> = s.iter().map(|s| s.target).collect();
-        names.sort();
-        names.dedup();
-        assert_eq!(names.len(), s.len());
-        assert!(s.iter().all(|s| s.target.starts_with("projects:")));
-    }
-
-    #[test]
-    fn the_cards_stops_have_distinct_areas() {
-        let s = project_cards_stops();
-        let mut names: Vec<_> = s.iter().map(|s| s.target).collect();
-        names.sort();
-        names.dedup();
-        assert_eq!(names.len(), s.len());
+    fn the_cards_the_tour_presents_are_on_the_overview() {
+        for st in tour_stops().iter().filter(|s| s.target.starts_with("card:")) {
+            assert_eq!(
+                super::super::projects::tab_of_mark(st.target),
+                Some(super::super::projects::ProjectTab::Overview),
+                "{}",
+                st.target
+            );
+        }
     }
 
     #[test]
