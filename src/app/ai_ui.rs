@@ -461,6 +461,7 @@ impl NotesApp {
         };
         let rtk = self.rtk_line_of(crate::auto::Agent::ClaudeCode);
         let note = rtk_note(ui, rtk, w, t);
+        let has_rtk = note.is_some();
         let h = h + note.as_ref().map_or(0.0, |g| g.size().y + 6.0);
         let (rect, resp) = ui.allocate_exact_size(egui::vec2(w, h), egui::Sense::click());
         let hov = ui
@@ -581,6 +582,9 @@ impl NotesApp {
                     }
                     ui.label(RichText::new(crate::trf!("Relevé par Claude Code {}", "Read from Claude Code {}", super::chrome::relative_time(u.at))).size(11.5).color(t.tertiary));
                 }
+            }
+            if has_rtk {
+                rtk_explanation(ui, t);
             }
         });
         if resp.clicked() {
@@ -705,6 +709,7 @@ fn other_usage_tile(
         26.0 + 20.0 * shown.len() as f32
     };
     let note = rtk_note(ui, rtk, w, t);
+    let has_rtk = note.is_some();
     let h = h + note.as_ref().map_or(0.0, |g| g.size().y + 6.0);
     let (rect, resp) = ui.allocate_exact_size(egui::vec2(w, h), egui::Sense::click());
     let hov = ui
@@ -864,7 +869,24 @@ fn other_usage_tile(
                 }
             }
         }
+        if has_rtk {
+            rtk_explanation(ui, t);
+        }
     })
+}
+
+/// The hover paragraph under a tile's RTK line: how the estimate is calculated.
+fn rtk_explanation(ui: &mut egui::Ui, t: &Tone) {
+    ui.add_space(6.0);
+    ui.separator();
+    ui.label(
+        RichText::new(crate::tr!(
+            "Estimation RTK sur 7 jours glissants : RTK raccourcit les sorties des commandes que l'IA lance dans les sessions autonomes d'Orchestra. Chaque sortie raccourcie est comptée autant de fois qu'elle aurait été renvoyée au modèle. Le pourcentage est « jetons économisés ÷ (jetons consommés + jetons économisés) », calculé séparément pour chaque IA. Il se masque sous 1 % ou sans session RTK dans la semaine.",
+            "RTK estimate over a rolling 7 days: RTK shortens the outputs of the commands the AI runs in Orchestra's autonomous sessions. Each shortened output is counted as many times as it would have been sent back to the model. The share is \"tokens saved ÷ (tokens consumed + tokens saved)\", worked out for each AI separately. It is hidden under 1 % or without an RTK session in the week."
+        ))
+        .size(11.5)
+        .color(t.tertiary),
+    );
 }
 
 /// "Abonnement Claude  Session (5 h) ▓▓░ 23 % · 15:40   Semaine ▓░░ 41 % · lun." in one line.
