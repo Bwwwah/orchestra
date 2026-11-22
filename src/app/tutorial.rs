@@ -98,7 +98,10 @@ fn mark_key(name: &str) -> egui::Id {
 
 /// Record where `name` was drawn this frame.
 pub fn mark(ctx: &egui::Context, name: &str, rect: egui::Rect) {
-    ctx.data_mut(|d| d.insert_temp(mark_key(name), (rect, ctx.cumulative_pass_nr())));
+    // Read the pass number first: calling `ctx` inside `data_mut` locks the context twice and
+    // freezes the app.
+    let pass = ctx.cumulative_pass_nr();
+    ctx.data_mut(|d| d.insert_temp(mark_key(name), (rect, pass)));
 }
 
 /// Where `name` was drawn, if it was on the last frames.
