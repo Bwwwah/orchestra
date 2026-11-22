@@ -1122,6 +1122,33 @@ pub struct OrchSettings {
     /// Most an AI run with an API key may spend in one session, in dollars (estimate at API
     /// prices); 0: no limit. Doesn't apply to AIs run on their subscription.
     pub budget_usd: f32,
+    /// Each AI's own limits on its own subscription (key: `agent_key`); what isn't set
+    /// there falls back on `global_limit` and `week_limit`.
+    #[serde(skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub per_agent: std::collections::BTreeMap<String, AgentLimits>,
+}
+
+/// One AI's limits on its subscription, each unset (None) until chosen for it.
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
+#[serde(default)]
+pub struct AgentLimits {
+    /// Never go past this share of its 5-hour window.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub five: Option<f32>,
+    /// No session of it starts or goes on once its week (or month) reaches this.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub week: Option<f32>,
+}
+
+/// The name an AI's limits are kept under in the settings.
+pub fn agent_key(agent: crate::auto::Agent) -> &'static str {
+    use crate::auto::Agent;
+    match agent {
+        Agent::ClaudeCode => "claude_code",
+        Agent::Codex => "codex",
+        Agent::Antigravity => "antigravity",
+        Agent::Vibe => "vibe",
+    }
 }
 
 impl Default for OrchSettings {
@@ -1140,6 +1167,7 @@ impl Default for OrchSettings {
             auto_resume: true,
             pause_for_answer: false,
             budget_usd: 5.0,
+            per_agent: Default::default(),
         }
     }
 }
@@ -1157,6 +1185,64 @@ impl OrchSettings {
 
     pub fn set_reserve(&mut self, reserve: f32) {
         self.week_limit = 100.0 - reserve.clamp(0.0, 95.0);
+    }
+
+    /// Where `agent`'s sessions stop on its 5-hour window: its own limit, else the common one.
+    pub fn five_limit(&self, agent: crate::auto::Agent) -> f32 {
+        self.per_agent
+            .get(agent_key(agent))
+            .and_then(|l| l.five)
+            .unwrap_or(self.global_limit)
+    }
+
+    /// The share of `agent`'s week (or month) its sessions may use: its own, else the common one.
+    pub fn week_limit_of(&self, agent: crate::auto::Agent) -> f32 {
+        self.per_agent
+            .get(agent_key(agent))
+            .and_then(|l| l.week)
+            .unwrap_or(self.week_limit)
+    }
+
+    /// The share of `agent`'s week (or month) kept for the person.
+    pub fn reserve_of(&self, agent: crate::auto::Agent) -> f32 {
+        (100.0 - self.week_limit_of(agent)).clamp(0.0, 95.0)
+    }
+
+    pub fn set_five_limit(&mut self, agent: crate::auto::Agent, v: f32) {
+        self.per_agent.entry(agent_key(agent).into()).or_default().five =
+            Some(v.clamp(5.0, 100.0));
+    }
+
+    pub fn set_reserve_of(&mut self, agent: crate::auto::Agent, reserve: f32) {
+        self.per_agent.entry(agent_key(agent).into()).or_default().week =
+            Some(100.0 - reserve.clamp(0.0, 95.0));
+    }
+}
+
+#[cfg(test)]
+mod agent_limit_tests {
+    use super::OrchSettings;
+    use crate::auto::Agent;
+
+    /// An AI without limits of its own follows the common ones; one set for an AI changes
+    /// that AI only, and comes back after a save.
+    #[test]
+    fn each_ai_has_its_own_limits_over_the_common_ones() {
+        let mut o = OrchSettings::default();
+        assert_eq!(o.five_limit(Agent::Codex), o.global_limit);
+        assert_eq!(o.reserve_of(Agent::Codex), o.reserve());
+        o.set_five_limit(Agent::Codex, 40.0);
+        o.set_reserve_of(Agent::Codex, 20.0);
+        assert_eq!(o.five_limit(Agent::Codex), 40.0);
+        assert_eq!(o.week_limit_of(Agent::Codex), 80.0);
+        assert_eq!(o.five_limit(Agent::ClaudeCode), o.global_limit);
+        assert_eq!(o.week_limit_of(Agent::ClaudeCode), o.week_limit);
+        let back: OrchSettings = serde_json::from_str(&serde_json::to_string(&o).unwrap()).unwrap();
+        assert_eq!(back, o);
+        // Settings written before: no per-AI limits.
+        let old: OrchSettings = serde_json::from_str(r#"{"global_limit": 50.0}"#).unwrap();
+        assert!(old.per_agent.is_empty());
+        assert_eq!(old.five_limit(Agent::Vibe), 50.0);
     }
 }
 

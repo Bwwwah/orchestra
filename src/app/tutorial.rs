@@ -107,13 +107,13 @@ pub fn orchestration_stops() -> Vec<Stop> {
         },
         Stop {
             target: "orch:week",
-            title: "Réserve de la semaine",
-            text: "La part de votre abonnement consommée cette semaine, et la réserve que les IA vous laissent : elles s'arrêtent avant de l'entamer.",
+            title: "Limites par IA",
+            text: "Chaque IA sur son propre abonnement : ce qu'elle a utilisé, où ses sessions s'arrêtent et la réserve qu'elle vous laisse. Glissez les repères sur les barres.",
         },
         Stop {
             target: "orch:stats",
             title: "Vue d'ensemble",
-            text: "Ce que les IA autonomes ont fait : sessions, étapes terminées, consommation.",
+            text: "Les IA au travail maintenant, et ce qu'elles ont fait aujourd'hui.",
         },
         Stop {
             target: "orch:limits",

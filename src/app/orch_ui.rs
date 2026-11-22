@@ -740,7 +740,7 @@ impl NotesApp {
         self.dirty_since.get_or_insert_with(Instant::now);
         let o = &self.ws.settings.orch;
         let five = self.agent_figures(d.agent).five;
-        let ceiling = ceiling_choice(ceiling_kept, five, o.default_limit, o.global_limit);
+        let ceiling = ceiling_choice(ceiling_kept, five, o.default_limit, o.five_limit(d.agent));
         let mission = super::watch::fix_mission(&req.findings);
         let n = match self.launch_run(ctx, &req.project, &mission, ceiling, true, None, d.agent, true, "") {
             Ok(()) => super::notices::Notice::Info(crate::tr!(
@@ -837,8 +837,9 @@ impl NotesApp {
         // Every figure below is that of the AI chosen, on its own subscription: never another
         // AI's (Claude Code's window full doesn't stop a Codex session, nor the reverse).
         let fig = self.agent_figures(agent);
+        let global = self.ws.settings.orch.five_limit(agent);
         if let Some(f) = fig.five
-            && f >= self.ws.settings.orch.global_limit
+            && f >= global
         {
             let left = fig
                 .five_reset
@@ -853,14 +854,15 @@ impl NotesApp {
                 })
                 .unwrap_or_default();
             return Err(crate::trf!(
-                "la limite globale ({:.0} %) est déjà atteinte{when}",
-                "the global limit ({:.0} %) is already reached{when}",
-                self.ws.settings.orch.global_limit
+                "la limite de {} ({:.0} %) est déjà atteinte{when}",
+                "{}'s limit ({:.0} %) is already reached{when}",
+                agent.label(),
+                global
             ));
         }
         // The ceiling is absolute (% of the 5-hour window), never past the global limit; one
         // already reached would stop the session at its first turn.
-        let ceiling = ceiling.min(self.ws.settings.orch.global_limit);
+        let ceiling = ceiling.min(global);
         if let Some(f) = fig.five
             && f >= ceiling
         {
@@ -873,12 +875,13 @@ impl NotesApp {
         // while the window's figure is unknown).
         let limit = (ceiling - fig.five.unwrap_or(0.0)).max(1.0);
         if let Some(w) = fig.week
-            && crate::usage::near_reserve(w, self.ws.settings.orch.week_limit, 0.0)
+            && crate::usage::near_reserve(w, self.ws.settings.orch.week_limit_of(agent), 0.0)
         {
             return Err(crate::trf!(
-                "la réserve minimum de la semaine ({:.0} %) est atteinte ou trop proche",
-                "the week's minimum reserve ({:.0} %) is reached or too near",
-                self.ws.settings.orch.reserve()
+                "la réserve minimum de {} ({:.0} %) est atteinte ou trop proche",
+                "{}'s minimum reserve ({:.0} %) is reached or too near",
+                agent.label(),
+                self.ws.settings.orch.reserve_of(agent)
             ));
         }
         // The limits are checked with Claude Code's own figures: they come through the status line.
@@ -1142,7 +1145,7 @@ impl NotesApp {
             && !AUTO_RUN_DONE.swap(true, std::sync::atomic::Ordering::Relaxed)
         {
             let o = &self.ws.settings.orch;
-            let l = ceiling_choice(None, self.orch.five, o.default_limit, o.global_limit);
+            let l = ceiling_choice(None, self.orch.five, o.default_limit, o.five_limit(Agent::ClaudeCode));
             if let Err(e) = self.launch_run(ctx, &pid, "", l, true, None, Agent::ClaudeCode, false, "") {
                 eprintln!("auto-run : {e}");
             }
@@ -1150,13 +1153,15 @@ impl NotesApp {
         self.cve_watch_tick(ctx);
         self.cve_fix_tick(ctx);
         let now = Instant::now();
-        let global = self.ws.settings.orch.global_limit;
-        let week_limit = self.ws.settings.orch.week_limit;
+        let limits = self.ws.settings.orch.clone();
         let pause = self.ws.settings.orch.pause_for_answer;
         let mut paused: Vec<(String, String, Wait)> = vec![];
         let mut finished: Vec<(usize, String, String)> = vec![];
         let figures = self.figures_by_agent();
         for (i, r) in self.orch.runs.iter_mut().enumerate() {
+            // The limits of this session's own AI, on its own subscription.
+            let global = limits.five_limit(r.agent);
+            let week_limit = limits.week_limit_of(r.agent);
             // The subscription of this session's own agent; none read (an agent that tells
             // nothing): no figures, and the session stops as unmeasured.
             let fig = figures.get(&r.agent).copied().unwrap_or_default();
@@ -1581,7 +1586,7 @@ impl NotesApp {
                 rec.ceiling
             } else {
                 let share = if rec.limit > 0.0 { rec.limit } else { o.default_limit };
-                ceiling_choice(None, five, share, o.global_limit)
+                ceiling_choice(None, five, share, o.five_limit(agent))
             };
             match self.launch_run(ctx, &rec.project, &rec.mission, ceiling, rec.commits_allowed, rec.endless.clone(), agent, rec.branch.contains("/auto-fix-"), &rec.model) {
                 Ok(()) => self.ws.notify(
@@ -2200,16 +2205,10 @@ impl NotesApp {
                 self.week_bar(ui, &t);
                 mark_from(ui, "orch:week", top);
                 ui.add_space(14.0);
-                // The figures once there are some: three tiles of « — » say nothing.
-                let known = self.orch.five.is_some()
-                    || !self.orch.runs.is_empty()
-                    || !self.ws.runs.is_empty();
-                if known {
-                    let top = ui.cursor().min;
-                    self.stats_row(ui, &t);
-                    mark_from(ui, "orch:stats", top);
-                    ui.add_space(14.0);
-                }
+                let top = ui.cursor().min;
+                self.stats_row(ui, &t);
+                mark_from(ui, "orch:stats", top);
+                ui.add_space(14.0);
                 let top = ui.cursor().min;
                 self.limits_card(ui, &t);
                 mark_from(ui, "orch:limits", top);
@@ -2218,30 +2217,39 @@ impl NotesApp {
         });
     }
 
-    /// The bar at the very top: the week's use of the subscription, with the reserve kept
-    /// for the person (set right here): past 100 − reserve, no session starts or goes on.
+    /// « Limites par IA »: each AI plugged in on its own subscription, one block each: its
+    /// windows (5 hours and week, or Mistral's month) as bars, with where its sessions stop
+    /// as a handle to drag along the bar (or a number to type). The reserve question comes
+    /// first until answered: its answer is the common reserve, each AI may then differ.
     fn week_bar(&mut self, ui: &mut egui::Ui, t: &Tone) {
-        let week = self.orch.week;
-        let before = (
-            self.ws.settings.orch.week_limit,
-            self.ws.settings.orch.reserve_asked,
-        );
-        let red = super::style::RED;
+        let before = self.ws.settings.orch.clone();
+        let figs = self.figures_by_agent();
+        let plugged = self.ais.plugged();
+        let agents: Vec<Agent> = Agent::ALL
+            .into_iter()
+            .filter(|a| plugged.contains(&a.ai()))
+            .collect();
+        let day_week = self.orch.day_week;
         super::projects::card(ui, t, 0.0, |ui| {
-            // Until the person has chosen it: the question, with a few ready answers.
+            super::projects::card_title(
+                ui,
+                crate::tr!("LIMITES PAR IA", "LIMITS PER AI"),
+                crate::tr!("chacune sur son propre abonnement", "each on its own subscription"),
+                t,
+            );
             if !self.ws.settings.orch.reserve_asked {
                 ui.label(
                     RichText::new(crate::tr!(
-                        "Quelle part de l'abonnement garder pour vous ?",
-                        "How much of the subscription should be kept for you?"
+                        "Quelle part de vos abonnements garder pour vous ?",
+                        "How much of your subscriptions should be kept for you?"
                     ))
                     .font(semibold(14.0))
                     .color(t.text),
                 );
                 ui.label(
                     RichText::new(crate::tr!(
-                        "Les IA s'arrêtent avant d'entamer cette réserve de la semaine, et reprennent quand la semaine repart à zéro. Modifiable ensuite à droite de la barre.",
-                        "The AIs stop before touching this reserve of the week, and start again once the week resets. You can change it later, right of the bar."
+                        "Les IA s'arrêtent avant d'entamer cette réserve de la semaine, et reprennent quand elle repart à zéro. Réglable ensuite pour chaque IA.",
+                        "The AIs stop before touching this reserve of the week, and start again once it resets. Then adjustable for each AI."
                     ))
                     .size(12.5)
                     .color(t.secondary),
@@ -2260,143 +2268,48 @@ impl NotesApp {
                         self.ws.settings.orch.reserve_asked = true;
                     }
                 });
-                ui.add_space(8.0);
+                ui.add_space(10.0);
+            }
+            if agents.is_empty() {
+                ui.label(
+                    RichText::new(crate::tr!(
+                        "Aucune IA branchée : Paramètres › IA.",
+                        "No AI plugged in: Settings › AI."
+                    ))
+                    .color(t.tertiary),
+                );
             }
             let o = &mut self.ws.settings.orch;
-            // The reserve, set right here (laid out right to left: its label ends up first).
-            let reserve_ctl = |ui: &mut egui::Ui, o: &mut crate::model::OrchSettings| {
-                let mut reserve = o.reserve();
-                let r = ui.add(egui::DragValue::new(&mut reserve).range(0.0..=95.0).speed(0.5).suffix(" %")).on_hover_text(crate::tr!(
-                    "Part de la semaine gardée pour vous : les IA s'arrêtent avant de l'entamer",
-                    "Share of the week kept for you: the AIs stop before touching it"
-                ));
-                if r.changed() {
-                    o.set_reserve(reserve);
-                    o.reserve_asked = true;
+            for (i, &a) in agents.iter().enumerate() {
+                if i > 0 {
+                    super::projects::card_rule(ui, t);
                 }
-                ui.label(
-                    RichText::new(crate::tr!("Réserve minimum", "Minimum reserve"))
-                        .size(13.0)
-                        .color(t.secondary),
-                );
-            };
-            // Narrow: the reserve on a line of its own rather than over the figure.
-            let wide = ui.available_width() >= WEEK_ONE_LINE;
-            ui.horizontal(|ui| {
-                ui.label(
-                    RichText::new(crate::tr!("CETTE SEMAINE", "THIS WEEK"))
-                        .font(semibold(11.5))
-                        .color(t.tertiary),
-                );
-                let used = match week {
-                    // Claude Code's subscription only: another AI's week is on its own.
-                    Some(w) => crate::trf!(
-                        "{w:.0} % de l'abonnement Claude Code utilisés",
-                        "{w:.0} % of the Claude Code subscription used"
-                    ),
-                    None => crate::tr!(
-                        "utilisation inconnue pour l'instant",
-                        "usage unknown for now"
-                    )
-                    .into(),
-                };
-                ui.label(RichText::new(used).font(semibold(14.0)).color(t.text));
-                if wide {
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        reserve_ctl(ui, o)
+                agent_limits(ui, a, figs.get(&a).copied().unwrap_or_default(), o, t);
+                // Claude Code's pace over the last day, read from its history.
+                if a == Agent::ClaudeCode
+                    && let Some((used, span)) = day_week
+                {
+                    let (line, fast) = crate::usage::day_pace_line(used, span);
+                    let color = if fast { super::projects::ORANGE } else { t.tertiary };
+                    ui.horizontal(|ui| {
+                        ui.add_space(LIMIT_LABEL_W);
+                        ui.add(egui::Label::new(RichText::new(line).size(12.0).color(color)).wrap())
+                            .on_hover_text(crate::trf!(
+                                "Ce qui est parti de la semaine sur les dernières 24 h, par vous et par les IA. La part d'un jour est un septième de la semaine ; plus vite (en orange), elle s'épuiserait avant sa remise à zéro. C'est {:.0} % de la part d'un jour.",
+                                "What went from the week over the last 24 hours, by you and by the AIs. A day's share is a seventh of the week; faster (in orange), it would run out before it resets. That is {:.0} % of a day's share.",
+                                crate::usage::daily_pct(used)
+                            ));
                     });
                 }
-            });
-            if !wide {
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    reserve_ctl(ui, o)
-                });
-            }
-            ui.add_space(4.0);
-            let limit = self.ws.settings.orch.week_limit;
-            let w = ui.available_width();
-            let (bar, _) = ui.allocate_exact_size(egui::vec2(w, 12.0), egui::Sense::hover());
-            let p = ui.painter();
-            p.rect_filled(bar, 6.0, t.fill);
-            let lx = bar.left() + bar.width() * limit / 100.0;
-            p.rect_filled(
-                egui::Rect::from_min_max(egui::pos2(lx, bar.top()), bar.max),
-                egui::CornerRadius {
-                    nw: 0,
-                    sw: 0,
-                    ne: 6,
-                    se: 6,
-                },
-                red.gamma_multiply(0.12),
-            );
-            if let Some(f) = week {
-                let frac = super::projects::smooth(ui, "orch-week", (f / 100.0).clamp(0.0, 1.0));
-                let color = if f >= limit {
-                    red
-                } else if f >= limit * 0.85 {
-                    super::projects::ORANGE
-                } else {
-                    super::projects::BLUE
-                };
-                ui.painter().rect_filled(
-                    egui::Rect::from_min_size(
-                        bar.min,
-                        egui::vec2(bar.width() * frac, bar.height()),
-                    ),
-                    6.0,
-                    color,
-                );
-            }
-            ui.painter().vline(
-                lx,
-                egui::Rangef::new(bar.top() - 3.0, bar.bottom() + 3.0),
-                egui::Stroke::new(2.0, super::projects::ORANGE),
-            );
-            // The day's pace: what went from the week in 24 hours against a seventh of it.
-            if let Some((used, span)) = self.orch.day_week {
-                let (line, fast) = crate::usage::day_pace_line(used, span);
-                let color = if fast {
-                    super::projects::ORANGE
-                } else {
-                    t.secondary
-                };
-                ui.add_space(4.0);
-                ui.add(egui::Label::new(RichText::new(line).size(12.5).color(color)).wrap()).on_hover_text(crate::trf!(
-                    "Ce qui est parti de l'abonnement de la semaine sur les dernières 24 h, par vous et par les IA. La part d'un jour est un septième de la semaine : à ce rythme, la semaine dure pile jusqu'à sa remise à zéro. Plus vite (en orange), elle s'épuiserait avant ; c'est {:.0} % de la part d'un jour.",
-                    "What went from the week's subscription over the last 24 hours, by you and by the AIs. A day's share is a seventh of the week: at that pace, the week lasts exactly until it resets. Faster (in orange), it would run out before; that is {:.0} % of a day's share.",
-                    crate::usage::daily_pct(used)
-                ));
             }
         });
-        if (
-            self.ws.settings.orch.week_limit,
-            self.ws.settings.orch.reserve_asked,
-        ) != before
-        {
+        if self.ws.settings.orch != before {
             self.dirty_since.get_or_insert_with(Instant::now);
         }
     }
 
     /// Three tiles at the top: the subscription, the AIs at work, today's work.
     fn stats_row(&mut self, ui: &mut egui::Ui, t: &Tone) {
-        let five = self.orch.five;
-        let week = self.orch.week;
-        let day = self.orch.day_total;
-        // The figure shown is the one kept from the last reading (see `measure_alert`).
-        let stale = self
-            .orch
-            .unmeasured_since
-            .is_some_and(|s| crate::model::now_ms().saturating_sub(s) >= MEASURE_GRACE_MS);
-        let global = self.ws.settings.orch.global_limit;
-        let now_ms = crate::model::now_ms();
-        let five_left = self
-            .orch
-            .five_reset
-            .and_then(|r| crate::usage::until(r, now_ms));
-        let week_left = self
-            .orch
-            .week_reset
-            .and_then(|r| crate::usage::until(r, now_ms));
         let running = self.orch.runs.len();
         let ready = self
             .ws
@@ -2419,19 +2332,16 @@ impl NotesApp {
         let hour = self.ws.settings.orch.report_hour;
         let w = ui.available_width();
         let gap = 14.0;
-        let cols = if w >= 520.0 { 3 } else { 1 };
-        let tw = if cols == 3 { (w - 2.0 * gap) / 3.0 } else { w };
-        let h = if cols == 3 { 112.0 } else { 92.0 };
+        // Each AI's windows are in « Limites par IA »: here, what is common to all of them.
+        let cols = if w >= 520.0 { 2 } else { 1 };
+        let tw = if cols == 2 { (w - gap) / 2.0 } else { w };
+        let h = if cols == 2 { 112.0 } else { 92.0 };
         let draw = |ui: &mut egui::Ui, i: usize| {
             let (rect, resp) = ui.allocate_exact_size(egui::vec2(tw, h), egui::Sense::hover());
             let a = ui
                 .ctx()
                 .animate_bool_with_time(resp.id.with("hov"), resp.hovered(), 0.18);
-            let accent = [
-                super::style::PINK,
-                super::projects::GREEN,
-                super::projects::BLUE,
-            ][i];
+            let accent = [super::projects::GREEN, super::projects::BLUE][i];
             let p = ui.painter();
             p.add(egui::epaint::RectShape::new(
                 rect,
@@ -2447,11 +2357,7 @@ impl NotesApp {
                 accent.gamma_multiply(0.07),
             );
             let x = rect.left() + 18.0;
-            // Each figure once on the page: the week (and the day's pace) in the bar above, the
-            // 5-hour window here (the one the sessions stop at), counts in the other tiles.
             let label = [
-                // Claude Code's: each AI's sessions stop on their own subscription's window.
-                crate::tr!("FENÊTRE DE 5 H · CLAUDE CODE", "5-HOUR WINDOW · CLAUDE CODE"),
                 crate::tr!("IA AU TRAVAIL", "AIS AT WORK"),
                 crate::tr!("AUJOURD'HUI", "TODAY"),
             ][i];
@@ -2463,27 +2369,7 @@ impl NotesApp {
                 t.tertiary,
             );
             let (big, sub): (String, String) = match i {
-                0 => (
-                    five.map(|f| format!("{f:.0} %"))
-                        .unwrap_or_else(|| "—".into()),
-                    match (five, five_left) {
-                        (Some(_), _) if stale => crate::tr!(
-                            "dernière valeur connue · mesure indisponible",
-                            "last known figure · can't be measured now"
-                        )
-                        .into(),
-                        (Some(_), Some(l)) => crate::trf!(
-                            "repart dans {} · IA arrêtées à {global:.0} %",
-                            "resets in {} · AIs stop at {global:.0} %",
-                            crate::usage::left_text(l)
-                        ),
-                        (Some(_), None) => {
-                            crate::trf!("IA arrêtées à {global:.0} %", "AIs stop at {global:.0} %")
-                        }
-                        _ => crate::tr!("inconnu pour l'instant", "unknown for now").into(),
-                    },
-                ),
-                1 => {
+                0 => {
                     let s = crate::i18n::plural(ready);
                     (
                         running.to_string(),
@@ -2531,44 +2417,13 @@ impl NotesApp {
                 egui::TextFormat::simple(FontId::proportional(12.5), t.secondary),
             );
             job.wrap = egui::text::TextWrapping::truncate_at_width(
-                tw - 36.0 - if i == 0 && tw >= 240.0 { 70.0 } else { 0.0 },
+                tw - 36.0,
             );
             let g = ui.fonts_mut(|f| f.layout_job(job));
             ui.painter()
                 .galley(egui::pos2(x, rect.bottom() - 28.0), g, t.secondary);
             match i {
-                0 => {
-                    if tw >= 240.0 {
-                        // A ring: the 5-hour use, the global limit as a tick.
-                        let c = egui::pos2(rect.right() - 50.0, rect.center().y + 4.0);
-                        ring(
-                            ui,
-                            c,
-                            28.0,
-                            five.map(|f| f / 100.0),
-                            global / 100.0,
-                            accent,
-                            t,
-                        );
-                    }
-                    // The details, on hover only.
-                    let mut tip = vec![crate::trf!(
-                        "Part de la fenêtre de 5 h de l'abonnement Claude déjà utilisée, par les IA d'Orchestra et par vous (Claude Code, claude.ai…) : le chiffre de Claude Code lui-même.\nLe trait orange de l'anneau est la limite globale ({global:.0} %) : aucune session autonome ne démarre ni ne continue au-delà. Réglable plus bas, dans « Réglages et limites ».",
-                        "Share of the Claude subscription's 5-hour window already used, by Orchestra's AIs and by you (Claude Code, claude.ai…): Claude Code's own figure.\nThe ring's orange tick is the global limit ({global:.0} %): no autonomous session starts or goes on past it. Set below, in « Settings and limits »."
-                    )];
-                    if let Some(d) = day {
-                        tip.push(crate::trf!("Dernières 24 h : {d:.0} % (les fenêtres de 5 h de la journée, additionnées)", "Last 24 hours: {d:.0} % (the day's 5-hour windows, added up)"));
-                    }
-                    if let Some(l) = week_left.filter(|_| week.is_some()) {
-                        tip.push(crate::trf!(
-                            "La semaine repart à zéro dans {}",
-                            "The week resets in {}",
-                            crate::usage::left_text(l)
-                        ));
-                    }
-                    resp.on_hover_text(tip.join("\n"));
-                }
-                1 if running > 0 => {
+                0 if running > 0 => {
                     super::projects::pulse_dot(
                         ui,
                         egui::pos2(rect.right() - 30.0, rect.top() + 24.0),
@@ -2578,15 +2433,15 @@ impl NotesApp {
                 _ => {}
             }
         };
-        if cols == 3 {
+        if cols == 2 {
             ui.horizontal(|ui| {
                 ui.spacing_mut().item_spacing.x = gap;
-                for i in 0..3 {
+                for i in 0..2 {
                     draw(ui, i);
                 }
             });
         } else {
-            for i in 0..3 {
+            for i in 0..2 {
                 draw(ui, i);
                 ui.add_space(8.0);
             }
@@ -2657,10 +2512,10 @@ impl NotesApp {
                 ui.set_width(col_w);
                 row(
                     ui,
-                    crate::tr!("Limite globale", "Global limit"),
+                    crate::tr!("Limite par défaut", "Default limit"),
                     crate::tr!(
-                        "De la fenêtre de 5 h, votre propre usage compris : aucune session ne va au-delà, tous projets confondus. Chaque session a en plus son propre plafond, choisi au lancement (« arrêt à »).",
-                        "Of the 5-hour window, your own use included: no session goes past it, all projects together. Each session also has its own ceiling, chosen at its start (« stops at »)."
+                        "De la fenêtre de 5 h, votre propre usage compris, pour les IA sans limite à elles dans « Limites par IA ». Chaque session a en plus son propre plafond, choisi au lancement (« arrêt à »).",
+                        "Of the 5-hour window, your own use included, for the AIs without a limit of their own in « Limits per AI ». Each session also has its own ceiling, chosen at its start (« stops at »)."
                     ),
                     &mut |ui| {
                         ui.add(
@@ -2788,7 +2643,7 @@ impl NotesApp {
         let awake = self.orch.awake.held();
         // Each session's bar on the 5-hour window of its own AI's subscription.
         let figs = self.figures_by_agent();
-        let global = self.ws.settings.orch.global_limit;
+        let limits = self.ws.settings.orch.clone();
         // The step each session is on (« doing », reserved by this computer).
         let me = crate::store::computer_id();
         let working_on: HashMap<String, String> = self
@@ -2946,7 +2801,7 @@ impl NotesApp {
                             });
                         }
                         let five = figs.get(&r.agent).and_then(|f| f.five);
-                        share_row(ui, &r.id, r.pct, r.limit, r.ceiling, five, global, t);
+                        share_row(ui, &r.id, r.pct, r.limit, r.ceiling, five, limits.five_limit(r.agent), t);
                         // The task in hand, as a short sentence.
                         if let Some(step) = working_on.get(&r.id) {
                             ui.add_space(2.0);
@@ -3239,7 +3094,7 @@ impl NotesApp {
             })
             .map(|(id, _, _)| id.clone())
             .collect();
-        let global = self.ws.settings.orch.global_limit;
+        let limits = self.ws.settings.orch.clone();
         // Each session stops at its own ceiling on the 5-hour window (absolute), all under the
         // global limit: nothing to share out between them. One started beside them begins
         // from their ceiling. All on the subscription of the AI chosen for each project: its
@@ -3339,8 +3194,9 @@ impl NotesApp {
             let (order, folded) = launch_order(&rows, show_idle);
             for (id, title, folder) in order.iter().map(|&i| &projects[i]) {
                 let d = drafts.get_mut(id).unwrap();
-                // On the subscription of the AI chosen for this project.
+                // On the subscription of the AI chosen for this project, under its own limit.
                 let (five, running_at) = (five_of(d.agent), running_of(d.agent));
+                let global = limits.five_limit(d.agent);
                 let busy = running.contains(id);
                 let bg = super::projects::hover_begin(ui);
                 let open = open_steps.get(id).copied().unwrap_or(0);
@@ -3535,7 +3391,7 @@ impl NotesApp {
                         }
                     }
                     let s = crate::i18n::plural(picked.len());
-                    let note = crate::trf!("{} projet{s} en parallèle · chacun s'arrête à son plafond, tous sous la limite globale de {global:.0} %", "{} project{s} in parallel · each stops at its ceiling, all under the global limit of {global:.0} %", picked.len());
+                    let note = crate::trf!("{} projet{s} en parallèle · chacun s'arrête à son plafond, sous la limite de son IA", "{} project{s} in parallel · each stops at its ceiling, under its AI's limit", picked.len());
                     ui.label(RichText::new(note).size(12.5).color(t.tertiary));
                 });
             }
@@ -3585,7 +3441,7 @@ impl NotesApp {
             // As shown in the card: the sessions started together in a selection don't change
             // each other's ceiling.
             let want = draft_ceiling(&d, running_of(d.agent));
-            let ceiling = ceiling_choice(want, five_of(d.agent), o.default_limit, global);
+            let ceiling = ceiling_choice(want, five_of(d.agent), o.default_limit, o.five_limit(d.agent));
             let endless = if d.endless { Some(d.end.clone()) } else { None };
             match self.launch_run(ctx, &id, &d.mission, ceiling, d.commits, endless, d.agent, false, "") {
                 Ok(()) => {
@@ -3634,13 +3490,14 @@ impl NotesApp {
             .page(id)
             .map(|p| p.display_title())
             .unwrap_or_default();
-        let global = self.ws.settings.orch.global_limit;
+        let global = self.ws.settings.orch.five_limit(d.agent);
         let figs = self.figures_by_agent();
         let five = figs.get(&d.agent).and_then(|f| f.five);
         if !room_left(five, global) {
             return Some(super::notices::Notice::Error(crate::trf!(
-                "La fenêtre de 5 h a atteint la limite globale ({global:.0} %) : attendez qu'elle reparte à zéro.",
-                "The 5-hour window has reached the global limit ({global:.0} %): wait for it to reset."
+                "La fenêtre de 5 h de {} a atteint sa limite ({global:.0} %) : attendez qu'elle reparte à zéro.",
+                "{}'s 5-hour window has reached its limit ({global:.0} %): wait for it to reset.",
+                d.agent.label()
             )));
         }
         let ceilings_run: Vec<(Agent, Option<f32>)> =
@@ -3692,7 +3549,7 @@ impl NotesApp {
             .filter_map(Agent::from_ai)
             .collect();
         let figs = self.figures_by_agent();
-        let global = self.ws.settings.orch.global_limit;
+        let limits = self.ws.settings.orch.clone();
         let default_share = self.ws.settings.orch.default_limit;
         let ceilings_run: Vec<(Agent, Option<f32>)> =
             self.orch.runs.iter().map(|r| (r.agent, r.ceiling)).collect();
@@ -3739,6 +3596,7 @@ impl NotesApp {
                 });
                 // The ceiling, on the subscription of the AI chosen.
                 let five = figs.get(&d.agent).and_then(|f| f.five);
+                let global = limits.five_limit(d.agent);
                 let running_at = running_ceiling_of(&ceilings_run, d.agent);
                 ui.horizontal(|ui| {
                     ui.label(RichText::new(crate::tr!("Arrêt à", "Stops at")).size(12.5).color(t.secondary));
@@ -5329,52 +5187,6 @@ fn answer_note(no_project: bool) -> &'static str {
     }
 }
 
-/// A ring gauge: `value` (0..1, None when unknown) and a tick at `limit`.
-fn ring(
-    ui: &egui::Ui,
-    c: egui::Pos2,
-    r: f32,
-    value: Option<f32>,
-    limit: f32,
-    color: Color32,
-    t: &Tone,
-) {
-    let p = ui.painter();
-    let arc = |from: f32, to: f32, col: Color32, w: f32| {
-        let n = 48;
-        let pts: Vec<egui::Pos2> = (0..=n)
-            .map(|i| {
-                let a = -std::f32::consts::FRAC_PI_2
-                    + std::f32::consts::TAU * (from + (to - from) * i as f32 / n as f32);
-                c + egui::vec2(a.cos(), a.sin()) * r
-            })
-            .collect();
-        p.add(egui::Shape::line(pts, egui::Stroke::new(w, col)));
-    };
-    arc(0.0, 1.0, t.fill, 6.0);
-    if let Some(v) = value {
-        let v = super::projects::smooth(ui, "orch-ring", v.clamp(0.0, 1.0));
-        if v > 0.001 {
-            arc(
-                0.0,
-                v,
-                if v >= limit {
-                    super::style::RED
-                } else {
-                    color
-                },
-                6.0,
-            );
-        }
-    }
-    let a = -std::f32::consts::FRAC_PI_2 + std::f32::consts::TAU * limit.clamp(0.0, 1.0);
-    let d = egui::vec2(a.cos(), a.sin());
-    p.line_segment(
-        [c + d * (r - 6.0), c + d * (r + 6.0)],
-        egui::Stroke::new(2.0, super::projects::ORANGE),
-    );
-}
-
 /// The mark before « En train de s'occuper de … »: a step in progress, as in the steps card
 /// (a ring with a dot), drawn rather than a glyph (« ✦ » is missing from the app's font and
 /// showed as a stack of lines), in the card's muted grey: the same size as the green dot of
@@ -5467,17 +5279,210 @@ fn limits_summary(o: &crate::model::OrchSettings) -> String {
         crate::tr!("sans reprise", "no restart")
     };
     crate::trf!(
-        "IA arrêtées à {:.0} % de la fenêtre de 5 h · {commits} · {resume} · bilan à {} h · {} tours au plus",
-        "AIs stop at {:.0} % of the 5-hour window · {commits} · {resume} · summary at {} h · {} turns at most",
-        o.global_limit,
+        "{commits} · {resume} · bilan à {} h · {} tours au plus",
+        "{commits} · {resume} · summary at {} h · {} turns at most",
         o.report_hour,
         o.max_turns
     )
 }
 
 /// "Lancer": a filled button.
-/// Below this width, the week's reserve goes under the week's figure.
-const WEEK_ONE_LINE: f32 = 520.0;
+/// Width of the window's name (« 5 h », « Semaine ») before an AI's bars.
+const LIMIT_LABEL_W: f32 = 84.0;
+
+/// One AI in « Limites par IA »: its name, then a bar per window it has, each with its
+/// limit; an AI whose use can't be read says so instead.
+fn agent_limits(
+    ui: &mut egui::Ui,
+    a: Agent,
+    fig: Figures,
+    o: &mut crate::model::OrchSettings,
+    t: &Tone,
+) {
+    let (r, g, b) = a.ai().accent();
+    ui.horizontal(|ui| {
+        let (dot, _) = ui.allocate_exact_size(egui::vec2(12.0, 18.0), egui::Sense::hover());
+        ui.painter().circle_filled(dot.center(), 4.0, Color32::from_rgb(r, g, b));
+        ui.label(RichText::new(a.label()).font(semibold(super::style::BODY)).color(t.text));
+        let own = o.per_agent.get(crate::model::agent_key(a)).is_some_and(|l| l.five.is_some() || l.week.is_some());
+        if own
+            && super::style::quiet(ui, crate::tr!("↺ Valeurs communes", "↺ Common values"))
+                .on_hover_text(crate::trf!(
+                    "Revenir aux limites communes : arrêt à {:.0} % de la fenêtre, réserve de {:.0} %.",
+                    "Back to the common limits: stop at {:.0} % of the window, reserve of {:.0} %.",
+                    o.global_limit,
+                    o.reserve()
+                ))
+                .clicked()
+        {
+            o.per_agent.remove(crate::model::agent_key(a));
+        }
+    });
+    if let Some(why) = crate::usage::unreadable_reason(a) {
+        ui.horizontal(|ui| {
+            ui.add_space(LIMIT_LABEL_W);
+            ui.add(
+                egui::Label::new(
+                    RichText::new(crate::trf!(
+                        "Utilisation non mesurable : {why} Ses sessions autonomes s'arrêtent faute de mesure.",
+                        "Usage can't be measured: {why} Its autonomous sessions stop for lack of a measure."
+                    ))
+                    .size(12.0)
+                    .color(t.tertiary),
+                )
+                .wrap(),
+            );
+        });
+        return;
+    }
+    // Mistral Vibe is measured on its monthly budget, in place of a 5-hour window.
+    let first = if a == Agent::Vibe {
+        crate::tr!("Mois", "Month")
+    } else {
+        crate::tr!("5 h", "5 h")
+    };
+    let mut five = o.five_limit(a);
+    if limit_line(ui, first, fig.five, &mut five, LimitKind::Stop, t) {
+        o.set_five_limit(a, five);
+    }
+    if a != Agent::Vibe {
+        let mut week = o.week_limit_of(a);
+        if limit_line(ui, crate::tr!("Semaine", "Week"), fig.week, &mut week, LimitKind::Reserve, t) {
+            o.set_reserve_of(a, 100.0 - week);
+        }
+    }
+}
+
+#[derive(Clone, Copy, PartialEq)]
+enum LimitKind {
+    /// « arrêt à X % »: where the sessions stop.
+    Stop,
+    /// « réserve X % »: what is kept, past the handle.
+    Reserve,
+}
+
+/// A window's line: its name, the bar (use so far, the zone past the limit tinted red, the
+/// limit as a handle that can be dragged), the figure, and the limit as a number. True when
+/// the limit changed (`limit`: % of the window the AIs may reach).
+fn limit_line(
+    ui: &mut egui::Ui,
+    label: &str,
+    used: Option<f32>,
+    limit: &mut f32,
+    kind: LimitKind,
+    t: &Tone,
+) -> bool {
+    let mut changed = false;
+    let (lo, hi) = match kind {
+        LimitKind::Stop => (5.0, 100.0),
+        LimitKind::Reserve => (5.0, 100.0),
+    };
+    ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing.x = 10.0;
+        let (lr, _) = ui.allocate_exact_size(egui::vec2(LIMIT_LABEL_W - 10.0, 22.0), egui::Sense::hover());
+        ui.painter().text(
+            lr.left_center() + egui::vec2(16.0, 0.0),
+            egui::Align2::LEFT_CENTER,
+            label,
+            FontId::proportional(12.5),
+            t.secondary,
+        );
+        let right = 190.0;
+        let bw = (ui.available_width() - right).max(80.0);
+        let (rect, resp) = ui.allocate_exact_size(egui::vec2(bw, 22.0), egui::Sense::click_and_drag());
+        let bar = egui::Rect::from_center_size(rect.center(), egui::vec2(bw, 8.0));
+        let x_of = |v: f32| bar.left() + bar.width() * (v / 100.0).clamp(0.0, 1.0);
+        // Dragging or clicking along the bar puts the limit there.
+        if (resp.dragged() || resp.clicked())
+            && let Some(p) = resp.interact_pointer_pos()
+        {
+            let v = (((p.x - bar.left()) / bar.width()) * 100.0).round().clamp(lo, hi);
+            if (v - *limit).abs() >= 0.5 {
+                *limit = v;
+                changed = true;
+            }
+        }
+        let hov = ui
+            .ctx()
+            .animate_bool_with_time(resp.id.with("hov"), resp.hovered() || resp.dragged(), 0.12);
+        if resp.hovered() || resp.dragged() {
+            ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeHorizontal);
+        }
+        let p = ui.painter();
+        p.rect_filled(bar, 4.0, t.fill);
+        let lx = x_of(*limit);
+        p.rect_filled(
+            egui::Rect::from_min_max(egui::pos2(lx, bar.top()), bar.max),
+            egui::CornerRadius { nw: 0, sw: 0, ne: 4, se: 4 },
+            super::style::RED.gamma_multiply(0.14),
+        );
+        if let Some(u) = used {
+            let frac = ui
+                .ctx()
+                .animate_value_with_time(resp.id.with("v"), (u / 100.0).clamp(0.0, 1.0), 0.6);
+            let color = if u >= *limit {
+                super::style::RED
+            } else if u >= *limit * 0.85 {
+                super::style::ORANGE
+            } else {
+                super::style::BLUE
+            };
+            p.rect_filled(
+                egui::Rect::from_min_size(bar.min, egui::vec2(bar.width() * frac, bar.height())),
+                4.0,
+                color,
+            );
+        }
+        // The handle: a line across the bar and a round grip that grows under the pointer.
+        p.vline(
+            lx,
+            egui::Rangef::new(bar.top() - 4.0, bar.bottom() + 4.0),
+            egui::Stroke::new(2.0, super::style::ORANGE),
+        );
+        p.circle_filled(egui::pos2(lx, bar.top() - 5.0), 4.0 + 1.5 * hov, super::style::ORANGE);
+        resp.on_hover_text(match kind {
+            LimitKind::Stop => crate::tr!(
+                "Glissez le repère : les sessions de cette IA s'arrêtent quand la fenêtre l'atteint, votre propre usage compris. Chaque session a en plus son plafond (« arrêt à » au lancement).",
+                "Drag the handle: this AI's sessions stop when the window reaches it, your own use included. Each session also has its own ceiling (« stops at » at its start)."
+            ),
+            LimitKind::Reserve => crate::tr!(
+                "Glissez le repère : au-delà, c'est votre réserve. Les sessions de cette IA s'arrêtent avant de l'entamer et reprennent quand la semaine repart à zéro.",
+                "Drag the handle: past it is your reserve. This AI's sessions stop before touching it and start again once the week resets."
+            ),
+        });
+        // The figure, then the limit as a number.
+        let fig = used.map(|u| format!("{u:.0} %")).unwrap_or_else(|| "—".into());
+        let (fr, _) = ui.allocate_exact_size(egui::vec2(42.0, 22.0), egui::Sense::hover());
+        ui.painter().text(
+            fr.right_center(),
+            egui::Align2::RIGHT_CENTER,
+            fig,
+            semibold(12.5),
+            if used.is_some() { t.text } else { t.tertiary },
+        );
+        let (word, mut v) = match kind {
+            LimitKind::Stop => (crate::tr!("arrêt à", "stop at"), *limit),
+            LimitKind::Reserve => (crate::tr!("réserve", "reserve"), 100.0 - *limit),
+        };
+        ui.label(RichText::new(word).size(12.0).color(t.tertiary));
+        let range = match kind {
+            LimitKind::Stop => lo..=hi,
+            LimitKind::Reserve => 0.0..=95.0,
+        };
+        if ui
+            .add(egui::DragValue::new(&mut v).range(range).speed(0.5).suffix(" %"))
+            .changed()
+        {
+            *limit = match kind {
+                LimitKind::Stop => v,
+                LimitKind::Reserve => 100.0 - v,
+            };
+            changed = true;
+        }
+    });
+    changed
+}
+
 
 /// Record for the tutorial the area drawn since `top` (the column's width).
 fn mark_from(ui: &egui::Ui, name: &str, top: egui::Pos2) {
