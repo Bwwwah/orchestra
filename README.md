@@ -42,7 +42,7 @@ Une fois installée, Orchestra se met à jour seule depuis les publications du d
 Il faut [Rust](https://rustup.rs) (édition 2024, donc Rust 1.85 ou plus récent).
 
 ```sh
-cargo run --release          # lance la fenêtre
+cargo run --release -- ouvrir  # lance la fenêtre (sans argument, depuis un terminal, elle sort aussitôt)
 cargo test                   # les tests
 packaging/build-macos.sh     # construit Orchestra.app (macOS)
 ```
