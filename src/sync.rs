@@ -1239,15 +1239,21 @@ pub fn ask_followup(resume: &Resume, tool: Tool, reply: &str) -> Result<Question
     if answer.trim().is_empty() {
         return Err(crate::tr!("l'IA n'a rien répondu", "the AI answered nothing").into());
     }
-    let session = session.unwrap_or_else(|| resume.session.clone());
     Ok(QuestionReply {
         answer: answer.trim().to_string(),
         tool,
-        resume: resume_command(tool, &session).map(|cmd| Resume {
-            session,
-            cwd: resume.cwd.clone(),
-            cmd,
-        }),
+        resume: next_resume(tool, resume, session),
+    })
+}
+
+/// The conversation to carry on after a reply: the id the agent gave back, or else the one
+/// the reply was sent on, always in the same folder.
+fn next_resume(tool: Tool, resume: &Resume, session: Option<String>) -> Option<Resume> {
+    let session = session.unwrap_or_else(|| resume.session.clone());
+    resume_command(tool, &session).map(|cmd| Resume {
+        session,
+        cwd: resume.cwd.clone(),
+        cmd,
     })
 }
 
@@ -1664,6 +1670,26 @@ mod tests {
         assert_eq!(c.last().map(String::as_str), Some("et ensuite ?"));
         assert!(c.iter().position(|x| x == "read-only").unwrap() < i);
         assert!(followup_args(Tool::Codex, "abc;ls", "x").is_none());
+    }
+
+    #[test]
+    fn a_reply_keeps_the_conversation_to_carry_on() {
+        let id = "0199a2b3-c4d5-7e6f-8a9b-0c1d2e3f4a5b";
+        let r = Resume {
+            session: id.into(),
+            cwd: "/tmp/projet".into(),
+            cmd: format!("claude --resume {id}"),
+        };
+        // No id given back: the reply stays on the same conversation.
+        assert_eq!(next_resume(Tool::ClaudeCode, &r, None), Some(r.clone()));
+        assert_eq!(next_resume(Tool::ClaudeCode, &r, Some(id.into())), Some(r.clone()));
+        // A new id is followed, in the same folder.
+        let new = "0199ffff-aaaa-7bbb-8ccc-0d1e2f3a4b5c";
+        let n = next_resume(Tool::Codex, &r, Some(new.into())).unwrap();
+        assert_eq!(n.cwd, "/tmp/projet");
+        assert_eq!(n.cmd, format!("codex resume {new}"));
+        // An unsafe id is never offered.
+        assert_eq!(next_resume(Tool::ClaudeCode, &r, Some("x;ls".into())), None);
     }
 
     #[test]
