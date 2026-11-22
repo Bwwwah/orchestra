@@ -55,7 +55,7 @@ pub fn open_thread(ctx: &egui::Context, project: &str) {
 
 /// A quick question and its answer as a thread of messages: the question in a bubble, the
 /// answer (Markdown) below it, or the error that came instead.
-fn thread(ui: &mut egui::Ui, q: &str, a: &Result<String, String>, by: &str, t: &Tone) {
+fn thread(ui: &mut egui::Ui, q: &str, a: &Result<String, String>, by: &str, steps: usize, t: &Tone) {
     egui::Frame::new()
         .fill(t.fill)
         .corner_radius(10.0)
@@ -77,6 +77,19 @@ fn thread(ui: &mut egui::Ui, q: &str, a: &Result<String, String>, by: &str, t: &
             match a {
                 Ok(md) => {
                     super::rich::markdown(ui, md, 13.5, t);
+                    // Each answer of the thread proposes its steps in the Steps box.
+                    if steps > 0 {
+                        let s = crate::i18n::plural(steps);
+                        ui.label(
+                            RichText::new(crate::trf!(
+                                "{} étape{s} proposée{s} dans l'encadré Étapes : cochez celles à garder.",
+                                "{} step{s} proposed in the Steps box: tick the ones to keep.",
+                                steps
+                            ))
+                            .size(12.5)
+                            .color(Color32::from_rgb(68, 131, 97)),
+                        );
+                    }
                     if !by.is_empty() {
                         ui.label(
                             RichText::new(crate::trf!("réponse de {}", "answer by {}", by))
@@ -464,11 +477,11 @@ impl NotesApp {
             .auto_shrink([false, false])
             .stick_to_bottom(true)
             .show(ui, |ui| {
-                for (q, ans, by) in &a.earlier {
-                    thread(ui, q, ans, by, t);
+                for (q, ans, by, n) in &a.earlier {
+                    thread(ui, q, ans, by, *n, t);
                     ui.add_space(10.0);
                 }
-                thread(ui, &a.question, &a.answer, &a.by, t);
+                thread(ui, &a.question, &a.answer, &a.by, a.steps, t);
                 // A reply being sent: its bubble shows at once, the answer follows.
                 if let Some(q) = self.ai.asking(pid).filter(|q| *q != a.question) {
                     ui.add_space(10.0);

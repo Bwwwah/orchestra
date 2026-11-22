@@ -58,7 +58,7 @@ pub struct QuickAnswer {
 }
 
 /// One earlier exchange of a quick question's thread: question, answer, who answered.
-pub type Exchange = (String, Result<String, String>, String);
+pub type Exchange = (String, Result<String, String>, String, usize);
 
 fn req_key() -> egui::Id {
     egui::Id::unique("ai-fill-requests")
@@ -264,7 +264,7 @@ impl NotesApp {
             let earlier: Vec<Exchange> = carried
                 .map(|mut c| {
                     let mut e = std::mem::take(&mut c.earlier);
-                    e.push((c.question, c.answer, c.by));
+                    e.push((c.question, c.answer, c.by, c.steps));
                     e
                 })
                 .unwrap_or_default();
