@@ -123,6 +123,27 @@ pub fn orchestration_stops() -> Vec<Stop> {
     ]
 }
 
+/// The stops presenting the Projects page.
+pub fn projects_stops() -> Vec<Stop> {
+    vec![
+        Stop {
+            target: "projects:card",
+            title: "Un projet",
+            text: "Chaque projet a sa carte : statut, avancement des étapes et prochaine étape. Cliquez dessus pour ouvrir sa page.",
+        },
+        Stop {
+            target: "projects:new",
+            title: "Nouveau projet",
+            text: "Indiquez un dossier : une IA peut l'analyser et remplir le tableau de bord.",
+        },
+        Stop {
+            target: "projects:sync",
+            title: "Synchroniser avec les IA",
+            text: "Demande à votre IA de se brancher à Orchestra et de faire l'état des lieux de vos projets.",
+        },
+    ]
+}
+
 fn mark_key(name: &str) -> egui::Id {
     egui::Id::unique(("tutorial-area", name))
 }
@@ -176,6 +197,12 @@ impl NotesApp {
     pub(super) fn start_orchestration_tour(&mut self) {
         self.view = View::Orchestra;
         self.start_tour(orchestration_stops());
+    }
+
+    /// Open the Projects page and begin the tour of it.
+    pub(super) fn start_projects_tour(&mut self) {
+        self.view = View::Projects;
+        self.start_tour(projects_stops());
     }
 
     /// Draw the tour in progress, if any.
@@ -302,6 +329,16 @@ mod tests {
         names.dedup();
         assert_eq!(names.len(), s.len());
         assert!(s.iter().all(|s| s.target.starts_with("orch:")));
+    }
+
+    #[test]
+    fn the_projects_stops_have_distinct_areas() {
+        let s = projects_stops();
+        let mut names: Vec<_> = s.iter().map(|s| s.target).collect();
+        names.sort();
+        names.dedup();
+        assert_eq!(names.len(), s.len());
+        assert!(s.iter().all(|s| s.target.starts_with("projects:")));
     }
 
     #[test]
