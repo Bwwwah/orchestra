@@ -774,6 +774,8 @@ impl NotesApp {
             )
             .into());
         }
+        // The AI assigned to the step taken first wins over the card's; none: the card's.
+        let agent = pr.agent_for_next(agent, &crate::store::computer_id(), crate::model::now_ms());
         // The AI chosen: wired for working alone, and plugged in.
         if !agent.ready() {
             return Err(crate::trf!(

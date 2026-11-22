@@ -707,6 +707,11 @@ impl Project {
             })
     }
 
+    /// The AI that should run the next step: the one assigned to it, else `default`.
+    pub fn agent_for_next(&self, default: crate::auto::Agent, me: &str, now: u64) -> crate::auto::Agent {
+        self.next_step_for(me, now).and_then(|s| s.agent).unwrap_or(default)
+    }
+
     /// Add a session, or refresh it if already known (same tool and id).
     pub fn link_session(&mut self, mut s: SessionRef) {
         s.title = crate::richtext::one_line(&s.title, 120);
@@ -1343,6 +1348,23 @@ mod tests {
         // Leaving this computer, the assignment stays here.
         pr.strip_local();
         assert_eq!(pr.steps[0].agent, None);
+    }
+
+    #[test]
+    fn the_next_step_decides_which_ai_launches() {
+        use crate::auto::Agent;
+        let mut pr = Project::default();
+        let a = pr.add_step("première", "moi");
+        pr.add_step("seconde", "moi");
+        assert_eq!(pr.agent_for_next(Agent::ClaudeCode, "", 0), Agent::ClaudeCode);
+        let b = pr.steps[1].id.clone();
+        pr.set_step_agent(&b, Some(Agent::Codex));
+        // The first open step has none: the project's AI.
+        assert_eq!(pr.agent_for_next(Agent::ClaudeCode, "", 0), Agent::ClaudeCode);
+        pr.set_step_agent(&a, Some(Agent::Vibe));
+        assert_eq!(pr.agent_for_next(Agent::ClaudeCode, "", 0), Agent::Vibe);
+        pr.steps[0].status = StepStatus::Done;
+        assert_eq!(pr.agent_for_next(Agent::ClaudeCode, "", 0), Agent::Codex);
     }
 
     #[test]
