@@ -186,6 +186,10 @@ pub struct Step {
     /// Decided on this computer only: the models offered depend on the AIs plugged in here.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub model: String,
+    /// The AI the person assigned to this step (None: the project's, `LaunchPrefs::agent`).
+    /// Decided on this computer only, like the model: the AIs plugged in differ per computer.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent: Option<crate::auto::Agent>,
 }
 
 /// `source` of a step typed by the person in the window.
@@ -394,6 +398,7 @@ impl Project {
         self.launch = None;
         for s in &mut self.steps {
             s.model.clear();
+            s.agent = None;
         }
         self.sessions.clear();
         self.sessions_cleared = 0;
@@ -473,6 +478,7 @@ impl Project {
                     s.received = true;
                     // Decided on each computer: another's AIs and models aren't ours.
                     s.model.clear();
+                    s.agent = None;
                     self.steps.push(s);
                     changed = true;
                 }
@@ -523,6 +529,7 @@ impl Project {
             held_by: String::new(),
             held_at: 0,
             model: String::new(),
+            agent: None,
         };
         let id = s.id.clone();
         self.steps.push(s);
@@ -554,6 +561,18 @@ impl Project {
         let model = model.trim();
         if s.model != model {
             s.model = model.to_string();
+            self.touch();
+        }
+        true
+    }
+
+    /// Assign `agent` to step `id` (None: the project's AI again). False: no such step.
+    pub fn set_step_agent(&mut self, id: &str, agent: Option<crate::auto::Agent>) -> bool {
+        let Some(s) = self.steps.iter_mut().find(|s| s.id == id) else {
+            return false;
+        };
+        if s.agent != agent {
+            s.agent = agent;
             self.touch();
         }
         true
@@ -1304,6 +1323,27 @@ pub fn project_to_markdown(page: &Page) -> String {
 mod tests {
     use super::*;
     use crate::model::Workspace;
+
+    #[test]
+    fn a_step_keeps_its_assigned_ai_on_this_computer_only() {
+        use crate::auto::Agent;
+        let mut pr = Project::default();
+        let a = pr.add_step("première", "moi");
+        assert_eq!(pr.steps[0].agent, None);
+        assert!(pr.set_step_agent(&a, Some(Agent::Codex)));
+        assert!(!pr.set_step_agent("nope", Some(Agent::Codex)));
+        assert_eq!(pr.steps[0].agent, Some(Agent::Codex));
+        // Written and read back; an old file without the field reads as None.
+        let json = serde_json::to_string(&pr.steps[0]).unwrap();
+        let back: Step = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.agent, Some(Agent::Codex));
+        let mut v: serde_json::Value = serde_json::from_str(&json).unwrap();
+        v.as_object_mut().unwrap().remove("agent");
+        assert_eq!(serde_json::from_value::<Step>(v).unwrap().agent, None);
+        // Leaving this computer, the assignment stays here.
+        pr.strip_local();
+        assert_eq!(pr.steps[0].agent, None);
+    }
 
     #[test]
     fn ai_steps_are_one_action_under_a_theme() {
