@@ -33,6 +33,62 @@ fn pending_key() -> egui::Id {
     egui::Id::unique("side-conversation-pending")
 }
 
+fn thread_key() -> egui::Id {
+    egui::Id::unique("side-quick-thread-request")
+}
+
+/// Open this panel on the question/answer thread of a project's quick question.
+pub fn open_thread(ctx: &egui::Context, project: &str) {
+    ctx.data_mut(|d| d.insert_temp(thread_key(), project.to_string()));
+}
+
+/// A quick question and its answer as a thread of messages: the question in a bubble, the
+/// answer (Markdown) below it, or the error that came instead.
+fn thread(ui: &mut egui::Ui, q: &str, a: &Result<String, String>, by: &str, t: &Tone) {
+    egui::Frame::new()
+        .fill(t.fill)
+        .corner_radius(10.0)
+        .inner_margin(egui::Margin::symmetric(10, 7))
+        .show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            ui.add(egui::Label::new(RichText::new(q).size(13.5).color(t.text)).wrap());
+        });
+    ui.add_space(6.0);
+    ui.horizontal_top(|ui| {
+        ui.label(
+            RichText::new("●")
+                .size(10.0)
+                .color(Color32::from_rgb(204, 120, 92)),
+        );
+        let w = ui.available_width();
+        ui.vertical(|ui| {
+            ui.set_max_width(w);
+            match a {
+                Ok(md) => {
+                    super::rich::markdown(ui, md, 13.5, t);
+                    if !by.is_empty() {
+                        ui.label(
+                            RichText::new(crate::trf!("réponse de {}", "answer by {}", by))
+                                .size(11.5)
+                                .color(t.tertiary),
+                        );
+                    }
+                }
+                Err(e) => {
+                    ui.add(
+                        egui::Label::new(
+                            RichText::new(crate::trf!("Pas de réponse : {e}", "No answer: {e}"))
+                                .size(12.5)
+                                .color(Color32::from_rgb(217, 115, 13)),
+                        )
+                        .wrap(),
+                    );
+                }
+            }
+        });
+    });
+}
+
 pub fn open_conversation(
     ctx: &egui::Context,
     project: &str,
@@ -168,6 +224,14 @@ fn composer(ui: &mut egui::Ui, draft: &mut String, hint: &str, enabled: bool) ->
 impl NotesApp {
     /// Open this panel on the conversation a button asked for, if any.
     pub(super) fn take_conversation_request(&mut self, ctx: &egui::Context) {
+        if ctx
+            .data_mut(|d| d.remove_temp::<String>(thread_key()))
+            .is_some()
+        {
+            self.side_open = true;
+            self.side_tab = 1;
+            self.ai_session = None;
+        }
         let Some(r) = ctx.data_mut(|d| d.remove_temp::<ConversationRequest>(conversation_key()))
         else {
             return;
@@ -396,6 +460,14 @@ impl NotesApp {
                         .data_mut(|d| d.remove::<ConversationRequest>(pending_key()));
                 }
                 Waiting::Wait => {
+                    if let Some(a) = self.ai.answers.get(pid) {
+                        egui::ScrollArea::vertical()
+                            .id_salt(("quick-thread", pid))
+                            .auto_shrink([false, false])
+                            .show(ui, |ui| thread(ui, &a.question, &a.answer, &a.by, t));
+                        ui.ctx().request_repaint_after(std::time::Duration::from_millis(500));
+                        return;
+                    }
                     ui.add_space(10.0);
                     ui.horizontal(|ui| {
                         ui.add(egui::Spinner::new().size(12.0));
@@ -426,6 +498,13 @@ impl NotesApp {
             }
         }
         if live.is_empty() {
+            if let Some(a) = self.ai.answers.get(pid) {
+                egui::ScrollArea::vertical()
+                    .id_salt(("quick-thread", pid))
+                    .auto_shrink([false, false])
+                    .show(ui, |ui| thread(ui, &a.question, &a.answer, &a.by, t));
+                return;
+            }
             ui.add_space(10.0);
             ui.add(
                 egui::Label::new(

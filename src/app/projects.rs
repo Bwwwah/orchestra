@@ -3917,6 +3917,15 @@ fn quick_question(ui: &mut egui::Ui, cx: &mut Cx) {
                                     .color(t.tertiary),
                                 );
                             }
+                            if action_link(ui, crate::tr!("Voir en fil", "View as thread"))
+                                .on_hover_text(crate::tr!(
+                                    "Afficher la question et la réponse en fil de messages dans le volet de droite",
+                                    "Show the question and answer as a message thread in the right-hand panel"
+                                ))
+                                .clicked()
+                            {
+                                super::side::open_thread(ui.ctx(), page_id);
+                            }
                             if let Some(resume) = &a.resume
                                 && action_link(
                                     ui,
