@@ -1071,7 +1071,35 @@ impl Agent {
     /// `.rules` file, `allow` or `forbidden`). Empty for Claude Code, whose rules are passed
     /// on its command line.
     pub fn rules_config(self, allow_commits: bool, extra: &str) -> String {
-        let r = self.rules(allow_commits, extra);
+        self.rules_config_rtk(allow_commits, extra, rtk_binary().is_some())
+    }
+
+    /// `rules_config`, with `rtk` telling whether RTK shortens the shell outputs: Codex's
+    /// commands are then rewritten behind `rtk` and checked as rewritten, so every shell rule is
+    /// given twice, as written and behind `rtk` (as for Claude Code, see `claude_command`), and
+    /// RTK's own ways of running any command are refused.
+    fn rules_config_rtk(self, allow_commits: bool, extra: &str, rtk: bool) -> String {
+        let mut r = self.rules(allow_commits, extra);
+        if rtk && self == Agent::Codex {
+            let twins = |v: &[String]| -> Vec<String> {
+                let mut out = Vec::with_capacity(v.len() * 2);
+                for c in v {
+                    out.push(c.clone());
+                    let twin = format!("rtk {c}");
+                    if !c.starts_with("rtk ") && !v.contains(&twin) {
+                        out.push(twin);
+                    }
+                }
+                out
+            };
+            r.allowed_commands = twins(&r.allowed_commands);
+            r.denied_commands = twins(&r.denied_commands);
+            for c in ["rtk proxy", "rtk run", "rtk init"] {
+                if !r.denied_commands.iter().any(|x| x == c) {
+                    r.denied_commands.push(c.to_string());
+                }
+            }
+        }
         match self {
             Agent::ClaudeCode => String::new(),
             Agent::Gemini => {
@@ -3694,6 +3722,22 @@ mod tests {
         // A folder that isn't there: refused.
         assert!(make_copy("/nulle/part/orch", "X", false, false).is_err());
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn codex_rules_are_doubled_behind_rtk() {
+        let plain = Agent::Codex.rules_config_rtk(false, "", false);
+        let with = Agent::Codex.rules_config_rtk(false, "", true);
+        assert!(!plain.contains("\"rtk\""), "{plain}");
+        for l in [
+            "prefix_rule(pattern=[\"git\", \"status\"], decision=\"allow\")",
+            "prefix_rule(pattern=[\"rtk\", \"git\", \"status\"], decision=\"allow\")",
+            "prefix_rule(pattern=[\"git\", \"push\"], decision=\"forbidden\")",
+            "prefix_rule(pattern=[\"rtk\", \"git\", \"push\"], decision=\"forbidden\")",
+            "prefix_rule(pattern=[\"rtk\", \"proxy\"], decision=\"forbidden\")",
+        ] {
+            assert!(with.contains(l), "{l}\n{with}");
+        }
     }
 
     #[test]
