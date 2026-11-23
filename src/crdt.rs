@@ -177,14 +177,35 @@ pub fn merged(ours: &Block, theirs: &Block) -> Block {
     let (mut a, mut b) = (ours.clone(), theirs.clone());
     reconcile(&mut a);
     reconcile(&mut b);
-    let doc = load(&a);
+    let (da, db) = (load(&a), load(&b));
+    // The same state, one copy lightened (`compact`): the lighter one, as is.
+    if da.oplog_frontiers() == db.oplog_frontiers() {
+        let lighter = match (&a.crdt, &b.crdt) {
+            (Some(x), Some(y)) if y.len() < x.len() => b.crdt.clone(),
+            _ => a.crdt.clone(),
+        };
+        out.text = a.text.clone();
+        out.crdt = lighter;
+        out.updated = ours.updated.max(theirs.updated);
+        return out;
+    }
+    let doc = da;
     let before = doc.oplog_vv();
-    if let Some(bytes) = b
+    let imported = b
         .crdt
         .as_deref()
         .and_then(|s| base64::engine::general_purpose::STANDARD.decode(s).ok())
-    {
-        let _ = doc.import(&bytes);
+        .map(|bytes| doc.import(&bytes).is_ok())
+        .unwrap_or(false);
+    if !imported {
+        // No common start any more (one side was lightened since the other's edit was made):
+        // the copy edited last wins, written over the document, as with a copy without one.
+        let mut keep = if theirs.updated > ours.updated { b } else { a };
+        reconcile(&mut keep);
+        out.text = keep.text;
+        out.crdt = keep.crdt;
+        out.updated = ours.updated.max(theirs.updated);
+        return out;
     }
     out.text = doc.get_text(TEXT).to_string();
     // Nothing new from theirs: our document as it was (the same bytes, so no echo).
@@ -195,6 +216,28 @@ pub fn merged(ours: &Block, theirs: &Block) -> Block {
     };
     out.updated = ours.updated.max(theirs.updated);
     out
+}
+
+/// Lighten a block's document: its history is dropped, only its current state is kept (a
+/// shallow snapshot). For blocks nobody has touched for a while (the server does it, see
+/// team.rs): an edit made offline from before would no longer merge character by character,
+/// only by the copy edited last. Returns true when it got lighter.
+pub fn compact(b: &mut Block) -> bool {
+    let Some(old) = b.crdt.clone() else {
+        return false;
+    };
+    let doc = load(b);
+    let Ok(bytes) = doc.export(ExportMode::ShallowSnapshot(std::borrow::Cow::Owned(
+        doc.oplog_frontiers(),
+    ))) else {
+        return false;
+    };
+    let new = base64::engine::general_purpose::STANDARD.encode(bytes);
+    if new.len() >= old.len() {
+        return false;
+    }
+    b.crdt = Some(new);
+    true
 }
 
 #[cfg(test)]
@@ -270,6 +313,60 @@ mod tests {
         let m = merged(&a, &a.clone());
         assert_eq!(m.crdt, a.crdt);
         assert!(!reconcile(&mut a.clone()));
+    }
+
+    #[test]
+    fn a_lightened_document_keeps_its_text_and_still_takes_new_edits() {
+        let mut b = with_doc("début");
+        for i in 0..40 {
+            b.text = format!("début {i} {}", "x".repeat(i));
+            reconcile(&mut b);
+        }
+        let full = b.clone();
+        let mut light = b.clone();
+        assert!(compact(&mut light));
+        assert!(light.crdt.as_ref().unwrap().len() < full.crdt.as_ref().unwrap().len());
+        assert_eq!(load(&light).get_text(TEXT).to_string(), full.text);
+        // Meeting the full copy of the same state: the lighter one is kept, either way round.
+        assert_eq!(merged(&full, &light).crdt, light.crdt);
+        assert_eq!(merged(&light, &full).crdt, light.crdt);
+        // Edits after lightening still merge character by character.
+        let (mut ana, mut bob) = (light.clone(), light.clone());
+        ana.text = format!("A {}", light.text);
+        bob.text = format!("{} B", light.text);
+        assert_eq!(merged(&ana, &bob).text, format!("A {} B", light.text));
+        assert_eq!(
+            merged(&full_with(&full, "Z "), &bob).text.starts_with('Z'),
+            true
+        );
+    }
+
+    fn full_with(b: &Block, prefix: &str) -> Block {
+        let mut x = b.clone();
+        x.text = format!("{prefix}{}", b.text);
+        x
+    }
+
+    #[test]
+    fn an_old_offline_edit_against_a_lightened_document_falls_back_to_the_latest() {
+        let base = with_doc("un deux");
+        // Bob went offline from `base`; meanwhile Ana edited, then the server lightened.
+        let mut ana = base.clone();
+        ana.text = "un deux trois".into();
+        ana.updated = base.updated + 5;
+        reconcile(&mut ana);
+        let mut server = ana.clone();
+        compact(&mut server);
+        let mut bob = base.clone();
+        bob.text = "zéro un deux".into();
+        bob.updated = base.updated + 9;
+        let m = merged(&server, &bob);
+        // Either both edits (if it still merges) or Bob's, edited last: never doubled text.
+        assert!(
+            m.text == "zéro un deux trois" || m.text == "zéro un deux",
+            "{}",
+            m.text
+        );
     }
 
     #[test]

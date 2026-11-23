@@ -47,6 +47,9 @@ const THREAD_STACK: usize = 256 * 1024;
 const MAX_MESSAGE: usize = 32 * 1024 * 1024;
 /// How long a reader waits before looking at what is to be sent.
 const TICK: Duration = Duration::from_millis(100);
+/// How often the server lightens old documents, and how long a block must be left untouched.
+const COMPACT_EVERY: Duration = Duration::from_secs(3600);
+pub const COMPACT_IDLE_MS: u64 = 7 * 24 * 3600 * 1000;
 /// How often a connected member's access is checked again (taken off the space meanwhile?).
 const RECHECK: Duration = Duration::from_secs(5);
 
@@ -604,6 +607,44 @@ impl Db {
         (out, out_deleted)
     }
 
+    /// Lighten the documents of blocks nobody touched for `idle_ms` (crdt::compact). Each page
+    /// lightened gets a new change number: the members take the lighter copy the next time.
+    /// Returns how many pages were lightened.
+    pub fn compact_idle(&self, idle_ms: u64) -> usize {
+        let cutoff = crate::model::now_ms().saturating_sub(idle_ms);
+        let rows: Vec<String> = self
+            .0
+            .prepare("SELECT json FROM pages WHERE updated < ?1")
+            .and_then(|mut st| {
+                st.query_map([cutoff as i64], |r| r.get::<_, String>(0))
+                    .map(|it| it.flatten().collect())
+            })
+            .unwrap_or_default();
+        let mut n = 0;
+        for j in rows {
+            let Ok(mut p) = serde_json::from_str::<Page>(&j) else {
+                continue;
+            };
+            let mut lighter = false;
+            for b in p.blocks.iter_mut().filter(|b| b.updated < cutoff) {
+                lighter |= crate::crdt::compact(b);
+            }
+            if lighter {
+                let seq = self.next_seq();
+                let _ = self.0.execute(
+                    "UPDATE pages SET json = ?2, seq = ?3 WHERE id = ?1",
+                    params![
+                        p.id,
+                        serde_json::to_string(&p).unwrap_or_default(),
+                        seq as i64
+                    ],
+                );
+                n += 1;
+            }
+        }
+        n
+    }
+
     /// New discussion messages (never edited): those not stored yet.
     pub fn absorb_chat(&self, msgs: Vec<ChatMsg>) -> Vec<ChatMsg> {
         msgs.into_iter()
@@ -721,6 +762,21 @@ pub fn serve(dir: &std::path::Path, port: u16) -> Result<(), String> {
     let db = Arc::new(Mutex::new(Db::open(dir).map_err(|e| e.to_string())?));
     let listener = TcpListener::bind(("0.0.0.0", port)).map_err(|e| e.to_string())?;
     let conns: Conns = Arc::new(Mutex::new(vec![]));
+    // Every hour, the documents of blocks untouched for a week are lightened.
+    {
+        let db = db.clone();
+        std::thread::spawn(move || {
+            loop {
+                std::thread::sleep(COMPACT_EVERY);
+                if let Ok(d) = db.lock() {
+                    let n = d.compact_idle(COMPACT_IDLE_MS);
+                    if n > 0 {
+                        eprintln!("  {n} page(s) allégée(s)");
+                    }
+                }
+            }
+        });
+    }
     let open = Arc::new(AtomicUsize::new(0));
     let next = AtomicU64::new(1);
     for stream in listener.incoming() {

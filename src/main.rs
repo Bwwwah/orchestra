@@ -77,6 +77,7 @@ Utilisation :
   orchestra equipe ia-espace ajouter <nom> <claude-code|codex> <url> [modèle] [chat]
   orchestra equipe ia-espace cle <nom> <membre|tous> <clé>
   orchestra equipe ia-espace retirer <nom> | liste
+  orchestra equipe alleger [jours]  allège l'historique des blocs inchangés depuis 7 jours
   orchestra equipe nom <nom>  le nom de l'espace
   orchestra equipe ia <libres|espace|aucune> [ia…]  les IA autorisées dans l'espace
   orchestra aide            cette aide
@@ -381,6 +382,12 @@ fn run_team(args: &[String]) -> i32 {
                     1
                 }
             }
+        }
+        Some("alleger") | Some("compact") => {
+            let days: u64 = args.get(1).and_then(|d| d.parse().ok()).unwrap_or(7);
+            let n = db.compact_idle(days * 24 * 3600 * 1000);
+            println!("{n} page(s) allégée(s)");
+            0
         }
         Some("membres") | Some("members") => {
             for m in db.member_list() {

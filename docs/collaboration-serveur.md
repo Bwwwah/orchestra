@@ -184,5 +184,10 @@ accès au code). La documentation d'hébergement doit le dire.
     chacun de son côté ; au retour du serveur, les deux ajouts sont gardés, à l'identique chez
     Ana, chez Bob et sur le serveur.
   * Reste : l'ordre des blocs déplacés en même temps (encore « le dernier l'emporte »), les
-    curseurs des autres, et l'allègement de l'historique des documents (aujourd'hui gardé en
-    entier).
+    curseurs des autres.
+  * [x] Allègement : toutes les heures, le serveur réduit à leur état actuel les documents des
+    blocs inchangés depuis 7 jours (`orchestra equipe alleger [jours]` à la main) ; un
+    ordinateur qui reçoit la copie allégée d'un état qu'il a déjà la garde. Une vieille
+    modification hors ligne qui ne peut plus être fusionnée prend la règle de secours (la
+    copie modifiée en dernier, sans doublon). Vérifié : le serveur allège, Ana reçoit la page
+    allégée et l'adopte, même texte.
