@@ -34,6 +34,7 @@ mod pricing;
 mod sessions;
 mod setup;
 mod shot;
+mod space;
 mod store;
 mod sync;
 mod terminal;
@@ -63,7 +64,6 @@ Utilisation :
   orchestra nettoyer        avant de désinstaller : remet la ligne d'état de Claude Code et débranche les IA
   orchestra export <dossier>  exporte toutes les pages en Markdown
   orchestra import <fichier.md>  importe un fichier Markdown comme page
-  orchestra sync            synchronise une fois avec le branchement configuré
   orchestra serveur [port] [code]  point de rencontre en direct, sans fenêtre (port 7878 par défaut)
   orchestra aide            cette aide
   orchestra version         la version
@@ -173,29 +173,6 @@ fn main() {
                 .unwrap_or_else(|| model::new_id()[..8].to_string());
             run_server(port, &code)
         }
-        Some("sync") => {
-            // Held through the pull and the push too: the others wait for the sync to end
-            // rather than have their writes dropped by its save.
-            let _lock = store::lock_workspace();
-            let mut ws = store::load();
-            match collab::sync(&mut ws) {
-                Ok(report) => match store::save(&ws) {
-                    Ok(()) => {
-                        println!("{report}");
-                        0
-                    }
-                    Err(e) => {
-                        eprintln!("orchestra: enregistrement impossible : {e}");
-                        1
-                    }
-                },
-                Err(e) => {
-                    eprintln!("orchestra: synchronisation impossible : {e}");
-                    1
-                }
-            }
-        }
-        // macOS may pass a process serial number when the app is opened from Finder.
         Some(a) if a.starts_with("-psn_") => run_window(None),
         // A link copied with Cmd/Ctrl+L.
         Some(a) if a.starts_with("orchestra://page/") => run_window(Some(

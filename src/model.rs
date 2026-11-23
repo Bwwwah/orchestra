@@ -429,24 +429,19 @@ impl Page {
 #[derive(Clone, Debug, Serialize, Deserialize, Default, PartialEq)]
 #[serde(rename_all = "snake_case")]
 pub enum ConnectorKind {
-    #[default]
-    None,
-    SharedFolder,
-    Command,
     /// Real time: host on this computer or join another one.
     Live,
+    /// Also what the removed connectors (shared folder, own command) of older files read as
+    /// (`serde(other)` has to be on the last variant).
+    #[default]
+    #[serde(other)]
+    None,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, Default)]
 pub struct CollabSettings {
     #[serde(default)]
     pub connector: ConnectorKind,
-    #[serde(default)]
-    pub folder: String,
-    #[serde(default)]
-    pub command: String,
-    #[serde(default)]
-    pub auto_sync: bool,
     #[serde(default)]
     pub author: String,
     /// Live: true to host here, false to join `live_address`.
@@ -2376,5 +2371,19 @@ mod starter_tests {
                 .len(),
             w.blocks.len()
         );
+    }
+
+    #[test]
+    fn removed_connectors_of_older_files_read_as_none() {
+        for old in ["shared_folder", "command"] {
+            let c: CollabSettings = serde_json::from_str(&format!(
+                r#"{{"connector":"{old}","folder":"/x","command":"y","auto_sync":true,"author":"Ana"}}"#
+            ))
+            .unwrap();
+            assert_eq!(c.connector, ConnectorKind::None);
+            assert_eq!(c.author, "Ana");
+        }
+        let live: CollabSettings = serde_json::from_str(r#"{"connector":"live"}"#).unwrap();
+        assert_eq!(live.connector, ConnectorKind::Live);
     }
 }

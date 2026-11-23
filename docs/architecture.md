@@ -11,7 +11,7 @@ vient d'écrire par MCP, une synchronisation est passée).
             └──────────────┘        ▼                └──────┬───────┘
                               workspace.json ◀──────────────┘
                                     ▲
-             connecteur / direct ───┘   (collab.rs, live.rs)
+                 en direct ───┘   (collab.rs, live.rs)
 ```
 
 ## Les données — `model.rs`, `project.rs`, `store.rs`
@@ -67,7 +67,7 @@ relève le résultat à chaque image dans une fonction `…_tick`.
 |---|---|
 | `docs.rs` | README, `docs/`, `CLAUDE.md`, CHANGELOG d'un projet repris en pages, tenus à jour |
 | `git.rs` | `git` et `gh` de la personne ; l'application ne manipule jamais de jeton |
-| `collab.rs` | synchronisation par dossier partagé ou par commande maison |
+| `collab.rs` | fusion de copies de l'espace, page par page puis bloc par bloc |
 | `live.rs`, `secure.rs` | travail en direct sur TCP, chiffré (SPAKE2 + ChaCha20-Poly1305) |
 | `update.rs` | mise à jour automatique depuis les publications GitHub |
 | `i18n.rs` | `tr!` / `trf!` : chaque texte en français et en anglais |

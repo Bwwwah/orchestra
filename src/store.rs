@@ -62,8 +62,34 @@ pub fn computer_id() -> String {
     .clone()
 }
 
+/// The space this process works in (see space.rs). Only the window changes it; any other
+/// program stays in "Mon espace".
+static SPACE: std::sync::RwLock<Option<String>> = std::sync::RwLock::new(None);
+
+/// Work in space `id` from now on (the window, when the person picks a space).
+#[allow(dead_code)] // the space switcher isn't wired yet (docs/collaboration-serveur.md, step 1)
+pub fn use_space(id: &str) {
+    if let Ok(mut s) = SPACE.write() {
+        *s = (id != crate::space::LOCAL).then(|| id.to_string());
+    }
+}
+
+/// The id of the space this process works in.
+pub fn space_id() -> String {
+    SPACE
+        .read()
+        .ok()
+        .and_then(|s| s.clone())
+        .unwrap_or_else(|| crate::space::LOCAL.to_string())
+}
+
+/// The folder of the space this process works in.
+pub fn space_dir() -> PathBuf {
+    crate::space::dir_of(&space_id())
+}
+
 pub fn workspace_path() -> PathBuf {
-    data_dir().join("workspace.json")
+    space_dir().join("workspace.json")
 }
 
 /// Holds the workspace for one read-then-write: several MCP servers (one per Claude Code
@@ -75,7 +101,7 @@ pub struct WorkspaceLock(#[allow(dead_code)] Option<fs::File>);
 /// the lock is dropped. A lock that can't be taken (an odd file system) doesn't stop the
 /// work: it goes on unlocked, as before.
 pub fn lock_workspace() -> WorkspaceLock {
-    let path = data_dir().join("workspace.json.lock");
+    let path = space_dir().join("workspace.json.lock");
     let file = (|| {
         if let Some(dir) = path.parent() {
             fs::create_dir_all(dir)?;

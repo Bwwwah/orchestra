@@ -1555,8 +1555,6 @@ impl NotesApp {
         let kinds = [
             ConnectorKind::None,
             ConnectorKind::Live,
-            ConnectorKind::SharedFolder,
-            ConnectorKind::Command,
         ];
         let cur = kinds
             .iter()
@@ -1577,8 +1575,6 @@ impl NotesApp {
                     &[
                         crate::tr!("Aucun (travail seul)", "None (working alone)"),
                         crate::tr!("En direct (temps réel)", "Live (real time)"),
-                        crate::tr!("Dossier partagé", "Shared folder"),
-                        crate::tr!("Ma propre commande", "My own command"),
                     ],
                     cur,
                     t,
@@ -1611,97 +1607,7 @@ impl NotesApp {
         );
         match self.ws.settings.collab.connector {
             ConnectorKind::Live => self.live_settings(ui, t, l),
-            ConnectorKind::SharedFolder => {
-                row(
-                    ui,
-                    crate::tr!("Dossier partagé", "Shared folder"),
-                    crate::tr!(
-                        "Synchronisé entre vous (Syncthing, Nextcloud, disque réseau, dépôt git…). Chacun y dépose sa copie.",
-                        "Synced between you (Syncthing, Nextcloud, network drive, git repository…). Everyone drops their copy there."
-                    ),
-                    t,
-                    |_| {},
-                );
-                ui.add(field(
-                    &mut self.ws.settings.collab.folder,
-                    crate::tr!(
-                        "/chemin/vers/le/dossier/partagé",
-                        "/path/to/the/shared/folder"
-                    ),
-                    f32::INFINITY,
-                    t,
-                    l,
-                ));
-            }
-            ConnectorKind::Command => {
-                row(
-                    ui,
-                    crate::tr!("Commande", "Command"),
-                    crate::tr!(
-                        "Reçoit « pull » (afficher l'espace en JSON) ou « push » (recevoir l'espace en JSON sur son entrée).",
-                        "Receives « pull » (print the workspace as JSON) or « push » (receive the workspace as JSON on its input)."
-                    ),
-                    t,
-                    |_| {},
-                );
-                ui.add(field(
-                    &mut self.ws.settings.collab.command,
-                    "ex. python3 /chemin/mon_serveur.py",
-                    f32::INFINITY,
-                    t,
-                    l,
-                ));
-            }
             ConnectorKind::None => {}
-        }
-        if matches!(
-            self.ws.settings.collab.connector,
-            ConnectorKind::SharedFolder | ConnectorKind::Command
-        ) {
-            section(ui, crate::tr!("Synchronisation", "Sync"), t, l);
-            let mut auto = self.ws.settings.collab.auto_sync;
-            row(
-                ui,
-                crate::tr!("Automatique", "Automatic"),
-                crate::tr!("Toutes les 30 secondes.", "Every 30 seconds."),
-                t,
-                |ui| {
-                    if switch(ui, &mut auto, l).changed() {
-                        self.ws.settings.collab.auto_sync = auto;
-                    }
-                },
-            );
-            let ready = collab::connector_for(&self.ws).is_some();
-            let mut sync_now = false;
-            row(
-                ui,
-                crate::tr!("Maintenant", "Now"),
-                if ready {
-                    crate::tr!(
-                        "Lire les autres copies, fusionner, puis publier la vôtre.",
-                        "Read the other copies, merge, then publish yours."
-                    )
-                } else {
-                    crate::tr!(
-                        "Choisissez d'abord un branchement.",
-                        "Choose a connection first."
-                    )
-                },
-                t,
-                |ui| {
-                    ui.add_enabled_ui(ready, |ui| {
-                        if button(ui, crate::tr!("Synchroniser", "Sync"), t, l).clicked() {
-                            sync_now = true;
-                        }
-                    });
-                },
-            );
-            if sync_now {
-                self.run_sync(true);
-            }
-            for line in &self.sync_log {
-                ui.label(RichText::new(line).size(13.0).color(t.secondary));
-            }
         }
     }
 

@@ -1448,16 +1448,6 @@ impl NotesApp {
                 "No collaboration set up: sharing waits for a connection."
             )
             .to_string(),
-            ConnectorKind::SharedFolder => crate::trf!(
-                "Par dossier partagé : {}",
-                "Through a shared folder: {}",
-                c.folder
-            ),
-            ConnectorKind::Command => crate::tr!(
-                "Par votre commande de synchronisation.",
-                "Through your sync command."
-            )
-            .to_string(),
             ConnectorKind::Live => match &self.live {
                 None => crate::tr!("En direct, arrêté.", "Live, stopped.").to_string(),
                 Some(l) => {

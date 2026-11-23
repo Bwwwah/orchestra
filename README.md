@@ -16,7 +16,7 @@ Orchestra réunit au même endroit :
 - **les versions** : enregistrer (commit), envoyer (push), publier une version GitHub ;
 - **une boîte de réception** : questions des IA, fins de session, rapports, et tous les
   messages de l'application (les erreurs s'affichent aussi dans une petite fenêtre) ;
-- **le travail à plusieurs** : dossier partagé, connecteur maison, ou en direct, chiffré.
+- **le travail à plusieurs** : en direct, chiffré (espaces partagés et serveur auto-hébergeable en préparation, voir [docs/collaboration-serveur.md](docs/collaboration-serveur.md)).
 
 Les IA lisent et écrivent dans Orchestra par **MCP** : au démarrage, l'application se branche
 d'elle-même à celles qu'elle trouve sur la machine.
@@ -59,7 +59,6 @@ orchestra mcp                       serveur MCP (stdio) pour brancher une IA
 orchestra statusline                ligne d'état de Claude Code (relève l'utilisation de l'abonnement)
 orchestra export <dossier>          exporte toutes les pages en Markdown
 orchestra import <fichier.md>       importe un fichier Markdown comme page
-orchestra sync                      synchronise une fois avec le branchement configuré
 orchestra serveur [port] [code]     point de rencontre en direct, sans fenêtre (port 7878)
 orchestra aide | version
 ```
@@ -92,7 +91,7 @@ cocher les étapes, poser une question dans la boîte de réception… Voir
 | [docs/mode-autonome.md](docs/mode-autonome.md) | L'orchestration : étapes, limites, copies du dépôt, rapports, veille des failles (CVE) |
 | [docs/notifications.md](docs/notifications.md) | Boîte de réception, fenêtres d'erreur, confirmations |
 | [MECHANICS.md](MECHANICS.md) | La fiche des règles : tailles, raccourcis, couleurs, données |
-| [examples/connecteur-exemple.sh](examples/connecteur-exemple.sh) | Un connecteur de synchronisation maison |
+| [docs/collaboration-serveur.md](docs/collaboration-serveur.md) | Plan de la collaboration : espaces, serveur, IA d'espace |
 
 ## Publier une version
 

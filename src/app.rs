@@ -80,8 +80,6 @@ pub struct NotesApp {
     /// Inbox messages deleted here: a merge with the file on disk must not bring them back.
     inbox_removed: HashSet<String>,
     last_poll: Instant,
-    last_sync: Instant,
-    sync_log: Vec<String>,
     export_dir: String,
     import_path: String,
     new_col: (String, ColumnKind),
@@ -199,8 +197,6 @@ impl NotesApp {
             known_mtime: None,
             inbox_removed: HashSet::new(),
             last_poll: Instant::now(),
-            last_sync: Instant::now(),
-            sync_log: vec![],
             export_dir,
             import_path: String::new(),
             new_col: (String::new(), ColumnKind::Text),
@@ -532,31 +528,6 @@ impl NotesApp {
                 self.current = None;
             }
         }
-    }
-
-    /// Sync with the team. `by_hand`: asked from the settings (a short confirmation then);
-    /// the automatic one every 30 s stays silent unless it fails.
-    fn run_sync(&mut self, by_hand: bool) {
-        self.last_sync = Instant::now();
-        self.detect_changes();
-        let res = collab::sync(&mut self.ws);
-        let line = match &res {
-            Ok(r) => r.clone(),
-            Err(e) => crate::trf!("Échec : {e}", "Failed: {e}"),
-        };
-        self.sync_log.insert(0, line.clone());
-        self.sync_log.truncate(20);
-        match res {
-            Ok(_) if by_hand => self.ack(line),
-            Ok(_) => {}
-            Err(e) => self.fail(crate::trf!(
-                "Synchronisation impossible : {e}",
-                "Sync failed: {e}"
-            )),
-        }
-        // Merged pages keep their own times: refresh the snapshot without touching them.
-        self.take_snapshot();
-        self.save_now();
     }
 
     /// "system" (default, like Notion), "light" or "dark"; older files only had `dark`.
@@ -1769,13 +1740,6 @@ impl eframe::App for NotesApp {
             && t.elapsed() > Duration::from_millis(400)
         {
             self.save_now();
-        }
-        let c = &self.ws.settings.collab;
-        if c.auto_sync
-            && c.connector != ConnectorKind::None
-            && self.last_sync.elapsed() > Duration::from_secs(30)
-        {
-            self.run_sync(false);
         }
         ctx.request_repaint_after(Duration::from_millis(500));
     }

@@ -91,13 +91,12 @@ Kinds: text, heading 1/2/3, to-do, bulleted, numbered, toggle, quote, callout, c
 * Filter: rows where any cell contains the text (case-insensitive). Sort: by one column, numbers numerically (`,` accepted as decimal point), other columns alphabetically ignoring case.
 * Each row can be opened as its own page (created on first open, child of the database page).
 
-## Collaboration — the connector you plug in yourself
+## Collaboration
 
-* Connectors: none, shared folder, own command. Rust code can add more by implementing `Connector` (pull / push).
-* Shared folder: each person writes `<name>.json` (personal settings removed) and reads everyone else's.
-* Own command: `<command> pull` prints a workspace JSON (or a JSON list of them, or nothing); `<command> push` receives the workspace JSON on standard input. A non-zero exit is reported as a failure.
-* Merge: page by page, the copy with the later `updated` time wins; tombstones newer than a page remove it.
-* Auto-sync every 30 s when ticked; `notes-libres sync` runs one sync (for cron etc.).
+* Live only (see "Real-time collaboration" below). The shared-folder and own-command connectors
+  were removed; older files set to them read as "none". Plan: docs/collaboration-serveur.md.
+* Merge (also for what the MCP server wrote to the file meanwhile): page by page, then block by
+  block, each block keeping its latest edit; tombstones newer than a page or block remove it.
 
 ## AI — MCP
 
