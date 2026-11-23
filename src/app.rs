@@ -96,6 +96,8 @@ pub struct NotesApp {
     /// A team space: for each message sent to its server not yet acknowledged, the time it
     /// left (everything edited before was in it). See team.rs.
     team_marks: std::collections::VecDeque<u64>,
+    /// A team space: the caret last told to the others (block, character).
+    live_caret: Option<(String, usize)>,
     /// A team space's administration window: open, and the server's last answer.
     admin_open: bool,
     team_admin: Option<crate::team::AdminView>,
@@ -230,6 +232,7 @@ impl NotesApp {
             live_deleted_sent: 0,
             live_presence: None,
             team_marks: Default::default(),
+            live_caret: None,
             admin_open: false,
             team_admin: None,
             tabs: vec![],
@@ -2183,6 +2186,12 @@ fn blocks_view(
     let mut rows: Vec<egui::Rect> = Vec::with_capacity(n);
     let pointer = ui.input(|i| i.pointer.hover_pos());
     let mut select_all_blocks = false;
+    // A team space: where the others' carets are on this page (live_ui::live_tick).
+    let remote_carets: Vec<(String, usize, String)> = ui
+        .data(|d| d.get_temp::<(String, Vec<(String, usize, String)>)>(live_ui::remote_carets_key()))
+        .filter(|(p, _)| *p == page_id)
+        .map(|(_, c)| c)
+        .unwrap_or_default();
     ui.spacing_mut().item_spacing.y = 6.0;
     for i in 0..n {
         let prev_id = if i > 0 {
@@ -2517,6 +2526,41 @@ fn blocks_view(
                     .set(query_bg, egui::Shape::rect_filled(r, 6.0, fill));
             }
             slash_anchor = egui::Rect::from_min_size(out.galley_pos, out.galley.size());
+            // A team space: where this person writes, for the others…
+            if out.response.response.has_focus()
+                && let Some(r) = &out.cursor_range
+            {
+                // A plain number (egui's `CharIndex` wouldn't be found again under `usize`).
+                let mine: (String, String, usize) = (page_id.clone(), b.id.clone(), r.primary.index.0);
+                ui.data_mut(|d| d.insert_temp(live_ui::my_caret_key(), mine));
+            }
+            // …and where they write: a bar of their colour with their initial above.
+            for (_, at, name) in remote_carets.iter().filter(|c| c.0 == b.id) {
+                let r = out
+                    .galley
+                    .pos_from_cursor(egui::text::CCursor::new(*at))
+                    .translate(out.galley_pos.to_vec2());
+                let col = live_ui::peer_color(name);
+                let p = ui.painter();
+                p.line_segment([r.left_top(), r.left_bottom()], egui::Stroke::new(2.0, col));
+                let tag = egui::Rect::from_min_size(
+                    r.left_top() + egui::vec2(-1.0, -13.0),
+                    egui::vec2(13.0, 13.0),
+                );
+                p.rect_filled(tag, 3.0, col);
+                let initial: String = name
+                    .chars()
+                    .next()
+                    .map(|c| c.to_uppercase().collect())
+                    .unwrap_or_default();
+                p.text(
+                    tag.center(),
+                    egui::Align2::CENTER_CENTER,
+                    initial,
+                    FontId::proportional(9.0),
+                    Color32::WHITE,
+                );
+            }
             let resp = out.response.response.clone();
             // Screen readers announce the block's type ("Titre 1", "Liste de tâches"...).
             let kind_label = b.kind.label();

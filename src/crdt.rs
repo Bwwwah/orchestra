@@ -665,3 +665,57 @@ mod order_tests {
         assert!(!reconcile_order(&mut base.clone()));
     }
 }
+
+// ------------------------------------------------------------------ where the others write
+
+/// A place in a block's text that stays put when others write before it (a Loro cursor), to
+/// tell the others where this person's caret is. `pos` counts characters.
+pub fn caret_mark(b: &Block, pos: usize) -> Option<String> {
+    let mut x = b.clone();
+    // The same edit as the next real one (named the same): no new history.
+    reconcile(&mut x);
+    let doc = load(&x);
+    let c = doc
+        .get_text(TEXT)
+        .get_cursor(pos, loro::cursor::Side::Middle)?;
+    Some(base64::engine::general_purpose::STANDARD.encode(c.encode()))
+}
+
+/// Where someone's caret (`caret_mark`) now is in our copy of the block, in characters; None
+/// while our copy doesn't have the text it points into yet.
+pub fn caret_pos(b: &Block, mark: &str) -> Option<usize> {
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(mark)
+        .ok()?;
+    let c = loro::cursor::Cursor::decode(&bytes).ok()?;
+    let mut x = b.clone();
+    reconcile(&mut x);
+    let doc = load(&x);
+    let pos = doc.get_cursor_pos(&c).ok()?.current.pos;
+    Some(pos.min(x.text.chars().count()))
+}
+
+#[cfg(test)]
+mod caret_tests {
+    use super::*;
+    use crate::model::BlockKind;
+
+    #[test]
+    fn a_caret_stays_on_its_word_when_someone_writes_before_it() {
+        let mut b = Block::new(BlockKind::Paragraph, "Le plan de la semaine.");
+        b.id = "c".into();
+        reconcile(&mut b);
+        // Bob's caret right before « semaine ».
+        let mark = caret_mark(&b, 14).unwrap();
+        // Ana writes at the start; Bob's caret follows its word.
+        let mut ana = b.clone();
+        ana.text = format!("Voici : {}", b.text);
+        reconcile(&mut ana);
+        let pos = caret_pos(&ana, &mark).unwrap();
+        assert_eq!(
+            &ana.text.chars().skip(pos).collect::<String>()[..7],
+            "semaine"
+        );
+        assert!(caret_pos(&ana, "pas-un-repere").is_none());
+    }
+}

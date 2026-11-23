@@ -13,6 +13,21 @@ pub struct Peer {
     /// The shared project they are in, and whether an AI works on it at their place.
     pub project: Option<String>,
     pub ai: bool,
+    /// A team space: the block their caret is in, and where (`crdt::caret_mark`).
+    pub block: Option<String>,
+    pub caret: Option<String>,
+}
+
+/// Where the carets of the others are on the page shown: (page, [(block, character, name)]).
+/// Set by `live_tick`, drawn by `blocks_view`.
+pub fn remote_carets_key() -> egui::Id {
+    egui::Id::unique("remote-carets")
+}
+
+/// Where this person's caret is: (page, block, character). Set by `blocks_view` while a block
+/// has the focus, read (and cleared) by `live_tick`.
+pub fn my_caret_key() -> egui::Id {
+    egui::Id::unique("my-caret")
 }
 
 /// A stable colour per name, from the tag palette.
@@ -202,6 +217,8 @@ impl NotesApp {
                             seen: Instant::now(),
                             project: None,
                             ai: false,
+                            block: None,
+                            caret: None,
                         },
                     );
                     self.send_everything();
@@ -211,6 +228,8 @@ impl NotesApp {
                     page,
                     project,
                     ai,
+                    block,
+                    caret,
                 } => {
                     self.peers.insert(
                         name,
@@ -219,6 +238,8 @@ impl NotesApp {
                             seen: Instant::now(),
                             project,
                             ai,
+                            block,
+                            caret,
                         },
                     );
                 }
@@ -321,10 +342,23 @@ impl NotesApp {
         } else {
             None
         };
-        let due = match &self.live_presence {
-            Some((page, at)) => *page != here || at.elapsed() > Duration::from_secs(5),
-            None => true,
-        };
+        // A team space: where this person's caret is, as a place the others can follow.
+        let mine: Option<(String, String, usize)> =
+            self.ctx.data_mut(|d| d.remove_temp(live_ui::my_caret_key()));
+        let caret_now = mine
+            .filter(|(p, _, _)| self.ws.whole_shared && Some(p) == here.as_ref())
+            .map(|(_, b, at)| (b, at));
+        let caret_moved = self.ws.whole_shared
+            && caret_now != self.live_caret
+            && self
+                .live_presence
+                .as_ref()
+                .is_none_or(|(_, at)| at.elapsed() > Duration::from_millis(150));
+        let due = caret_moved
+            || match &self.live_presence {
+                Some((page, at)) => *page != here || at.elapsed() > Duration::from_secs(5),
+                None => true,
+            };
         if due {
             let project = here
                 .as_deref()
@@ -335,16 +369,50 @@ impl NotesApp {
                 .as_ref()
                 .and_then(|p| self.agents.by_project.get(p))
                 .is_some_and(|v| v.iter().any(|s| s.is_live(now)));
+            let (block, caret) = match &caret_now {
+                Some((bid, at)) => {
+                    let mark = here
+                        .as_deref()
+                        .and_then(|p| self.ws.page(p))
+                        .and_then(|p| p.blocks.iter().find(|b| &b.id == bid))
+                        .and_then(|b| crate::crdt::caret_mark(b, *at));
+                    (Some(bid.clone()), mark)
+                }
+                None => (None, None),
+            };
             if let Some(l) = &self.live {
                 l.send(&LiveMsg::Presence {
                     name: self.my_name(),
                     page: here.clone(),
                     project,
                     ai,
+                    block,
+                    caret,
                 });
             }
-            self.live_presence = Some((here, Instant::now()));
+            self.live_presence = Some((here.clone(), Instant::now()));
+            self.live_caret = caret_now;
         }
+        // The others' carets on the page shown, for the editor to draw.
+        let carets: Vec<(String, usize, String)> = here
+            .as_deref()
+            .and_then(|pid| self.ws.page(pid))
+            .map(|page| {
+                self.peers
+                    .iter()
+                    .filter(|(_, p)| p.page.as_deref() == Some(page.id.as_str()))
+                    .filter_map(|(name, p)| {
+                        let bid = p.block.as_ref()?;
+                        let b = page.blocks.iter().find(|b| &b.id == bid)?;
+                        let at = crate::crdt::caret_pos(b, p.caret.as_ref()?)?;
+                        Some((bid.clone(), at, name.clone()))
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        let shown = here.clone().unwrap_or_default();
+        self.ctx
+            .data_mut(|d| d.insert_temp(live_ui::remote_carets_key(), (shown, carets)));
         self.peers
             .retain(|_, p| p.seen.elapsed() < Duration::from_secs(16));
         self.ctx.request_repaint_after(Duration::from_millis(250));

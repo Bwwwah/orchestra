@@ -192,7 +192,11 @@ accès au code). La documentation d'hébergement doit le dire.
     en place). Deux personnes qui déplacent des blocs différents gardent toutes deux leur
     déplacement ; des blocs ajoutés des deux côtés restent à leur place. Vérifié : Ana
     remonte « d », Bob descend « a » hors ligne → `d, b, c, a` partout.
-  * Reste : les curseurs des autres.
+  * [x] Curseurs des autres : la présence dit le bloc et la place du curseur, sous forme d'un
+    repère Loro qui suit le texte quand d'autres écrivent avant lui ; envoyée au plus toutes
+    les 150 ms quand le curseur bouge. L'éditeur dessine une barre à la couleur de la
+    personne, son initiale au-dessus. Vérifié : le curseur de Bob s'affiche chez Ana à sa
+    place exacte.
   * [x] Allègement : toutes les heures, le serveur réduit à leur état actuel les documents des
     blocs inchangés depuis 7 jours (`orchestra equipe alleger [jours]` à la main) ; un
     ordinateur qui reçoit la copie allégée d'un état qu'il a déjà la garde. Une vieille

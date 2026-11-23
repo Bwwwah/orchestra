@@ -49,6 +49,11 @@ pub enum LiveMsg {
         project: Option<String>,
         #[serde(default)]
         ai: bool,
+        /// A team space: the block their caret is in, and where (`crdt::caret_mark`).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        block: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        caret: Option<String>,
     },
     /// New messages of the projects' team discussions.
     Chat {
@@ -797,6 +802,8 @@ mod tests {
             page: None,
             project: None,
             ai: false,
+            block: None,
+            caret: None,
         });
         assert!(wait_for(&good, |m| matches!(m, LiveMsg::Presence { .. })).is_some());
         drop(stuck);
@@ -831,6 +838,8 @@ mod tests {
             page: Some(p.id.clone()),
             project: None,
             ai: false,
+            block: None,
+            caret: None,
         });
         assert!(wait_for(&j, |m| matches!(m, LiveMsg::Presence { .. })).is_some());
         // A peer with the wrong code is turned away.

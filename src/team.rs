@@ -1407,7 +1407,12 @@ fn serve_one(id: u64, stream: Replay, db: &Arc<Mutex<Db>>, conns: &Conns) -> Res
                 }
                 // Under the name the server knows, never the one a message claims.
                 LiveMsg::Presence {
-                    page, project, ai, ..
+                    page,
+                    project,
+                    ai,
+                    block,
+                    caret,
+                    ..
                 } => pass_on(
                     conns,
                     id,
@@ -1416,6 +1421,8 @@ fn serve_one(id: u64, stream: Replay, db: &Arc<Mutex<Db>>, conns: &Conns) -> Res
                         page,
                         project,
                         ai,
+                        block,
+                        caret,
                     })],
                 ),
                 _ => {}
