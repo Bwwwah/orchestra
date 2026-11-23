@@ -840,6 +840,9 @@ impl NotesApp {
                 agent.label()
             ));
         }
+        if let Some(why) = crate::space::refusal(agent.ai().key(), agent.label()) {
+            return Err(why);
+        }
         // Every figure below is that of the AI chosen, on its own subscription: never another
         // AI's (Claude Code's window full doesn't stop a Codex session, nor the reverse).
         let fig = self.agent_figures(agent);
@@ -965,7 +968,12 @@ impl NotesApp {
         };
         let cmd = agent.command_saving(cwd, commits, &o.extra_tools, model, saving);
         let c2 = ctx.clone();
-        let envs = crate::sync::api_env(&self.ws.settings, agent);
+        let mut envs = crate::sync::api_env(&self.ws.settings, agent);
+        // For an AI whose MCP servers can't be set per session (Antigravity): they inherit it.
+        let space = store::space_id();
+        if space != crate::space::LOCAL {
+            envs.push(("ORCHESTRA_SPACE".into(), space));
+        }
         let mut term = Term::spawn_once_env(
             &crate::trf!("Autonome · {title}", "Autonomous · {title}"),
             &copy.worktree,
@@ -3506,9 +3514,14 @@ impl NotesApp {
         let figs = self.figures_by_agent();
         let o = &self.ws.settings.orch;
         let plugged = self.ais.plugged();
+        let space = crate::space::current();
         let cands: Vec<AutoCandidate> = Agent::ALL
             .into_iter()
-            .filter(|a| plugged.contains(&a.ai()) && agent_unavailable(*a).is_none())
+            .filter(|a| {
+                plugged.contains(&a.ai())
+                    && agent_unavailable(*a).is_none()
+                    && space.allows_own_ai(a.ai().key())
+            })
             .map(|a| {
                 let f = figs.get(&a).copied().unwrap_or_default();
                 AutoCandidate {
@@ -3635,10 +3648,12 @@ impl NotesApp {
         let t = tone(dark);
         let lk = super::settings::look(dark);
         let busy = self.orch.runs.iter().any(|r| r.project == id);
+        let space = crate::space::current();
         let connected: Vec<Agent> = self
             .ais
             .plugged()
             .into_iter()
+            .filter(|a| space.allows_own_ai(a.key()))
             .filter_map(Agent::from_ai)
             .collect();
         let figs = self.figures_by_agent();

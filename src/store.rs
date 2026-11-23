@@ -176,6 +176,11 @@ fn keep_personal(settings: &crate::model::Settings) -> std::io::Result<()> {
     Ok(())
 }
 
+/// The workspace in file `path` (another space's, for instance).
+pub fn load_path(path: &Path) -> Workspace {
+    load_from(path)
+}
+
 fn load_from(path: &Path) -> Workspace {
     let path = path.to_path_buf();
     match fs::read_to_string(&path) {

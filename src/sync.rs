@@ -279,6 +279,10 @@ fn run_agent(
     cancel: &AtomicBool,
     limit: Duration,
 ) -> Result<(String, String, Option<String>), String> {
+    // Every AI run without a window goes through here: the space's AI rule is kept.
+    if let Some(why) = crate::space::refusal(agent.tool.name(), agent.tool.label()) {
+        return Err(why);
+    }
     let dir = crate::project::normalize_folder(folder);
     if !dir.is_dir() {
         return Err(crate::tr!("dossier introuvable", "folder not found").into());
@@ -984,7 +988,17 @@ fn ask_full(
     weight: Weight,
 ) -> Result<(String, Tool, Option<String>), String> {
     let path = shell_path();
-    let agents = detect(&path);
+    let mut agents = detect(&path);
+    // Only the AIs the space allows; none: say why.
+    let refused = agents
+        .iter()
+        .find_map(|a| crate::space::refusal(a.tool.name(), a.tool.label()));
+    agents.retain(|a| crate::space::refusal(a.tool.name(), a.tool.label()).is_none());
+    if agents.is_empty()
+        && let Some(why) = refused
+    {
+        return Err(why);
+    }
     let agent = agents
         .iter()
         .find(|a| Some(a.tool) == prefer)

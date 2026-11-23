@@ -23,7 +23,42 @@ est en cours ailleurs : ne la prends pas.\n\n";
 
 pub const PROTOCOL_VERSION: &str = "2025-06-18";
 
+/// The name the AI gave when it connected (`clientInfo.name`).
+static CLIENT: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+
+/// The space this server works in: the one named by the session that started it
+/// (ORCHESTRA_SPACE, set for autonomous sessions, whose copy of the folder is elsewhere),
+/// else the one holding the project of the folder it was started in, else « Mon espace ».
+fn choose_space() {
+    let named = std::env::var("ORCHESTRA_SPACE")
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty() && crate::space::load().get(s).is_some());
+    let id = named.unwrap_or_else(|| {
+        std::env::current_dir()
+            .map(|d| crate::space::space_for_folder(&d))
+            .unwrap_or_else(|_| crate::space::LOCAL.to_string())
+    });
+    store::use_space(&id);
+}
+
+/// Why the AI on the other end may not work in this space, if so (its rule, see space.rs).
+/// The name of an autonomous session comes first: it says which AI it is for sure.
+fn ai_refusal() -> Option<String> {
+    if store::space_id() == crate::space::LOCAL {
+        return None;
+    }
+    let holder = std::env::var("ORCHESTRA_HOLDER").unwrap_or_default();
+    let client = CLIENT.get().cloned().unwrap_or_default();
+    let key = crate::space::ai_key_of_client(&holder)
+        .or_else(|| crate::space::ai_key_of_client(&client))
+        .unwrap_or("unknown");
+    let label = if client.is_empty() { key.to_string() } else { client };
+    crate::space::refusal(key, &label)
+}
+
 pub fn run() -> i32 {
+    choose_space();
     let stdin = std::io::stdin();
     let mut stdout = std::io::stdout();
     for line in stdin.lock().lines() {
@@ -61,6 +96,13 @@ fn handle(msg: &Value) -> Option<Value> {
     let id = id?;
     let result: Result<Value, (i64, String)> = match method {
         "initialize" => {
+            if let Some(n) = params
+                .get("clientInfo")
+                .and_then(|c| c.get("name"))
+                .and_then(Value::as_str)
+            {
+                let _ = CLIENT.set(n.to_string());
+            }
             let asked = params
                 .get("protocolVersion")
                 .and_then(Value::as_str)
@@ -74,6 +116,14 @@ fn handle(msg: &Value) -> Option<Value> {
         }
         "ping" => Ok(json!({})),
         "tools/list" => Ok(json!({"tools": tools()})),
+        "tools/call" | "resources/list" | "resources/read" if ai_refusal().is_some() => {
+            let why = ai_refusal().unwrap_or_default();
+            if method == "tools/call" {
+                Ok(json!({"content":[{"type":"text","text":format!("Orchestra refuse : {why}.")}],"isError":true}))
+            } else {
+                Err((-32001, format!("Orchestra refuse : {why}.")))
+            }
+        }
         "tools/call" => {
             let name = params
                 .get("name")
@@ -1120,6 +1170,38 @@ mod tests {
     /// The lock every writer of the workspace takes (MCP, the window, the live server, the
     /// import and sync commands): while one holds it, another can't take it; once dropped,
     /// it can. Each `lock_workspace` opens the file anew, as another process would.
+    #[test]
+    fn an_ai_started_in_a_folder_works_in_the_space_of_that_folders_project() {
+        let _g = fresh_workspace();
+        let root = store::data_dir().join("dossiers");
+        let boite = root.join("code-boite");
+        let perso = root.join("code-perso");
+        std::fs::create_dir_all(boite.join("src")).unwrap();
+        std::fs::create_dir_all(&perso).unwrap();
+        // « Mon espace » holds the personal project, the space « Boîte » the other one.
+        let mut local = Workspace::default();
+        local.create_project("Perso", &perso.display().to_string());
+        store::save(&local).unwrap();
+        let mut list = crate::space::load();
+        let id = list.add("Boîte", crate::space::SpaceKind::Local);
+        crate::space::save(&list).unwrap();
+        let mut theirs = Workspace::default();
+        theirs.create_project("Projet de la boîte", &boite.display().to_string());
+        let path = store::workspace_path_in(&id);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, serde_json::to_string(&theirs).unwrap()).unwrap();
+
+        assert_eq!(crate::space::space_for_folder(&boite.join("src")), id);
+        assert_eq!(crate::space::space_for_folder(&perso), crate::space::LOCAL);
+        // A folder no project holds: never a shared space by default.
+        assert_eq!(crate::space::space_for_folder(&root), crate::space::LOCAL);
+        // Nothing of « Boîte » went into « Mon espace ».
+        assert!(store::load().find_project("Projet de la boîte").is_none());
+
+        list.remove(&id);
+        crate::space::save(&list).unwrap();
+    }
+
     #[test]
     fn the_workspace_lock_keeps_a_second_writer_out() {
         let _g = fresh_workspace();

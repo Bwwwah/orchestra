@@ -284,6 +284,9 @@ impl Agent {
                 if let Some(h) = s["env"]["ORCHESTRA_HOLDER"].as_str() {
                     env.push(format!("ORCHESTRA_HOLDER = {}", toml_string(h)));
                 }
+                if let Some(h) = s["env"]["ORCHESTRA_SPACE"].as_str() {
+                    env.push(format!("ORCHESTRA_SPACE = {}", toml_string(h)));
+                }
                 if !env.is_empty() {
                     ours.push_str(&format!("env = {{ {} }}\n", env.join(", ")));
                 }
@@ -733,6 +736,11 @@ fn mcp_server(holder: &str) -> Value {
     if !holder.is_empty() {
         env.insert("ORCHESTRA_HOLDER".into(), holder.into());
     }
+    // The session works in a copy of the folder, elsewhere: its space is named outright.
+    let space = crate::store::space_id();
+    if space != crate::space::LOCAL {
+        env.insert("ORCHESTRA_SPACE".into(), space.into());
+    }
     if !env.is_empty() {
         server["env"] = Value::Object(env);
     }
@@ -753,6 +761,9 @@ fn codex_mcp() -> String {
     }
     if let Some(h) = s["env"]["ORCHESTRA_HOLDER"].as_str() {
         env.push(format!("ORCHESTRA_HOLDER={}", toml_string(h)));
+    }
+    if let Some(h) = s["env"]["ORCHESTRA_SPACE"].as_str() {
+        env.push(format!("ORCHESTRA_SPACE={}", toml_string(h)));
     }
     if !env.is_empty() {
         entry.push_str(&format!(",env={{{}}}", env.join(",")));

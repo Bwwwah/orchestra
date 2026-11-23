@@ -215,6 +215,13 @@ impl NotesApp {
         }
         ui.data_mut(|d| d.insert_temp(key, draft));
         ui.separator();
+        // Stays open on a click inside: several things can be set in a row.
+        egui::containers::menu::SubMenuButton::new(crate::tr!("Cet espace", "This space"))
+            .config(
+                egui::containers::menu::MenuConfig::new()
+                    .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside),
+            )
+            .ui(ui, |ui| self.this_space_menu(ui));
         if menu_item(
             ui,
             Some(Icon::Gear),
@@ -229,6 +236,183 @@ impl NotesApp {
         }
         if let Some(id) = pick {
             self.switch_space(&id);
+        }
+    }
+
+    /// « Cet espace › »: its name, the AIs it allows, taking it off the list.
+    fn this_space_menu(&mut self, ui: &mut egui::Ui) {
+        let t = tone(ui.visuals().dark_mode);
+        ui.set_min_width(280.0);
+        ui.set_max_width(280.0);
+        let here = store::space_id();
+        let mut list = space::load();
+        let Some(cur) = list.get(&here).cloned() else {
+            return;
+        };
+        let mut changed = false;
+
+        // Name.
+        let key = egui::Id::unique(("space-rename", here.as_str()));
+        let mut name: String = ui
+            .data(|d| d.get_temp(key))
+            .unwrap_or_else(|| self.space_name());
+        ui.label(
+            RichText::new(crate::tr!("Nom", "Name"))
+                .size(12.0)
+                .color(t.tertiary),
+        );
+        ui.horizontal(|ui| {
+            let r = ui.add(egui::TextEdit::singleline(&mut name).desired_width(180.0));
+            let enter = r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+            let ok = !name.trim().is_empty() && name.trim() != self.space_name();
+            if (ui
+                .add_enabled(ok, egui::Button::new(crate::tr!("Renommer", "Rename")))
+                .clicked()
+                || enter)
+                && ok
+            {
+                let n = name.trim().to_string();
+                if cur.is_local() {
+                    // « Mon espace » keeps its name in the settings, as before.
+                    self.ws.settings.workspace_name = n.clone();
+                }
+                if let Some(s) = list.spaces.iter_mut().find(|s| s.id == here) {
+                    s.name = n;
+                }
+                changed = true;
+            }
+        });
+        ui.data_mut(|d| d.insert_temp(key, name));
+
+        // AIs allowed (not for « Mon espace »: the person's own AIs always work there).
+        if !cur.is_local() {
+            ui.separator();
+            ui.label(
+                RichText::new(crate::tr!("IA autorisées ici", "AIs allowed here"))
+                    .size(12.0)
+                    .color(t.tertiary),
+            );
+            let mut rule = cur.ai_rule;
+            ui.radio_value(
+                &mut rule,
+                space::AiRule::Free,
+                crate::tr!("Vos IA", "Your AIs"),
+            );
+            ui.radio_value(
+                &mut rule,
+                space::AiRule::SpaceOnly,
+                crate::tr!("IA de l'espace seulement", "The space's AIs only"),
+            );
+            ui.radio_value(
+                &mut rule,
+                space::AiRule::NoAi,
+                crate::tr!("Aucune IA", "No AI"),
+            );
+            let mut allowed = cur.allowed_ai.clone();
+            if rule == space::AiRule::Free {
+                ui.label(
+                    RichText::new(crate::tr!(
+                        "Rien de coché : toutes vos IA.",
+                        "Nothing ticked: all your AIs."
+                    ))
+                    .size(11.5)
+                    .color(t.tertiary),
+                );
+                for a in crate::setup::Ai::ALL {
+                    let mut on = allowed.iter().any(|k| k == a.key());
+                    if ui.checkbox(&mut on, a.label()).changed() {
+                        allowed.retain(|k| k != a.key());
+                        if on {
+                            allowed.push(a.key().to_string());
+                        }
+                    }
+                }
+            }
+            if rule == space::AiRule::SpaceOnly {
+                ui.label(
+                    RichText::new(crate::tr!(
+                        "Les IA fournies par un espace arrivent avec le serveur : d'ici là, aucune IA ne travaille ici.",
+                        "AIs provided by a space come with the server: until then, no AI works here."
+                    ))
+                    .size(11.5)
+                    .color(t.tertiary),
+                );
+            }
+            if rule != cur.ai_rule || allowed != cur.allowed_ai {
+                if let Some(s) = list.spaces.iter_mut().find(|s| s.id == here) {
+                    s.ai_rule = rule;
+                    s.allowed_ai = allowed;
+                }
+                changed = true;
+            }
+            ui.label(
+                RichText::new(crate::tr!(
+                    "Orchestra respecte cette règle ; il ne peut pas empêcher de lancer une IA hors de l'application.",
+                    "Orchestra keeps to this rule; it can't stop an AI being started outside the app."
+                ))
+                .size(11.5)
+                .color(t.tertiary),
+            );
+        }
+
+        if changed {
+            if let Err(e) = space::save(&list) {
+                self.fail(crate::trf!(
+                    "Espace non enregistré : {e}",
+                    "Space not saved: {e}"
+                ));
+            }
+            self.dirty_since.get_or_insert_with(Instant::now);
+        }
+
+        // Take it off the list (two clicks; its files stay on disk).
+        if !cur.is_local() {
+            ui.separator();
+            let confirm = egui::Id::unique(("space-remove", here.as_str()));
+            let asked: bool = ui.data(|d| d.get_temp(confirm)).unwrap_or(false);
+            let label = if asked {
+                crate::tr!(
+                    "Confirmer : retirer cet espace",
+                    "Confirm: remove this space"
+                )
+            } else {
+                crate::tr!("Retirer cet espace…", "Remove this space…")
+            };
+            if ui
+                .button(RichText::new(label).color(super::style::RED))
+                .clicked()
+            {
+                if asked {
+                    ui.data_mut(|d| d.remove_temp::<bool>(confirm));
+                    ui.close();
+                    self.remove_space(&here);
+                } else {
+                    ui.data_mut(|d| d.insert_temp(confirm, true));
+                }
+            }
+        }
+    }
+
+    /// Take space `id` off the list, after going back to « Mon espace ». Its folder stays on
+    /// disk (nothing is deleted).
+    fn remove_space(&mut self, id: &str) {
+        self.switch_space(LOCAL);
+        if store::space_id() != LOCAL {
+            return; // refused (an AI at work): said by `switch_space`
+        }
+        let mut list = space::load();
+        let name = list.get(id).map(|s| s.name.clone()).unwrap_or_default();
+        list.remove(id);
+        match space::save(&list) {
+            Ok(()) => self.ack(crate::trf!(
+                "Espace « {name} » retiré de la liste ; ses fichiers restent dans {}",
+                "Space « {name} » taken off the list; its files stay in {}",
+                space::dir_of(id).display()
+            )),
+            Err(e) => self.fail(crate::trf!(
+                "Espace non retiré : {e}",
+                "Space not removed: {e}"
+            )),
         }
     }
 }

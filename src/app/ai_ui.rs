@@ -48,9 +48,25 @@ impl Ais {
     }
 
     /// The AIs of « Nouvelle session » (« Sessions IA » card): see `launchers_from`.
+    /// Only the AIs the space shown allows (the shell stays).
     pub fn launchers(&self) -> Vec<(&'static str, Option<&'static str>, Color32)> {
+        let space = crate::space::current();
         launchers_from(self.states.lock_or_recover().as_deref().unwrap_or(&[]))
+            .into_iter()
+            .filter(|(_, cmd, _)| {
+                cmd.and_then(ai_of_command)
+                    .is_none_or(|a| space.allows_own_ai(a.key()))
+            })
+            .collect()
     }
+}
+
+/// The AI a terminal command starts (`Ai::launch`), if it starts one.
+pub fn ai_of_command(cmd: &str) -> Option<Ai> {
+    let first = cmd.split_whitespace().next()?;
+    Ai::ALL
+        .into_iter()
+        .find(|a| a.launch().and_then(|l| l.split_whitespace().next()) == Some(first))
 }
 
 /// The plugged AIs whose quota is shown besides Claude's subscription: the agents other than

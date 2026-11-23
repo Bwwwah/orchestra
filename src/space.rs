@@ -9,10 +9,6 @@
 //! from the list: a program that chooses nothing (an MCP server, an autonomous session) works
 //! in "Mon espace", never in a shared space by default. See docs/collaboration-serveur.md.
 
-// The AI rule and server spaces aren't wired yet (docs/collaboration-serveur.md, step 1):
-// remove once they are.
-#![allow(dead_code)]
-
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
@@ -165,23 +161,124 @@ impl Spaces {
     }
 }
 
+/// The space this process works in (see `store::use_space`); "Mon espace" if it is gone
+/// from the list.
+pub fn current() -> Space {
+    let id = crate::store::space_id();
+    load().get(&id).cloned().unwrap_or_else(Space::local)
+}
+
+/// Why the person's own AI `key` (`Ai::key`) may not work here, in the space this process
+/// works in; None when it may.
+pub fn refusal(key: &str, label: &str) -> Option<String> {
+    let s = current();
+    if s.allows_own_ai(key) {
+        return None;
+    }
+    let name = s.name.clone();
+    Some(match s.ai_rule {
+        AiRule::NoAi => crate::trf!(
+            "l'espace « {name} » n'autorise aucune IA",
+            "the space « {name} » allows no AI"
+        ),
+        AiRule::SpaceOnly => crate::trf!(
+            "l'espace « {name} » n'autorise que ses propres IA, pas {label}",
+            "the space « {name} » only allows its own AIs, not {label}"
+        ),
+        AiRule::Free => crate::trf!(
+            "l'espace « {name} » n'autorise pas {label}",
+            "the space « {name} » doesn't allow {label}"
+        ),
+    })
+}
+
+/// The space holding the project of `folder`: the one whose project folder is the closest
+/// to it; "Mon espace" when no space has one, or when it has one as close as the others.
+pub fn space_for_folder(folder: &std::path::Path) -> String {
+    let mut best: (usize, String) = (0, LOCAL.to_string());
+    for s in load().spaces {
+        let path = crate::store::workspace_path_in(&s.id);
+        if !path.exists() {
+            continue;
+        }
+        let ws = crate::store::load_path(&path);
+        let depth = ws
+            .project_for_path(folder)
+            .and_then(|p| p.project.as_ref())
+            .map(|x| {
+                crate::project::normalize_folder(&x.folder)
+                    .components()
+                    .count()
+            });
+        // Strictly closer only: on a tie, the first one (« Mon espace ») is kept.
+        if let Some(n) = depth
+            && n > best.0
+        {
+            best = (n, s.id.clone());
+        }
+    }
+    best.1
+}
+
+/// The key (`Ai::key`) of the AI behind an MCP client, from the name it gives when it
+/// connects (`clientInfo.name`) or the name of an autonomous session (ORCHESTRA_HOLDER).
+pub fn ai_key_of_client(name: &str) -> Option<&'static str> {
+    let n = name.to_lowercase();
+    if n.contains("claude-code") || n.contains("claude code") {
+        Some("claude-code")
+    } else if n.contains("codex") {
+        Some("codex")
+    } else if n.contains("vibe") || n.contains("mistral") {
+        Some("vibe")
+    } else if n.contains("antigravity") || n.contains("gemini") || n == "agy" {
+        Some("antigravity")
+    } else if n.contains("cursor") {
+        Some("cursor")
+    } else if n.contains("claude") {
+        Some("claude-desktop")
+    } else {
+        None
+    }
+}
+
 fn list_path() -> PathBuf {
     crate::store::data_dir().join("espaces.json")
 }
 
+/// The list as last read or written, with the file's time then: the window asks for it at
+/// every frame, the file is read again only when it changed.
+static CACHE: std::sync::Mutex<Option<(Option<std::time::SystemTime>, Spaces)>> =
+    std::sync::Mutex::new(None);
+
 /// The list of spaces; just "Mon espace" when there is none yet or it can't be read.
 pub fn load() -> Spaces {
-    std::fs::read_to_string(list_path())
+    let path = list_path();
+    let m = crate::store::modified(&path);
+    let mut cache = CACHE.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some((at, s)) = cache.as_ref()
+        && *at == m
+        && m.is_some()
+    {
+        return s.clone();
+    }
+    let s = std::fs::read_to_string(&path)
         .ok()
         .and_then(|s| serde_json::from_str::<Spaces>(&s).ok())
         .unwrap_or_default()
-        .tidy()
+        .tidy();
+    *cache = Some((m, s.clone()));
+    s
 }
 
 pub fn save(spaces: &Spaces) -> std::io::Result<()> {
     std::fs::create_dir_all(crate::store::data_dir())?;
-    let text = serde_json::to_string_pretty(&spaces.clone().tidy()).unwrap_or_default();
-    crate::store::write_atomic(&list_path(), text.as_bytes())
+    let tidy = spaces.clone().tidy();
+    let text = serde_json::to_string_pretty(&tidy).unwrap_or_default();
+    let path = list_path();
+    crate::store::write_atomic(&path, text.as_bytes())?;
+    // Written here: the next read takes it as is (the file's time may not have moved).
+    *CACHE.lock().unwrap_or_else(|e| e.into_inner()) = Some((crate::store::modified(&path), tidy));
+    Ok(())
 }
 
 /// The folder of space `id`: the data folder for "Mon espace", `espaces/<id>/` for the others.
@@ -272,6 +369,30 @@ mod tests {
             crate::store::workspace_path(),
             crate::store::data_dir().join("workspace.json")
         );
+    }
+
+    #[test]
+    fn mcp_clients_are_told_apart() {
+        assert_eq!(ai_key_of_client("claude-code"), Some("claude-code"));
+        assert_eq!(ai_key_of_client("codex-mcp-client"), Some("codex"));
+        assert_eq!(ai_key_of_client("codex"), Some("codex"));
+        assert_eq!(ai_key_of_client("vibe"), Some("vibe"));
+        assert_eq!(
+            ai_key_of_client("gemini-cli-mcp-client"),
+            Some("antigravity")
+        );
+        assert_eq!(ai_key_of_client("claude-ai"), Some("claude-desktop"));
+        assert_eq!(ai_key_of_client("cursor-vscode"), Some("cursor"));
+        assert_eq!(ai_key_of_client("un-inconnu"), None);
+    }
+
+    #[test]
+    fn an_unknown_ai_is_allowed_only_where_every_ai_is() {
+        let mut s = Spaces::default();
+        s.add("Boîte", SpaceKind::Local);
+        assert!(s.spaces[1].allows_own_ai("inconnue"));
+        s.spaces[1].allowed_ai = vec!["codex".into()];
+        assert!(!s.spaces[1].allows_own_ai("inconnue"));
     }
 
     #[test]

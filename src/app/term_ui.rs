@@ -75,6 +75,13 @@ impl NotesApp {
         let Some(r) = ctx.data_mut(|d| d.remove_temp::<TermRequest>(request_key())) else {
             return;
         };
+        // An AI the space shown doesn't allow isn't started (a plain shell always is).
+        if let Some(ai) = r.cmd.as_deref().and_then(super::ai_ui::ai_of_command)
+            && let Some(why) = crate::space::refusal(ai.key(), ai.label())
+        {
+            self.info(crate::trf!("{} non lancé : {why}.", "{} not started: {why}.", ai.label()));
+            return;
+        }
         let c2 = ctx.clone();
         match Term::spawn(&r.title, &r.cwd, r.cmd.as_deref(), move || {
             c2.request_repaint()

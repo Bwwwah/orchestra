@@ -109,6 +109,16 @@ accès au code). La documentation d'hébergement doit le dire.
     fenêtre rouvre le dernier espace choisi.
   * [x] Réglages personnels communs à tous les espaces : ils vivent dans `Mon espace` et y
     retournent quand ils changent ailleurs ; les onglets ouverts restent propres à chaque espace.
-  * [ ] Renommer / retirer un espace depuis le sélecteur.
-  * [ ] Le serveur MCP écrit dans l'espace qui contient le projet de son dossier.
-  * [ ] Règle d'IA appliquée à tous les lancements d'IA et au serveur MCP.
+  * [x] « Cet espace › » dans le sélecteur : renommer, règle d'IA (réglable à la main en
+    attendant le serveur), retirer de la liste (deux clics ; les fichiers restent sur le disque).
+  * [x] Le serveur MCP travaille dans l'espace qui contient le projet du dossier où l'IA a été
+    lancée (`space::space_for_folder`), sinon `Mon espace`. Les sessions autonomes, qui
+    travaillent dans une copie du dossier, nomment leur espace (ORCHESTRA_SPACE).
+  * [x] Règle d'IA appliquée : sessions autonomes (et le choix « Automatique »), appels sans
+    fenêtre (état des lieux, questions, remplissage, regard extérieur), boutons de lancement
+    dans un terminal, et serveur MCP (il reconnaît l'IA à son nom de connexion ; une IA
+    inconnue n'est admise que là où toutes le sont).
+  * Limite connue : une IA dont Orchestra ne peut pas régler les serveurs MCP par session
+    (Antigravity) reçoit l'espace par son environnement ; si elle ne le transmet pas, son
+    serveur MCP retombe sur le choix par dossier, et une copie de dossier n'appartient à aucun
+    projet : il écrit alors dans `Mon espace`.
