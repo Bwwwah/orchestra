@@ -48,6 +48,17 @@ impl Term {
         Self::spawn_with(title, cwd, cmd, true, &[], on_output)
     }
 
+    /// `spawn` with environment variables (the key of a space's AI: never on the command line).
+    pub fn spawn_env(
+        title: &str,
+        cwd: &str,
+        cmd: Option<&str>,
+        envs: &[(String, String)],
+        on_output: impl Fn() + Send + 'static,
+    ) -> Result<Term, String> {
+        Self::spawn_with(title, cwd, cmd, true, envs, on_output)
+    }
+
     /// The shell runs `cmd` and ends with it: `exited()` says when the program has quit.
     /// The sessions use `spawn_once_env`; this one is left to the tests.
     #[cfg(test)]

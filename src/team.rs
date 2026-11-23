@@ -109,6 +109,9 @@ pub enum Greeting {
         name: String,
         #[serde(default)]
         role: Role,
+        /// The AIs the space provides to this member, with their key.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        ais: Vec<crate::space::SpaceAi>,
     },
     /// Server → app: not (or no longer) welcome.
     Refused { reason: String },
@@ -186,7 +189,12 @@ impl Db {
              CREATE TABLE IF NOT EXISTS deleted (id TEXT PRIMARY KEY, at INTEGER NOT NULL,
                  seq INTEGER NOT NULL DEFAULT 0);
              CREATE TABLE IF NOT EXISTS chat (id TEXT PRIMARY KEY, json TEXT NOT NULL,
-                 seq INTEGER NOT NULL DEFAULT 0);",
+                 seq INTEGER NOT NULL DEFAULT 0);
+             CREATE TABLE IF NOT EXISTS space_ais (name TEXT PRIMARY KEY, tool TEXT NOT NULL,
+                 base_url TEXT NOT NULL, model TEXT NOT NULL DEFAULT '',
+                 wire_api TEXT NOT NULL DEFAULT '');
+             CREATE TABLE IF NOT EXISTS ai_keys (ai TEXT NOT NULL, member TEXT NOT NULL,
+                 key TEXT NOT NULL, PRIMARY KEY (ai, member));",
         )?;
         // Spaces made before change numbers: add the column (0: sent to everyone once).
         for t in ["pages", "deleted", "chat"] {
@@ -320,6 +328,84 @@ impl Db {
             "UPDATE members SET role = ?2 WHERE key = ?1",
             params![key, role.key()],
         )
+    }
+
+    /// Add (or change) an AI the space provides. `tool`: `claude-code` or `codex`.
+    pub fn set_space_ai(&self, a: &crate::space::SpaceAi) -> rusqlite::Result<()> {
+        self.0.execute(
+            "INSERT INTO space_ais (name, tool, base_url, model, wire_api) VALUES (?1, ?2, ?3, ?4, ?5)
+             ON CONFLICT(name) DO UPDATE SET tool = ?2, base_url = ?3, model = ?4, wire_api = ?5",
+            params![a.name, a.tool, a.base_url, a.model, a.wire_api],
+        )?;
+        Ok(())
+    }
+
+    pub fn remove_space_ai(&self, name: &str) -> rusqlite::Result<usize> {
+        self.0
+            .execute("DELETE FROM ai_keys WHERE ai = ?1", [name])?;
+        self.0
+            .execute("DELETE FROM space_ais WHERE name = ?1", [name])
+    }
+
+    /// The AIs the space provides (without keys), and for each how many keys it has.
+    pub fn space_ais(&self) -> Vec<(crate::space::SpaceAi, usize)> {
+        let Ok(mut st) = self.0.prepare(
+            "SELECT name, tool, base_url, model, wire_api,
+                    (SELECT COUNT(*) FROM ai_keys k WHERE k.ai = a.name)
+             FROM space_ais a ORDER BY name",
+        ) else {
+            return vec![];
+        };
+        st.query_map([], |r| {
+            Ok((
+                crate::space::SpaceAi {
+                    name: r.get(0)?,
+                    tool: r.get(1)?,
+                    base_url: r.get(2)?,
+                    model: r.get(3)?,
+                    wire_api: r.get(4)?,
+                    key: String::new(),
+                },
+                r.get::<_, i64>(5)? as usize,
+            ))
+        })
+        .map(|it| it.flatten().collect())
+        .unwrap_or_default()
+    }
+
+    /// The key of AI `ai` for member `member` (their public key), or for everyone (`*`).
+    pub fn set_ai_key(&self, ai: &str, member: &str, key: &str) -> rusqlite::Result<usize> {
+        self.0.execute(
+            "INSERT INTO ai_keys (ai, member, key) VALUES (?1, ?2, ?3)
+             ON CONFLICT(ai, member) DO UPDATE SET key = ?3",
+            params![ai, member, key],
+        )
+    }
+
+    /// The space's AIs as member `member` gets them: with their own key, else the one for
+    /// everyone; an AI with neither isn't theirs. A reader gets none (they change nothing).
+    pub fn ais_for(&self, member: &str, role: Role) -> Vec<crate::space::SpaceAi> {
+        if role == Role::Reader {
+            return vec![];
+        }
+        self.space_ais()
+            .into_iter()
+            .filter_map(|(mut a, _)| {
+                let key: Option<String> = self
+                    .0
+                    .query_row(
+                        "SELECT key FROM ai_keys WHERE ai = ?1 AND member IN (?2, '*')
+                         ORDER BY member = '*' LIMIT 1",
+                        params![a.name, member],
+                        |r| r.get(0),
+                    )
+                    .optional()
+                    .ok()
+                    .flatten();
+                a.key = key?;
+                Some(a)
+            })
+            .collect()
     }
 
     /// A new one-time invitation for `role` (the very first person to come in becomes the
@@ -700,12 +786,14 @@ fn serve_one(id: u64, stream: TcpStream, db: &Arc<Mutex<Db>>, conns: &Conns) -> 
         }
     };
     eprintln!("+ {name} ({})", role.label());
+    let ais = db.lock().map_err(|e| e.to_string())?.ais_for(&key, role);
     send_json(
         &mut ws,
         &Greeting::Welcome {
             space: info,
             name: name.clone(),
             role,
+            ais,
         },
     )?;
     // What came after the last change they have; then the others' news as it comes. Queued
@@ -1133,8 +1221,10 @@ impl Session<'_> {
             },
         )
         .map_err(net)?;
-        let (info, role) = match read_json::<_, Greeting>(&mut ws).map_err(net)? {
-            Greeting::Welcome { space, role, .. } => (space, role),
+        let (info, role, ais) = match read_json::<_, Greeting>(&mut ws).map_err(net)? {
+            Greeting::Welcome {
+                space, role, ais, ..
+            } => (space, role, ais),
             Greeting::Refused { reason } => return Err((reason, true)),
             _ => {
                 return Err(net(
@@ -1144,7 +1234,7 @@ impl Session<'_> {
         };
         // In: the invitation is spent; later visits go by the key alone.
         self.invite.clear();
-        remember(self.space_id, &info, role);
+        remember(self.space_id, &info, role, ais);
         let (otx, orx) = channel::<String>();
         *self.outbox.lock().unwrap_or_else(|e| e.into_inner()) = Some(otx);
         if let Ok(mut st) = self.status.lock() {
@@ -1203,7 +1293,7 @@ impl Session<'_> {
 
 /// What the server says of its space goes into the list: its name, its AI rule, the role
 /// given here. The invitation is spent.
-fn remember(space_id: &str, info: &SpaceInfo, role: Role) {
+fn remember(space_id: &str, info: &SpaceInfo, role: Role, ais: Vec<crate::space::SpaceAi>) {
     let mut list = crate::space::load();
     if let Some(s) = list.spaces.iter_mut().find(|s| s.id == space_id) {
         if !info.name.trim().is_empty() {
@@ -1212,6 +1302,8 @@ fn remember(space_id: &str, info: &SpaceInfo, role: Role) {
         s.ai_rule = info.ai_rule;
         s.allowed_ai = info.allowed_ai.clone();
         s.role = role.key().to_string();
+        // Replaced each time: an AI or a key the server took back is gone here too.
+        s.ais = ais;
         if let crate::space::SpaceKind::Server { invite, .. } = &mut s.kind {
             invite.clear();
         }
@@ -1356,6 +1448,28 @@ mod tests {
         assert_eq!(gone, del);
         assert!(d.everything().0.is_empty());
         assert!(d.absorb(vec![p], BTreeMap::new()).0.is_empty());
+    }
+
+    #[test]
+    fn each_member_gets_the_space_ais_with_their_own_key() {
+        let d = db();
+        let ai = crate::space::SpaceAi {
+            name: "Modèle maison".into(),
+            tool: "codex".into(),
+            base_url: "https://ia.example/v1".into(),
+            ..Default::default()
+        };
+        d.set_space_ai(&ai).unwrap();
+        // No key: nobody gets it.
+        assert!(d.ais_for("ana", Role::Member).is_empty());
+        d.set_ai_key("Modèle maison", "*", "cle-commune").unwrap();
+        d.set_ai_key("Modèle maison", "ana", "cle-ana").unwrap();
+        assert_eq!(d.ais_for("ana", Role::Member)[0].key, "cle-ana");
+        assert_eq!(d.ais_for("bob", Role::Member)[0].key, "cle-commune");
+        assert!(d.ais_for("bob", Role::Reader).is_empty());
+        assert_eq!(d.space_ais()[0].1, 2);
+        d.remove_space_ai("Modèle maison").unwrap();
+        assert!(d.ais_for("ana", Role::Member).is_empty());
     }
 
     #[test]

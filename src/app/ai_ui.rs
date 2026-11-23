@@ -55,7 +55,7 @@ impl Ais {
             .into_iter()
             .filter(|(_, cmd, _)| {
                 cmd.and_then(ai_of_command)
-                    .is_none_or(|a| space.allows_own_ai(a.key()))
+                    .is_none_or(|a| space.may_run(a.key()))
             })
             .collect()
     }

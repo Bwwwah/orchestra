@@ -291,6 +291,16 @@ fn run_agent(
     for k in API_KEY_VARS.iter().chain(&HOST_SESSION_VARS) {
         cmd.env_remove(k);
     }
+    // The space's own AI for this agent, if it provides one: its gateway, its key, its model.
+    let args = match crate::space::ai_run(agent.tool.name()) {
+        Some(r) => {
+            cmd.envs(r.env.iter().map(|(k, v)| (k, v)));
+            let mut a = r.args;
+            a.extend(crate::space::without_model(args));
+            a
+        }
+        None => args,
+    };
     let mut child = cmd
         .args(args)
         .current_dir(&dir)

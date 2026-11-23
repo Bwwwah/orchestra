@@ -150,3 +150,19 @@ accès au code). La documentation d'hébergement doit le dire.
     `reintegrer`, `role <admin|membre|lecteur>`, `inviter … lecteur`. Un lecteur voit tout ;
     ses modifications ne sont pas prises (il en est prévenu). Vérifié en vrai.
   * [ ] Administration depuis l'appli (aujourd'hui : en ligne de commande, chez l'hébergeur).
+* [x] Étape 3 — IA d'espace.
+  * Le serveur garde les IA de l'espace (`orchestra equipe ia-espace ajouter <nom>
+    <claude-code|codex> <url> [modèle] [chat]`) et une clé par membre ou pour tous
+    (`ia-espace cle <nom> <membre|tous> <clé>`) ; chaque membre reçoit à sa connexion celles
+    qui ont une clé pour lui (un lecteur n'en reçoit pas). Retirer une IA ou une clé la retire
+    chez tous à leur connexion suivante ; la révocation définitive d'une clé se fait dans la
+    passerelle de l'entreprise.
+  * Dans un espace qui fournit une IA pour un outil, c'est elle qui est utilisée (sessions
+    autonomes, appels sans fenêtre, boutons de terminal) : Claude Code avec
+    `ANTHROPIC_BASE_URL` / `ANTHROPIC_AUTH_TOKEN` / `ANTHROPIC_MODEL`, Codex avec un fournisseur
+    `-c model_providers.orchestra_espace=…` dont la clé passe par l'environnement. La clé n'est
+    jamais sur une ligne de commande. « IA de l'espace seulement » n'autorise qu'elles.
+  * Vérifié avec les vrais Claude Code et Codex contre une passerelle de test : requêtes
+    reçues sur `/v1/messages` et `/v1/responses`, avec la clé de l'espace et son modèle.
+  * Limite : le serveur MCP ne distingue pas un Claude Code lancé sur l'IA de l'espace d'un
+    Claude Code lancé à la main sur l'abonnement de la personne.

@@ -61,6 +61,117 @@ pub struct Space {
     /// A team space: the role its server gives this person (`team::Role::key`).
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub role: String,
+    /// The AIs the space provides to this person (from its server), with their key.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub ais: Vec<SpaceAi>,
+}
+
+/// An AI a space provides: one of the coding agents (Claude Code, Codex) running on this
+/// computer, its calls to the model going to the company's own (vLLM, Ollama, LiteLLM,
+/// Bedrock…) with a key given to this person. Orchestra hands out the settings; the company's
+/// gateway does the rest (and is where a key is revoked for good).
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Default)]
+pub struct SpaceAi {
+    pub name: String,
+    /// The agent: `claude-code` or `codex` (`Ai::key`).
+    pub tool: String,
+    /// The model's address: Anthropic Messages format for Claude Code, OpenAI for Codex.
+    pub base_url: String,
+    /// The model to ask for (empty: the gateway's default).
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub model: String,
+    /// Codex only: `responses` (default) or `chat`.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub wire_api: String,
+    /// This person's key (only in the app's copy; the server keeps one per member).
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub key: String,
+}
+
+/// What it takes to run an agent on a space's AI: environment variables (the key goes there,
+/// never on a command line) and options placed right after the program's name.
+#[derive(Clone, Debug, PartialEq, Default)]
+pub struct SpaceAiRun {
+    pub env: Vec<(String, String)>,
+    pub args: Vec<String>,
+}
+
+/// The environment variable holding the key for Codex (`env_key` of its provider).
+pub const CODEX_KEY_VAR: &str = "ORCHESTRA_ESPACE_CLE";
+
+impl SpaceAi {
+    /// How to run its agent on it; None for an agent Orchestra can't point elsewhere.
+    pub fn run(&self) -> Option<SpaceAiRun> {
+        if self.key.is_empty() || self.base_url.trim().is_empty() {
+            return None;
+        }
+        let s = |v: &str| serde_json::to_string(v).unwrap_or_default();
+        match self.tool.as_str() {
+            "claude-code" => {
+                let mut env = vec![
+                    (
+                        "ANTHROPIC_BASE_URL".to_string(),
+                        self.base_url.trim().to_string(),
+                    ),
+                    ("ANTHROPIC_AUTH_TOKEN".to_string(), self.key.clone()),
+                ];
+                if !self.model.trim().is_empty() {
+                    env.push(("ANTHROPIC_MODEL".into(), self.model.trim().to_string()));
+                }
+                Some(SpaceAiRun { env, args: vec![] })
+            }
+            "codex" => {
+                let wire = if self.wire_api.trim().is_empty() {
+                    "responses"
+                } else {
+                    self.wire_api.trim()
+                };
+                let mut args = vec![
+                    "-c".to_string(),
+                    "model_provider=\"orchestra_espace\"".to_string(),
+                    "-c".to_string(),
+                    format!(
+                        "model_providers.orchestra_espace={{name={},base_url={},env_key={},wire_api={}}}",
+                        s(&self.name),
+                        s(self.base_url.trim()),
+                        s(CODEX_KEY_VAR),
+                        s(wire)
+                    ),
+                ];
+                if !self.model.trim().is_empty() {
+                    args.push("-m".into());
+                    args.push(self.model.trim().to_string());
+                }
+                Some(SpaceAiRun {
+                    env: vec![(CODEX_KEY_VAR.to_string(), self.key.clone())],
+                    args,
+                })
+            }
+            _ => None,
+        }
+    }
+}
+
+/// `args` without a choice of model (`-m x`, `--model x`, `--model=x`): a space's AI has its
+/// own, and the gateway may not know the person's usual ones.
+pub fn without_model(args: Vec<String>) -> Vec<String> {
+    let mut out = Vec::with_capacity(args.len());
+    let mut skip = false;
+    for a in args {
+        if skip {
+            skip = false;
+            continue;
+        }
+        if a == "-m" || a == "--model" {
+            skip = true;
+            continue;
+        }
+        if a.starts_with("--model=") {
+            continue;
+        }
+        out.push(a);
+    }
+    out
 }
 
 impl Space {
@@ -72,6 +183,7 @@ impl Space {
             ai_rule: AiRule::Free,
             allowed_ai: vec![],
             role: String::new(),
+            ais: vec![],
         }
     }
 
@@ -85,6 +197,22 @@ impl Space {
             SpaceKind::Server { url, invite } => Some((url.as_str(), invite.as_str())),
             SpaceKind::Local => None,
         }
+    }
+
+    /// The AI this space provides for agent `tool` (`Ai::key`), ready to run.
+    pub fn space_ai(&self, tool: &str) -> Option<&SpaceAi> {
+        if self.ai_rule == AiRule::NoAi {
+            return None;
+        }
+        self.ais
+            .iter()
+            .find(|a| a.tool == tool && a.run().is_some())
+    }
+
+    /// May agent `tool` work here at all: on the space's AI if it provides one for it (that
+    /// one first), else as the person's own?
+    pub fn may_run(&self, tool: &str) -> bool {
+        self.space_ai(tool).is_some() || self.allows_own_ai(tool)
     }
 
     /// May the person's own AI `key` (`Ai::key`) work on this space's projects?
@@ -161,6 +289,7 @@ impl Spaces {
             ai_rule: AiRule::Free,
             allowed_ai: vec![],
             role: String::new(),
+            ais: vec![],
         });
         id
     }
@@ -190,7 +319,7 @@ pub fn current() -> Space {
 /// works in; None when it may.
 pub fn refusal(key: &str, label: &str) -> Option<String> {
     let s = current();
-    if s.allows_own_ai(key) {
+    if s.may_run(key) {
         return None;
     }
     let name = s.name.clone();
@@ -200,8 +329,8 @@ pub fn refusal(key: &str, label: &str) -> Option<String> {
             "the space « {name} » allows no AI"
         ),
         AiRule::SpaceOnly => crate::trf!(
-            "l'espace « {name} » n'autorise que ses propres IA, pas {label}",
-            "the space « {name} » only allows its own AIs, not {label}"
+            "l'espace « {name} » n'autorise que ses propres IA, et n'en fournit pas pour {label}",
+            "the space « {name} » only allows its own AIs, and provides none for {label}"
         ),
         AiRule::Free => crate::trf!(
             "l'espace « {name} » n'autorise pas {label}",
@@ -257,6 +386,12 @@ pub fn ai_key_of_client(name: &str) -> Option<&'static str> {
     } else {
         None
     }
+}
+
+/// How to run agent `tool` on the AI the space this process works in provides for it, if
+/// it provides one.
+pub fn ai_run(tool: &str) -> Option<SpaceAiRun> {
+    current().space_ai(tool).and_then(|a| a.run())
 }
 
 fn list_path() -> PathBuf {
@@ -387,6 +522,93 @@ mod tests {
         assert_eq!(
             crate::store::workspace_path(),
             crate::store::data_dir().join("workspace.json")
+        );
+    }
+
+    #[test]
+    fn a_space_ai_runs_its_agent_on_the_company_model_with_the_key_out_of_the_command_line() {
+        let claude = SpaceAi {
+            name: "Maison".into(),
+            tool: "claude-code".into(),
+            base_url: "https://passerelle.example".into(),
+            model: "claude-maison".into(),
+            key: "sk-ana".into(),
+            ..Default::default()
+        };
+        let r = claude.run().unwrap();
+        assert!(r.args.is_empty());
+        assert!(r.env.contains(&(
+            "ANTHROPIC_BASE_URL".into(),
+            "https://passerelle.example".into()
+        )));
+        assert!(
+            r.env
+                .contains(&("ANTHROPIC_AUTH_TOKEN".into(), "sk-ana".into()))
+        );
+        assert!(
+            r.env
+                .contains(&("ANTHROPIC_MODEL".into(), "claude-maison".into()))
+        );
+        let codex = SpaceAi {
+            name: "Maison \"v2\"".into(),
+            tool: "codex".into(),
+            base_url: "https://ia.example/v1".into(),
+            model: "qwen".into(),
+            key: "sk-ana".into(),
+            ..Default::default()
+        };
+        let r = codex.run().unwrap();
+        assert_eq!(
+            r.env,
+            vec![(CODEX_KEY_VAR.to_string(), "sk-ana".to_string())]
+        );
+        assert!(
+            r.args.iter().all(|a| !a.contains("sk-ana")),
+            "the key never on the command line"
+        );
+        assert_eq!(r.args[1], "model_provider=\"orchestra_espace\"");
+        assert_eq!(
+            r.args[3],
+            r#"model_providers.orchestra_espace={name="Maison \"v2\"",base_url="https://ia.example/v1",env_key="ORCHESTRA_ESPACE_CLE",wire_api="responses"}"#
+        );
+        assert_eq!(&r.args[4..], ["-m", "qwen"]);
+        // Without a key, or for an agent that can't be pointed elsewhere: nothing.
+        assert!(
+            SpaceAi {
+                key: String::new(),
+                ..codex.clone()
+            }
+            .run()
+            .is_none()
+        );
+        assert!(
+            SpaceAi {
+                tool: "vibe".into(),
+                ..codex.clone()
+            }
+            .run()
+            .is_none()
+        );
+        // The space's AI first; with « no AI », not even that.
+        let mut s = Spaces::default();
+        s.add("Boîte", SpaceKind::Local);
+        s.spaces[1].ai_rule = AiRule::SpaceOnly;
+        s.spaces[1].ais = vec![codex];
+        assert!(s.spaces[1].may_run("codex"));
+        assert!(!s.spaces[1].may_run("claude-code"));
+        s.spaces[1].ai_rule = AiRule::NoAi;
+        assert!(!s.spaces[1].may_run("codex"));
+        assert_eq!(
+            without_model(vec![
+                "exec".into(),
+                "-m".into(),
+                "o3".into(),
+                "--model=x".into(),
+                "--model".into(),
+                "y".into(),
+                "fin".into()
+            ]),
+            vec!["exec".to_string(), "fin".to_string()]
         );
     }
 

@@ -73,6 +73,9 @@ Utilisation :
   orchestra equipe retirer <nom|clé>  retire un membre (coupé dans les secondes qui suivent)
   orchestra equipe reintegrer <nom|clé>  lui rend l'accès
   orchestra equipe role <nom|clé> <admin|membre|lecteur>
+  orchestra equipe ia-espace ajouter <nom> <claude-code|codex> <url> [modèle] [chat]
+  orchestra equipe ia-espace cle <nom> <membre|tous> <clé>
+  orchestra equipe ia-espace retirer <nom> | liste
   orchestra equipe nom <nom>  le nom de l'espace
   orchestra equipe ia <libres|espace|aucune> [ia…]  les IA autorisées dans l'espace
   orchestra aide            cette aide
@@ -311,6 +314,72 @@ fn run_team(args: &[String]) -> i32 {
                 .cloned()
                 .unwrap_or_else(|| here(team::DEFAULT_PORT));
             link(&base, role)
+        }
+        Some("ia-espace") | Some("space-ai") => {
+            let a = |i: usize| args.get(i).map(String::as_str).unwrap_or("");
+            let done = match a(1) {
+                "liste" | "list" | "" => {
+                    for (ai, keys) in db.space_ais() {
+                        println!(
+                            "{}  {}  {}  {}  {keys} clé(s)",
+                            ai.name,
+                            ai.tool,
+                            ai.base_url,
+                            if ai.model.is_empty() { "(modèle par défaut)" } else { &ai.model }
+                        );
+                    }
+                    return 0;
+                }
+                "ajouter" | "add" => {
+                    if !matches!(a(3), "claude-code" | "codex") || a(4).is_empty() || a(2).is_empty() {
+                        return usage("ia-espace ajouter <nom> <claude-code|codex> <url> [modèle] [chat]");
+                    }
+                    let model = if a(5) == "chat" { "" } else { a(5) };
+                    let wire = if a(5) == "chat" || a(6) == "chat" { "chat" } else { "" };
+                    db.set_space_ai(&space::SpaceAi {
+                        name: a(2).into(),
+                        tool: a(3).into(),
+                        base_url: a(4).into(),
+                        model: model.into(),
+                        wire_api: wire.into(),
+                        key: String::new(),
+                    })
+                    .map(|_| 1)
+                }
+                "cle" | "key" => {
+                    if a(2).is_empty() || a(3).is_empty() || a(4).is_empty() {
+                        return usage("ia-espace cle <nom> <membre|tous> <clé>");
+                    }
+                    if !db.space_ais().iter().any(|(x, _)| x.name == a(2)) {
+                        eprintln!("orchestra: aucune IA d'espace « {} »", a(2));
+                        return 1;
+                    }
+                    let member = if matches!(a(3), "tous" | "all") {
+                        "*".to_string()
+                    } else {
+                        match db.find_member(a(3)) {
+                            Ok(m) => m.key,
+                            Err(e) => {
+                                eprintln!("orchestra: {e}");
+                                return 1;
+                            }
+                        }
+                    };
+                    db.set_ai_key(a(2), &member, a(4))
+                }
+                "retirer" | "remove" => db.remove_space_ai(a(2)),
+                _ => return usage("ia-espace : ajouter, cle, retirer ou liste"),
+            };
+            match done {
+                Ok(_) => {
+                    println!("Fait. Les membres le reçoivent à leur prochaine connexion.");
+                    0
+                }
+                Err(e) => {
+                    eprintln!("orchestra: {e}");
+                    1
+                }
+            }
         }
         Some("membres") | Some("members") => {
             for m in db.member_list() {

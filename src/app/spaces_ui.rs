@@ -445,11 +445,33 @@ impl NotesApp {
                     }
                 }
             }
-            if rule == space::AiRule::SpaceOnly {
+            if !cur.ais.is_empty() {
+                ui.label(
+                    RichText::new(crate::tr!("IA fournies par l'espace", "AIs the space provides"))
+                        .size(12.0)
+                        .color(t.tertiary),
+                );
+                for a in &cur.ais {
+                    let tool = crate::setup::Ai::ALL
+                        .into_iter()
+                        .find(|x| x.key() == a.tool)
+                        .map(|x| x.label())
+                        .unwrap_or(a.tool.as_str());
+                    ui.label(RichText::new(format!("• {} — {tool}", a.name)).size(12.5));
+                }
                 ui.label(
                     RichText::new(crate::tr!(
-                        "Les IA fournies par un espace arrivent avec le serveur : d'ici là, aucune IA ne travaille ici.",
-                        "AIs provided by a space come with the server: until then, no AI works here."
+                        "Utilisées à la place de votre abonnement pour ces outils, dans cet espace.",
+                        "Used instead of your subscription for these tools, in this space."
+                    ))
+                    .size(11.5)
+                    .color(t.tertiary),
+                );
+            } else if rule == space::AiRule::SpaceOnly {
+                ui.label(
+                    RichText::new(crate::tr!(
+                        "L'espace ne fournit pas encore d'IA : aucune IA ne travaille ici.",
+                        "The space provides no AI yet: no AI works here."
                     ))
                     .size(11.5)
                     .color(t.tertiary),

@@ -82,8 +82,28 @@ impl NotesApp {
             self.info(crate::trf!("{} non lancé : {why}.", "{} not started: {why}.", ai.label()));
             return;
         }
+        // The space's own AI for this agent: its settings in the environment, its options
+        // after the program's name.
+        let space_ai = r
+            .cmd
+            .as_deref()
+            .and_then(super::ai_ui::ai_of_command)
+            .and_then(|ai| crate::space::ai_run(ai.key()));
+        let cmd = match (&space_ai, r.cmd.as_deref()) {
+            (Some(run), Some(c)) if !run.args.is_empty() => {
+                let (prog, rest) = c.split_once(' ').unwrap_or((c, ""));
+                let opts: Vec<String> = run
+                    .args
+                    .iter()
+                    .map(|a| crate::sessions::shell_quote(a))
+                    .collect();
+                Some(format!("{prog} {} {rest}", opts.join(" ")).trim_end().to_string())
+            }
+            _ => r.cmd.clone(),
+        };
+        let envs = space_ai.map(|r| r.env).unwrap_or_default();
         let c2 = ctx.clone();
-        match Term::spawn(&r.title, &r.cwd, r.cmd.as_deref(), move || {
+        match Term::spawn_env(&r.title, &r.cwd, cmd.as_deref(), &envs, move || {
             c2.request_repaint()
         }) {
             Ok(mut t) => {

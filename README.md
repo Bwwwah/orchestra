@@ -63,6 +63,7 @@ orchestra serveur [port] [code]     point de rencontre en direct, sans fenêtre 
 orchestra equipe [port]             serveur d'équipe : un espace partagé par ses membres (port 7879)
 orchestra equipe inviter [wss://…] [lecteur]  une invitation à usage unique
 orchestra equipe membres | retirer | reintegrer | role   les membres et leurs droits
+orchestra equipe ia-espace ajouter | cle | retirer | liste   les IA fournies par l'espace
 orchestra aide | version
 ```
 

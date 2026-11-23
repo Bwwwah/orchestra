@@ -966,9 +966,27 @@ impl NotesApp {
         } else {
             pr.launch.as_ref().map(|l| l.saving).unwrap_or_default()
         };
-        let cmd = agent.command_saving(cwd, commits, &o.extra_tools, model, saving);
+        // The space's own AI for this agent, if it provides one: its model, its gateway and
+        // key (in the environment), its options after the program's name.
+        let space_ai = crate::space::ai_run(agent.ai().key());
+        let model = if space_ai.is_some() { "" } else { model };
+        let mut cmd = agent.command_saving(cwd, commits, &o.extra_tools, model, saving);
+        if let Some(run) = &space_ai
+            && !run.args.is_empty()
+            && let Some(rest) = cmd.strip_prefix("codex ")
+        {
+            let opts: Vec<String> = run
+                .args
+                .iter()
+                .map(|a| crate::sessions::shell_quote(a))
+                .collect();
+            cmd = format!("codex {} {rest}", opts.join(" "));
+        }
         let c2 = ctx.clone();
-        let mut envs = crate::sync::api_env(&self.ws.settings, agent);
+        let mut envs = match &space_ai {
+            Some(run) => run.env.clone(),
+            None => crate::sync::api_env(&self.ws.settings, agent),
+        };
         // For an AI whose MCP servers can't be set per session (Antigravity): they inherit it.
         let space = store::space_id();
         if space != crate::space::LOCAL {
@@ -3520,7 +3538,7 @@ impl NotesApp {
             .filter(|a| {
                 plugged.contains(&a.ai())
                     && agent_unavailable(*a).is_none()
-                    && space.allows_own_ai(a.ai().key())
+                    && space.may_run(a.ai().key())
             })
             .map(|a| {
                 let f = figs.get(&a).copied().unwrap_or_default();
@@ -3653,7 +3671,7 @@ impl NotesApp {
             .ais
             .plugged()
             .into_iter()
-            .filter(|a| space.allows_own_ai(a.key()))
+            .filter(|a| space.may_run(a.key()))
             .filter_map(Agent::from_ai)
             .collect();
         let figs = self.figures_by_agent();
