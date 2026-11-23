@@ -558,11 +558,7 @@ impl NotesApp {
         let bottom = ui.with_layout(egui::Layout::bottom_up(egui::Align::Min), |ui| {
             ui.spacing_mut().item_spacing.y = 2.0;
             ui.add_space(10.0);
-            let name = if self.ws.settings.workspace_name.trim().is_empty() {
-                crate::tr!("Mon espace", "My workspace").to_string()
-            } else {
-                self.ws.settings.workspace_name.clone()
-            };
+            let name = self.space_name();
             ui.horizontal(|ui| {
                 let w = ui.available_width() - 40.0;
                 let (rect, resp) =
@@ -608,9 +604,10 @@ impl NotesApp {
                     Icon::ChevronDown,
                     t.secondary,
                 );
-                if resp.clicked() {
-                    self.open_settings(SettingsTab::Preferences);
-                }
+                // Stays open on a click inside: the new space's name is typed in it.
+                egui::Popup::menu(&resp)
+                    .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
+                    .show(|ui| self.space_menu(ui));
                 if icons::button(
                     ui,
                     Icon::Help,

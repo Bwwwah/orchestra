@@ -9,8 +9,8 @@
 //! from the list: a program that chooses nothing (an MCP server, an autonomous session) works
 //! in "Mon espace", never in a shared space by default. See docs/collaboration-serveur.md.
 
-// Not wired to the window yet (step 1 of docs/collaboration-serveur.md, in progress): remove
-// once the space switcher uses it.
+// The AI rule and server spaces aren't wired yet (docs/collaboration-serveur.md, step 1):
+// remove once they are.
 #![allow(dead_code)]
 
 use serde::{Deserialize, Serialize};
@@ -268,7 +268,6 @@ mod tests {
     fn a_process_that_chooses_nothing_works_in_mon_espace() {
         // Nothing in the tests calls `store::use_space`: the MCP server's case.
         assert_eq!(crate::store::space_id(), LOCAL);
-        assert_eq!(crate::store::space_dir(), crate::store::data_dir());
         assert_eq!(
             crate::store::workspace_path(),
             crate::store::data_dir().join("workspace.json")

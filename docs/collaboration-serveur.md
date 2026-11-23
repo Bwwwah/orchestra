@@ -103,9 +103,12 @@ accès au code). La documentation d'hébergement doit le dire.
     espace` garde le dossier de données actuel, donc rien à migrer.
   * [x] Chaque programme choisit son espace (`store::use_space`) ; sans choix, `Mon espace`.
   * [x] Règle d'IA par espace (modèle et tests ; pas encore appliquée aux lancements).
-  * [ ] Sélecteur d'espace dans la fenêtre (le bouton « Mon espace ⌄ » en bas de la barre
-    latérale). À régler : que faire des IA, terminaux et sessions en cours au changement
-    d'espace (proposition : changement refusé tant qu'une IA travaille).
-  * [ ] Réglages personnels communs à tous les espaces.
+  * [x] Sélecteur d'espace (« Mon espace ⌄ » en bas de la barre latérale) : liste des espaces,
+    création d'un espace local (pour essayer), réglages. Changement refusé tant qu'une IA
+    travaille (session autonome, réponse, état des lieux) ou qu'un terminal est ouvert. La
+    fenêtre rouvre le dernier espace choisi.
+  * [x] Réglages personnels communs à tous les espaces : ils vivent dans `Mon espace` et y
+    retournent quand ils changent ailleurs ; les onglets ouverts restent propres à chaque espace.
+  * [ ] Renommer / retirer un espace depuis le sélecteur.
   * [ ] Le serveur MCP écrit dans l'espace qui contient le projet de son dossier.
   * [ ] Règle d'IA appliquée à tous les lancements d'IA et au serveur MCP.

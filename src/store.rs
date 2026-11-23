@@ -67,7 +67,6 @@ pub fn computer_id() -> String {
 static SPACE: std::sync::RwLock<Option<String>> = std::sync::RwLock::new(None);
 
 /// Work in space `id` from now on (the window, when the person picks a space).
-#[allow(dead_code)] // the space switcher isn't wired yet (docs/collaboration-serveur.md, step 1)
 pub fn use_space(id: &str) {
     if let Ok(mut s) = SPACE.write() {
         *s = (id != crate::space::LOCAL).then(|| id.to_string());
@@ -83,13 +82,13 @@ pub fn space_id() -> String {
         .unwrap_or_else(|| crate::space::LOCAL.to_string())
 }
 
-/// The folder of the space this process works in.
-pub fn space_dir() -> PathBuf {
-    crate::space::dir_of(&space_id())
+pub fn workspace_path() -> PathBuf {
+    workspace_path_in(&space_id())
 }
 
-pub fn workspace_path() -> PathBuf {
-    space_dir().join("workspace.json")
+/// The workspace file of space `id`.
+pub fn workspace_path_in(id: &str) -> PathBuf {
+    crate::space::dir_of(id).join("workspace.json")
 }
 
 /// Holds the workspace for one read-then-write: several MCP servers (one per Claude Code
@@ -101,7 +100,12 @@ pub struct WorkspaceLock(#[allow(dead_code)] Option<fs::File>);
 /// the lock is dropped. A lock that can't be taken (an odd file system) doesn't stop the
 /// work: it goes on unlocked, as before.
 pub fn lock_workspace() -> WorkspaceLock {
-    let path = space_dir().join("workspace.json.lock");
+    lock_workspace_in(&space_id())
+}
+
+/// The same, for space `id`.
+pub fn lock_workspace_in(id: &str) -> WorkspaceLock {
+    let path = crate::space::dir_of(id).join("workspace.json.lock");
     let file = (|| {
         if let Some(dir) = path.parent() {
             fs::create_dir_all(dir)?;
@@ -131,7 +135,49 @@ pub fn modified(path: &Path) -> Option<SystemTime> {
 }
 
 pub fn load() -> Workspace {
-    let path = workspace_path();
+    load_from(&workspace_path())
+}
+
+/// The personal settings: they live in "Mon espace" and follow the person into every space
+/// (AI subscriptions and limits, language, look…).
+pub fn personal_settings() -> crate::model::Settings {
+    load_from(&workspace_path_in(crate::space::LOCAL)).settings
+}
+
+/// Settings changed while working in another space go back to "Mon espace", where they
+/// live; only when they changed since the last time.
+fn keep_personal(settings: &crate::model::Settings) -> std::io::Result<()> {
+    static LAST: std::sync::Mutex<String> = std::sync::Mutex::new(String::new());
+    // The open tabs are pages of the space shown: "Mon espace" keeps its own.
+    let mut personal = settings.clone();
+    personal.open_tabs.clear();
+    personal.active_tab = 0;
+    let text = serde_json::to_string(&personal).unwrap_or_default();
+    let mut last = LAST.lock().unwrap_or_else(|e| e.into_inner());
+    if *last == text {
+        return Ok(());
+    }
+    let _lock = lock_workspace_in(crate::space::LOCAL);
+    let path = workspace_path_in(crate::space::LOCAL);
+    let mut local = load_from(&path);
+    personal.open_tabs = std::mem::take(&mut local.settings.open_tabs);
+    personal.active_tab = local.settings.active_tab;
+    local.settings = personal;
+    if let Some(dir) = path.parent() {
+        fs::create_dir_all(dir)?;
+    }
+    write_atomic(
+        &path,
+        serde_json::to_string_pretty(&local)
+            .unwrap_or_default()
+            .as_bytes(),
+    )?;
+    *last = text;
+    Ok(())
+}
+
+fn load_from(path: &Path) -> Workspace {
+    let path = path.to_path_buf();
     match fs::read_to_string(&path) {
         Ok(s) => match serde_json::from_str::<Workspace>(&s) {
             Ok(mut ws) => {
@@ -199,7 +245,11 @@ pub fn save(ws: &Workspace) -> std::io::Result<()> {
         serde_json::to_string_pretty(ws)
             .unwrap_or_default()
             .as_bytes(),
-    )
+    )?;
+    if space_id() != crate::space::LOCAL {
+        keep_personal(&ws.settings)?;
+    }
+    Ok(())
 }
 
 /// A new file that only this user may read (0600 on Unix), from its creation: the

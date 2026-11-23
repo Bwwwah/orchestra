@@ -160,8 +160,19 @@ impl NotesApp {
         crate::i18n::set("auto");
         // A workspace file that already exists belongs to someone who has used the app: the
         // tutorial must not start by itself after an update (older files lack `tutorial_seen`).
+        // The space shown last time; the settings are the person's own, whatever the space.
+        let spaces = crate::space::load();
+        store::use_space(&spaces.active);
         let had_workspace = store::workspace_path().exists();
         let mut ws = store::load();
+        if spaces.active != crate::space::LOCAL {
+            // The person's settings, with this space's own open tabs.
+            let tabs = std::mem::take(&mut ws.settings.open_tabs);
+            let active = ws.settings.active_tab;
+            ws.settings = store::personal_settings();
+            ws.settings.open_tabs = tabs;
+            ws.settings.active_tab = active;
+        }
         if had_workspace {
             ws.settings.tutorial_seen = true;
         }
@@ -2988,6 +2999,7 @@ mod search;
 mod settings;
 mod side;
 mod slash;
+mod spaces_ui;
 mod style;
 mod term_ui;
 mod tutorial;

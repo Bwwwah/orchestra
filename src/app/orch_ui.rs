@@ -1996,6 +1996,11 @@ impl NotesApp {
 
     /// Stop the autonomous sessions' programs (and everything they started), before quitting
     /// or replacing the app.
+    /// Autonomous sessions still working, and copies being merged or discarded.
+    pub(super) fn runs_working(&self) -> usize {
+        self.orch.runs.iter().filter(|r| !r.term.exited()).count() + self.orch.copy_jobs.len()
+    }
+
     pub(super) fn stop_runs(&mut self) {
         for r in self.orch.runs.iter_mut() {
             r.term.stop();

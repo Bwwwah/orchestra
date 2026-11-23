@@ -106,6 +106,13 @@ impl AiJobs {
     pub fn tasking(&self, page_id: &str) -> bool {
         self.tasks.contains_key(page_id)
     }
+    /// An AI is filling a page, proposing steps or answering a question.
+    pub fn any(&self) -> bool {
+        !self.fills.is_empty()
+            || !self.pending.is_empty()
+            || !self.tasks.is_empty()
+            || !self.questions.is_empty()
+    }
 }
 
 fn spawn<T: Send + 'static>(
