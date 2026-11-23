@@ -810,6 +810,9 @@ impl Db {
             for b in p.blocks.iter_mut().filter(|b| b.crdt.is_none()) {
                 crate::crdt::reconcile(b);
             }
+            if p.order_crdt.is_none() {
+                crate::crdt::reconcile_order(&mut p);
+            }
             let merged = match self.page(&p.id) {
                 Some(mut ours) => {
                     if !crate::collab::merge_page(&mut ours, &p) {

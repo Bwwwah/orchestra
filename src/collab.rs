@@ -31,6 +31,9 @@ pub fn give_documents(
         {
             changed |= crate::crdt::reconcile(b);
         }
+        if !missing_only || p.order_crdt.is_none() {
+            changed |= crate::crdt::reconcile_order(p);
+        }
     }
     changed
 }
@@ -135,6 +138,21 @@ pub fn merge_page(ours: &mut Page, theirs: &Page) -> bool {
         prev = Some(b.id.clone());
     }
     blocks.retain(|b| alive(b));
+    // A team space's page: the order of both copies joined (crdt.rs), every move kept.
+    let order = crate::crdt::merged_order(ours, theirs);
+    if let Some((ids, _)) = &order {
+        let at: HashMap<&str, usize> = ids.iter().enumerate().map(|(i, id)| (id.as_str(), i)).collect();
+        // A block the order doesn't know keeps its place after the one before it.
+        let mut last = 0usize;
+        let mut keyed: Vec<(usize, usize, Block)> = Vec::with_capacity(blocks.len());
+        for (n, b) in blocks.into_iter().enumerate() {
+            let k = at.get(b.id.as_str()).copied().unwrap_or(last);
+            last = k;
+            keyed.push((k, n, b));
+        }
+        keyed.sort_by_key(|(k, n, _)| (*k, *n));
+        blocks = keyed.into_iter().map(|(_, _, b)| b).collect();
+    }
     let mut merged = newer;
     if let Some(p) = merged.project.as_mut() {
         p.keep_local(ours.project.as_ref());
@@ -145,6 +163,9 @@ pub fn merge_page(ours: &mut Page, theirs: &Page) -> bool {
     }
     merged.blocks = blocks;
     merged.deleted_blocks = tomb;
+    if let Some((_, crdt)) = order {
+        merged.order_crdt = crdt;
+    }
     merged.updated = ours.updated.max(theirs.updated);
     *ours = merged;
     serde_json::to_string(&ours).unwrap_or_default() != before

@@ -389,6 +389,10 @@ pub struct Page {
     /// Blocks removed from this page: id -> time, so a merge doesn't bring them back.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub deleted_blocks: BTreeMap<String, u64>,
+    /// A team space: the order of the blocks as a CRDT document (crdt.rs), so blocks moved
+    /// by several people at once are all moved. None elsewhere.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub order_crdt: Option<String>,
     /// Set when this page is an AI project (see `Project`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub project: Option<Project>,
@@ -413,6 +417,7 @@ impl Page {
             created: t,
             updated: t,
             deleted_blocks: BTreeMap::new(),
+            order_crdt: None,
             project: None,
             source: None,
         }

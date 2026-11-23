@@ -381,3 +381,287 @@ mod tests {
         assert!(m.crdt.is_none());
     }
 }
+
+// ------------------------------------------------------------------ order of a page's blocks
+
+const ORDER: &str = "o";
+
+/// The block ids of an order document, each once (in the rare case of the same block
+/// inserted on two sides, the first place is kept).
+fn ids_of(doc: &LoroDoc) -> Vec<String> {
+    let mut seen = std::collections::HashSet::new();
+    doc.get_movable_list(ORDER)
+        .to_vec()
+        .into_iter()
+        .filter_map(|v| match v {
+            loro::LoroValue::String(s) => Some(s.to_string()),
+            _ => None,
+        })
+        .filter(|id| seen.insert(id.clone()))
+        .collect()
+}
+
+fn order_peer(page: &str, doc: &LoroDoc, target: &[String]) -> u64 {
+    peer_for(&format!("ordre:{page}"), doc, &target.join("\u{0}"))
+}
+
+fn first_order(page: &crate::model::Page) -> LoroDoc {
+    let doc = LoroDoc::new();
+    let ids: Vec<String> = page.blocks.iter().map(|b| b.id.clone()).collect();
+    let _ = doc.set_peer_id(order_peer(&page.id, &doc, &ids));
+    let list = doc.get_movable_list(ORDER);
+    for id in &ids {
+        let _ = list.push(id.as_str());
+    }
+    doc.commit();
+    doc
+}
+
+fn load_order(page: &crate::model::Page) -> LoroDoc {
+    page.order_crdt
+        .as_deref()
+        .and_then(|s| base64::engine::general_purpose::STANDARD.decode(s).ok())
+        .and_then(|bytes| {
+            let d = LoroDoc::new();
+            d.import(&bytes).ok().map(|_| d)
+        })
+        .unwrap_or_else(|| first_order(page))
+}
+
+/// Bring the order of the page's blocks into its order document (making one if it has none):
+/// moves, insertions and removals as edits of their own. Returns true when it changed.
+pub fn reconcile_order(page: &mut crate::model::Page) -> bool {
+    let had = page.order_crdt.is_some();
+    let doc = load_order(page);
+    let target: Vec<String> = page.blocks.iter().map(|b| b.id.clone()).collect();
+    if ids_of(&doc) == target && had {
+        return false;
+    }
+    if ids_of(&doc) != target {
+        let _ = doc.set_peer_id(order_peer(&page.id, &doc, &target));
+        let list = doc.get_movable_list(ORDER);
+        let wanted: std::collections::HashSet<&String> = target.iter().collect();
+        // Out: blocks no longer here (and second copies of one block).
+        let mut seen = std::collections::HashSet::new();
+        let mut i = list.len();
+        let all = list.to_vec();
+        while i > 0 {
+            i -= 1;
+            let id = match &all[i] {
+                loro::LoroValue::String(s) => s.to_string(),
+                _ => String::new(),
+            };
+            let first = all[..i]
+                .iter()
+                .all(|v| !matches!(v, loro::LoroValue::String(s) if s.to_string() == id));
+            if !wanted.contains(&id) || !first || !seen.insert(id) {
+                let _ = list.delete(i, 1);
+            }
+        }
+        // As few moves as possible: the longest run of blocks already in the right order stays
+        // put (so a move made elsewhere on one of them isn't undone); each other block is
+        // moved, or put in, right after the one before it.
+        let now = ids_of(&doc);
+        let place: std::collections::HashMap<&str, usize> = now
+            .iter()
+            .enumerate()
+            .map(|(i, id)| (id.as_str(), i))
+            .collect();
+        let present: Vec<usize> = target
+            .iter()
+            .filter_map(|id| place.get(id.as_str()).copied())
+            .collect();
+        let stay: std::collections::HashSet<usize> = longest_rising(&present).into_iter().collect();
+        for (i, id) in target.iter().enumerate() {
+            if place.get(id.as_str()).is_some_and(|p| stay.contains(p)) {
+                continue;
+            }
+            let cur = ids_of(&doc);
+            let to = if i == 0 {
+                0
+            } else {
+                cur.iter()
+                    .position(|x| x == &target[i - 1])
+                    .map(|p| p + 1)
+                    .unwrap_or(0)
+            };
+            match cur.iter().position(|x| x == id) {
+                Some(from) => {
+                    let to = if from < to { to - 1 } else { to };
+                    if from != to {
+                        let _ = list.mov(from, to);
+                    }
+                }
+                None => {
+                    let _ = list.insert(to, id.as_str());
+                }
+            }
+        }
+        doc.commit();
+    }
+    match save(&doc) {
+        Some(s) => {
+            page.order_crdt = Some(s);
+            true
+        }
+        None => false,
+    }
+}
+
+/// The values of the longest strictly rising run in `v` (not necessarily side by side).
+fn longest_rising(v: &[usize]) -> Vec<usize> {
+    // Patience sorting, with links back to rebuild the run.
+    let mut tails: Vec<usize> = Vec::new(); // index in v of the last value of each length
+    let mut prev: Vec<Option<usize>> = vec![None; v.len()];
+    for (i, &x) in v.iter().enumerate() {
+        let k = tails.partition_point(|&t| v[t] < x);
+        if k > 0 {
+            prev[i] = Some(tails[k - 1]);
+        }
+        if k == tails.len() {
+            tails.push(i);
+        } else {
+            tails[k] = i;
+        }
+    }
+    let mut out = Vec::new();
+    let mut at = tails.last().copied();
+    while let Some(i) = at {
+        out.push(v[i]);
+        at = prev[i];
+    }
+    out.reverse();
+    out
+}
+
+/// The order of two copies of a page joined: (block ids in order, its document). None when
+/// neither copy has an order document (the old rule then: the copy edited last).
+pub fn merged_order(
+    ours: &crate::model::Page,
+    theirs: &crate::model::Page,
+) -> Option<(Vec<String>, Option<String>)> {
+    if ours.order_crdt.is_none() && theirs.order_crdt.is_none() {
+        return None;
+    }
+    // Only one with a document: the order of the copy edited last, written over it.
+    if ours.order_crdt.is_none() != theirs.order_crdt.is_none() {
+        let (with, without) = if ours.order_crdt.is_some() {
+            (ours, theirs)
+        } else {
+            (theirs, ours)
+        };
+        let mut x = with.clone();
+        if without.updated > with.updated {
+            x.blocks = without.blocks.clone();
+        }
+        reconcile_order(&mut x);
+        return Some((ids_of(&load_order(&x)), x.order_crdt));
+    }
+    let (mut a, mut b) = (ours.clone(), theirs.clone());
+    reconcile_order(&mut a);
+    reconcile_order(&mut b);
+    let doc = load_order(&a);
+    let before = doc.oplog_vv();
+    let ok = b
+        .order_crdt
+        .as_deref()
+        .and_then(|s| base64::engine::general_purpose::STANDARD.decode(s).ok())
+        .map(|bytes| doc.import(&bytes).is_ok())
+        .unwrap_or(false);
+    if !ok {
+        let keep = if theirs.updated > ours.updated { b } else { a };
+        return Some((ids_of(&load_order(&keep)), keep.order_crdt));
+    }
+    let crdt = if doc.oplog_vv() == before {
+        a.order_crdt
+    } else {
+        save(&doc).or(a.order_crdt)
+    };
+    Some((ids_of(&doc), crdt))
+}
+
+#[cfg(test)]
+mod order_tests {
+    use super::*;
+    use crate::model::{BlockKind, Page};
+
+    fn page(ids: &[&str]) -> Page {
+        let mut p = Page::new("P", None);
+        p.id = "page".into();
+        p.blocks = ids
+            .iter()
+            .map(|id| {
+                let mut b = Block::new(BlockKind::Paragraph, *id);
+                b.id = id.to_string();
+                b
+            })
+            .collect();
+        reconcile_order(&mut p);
+        p
+    }
+
+    fn reorder(p: &Page, ids: &[&str]) -> Page {
+        let mut q = p.clone();
+        q.blocks = ids
+            .iter()
+            .map(|id| {
+                p.blocks
+                    .iter()
+                    .find(|b| b.id == *id)
+                    .cloned()
+                    .unwrap_or_else(|| {
+                        let mut b = Block::new(BlockKind::Paragraph, *id);
+                        b.id = id.to_string();
+                        b
+                    })
+            })
+            .collect();
+        q
+    }
+
+    #[test]
+    fn two_people_moving_different_blocks_keep_both_moves() {
+        let base = page(&["a", "b", "c", "d"]);
+        // Ana moves « d » to the top; Bob moves « a » to the bottom.
+        let ana = reorder(&base, &["d", "a", "b", "c"]);
+        let bob = reorder(&base, &["b", "c", "d", "a"]);
+        let (x, _) = merged_order(&ana, &bob).unwrap();
+        let (y, _) = merged_order(&bob, &ana).unwrap();
+        assert_eq!(x, y, "the same either way");
+        assert_eq!(x, ["d", "b", "c", "a"]);
+    }
+
+    #[test]
+    fn blocks_added_at_once_on_both_sides_are_all_kept_in_place() {
+        let base = page(&["a", "b"]);
+        let ana = reorder(&base, &["a", "x", "b"]);
+        let bob = reorder(&base, &["a", "b", "y"]);
+        let (o, _) = merged_order(&ana, &bob).unwrap();
+        assert_eq!(o, ["a", "x", "b", "y"]);
+    }
+
+    #[test]
+    fn any_reordering_is_reached_exactly() {
+        let base = page(&["a", "b", "c", "d", "e"]);
+        for target in [
+            vec!["e", "d", "c", "b", "a"],
+            vec!["b", "a", "d", "c", "e"],
+            vec!["c", "x", "a", "e"],
+            vec!["y"],
+            vec!["a", "b", "c", "d", "e", "z"],
+        ] {
+            let mut p = reorder(&base, &target);
+            reconcile_order(&mut p);
+            assert_eq!(ids_of(&load_order(&p)), target);
+        }
+        assert_eq!(longest_rising(&[3, 0, 1, 2]), [0, 1, 2]);
+    }
+
+    #[test]
+    fn nothing_new_keeps_the_same_document() {
+        let base = page(&["a", "b"]);
+        let (_, c) = merged_order(&base, &base.clone()).unwrap();
+        assert_eq!(c, base.order_crdt);
+        assert!(!reconcile_order(&mut base.clone()));
+    }
+}

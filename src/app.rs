@@ -1536,6 +1536,7 @@ fn page_key(p: &Page) -> String {
     for b in c.blocks.iter_mut() {
         b.crdt = None;
     }
+    c.order_crdt = None;
     serde_json::to_string(&c).unwrap_or_default()
 }
 

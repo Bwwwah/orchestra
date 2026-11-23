@@ -187,8 +187,12 @@ accès au code). La documentation d'hébergement doit le dire.
   * Vérifié avec le vrai programme : serveur coupé, Ana et Bob complètent le même paragraphe
     chacun de son côté ; au retour du serveur, les deux ajouts sont gardés, à l'identique chez
     Ana, chez Bob et sur le serveur.
-  * Reste : l'ordre des blocs déplacés en même temps (encore « le dernier l'emporte »), les
-    curseurs des autres.
+  * [x] Ordre des blocs : une liste Loro par page (`Page::order_crdt`), versée avant chaque
+    envoi avec le moins de déplacements possible (la plus longue suite déjà dans l'ordre reste
+    en place). Deux personnes qui déplacent des blocs différents gardent toutes deux leur
+    déplacement ; des blocs ajoutés des deux côtés restent à leur place. Vérifié : Ana
+    remonte « d », Bob descend « a » hors ligne → `d, b, c, a` partout.
+  * Reste : les curseurs des autres.
   * [x] Allègement : toutes les heures, le serveur réduit à leur état actuel les documents des
     blocs inchangés depuis 7 jours (`orchestra equipe alleger [jours]` à la main) ; un
     ordinateur qui reçoit la copie allégée d'un état qu'il a déjà la garde. Une vieille
