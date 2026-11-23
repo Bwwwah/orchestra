@@ -18,6 +18,7 @@ mod collab;
 mod docs;
 mod drive;
 mod git;
+mod identity;
 mod live;
 mod mcp;
 mod model;
@@ -37,6 +38,7 @@ mod shot;
 mod space;
 mod store;
 mod sync;
+mod team;
 mod terminal;
 mod triage;
 mod update;
@@ -65,6 +67,10 @@ Utilisation :
   orchestra export <dossier>  exporte toutes les pages en Markdown
   orchestra import <fichier.md>  importe un fichier Markdown comme page
   orchestra serveur [port] [code]  point de rencontre en direct, sans fenêtre (port 7878 par défaut)
+  orchestra equipe [port]   serveur d'équipe : un espace partagé par ses membres (port 7879)
+  orchestra equipe inviter [ws://adresse:port]  une invitation à usage unique
+  orchestra equipe nom <nom>  le nom de l'espace
+  orchestra equipe ia <libres|espace|aucune> [ia…]  les IA autorisées dans l'espace
   orchestra aide            cette aide
   orchestra version         la version
 
@@ -173,6 +179,7 @@ fn main() {
                 .unwrap_or_else(|| model::new_id()[..8].to_string());
             run_server(port, &code)
         }
+        Some("equipe") | Some("team") => run_team(&args[1..]),
         Some(a) if a.starts_with("-psn_") => run_window(None),
         // A link copied with Cmd/Ctrl+L.
         Some(a) if a.starts_with("orchestra://page/") => run_window(Some(
@@ -260,6 +267,91 @@ fn absorb(ws: &mut model::Workspace, msg: live::LiveMsg) -> bool {
         }
         live::LiveMsg::Chat { msgs } => ws.accept_chat(msgs) > 0,
         _ => false,
+    }
+}
+
+/// `orchestra equipe …`: the team server and its settings (team.rs). Its space is kept in
+/// `<data folder>/serveur-equipe/`.
+fn run_team(args: &[String]) -> i32 {
+    let dir = store::data_dir().join("serveur-equipe");
+    let db = match team::Db::open(&dir) {
+        Ok(d) => d,
+        Err(e) => {
+            eprintln!("orchestra: espace d'équipe illisible ({}) : {e}", dir.display());
+            return 1;
+        }
+    };
+    let link = |base: &str| -> i32 {
+        match db.invite() {
+            Ok(t) => {
+                println!("{}/?invitation={t}", base.trim_end_matches('/'));
+                0
+            }
+            Err(e) => {
+                eprintln!("orchestra: invitation impossible : {e}");
+                1
+            }
+        }
+    };
+    let here = |port: u16| format!("ws://{}:{port}", live::local_ip());
+    match args.first().map(String::as_str) {
+        Some("inviter") | Some("invite") => {
+            let base = args.get(1).cloned().unwrap_or_else(|| here(team::DEFAULT_PORT));
+            link(&base)
+        }
+        Some("nom") | Some("name") => match args.get(1..).map(|a| a.join(" ")) {
+            Some(n) if !n.trim().is_empty() => match db.set_meta("name", n.trim()) {
+                Ok(()) => 0,
+                Err(e) => {
+                    eprintln!("orchestra: {e}");
+                    1
+                }
+            },
+            _ => usage("equipe nom a besoin d'un nom"),
+        },
+        Some("ia") | Some("ai") => {
+            let rule = match args.get(1).map(String::as_str) {
+                Some("libres") | Some("free") => space::AiRule::Free,
+                Some("espace") | Some("space") => space::AiRule::SpaceOnly,
+                Some("aucune") | Some("none") => space::AiRule::NoAi,
+                _ => return usage("equipe ia : libres, espace ou aucune"),
+            };
+            let allowed: Vec<String> = args.get(2..).unwrap_or(&[]).to_vec();
+            match db.set_ai_rule(rule, &allowed) {
+                Ok(()) => 0,
+                Err(e) => {
+                    eprintln!("orchestra: {e}");
+                    1
+                }
+            }
+        }
+        port => {
+            let port = port
+                .and_then(|p| p.parse().ok())
+                .unwrap_or(team::DEFAULT_PORT);
+            let info = db.info();
+            println!("Espace « {} » sur {} ", info.name, here(port));
+            println!("Données : {}", dir.display());
+            if db.members() == 0 {
+                print!("Première invitation (elle fera de vous l'administrateur) : ");
+                if link(&here(port)) != 0 {
+                    return 1;
+                }
+            } else {
+                println!("{} membre(s). Nouvelle invitation : orchestra equipe inviter", db.members());
+            }
+            println!(
+                "Sans chiffrement propre : sur Internet, derrière un proxy HTTPS ; sinon, réseau privé (Tailscale, WireGuard…)."
+            );
+            drop(db);
+            match team::serve(&dir, port) {
+                Ok(()) => 0,
+                Err(e) => {
+                    eprintln!("orchestra: impossible d'écouter sur le port {port} : {e}");
+                    1
+                }
+            }
+        }
     }
 }
 

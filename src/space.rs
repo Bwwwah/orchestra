@@ -22,8 +22,13 @@ pub enum SpaceKind {
     /// On this computer only.
     #[default]
     Local,
-    /// A copy of a team server's space (step 2 of the plan).
-    Server { url: String },
+    /// A copy of a team server's space (team.rs): its address, and the invitation until it
+    /// is spent on the first visit.
+    Server {
+        url: String,
+        #[serde(default, skip_serializing_if = "String::is_empty")]
+        invite: String,
+    },
 }
 
 /// Which AIs may work on a space's projects. Set by the space's administrator (by hand for
@@ -68,6 +73,14 @@ impl Space {
 
     pub fn is_local(&self) -> bool {
         self.id == LOCAL
+    }
+
+    /// The team server it is a copy of: (address, invitation not spent yet).
+    pub fn server(&self) -> Option<(&str, &str)> {
+        match &self.kind {
+            SpaceKind::Server { url, invite } => Some((url.as_str(), invite.as_str())),
+            SpaceKind::Local => None,
+        }
     }
 
     /// May the person's own AI `key` (`Ai::key`) work on this space's projects?
@@ -328,7 +341,8 @@ mod tests {
         let id = s.add(
             "Boîte",
             SpaceKind::Server {
-                url: "https://o.example".into(),
+                url: "ws://o.example".into(),
+                invite: String::new(),
             },
         );
         let sp = |s: &Spaces| s.get(&id).unwrap().clone();

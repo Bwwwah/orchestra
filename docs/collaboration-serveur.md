@@ -122,3 +122,23 @@ accès au code). La documentation d'hébergement doit le dire.
     (Antigravity) reçoit l'espace par son environnement ; si elle ne le transmet pas, son
     serveur MCP retombe sur le choix par dossier, et une copie de dossier n'appartient à aucun
     projet : il écrit alors dans `Mon espace`.
+* [ ] Étape 2 — serveur.
+  * [x] Identité par clé Ed25519 (`src/identity.rs`, `.identite` dans le dossier de données).
+  * [x] Serveur d'équipe `orchestra equipe [port]` (`src/team.rs`) : SQLite (`espace.sqlite` :
+    membres, invitations, pages, suppressions, discussion), WebSocket, connexion par défi
+    signé, invitations à usage unique (`orchestra equipe inviter`), la première personne
+    entrée est administratrice, nom et règle d'IA de l'espace (`orchestra equipe nom`,
+    `orchestra equipe ia`).
+  * [x] Dans l'appli : « Lien d'invitation… › Rejoindre » dans le sélecteur ; un espace
+    d'équipe se connecte tout seul (au lancement, au changement d'espace), toutes ses pages
+    sont partagées, le nom et la règle d'IA viennent du serveur. Pages, discussion et présence
+    passent par le même chemin que le mode en direct.
+  * [x] Vérifié avec le vrai programme : un serveur, deux personnes ; la page d'Ana arrive chez
+    Bob, le bloc de Bob arrive chez Ana en direct.
+  * [ ] `wss://` (HTTPS derrière un proxy) : le client ne parle que `ws://` pour l'instant ;
+    à utiliser sur un réseau privé.
+  * [ ] Reprise après coupure par version (aujourd'hui : tout est renvoyé à la reconnexion).
+  * [ ] Asynchrone (tokio) pour des centaines de connexions (aujourd'hui : un fil par
+    connexion, 256 au plus).
+  * [ ] Administration : liste des membres, retrait d'un membre (la colonne existe, pas encore
+    la commande), rôles.

@@ -89,6 +89,8 @@ impl NotesApp {
             Workspace::default()
         };
         ws.settings = settings;
+        // A team space: all its pages are the team's (a new one too, made empty here).
+        ws.whole_shared = space::current().server().is_some();
         self.ws = ws;
         self.known_mtime = store::modified(&path);
         spaces.active = id.to_string();
@@ -136,8 +138,34 @@ impl NotesApp {
         if !existed {
             self.save_now();
         }
+        self.start_team();
         let name = self.space_name();
         self.ack(crate::trf!("Espace « {name} »", "Space « {name} »"));
+    }
+
+    /// A team space: connect to its server (nothing for a space of this computer).
+    pub(super) fn start_team(&mut self) {
+        let sp = space::current();
+        let Some((url, invite)) = sp.server() else {
+            return;
+        };
+        // Not `stop_live`: the person's live setting of « Mon espace » stays as it is.
+        if let Some(l) = self.live.take() {
+            l.send(&crate::live::LiveMsg::Bye {
+                name: self.my_name(),
+            });
+        }
+        let ctx = self.ctx.clone();
+        let wake: crate::live::Wake = std::sync::Arc::new(move || ctx.request_repaint());
+        self.live = Some(crate::team::connect(
+            &sp.id,
+            url,
+            invite,
+            &self.my_name(),
+            wake,
+        ));
+        self.live_sent.clear();
+        self.peers.clear();
     }
 
     /// The switcher's menu: the spaces, a new one, the settings.
@@ -194,8 +222,8 @@ impl NotesApp {
         });
         ui.label(
             RichText::new(crate::tr!(
-                "Sur cet ordinateur pour l'instant ; rejoindre un serveur viendra ensuite.",
-                "On this computer for now; joining a server comes next."
+                "Un espace sur cet ordinateur seulement.",
+                "A space on this computer only."
             ))
             .size(11.5)
             .color(t.tertiary),
@@ -214,6 +242,58 @@ impl NotesApp {
             ui.close();
         }
         ui.data_mut(|d| d.insert_temp(key, draft));
+
+        // Join a team space with the invitation link its server gave.
+        let jkey = egui::Id::unique("join-space-link");
+        let mut link: String = ui.data(|d| d.get_temp(jkey)).unwrap_or_default();
+        let parsed = crate::team::parse_invitation(&link);
+        let mut join = false;
+        ui.horizontal(|ui| {
+            let r = ui.add(
+                egui::TextEdit::singleline(&mut link)
+                    .hint_text(crate::tr!("Lien d'invitation…", "Invitation link…"))
+                    .desired_width(170.0),
+            );
+            let enter = r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+            if (ui
+                .add_enabled(
+                    parsed.is_some(),
+                    egui::Button::new(crate::tr!("Rejoindre", "Join")),
+                )
+                .clicked()
+                || enter)
+                && parsed.is_some()
+            {
+                join = true;
+            }
+        });
+        if !link.trim().is_empty() && parsed.is_none() {
+            ui.label(
+                RichText::new(crate::tr!(
+                    "Lien attendu : ws://adresse:port/?invitation=…",
+                    "Expected link: ws://address:port/?invitation=…"
+                ))
+                .size(11.5)
+                .color(super::style::RED),
+            );
+        }
+        if join && let Some((url, invite)) = parsed {
+            let mut list = space::load();
+            let id = list.add(
+                crate::tr!("Espace d'équipe", "Team space"),
+                space::SpaceKind::Server { url, invite },
+            );
+            match space::save(&list) {
+                Ok(()) => pick = Some(id),
+                Err(e) => self.fail(crate::trf!(
+                    "Espace non ajouté : {e}",
+                    "Space not added: {e}"
+                )),
+            }
+            link.clear();
+            ui.close();
+        }
+        ui.data_mut(|d| d.insert_temp(jkey, link));
         ui.separator();
         // Stays open on a click inside: several things can be set in a row.
         egui::containers::menu::SubMenuButton::new(crate::tr!("Cet espace", "This space"))
@@ -261,28 +341,51 @@ impl NotesApp {
                 .size(12.0)
                 .color(t.tertiary),
         );
-        ui.horizontal(|ui| {
-            let r = ui.add(egui::TextEdit::singleline(&mut name).desired_width(180.0));
-            let enter = r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
-            let ok = !name.trim().is_empty() && name.trim() != self.space_name();
-            if (ui
-                .add_enabled(ok, egui::Button::new(crate::tr!("Renommer", "Rename")))
-                .clicked()
-                || enter)
-                && ok
-            {
-                let n = name.trim().to_string();
-                if cur.is_local() {
-                    // « Mon espace » keeps its name in the settings, as before.
-                    self.ws.settings.workspace_name = n.clone();
+        // A team space is named by its server.
+        let from_server = cur.server().is_some();
+        ui.add_enabled_ui(!from_server, |ui| {
+            ui.horizontal(|ui| {
+                let r = ui.add(egui::TextEdit::singleline(&mut name).desired_width(180.0));
+                let enter = r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+                let ok = !name.trim().is_empty() && name.trim() != self.space_name();
+                if (ui
+                    .add_enabled(ok, egui::Button::new(crate::tr!("Renommer", "Rename")))
+                    .clicked()
+                    || enter)
+                    && ok
+                {
+                    let n = name.trim().to_string();
+                    if cur.is_local() {
+                        // « Mon espace » keeps its name in the settings, as before.
+                        self.ws.settings.workspace_name = n.clone();
+                    }
+                    if let Some(s) = list.spaces.iter_mut().find(|s| s.id == here) {
+                        s.name = n;
+                    }
+                    changed = true;
                 }
-                if let Some(s) = list.spaces.iter_mut().find(|s| s.id == here) {
-                    s.name = n;
-                }
-                changed = true;
-            }
+            })
         });
         ui.data_mut(|d| d.insert_temp(key, name));
+        if let Some((url, _)) = cur.server() {
+            let st = self.live.as_ref().map(|l| l.status());
+            let line = match st {
+                Some(s) if s.connected => crate::trf!("Relié à {url}", "Connected to {url}"),
+                Some(s) => match s.error {
+                    Some(e) => crate::trf!("{url} : {e}", "{url}: {e}"),
+                    None => crate::trf!("Connexion à {url}…", "Connecting to {url}…"),
+                },
+                None => crate::trf!("Non relié à {url}", "Not connected to {url}"),
+            };
+            ui.label(RichText::new(line).size(11.5).color(t.tertiary));
+            if self.live.as_ref().is_none_or(|l| l.stopped())
+                && ui
+                    .button(crate::tr!("Se reconnecter", "Reconnect"))
+                    .clicked()
+            {
+                self.start_team();
+            }
+        }
 
         // AIs allowed (not for « Mon espace »: the person's own AIs always work there).
         if !cur.is_local() {
@@ -293,6 +396,8 @@ impl NotesApp {
                     .color(t.tertiary),
             );
             let mut rule = cur.ai_rule;
+            let mut allowed = cur.allowed_ai.clone();
+            ui.add_enabled_ui(!from_server, |ui| {
             ui.radio_value(
                 &mut rule,
                 space::AiRule::Free,
@@ -308,7 +413,6 @@ impl NotesApp {
                 space::AiRule::NoAi,
                 crate::tr!("Aucune IA", "No AI"),
             );
-            let mut allowed = cur.allowed_ai.clone();
             if rule == space::AiRule::Free {
                 ui.label(
                     RichText::new(crate::tr!(
@@ -338,7 +442,18 @@ impl NotesApp {
                     .color(t.tertiary),
                 );
             }
-            if rule != cur.ai_rule || allowed != cur.allowed_ai {
+            });
+            if from_server {
+                ui.label(
+                    RichText::new(crate::tr!(
+                        "Fixée par le serveur de l'espace.",
+                        "Set by the space's server."
+                    ))
+                    .size(11.5)
+                    .color(t.tertiary),
+                );
+            }
+            if !from_server && (rule != cur.ai_rule || allowed != cur.allowed_ai) {
                 if let Some(s) = list.spaces.iter_mut().find(|s| s.id == here) {
                     s.ai_rule = rule;
                     s.allowed_ai = allowed;

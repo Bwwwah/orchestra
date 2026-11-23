@@ -74,7 +74,7 @@ pub struct Status {
     pub error: Option<String>,
 }
 
-type Wake = Arc<dyn Fn() + Send + Sync>;
+pub type Wake = Arc<dyn Fn() + Send + Sync>;
 
 pub struct Live {
     inbox: Receiver<LiveMsg>,
@@ -85,6 +85,22 @@ pub struct Live {
 }
 
 impl Live {
+    /// A connection made elsewhere (the team server's client, team.rs) behind the same face.
+    pub fn from_parts(
+        inbox: Receiver<LiveMsg>,
+        out: Arc<dyn Fn(&LiveMsg) + Send + Sync>,
+        status: Arc<Mutex<Status>>,
+        stop: Arc<AtomicBool>,
+    ) -> Live {
+        Live {
+            inbox,
+            out,
+            status,
+            stop,
+            listener_addr: None,
+        }
+    }
+
     pub fn send(&self, msg: &LiveMsg) {
         (self.out)(msg)
     }
@@ -92,6 +108,11 @@ impl Live {
     /// Messages received since the last call.
     pub fn drain(&self) -> Vec<LiveMsg> {
         self.inbox.try_iter().collect()
+    }
+
+    /// Stopped for good (a team server that refused us): no new attempt.
+    pub fn stopped(&self) -> bool {
+        self.stop.load(Ordering::SeqCst)
     }
 
     pub fn status(&self) -> Status {

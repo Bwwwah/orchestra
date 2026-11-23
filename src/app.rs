@@ -402,6 +402,8 @@ impl NotesApp {
         {
             app.start_live();
         }
+        // A team space: its server.
+        app.start_team();
         cc.egui_ctx.options_mut(|o| o.zoom_with_keyboard = false);
         let z = if app.ws.settings.zoom <= 0.0 {
             original::ZOOM_DEFAULT

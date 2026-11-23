@@ -135,7 +135,17 @@ pub fn modified(path: &Path) -> Option<SystemTime> {
 }
 
 pub fn load() -> Workspace {
-    load_from(&workspace_path())
+    let path = workspace_path();
+    // The welcome pages are for « Mon espace » only: another space starts empty (a team
+    // space would otherwise hand them to the whole team).
+    let mut ws = if space_id() != crate::space::LOCAL && !path.exists() {
+        Workspace::default()
+    } else {
+        load_from(&path)
+    };
+    // A team space: all its pages are the team's (see team.rs).
+    ws.whole_shared = space_id() != crate::space::LOCAL && crate::space::current().server().is_some();
+    ws
 }
 
 /// The personal settings: they live in "Mon espace" and follow the person into every space

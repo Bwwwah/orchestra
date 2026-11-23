@@ -20,6 +20,9 @@ sha2 = "0.10"
 spake2 = "0.4"
 uuid = { version = "1.29.3", features = ["v4"] }
 vt100 = "0.18"
+ed25519-dalek = "2"
+getrandom = "0.2"
+tungstenite = { version = "0.30.0", default-features = false, features = ["handshake"] }
 
 [dev-dependencies]
 egui_kittest = "0.37"

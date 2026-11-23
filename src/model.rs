@@ -611,6 +611,10 @@ pub struct Workspace {
     /// Autonomous work sessions (see auto.rs), finished or not.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub runs: Vec<RunRecord>,
+    /// A team space (team.rs): every page is shared with its members, not only shared
+    /// projects. Set when such a space is opened, never written.
+    #[serde(skip)]
+    pub whole_shared: bool,
 }
 
 /// One message of the inbox.

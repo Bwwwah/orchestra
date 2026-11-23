@@ -163,10 +163,17 @@ impl NotesApp {
                 }
                 LiveMsg::Disconnected { reason } => {
                     self.peers.clear();
-                    self.ack(crate::trf!(
-                        "En direct : {reason}, nouvelle tentative…",
-                        "Live: {reason}, trying again…"
-                    ));
+                    if self.live.as_ref().is_some_and(|l| l.stopped()) {
+                        self.fail(crate::trf!(
+                            "Connexion à l'espace refusée : {reason}",
+                            "Connection to the space refused: {reason}"
+                        ));
+                    } else {
+                        self.ack(crate::trf!(
+                            "En direct : {reason}, nouvelle tentative…",
+                            "Live: {reason}, trying again…"
+                        ));
+                    }
                 }
                 LiveMsg::Pages { pages, deleted } => {
                     merged_any |= self.merge_remote(pages, deleted);

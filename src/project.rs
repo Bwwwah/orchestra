@@ -1005,6 +1005,9 @@ impl Workspace {
 
     /// Ids of every page that belongs to a shared project (the project page and below).
     pub fn shared_ids(&self) -> std::collections::HashSet<String> {
+        if self.whole_shared {
+            return self.pages.iter().map(|p| p.id.clone()).collect();
+        }
         let mut out = std::collections::HashSet::new();
         for p in self
             .pages
@@ -1043,6 +1046,10 @@ impl Workspace {
     /// - a new project page: only a shared one, at the top level;
     /// - a new page: only under a shared page (ours, or one accepted in the same batch).
     pub fn accept_remote(&self, pages: Vec<Page>) -> Vec<Page> {
+        // A team space: everything in it is the team's.
+        if self.whole_shared {
+            return pages;
+        }
         let shared = self.shared_ids();
         let known: std::collections::HashMap<&str, &Option<String>> = self
             .pages
@@ -1093,6 +1100,9 @@ impl Workspace {
         &self,
         deleted: std::collections::BTreeMap<String, u64>,
     ) -> std::collections::BTreeMap<String, u64> {
+        if self.whole_shared {
+            return deleted;
+        }
         let shared = self.shared_ids();
         deleted
             .into_iter()
