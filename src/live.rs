@@ -59,6 +59,10 @@ pub enum LiveMsg {
     },
     /// Local only: the connection is (re)established; send everything.
     Connected,
+    /// To a team server (team.rs): an administrator's request (`team::AdminOp`).
+    Admin { req: serde_json::Value },
+    /// Local only: a team server's answer to it (`team::AdminView`).
+    AdminReply { reply: serde_json::Value },
     /// Local only (a team server, team.rs): everything up to change `seq` has arrived;
     /// `ack`: the last message sent was taken.
     Synced {
@@ -468,6 +472,8 @@ fn serve_peer(
                 | LiveMsg::Disconnected { .. }
                 | LiveMsg::Hello { .. }
                 | LiveMsg::Synced { .. }
+                | LiveMsg::Admin { .. }
+                | LiveMsg::AdminReply { .. }
         ) {
             continue;
         }

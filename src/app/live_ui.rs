@@ -163,6 +163,27 @@ impl NotesApp {
                         ));
                     }
                 }
+                LiveMsg::AdminReply { reply } => {
+                    if let Ok(view) = serde_json::from_value::<crate::team::AdminView>(reply) {
+                        if !view.error.is_empty() {
+                            self.fail(view.error.clone());
+                        }
+                        if !view.invite.is_empty() {
+                            let url = crate::space::current()
+                                .server()
+                                .map(|(u, _)| u.to_string())
+                                .unwrap_or_default();
+                            let link = format!("{url}/?invitation={}", view.invite);
+                            self.ctx.copy_text(link);
+                            self.ack(crate::tr!(
+                                "Invitation copiée : envoyez-la à la personne (elle ne sert qu'une fois).",
+                                "Invitation copied: send it to the person (it works once)."
+                            ));
+                        }
+                        self.team_admin = Some(view);
+                    }
+                }
+                LiveMsg::Admin { .. } => {}
                 LiveMsg::Synced { seq, ack } => {
                     if self.ws.whole_shared {
                         self.ws.server_seq = self.ws.server_seq.max(seq);

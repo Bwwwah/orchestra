@@ -149,7 +149,11 @@ accès au code). La documentation d'hébergement doit le dire.
   * [x] Administration : `orchestra equipe membres`, `retirer` (coupé en moins de 5 s),
     `reintegrer`, `role <admin|membre|lecteur>`, `inviter … lecteur`. Un lecteur voit tout ;
     ses modifications ne sont pas prises (il en est prévenu). Vérifié en vrai.
-  * [ ] Administration depuis l'appli (aujourd'hui : en ligne de commande, chez l'hébergeur).
+  * [x] Administration depuis l'appli : « Cet espace › Administrer l'espace… » (administrateurs
+    seulement, vérifié par le serveur à chaque demande) : nom et règle d'IA, membres (rôle,
+    retirer, réintégrer), invitation copiée, IA de l'espace (ajout, clé pour tous, quota,
+    suppression), appels du jour. Jamais une clé n'est renvoyée. Un administrateur ne peut ni
+    se retirer ni changer son propre rôle. Vérifié : Bob retiré depuis la fenêtre, coupé.
 * [x] Étape 3 — IA d'espace.
   * Le serveur garde les IA de l'espace (`orchestra equipe ia-espace ajouter <nom>
     <claude-code|codex> <url> [modèle] [chat]`) et une clé par membre ou pour tous

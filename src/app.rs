@@ -96,6 +96,9 @@ pub struct NotesApp {
     /// A team space: for each message sent to its server not yet acknowledged, the time it
     /// left (everything edited before was in it). See team.rs.
     team_marks: std::collections::VecDeque<u64>,
+    /// A team space's administration window: open, and the server's last answer.
+    admin_open: bool,
+    team_admin: Option<crate::team::AdminView>,
     tabs: Vec<Tab>,
     active_tab: usize,
     closed_tabs: Vec<Tab>,
@@ -227,6 +230,8 @@ impl NotesApp {
             live_deleted_sent: 0,
             live_presence: None,
             team_marks: Default::default(),
+            admin_open: false,
+            team_admin: None,
             tabs: vec![],
             active_tab: 0,
             closed_tabs: vec![],
@@ -1710,6 +1715,7 @@ impl eframe::App for NotesApp {
         self.search_window(&ctx, &mut actions);
         self.settings_window(&ctx, &mut actions);
         self.launch_settings_window(&ctx);
+        self.team_admin_window(&ctx);
         let had_actions = !actions.is_empty();
         // Starting a session needs the context (its terminal, its repaints): done here.
         let launches: Vec<String> = actions

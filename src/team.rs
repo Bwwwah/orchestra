@@ -118,6 +118,8 @@ pub enum Greeting {
     },
     /// Server → app: not (or no longer) welcome.
     Refused { reason: String },
+    /// Server → app: the answer to an administrator's request.
+    AdminReply { view: AdminView },
     /// Server → app: everything up to change `n` has been sent to you. `ack`: and the
     /// message you sent last has been taken.
     Seq {
@@ -125,6 +127,88 @@ pub enum Greeting {
         #[serde(default)]
         ack: bool,
     },
+}
+
+/// What an administrator asks from the app (`LiveMsg::Admin`).
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[serde(tag = "op", rename_all = "snake_case")]
+pub enum AdminOp {
+    List,
+    Invite {
+        role: Role,
+    },
+    Revoke {
+        key: String,
+    },
+    Restore {
+        key: String,
+    },
+    SetRole {
+        key: String,
+        role: Role,
+    },
+    AddAi {
+        ai: crate::space::SpaceAi,
+    },
+    /// The company's key of an AI, for one member (their public key) or everyone (`*`).
+    SetKey {
+        ai: String,
+        member: String,
+        key: String,
+    },
+    RemoveAi {
+        name: String,
+    },
+    Quota {
+        ai: String,
+        per_day: u64,
+    },
+    Rename {
+        name: String,
+    },
+    Rule {
+        rule: AiRule,
+        allowed: Vec<String>,
+    },
+}
+
+/// What an administrator sees of the space: never a key.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Default)]
+pub struct AdminView {
+    pub name: String,
+    pub rule: AiRule,
+    pub allowed: Vec<String>,
+    pub members: Vec<MemberView>,
+    pub ais: Vec<AiView>,
+    /// Calls of today through the relay: (member's name, AI, calls).
+    pub today: Vec<(String, String, u64)>,
+    /// A new invitation's token (`Invite`): the app makes the link.
+    #[serde(default)]
+    pub invite: String,
+    /// Why the request was refused, if it was.
+    #[serde(default)]
+    pub error: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct MemberView {
+    pub key: String,
+    pub name: String,
+    pub role: Role,
+    pub revoked: bool,
+    /// The administrator looking.
+    pub me: bool,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct AiView {
+    pub name: String,
+    pub tool: String,
+    pub base_url: String,
+    pub model: String,
+    pub quota: u64,
+    /// How many keys it has (members' own and everyone's).
+    pub keys: usize,
 }
 
 /// What a server says about its space.
@@ -751,6 +835,138 @@ impl Db {
         (out, out_deleted)
     }
 
+    /// Carry out `op` for the administrator `me` (their public key) and say how the space now
+    /// stands. An administrator can't take themselves off, nor change their own role (the
+    /// space would risk having none).
+    pub fn admin(&self, op: AdminOp, me: &str) -> AdminView {
+        let own = |k: &str| {
+            (k == me).then(|| {
+                crate::tr!(
+                    "pas sur vous-même : demandez à un autre administrateur",
+                    "not on yourself: ask another administrator"
+                )
+                .to_string()
+            })
+        };
+        let mut invite = String::new();
+        let done: Result<(), String> = match op {
+            AdminOp::List => Ok(()),
+            AdminOp::Invite { role } => self
+                .invite(role)
+                .map(|t| invite = t)
+                .map_err(|e| e.to_string()),
+            AdminOp::Revoke { key } => match own(&key) {
+                Some(e) => Err(e),
+                None => self
+                    .set_revoked(&key, true)
+                    .map(|_| ())
+                    .map_err(|e| e.to_string()),
+            },
+            AdminOp::Restore { key } => self
+                .set_revoked(&key, false)
+                .map(|_| ())
+                .map_err(|e| e.to_string()),
+            AdminOp::SetRole { key, role } => match own(&key) {
+                Some(e) => Err(e),
+                None => self
+                    .set_role(&key, role)
+                    .map(|_| ())
+                    .map_err(|e| e.to_string()),
+            },
+            AdminOp::AddAi { ai } => {
+                if ai.name.trim().is_empty()
+                    || !matches!(ai.tool.as_str(), "claude-code" | "codex")
+                    || crate::proxy::upstream(&ai.base_url).is_none()
+                {
+                    Err(crate::tr!(
+                        "IA incomplète : un nom, Claude Code ou Codex, une adresse http(s)://",
+                        "incomplete AI: a name, Claude Code or Codex, an http(s):// address"
+                    )
+                    .into())
+                } else {
+                    let ai = crate::space::SpaceAi {
+                        key: String::new(),
+                        ..ai
+                    };
+                    self.set_space_ai(&ai).map_err(|e| e.to_string())
+                }
+            }
+            AdminOp::SetKey { ai, member, key } => {
+                if key.trim().is_empty() {
+                    Err(crate::tr!("clé vide", "empty key").into())
+                } else {
+                    self.set_ai_key(&ai, &member, key.trim())
+                        .map(|_| ())
+                        .map_err(|e| e.to_string())
+                }
+            }
+            AdminOp::RemoveAi { name } => self
+                .remove_space_ai(&name)
+                .map(|_| ())
+                .map_err(|e| e.to_string()),
+            AdminOp::Quota { ai, per_day } => self
+                .set_quota(&ai, per_day)
+                .map(|_| ())
+                .map_err(|e| e.to_string()),
+            AdminOp::Rename { name } => {
+                if name.trim().is_empty() {
+                    Err(crate::tr!("nom vide", "empty name").into())
+                } else {
+                    self.set_meta("name", name.trim())
+                        .map_err(|e| e.to_string())
+                }
+            }
+            AdminOp::Rule { rule, allowed } => {
+                self.set_ai_rule(rule, &allowed).map_err(|e| e.to_string())
+            }
+        };
+        let info = self.info();
+        let today = today();
+        AdminView {
+            name: info.name,
+            rule: info.ai_rule,
+            allowed: info.allowed_ai,
+            members: self
+                .member_list()
+                .into_iter()
+                .map(|m| MemberView {
+                    me: m.key == me,
+                    key: m.key,
+                    name: m.name,
+                    role: m.role,
+                    revoked: m.revoked,
+                })
+                .collect(),
+            ais: self
+                .space_ais()
+                .into_iter()
+                .map(|(a, keys)| AiView {
+                    quota: self
+                        .0
+                        .query_row(
+                            "SELECT quota FROM space_ais WHERE name = ?1",
+                            [&a.name],
+                            |r| r.get::<_, i64>(0),
+                        )
+                        .unwrap_or(0) as u64,
+                    name: a.name,
+                    tool: a.tool,
+                    base_url: a.base_url,
+                    model: a.model,
+                    keys,
+                })
+                .collect(),
+            today: self
+                .usage(1)
+                .into_iter()
+                .filter(|u| u.0 == today)
+                .map(|(_, who, ai, n)| (who, ai, n))
+                .collect(),
+            invite,
+            error: done.err().unwrap_or_default(),
+        }
+    }
+
     /// Lighten the documents of blocks nobody touched for `idle_ms` (crdt::compact). Each page
     /// lightened gets a new change number: the members take the lighter copy the next time.
     /// Returns how many pages were lightened.
@@ -1166,6 +1382,26 @@ fn serve_one(id: u64, stream: Replay, db: &Arc<Mutex<Db>>, conns: &Conns) -> Res
                         ack: true,
                     }));
                 }
+                // Only an administrator (checked again: the role may have changed since).
+                LiveMsg::Admin { req } => {
+                    let Ok(d) = db.lock() else { return };
+                    let view = match (d.member(&key), serde_json::from_value::<AdminOp>(req)) {
+                        (Some((_, Role::Admin)), Ok(op)) => d.admin(op, &key),
+                        (Some((_, Role::Admin)), Err(e)) => AdminView {
+                            error: e.to_string(),
+                            ..Default::default()
+                        },
+                        _ => AdminView {
+                            error: crate::tr!(
+                                "réservé aux administrateurs de l'espace",
+                                "for the space's administrators only"
+                            )
+                            .into(),
+                            ..Default::default()
+                        },
+                    };
+                    let _ = tx.send(json(&Greeting::AdminReply { view }));
+                }
                 // Under the name the server knows, never the one a message claims.
                 LiveMsg::Presence {
                     page, project, ai, ..
@@ -1565,6 +1801,12 @@ impl Session<'_> {
                         wake();
                     }
                     Ok(Greeting::Refused { reason }) => refused = Some(reason),
+                    Ok(Greeting::AdminReply { view }) => {
+                        let _ = tx.send(LiveMsg::AdminReply {
+                            reply: serde_json::to_value(view).unwrap_or_default(),
+                        });
+                        wake();
+                    }
                     _ => {}
                 }
             },
@@ -1835,6 +2077,86 @@ mod tests {
             "https://equipe.example/x"
         );
         assert_eq!(http_base("ws://10.0.0.2:7879"), "http://10.0.0.2:7879");
+    }
+
+    #[test]
+    fn an_administrator_manages_others_never_themselves_and_sees_no_key() {
+        let d = db();
+        let space = d.info().id;
+        let ana = ed25519_dalek::SigningKey::from_bytes(&[1u8; 32]);
+        let bob = ed25519_dalek::SigningKey::from_bytes(&[2u8; 32]);
+        let i1 = d.invite(Role::Member).unwrap();
+        admit(&d, &space, "n", &auth(&ana, &space, "n", &i1)).unwrap();
+        let i2 = d.invite(Role::Member).unwrap();
+        admit(&d, &space, "m", &auth(&bob, &space, "m", &i2)).unwrap();
+        let (ka, kb) = (
+            crate::identity::public_hex(&ana),
+            crate::identity::public_hex(&bob),
+        );
+        let v = d.admin(AdminOp::Revoke { key: ka.clone() }, &ka);
+        assert!(!v.error.is_empty(), "not on yourself");
+        assert!(
+            !d.admin(
+                AdminOp::SetRole {
+                    key: ka.clone(),
+                    role: Role::Reader
+                },
+                &ka
+            )
+            .error
+            .is_empty()
+        );
+        let v = d.admin(
+            AdminOp::SetRole {
+                key: kb.clone(),
+                role: Role::Reader,
+            },
+            &ka,
+        );
+        assert!(v.error.is_empty());
+        assert_eq!(
+            v.members.iter().find(|m| m.key == kb).unwrap().role,
+            Role::Reader
+        );
+        assert!(v.members.iter().find(|m| m.key == ka).unwrap().me);
+        let v = d.admin(AdminOp::Invite { role: Role::Reader }, &ka);
+        assert_eq!(v.invite.len(), 32);
+        let v = d.admin(
+            AdminOp::AddAi {
+                ai: crate::space::SpaceAi {
+                    name: "Maison".into(),
+                    tool: "codex".into(),
+                    base_url: "https://ia.example/v1".into(),
+                    key: "ne-doit-pas-rester".into(),
+                    ..Default::default()
+                },
+            },
+            &ka,
+        );
+        assert!(v.error.is_empty());
+        let v = d.admin(
+            AdminOp::SetKey {
+                ai: "Maison".into(),
+                member: "*".into(),
+                key: "cle-secrete".into(),
+            },
+            &ka,
+        );
+        let shown = serde_json::to_string(&v).unwrap();
+        assert!(!shown.contains("cle-secrete") && !shown.contains("ne-doit-pas-rester"));
+        assert_eq!(v.ais[0].keys, 1);
+        assert!(
+            !d.admin(
+                AdminOp::AddAi {
+                    ai: Default::default()
+                },
+                &ka
+            )
+            .error
+            .is_empty()
+        );
+        let v = d.admin(AdminOp::Revoke { key: kb.clone() }, &ka);
+        assert!(v.members.iter().find(|m| m.key == kb).unwrap().revoked);
     }
 
     #[test]
