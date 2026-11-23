@@ -296,6 +296,7 @@ fn run_agent(
         Some(r) => {
             cmd.envs(r.env.iter().map(|(k, v)| (k, v)));
             let mut a = r.args;
+            a.extend(r.late_args);
             a.extend(crate::space::without_model(args));
             a
         }

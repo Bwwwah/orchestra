@@ -164,8 +164,11 @@ accès au code). La documentation d'hébergement doit le dire.
     jamais sur une ligne de commande. « IA de l'espace seulement » n'autorise qu'elles.
   * Vérifié avec les vrais Claude Code et Codex contre une passerelle de test : requêtes
     reçues sur `/v1/messages` et `/v1/responses`, avec la clé de l'espace et son modèle.
-  * Limite : le serveur MCP ne distingue pas un Claude Code lancé sur l'IA de l'espace d'un
-    Claude Code lancé à la main sur l'abonnement de la personne.
+  * [x] Jeton de session : chaque session qu'Orchestra lance sur une IA d'espace reçoit un
+    jeton (`ORCHESTRA_SESSION`, valable 48 h, noté dans `.sessions-espace.json`) ; dans un
+    espace « IA de l'espace seulement », le serveur MCP refuse toute IA sans jeton valide (un
+    Claude Code lancé à la main). Vérifié : refus sans jeton et avec un faux, accord avec un
+    vrai ; Claude Code et Codex transmettent bien le jeton à leur serveur MCP.
 * [x] Étape 4 — écrire à plusieurs dans le même paragraphe (`src/crdt.rs`).
   * Dans un espace d'équipe, le texte de chaque bloc vit aussi dans un petit document Loro
     (`Block::crdt`). L'éditeur, les IA (MCP), l'import et l'export travaillent toujours sur

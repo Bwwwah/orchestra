@@ -90,11 +90,12 @@ impl NotesApp {
             .and_then(super::ai_ui::ai_of_command)
             .and_then(|ai| crate::space::ai_run(ai.key()));
         let cmd = match (&space_ai, r.cmd.as_deref()) {
-            (Some(run), Some(c)) if !run.args.is_empty() => {
+            (Some(run), Some(c)) if !run.args.is_empty() || !run.late_args.is_empty() => {
                 let (prog, rest) = c.split_once(' ').unwrap_or((c, ""));
                 let opts: Vec<String> = run
                     .args
                     .iter()
+                    .chain(&run.late_args)
                     .map(|a| crate::sessions::shell_quote(a))
                     .collect();
                 Some(format!("{prog} {} {rest}", opts.join(" ")).trim_end().to_string())

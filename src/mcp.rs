@@ -48,6 +48,18 @@ fn ai_refusal() -> Option<String> {
     if store::space_id() == crate::space::LOCAL {
         return None;
     }
+    // Only the space's own AIs: only a session Orchestra started on one (it holds a token).
+    let sp = crate::space::current();
+    if sp.ai_rule == crate::space::AiRule::SpaceOnly {
+        let token = std::env::var(crate::space::SESSION_VAR).unwrap_or_default();
+        return (!crate::space::granted(&token, &sp.id)).then(|| {
+            crate::trf!(
+                "l'espace « {} » n'accepte que ses propres IA, lancées par Orchestra",
+                "the space « {} » only accepts its own AIs, started by Orchestra",
+                sp.name
+            )
+        });
+    }
     let holder = std::env::var("ORCHESTRA_HOLDER").unwrap_or_default();
     let client = CLIENT.get().cloned().unwrap_or_default();
     let key = crate::space::ai_key_of_client(&holder)

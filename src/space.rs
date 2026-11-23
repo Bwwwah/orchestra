@@ -94,6 +94,68 @@ pub struct SpaceAi {
 pub struct SpaceAiRun {
     pub env: Vec<(String, String)>,
     pub args: Vec<String>,
+    /// Options that must come after everything else on the command line (Codex: the session
+    /// token for Orchestra's MCP server, after a command that sets its servers).
+    pub late_args: Vec<String>,
+}
+
+/// The environment variable naming a session Orchestra started on a space's AI.
+pub const SESSION_VAR: &str = "ORCHESTRA_SESSION";
+/// How long such a session's token is good for.
+const SESSION_LIFE_MS: u64 = 48 * 3600 * 1000;
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct SessionGrant {
+    space: String,
+    at: u64,
+}
+
+fn grants_path() -> PathBuf {
+    crate::store::data_dir().join(".sessions-espace.json")
+}
+
+static GRANTS: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// A new token for a session Orchestra starts on space `space`'s own AI. Orchestra's MCP
+/// server, in a space that allows only its own AIs, serves only sessions with one: an agent
+/// started by hand (on the person's subscription) has none.
+pub fn grant_session(space: &str) -> String {
+    let _g = GRANTS.lock().unwrap_or_else(|e| e.into_inner());
+    let token = crate::identity::random_hex(16);
+    let now = crate::model::now_ms();
+    let mut all: std::collections::BTreeMap<String, SessionGrant> =
+        std::fs::read_to_string(grants_path())
+            .ok()
+            .and_then(|s| serde_json::from_str(&s).ok())
+            .unwrap_or_default();
+    all.retain(|_, g| now.saturating_sub(g.at) < SESSION_LIFE_MS);
+    all.insert(
+        token.clone(),
+        SessionGrant {
+            space: space.to_string(),
+            at: now,
+        },
+    );
+    let _ = crate::store::write_atomic(
+        &grants_path(),
+        serde_json::to_string(&all).unwrap_or_default().as_bytes(),
+    );
+    token
+}
+
+/// Was `token` given by Orchestra to a session on space `space`'s own AI, not long ago?
+pub fn granted(token: &str, space: &str) -> bool {
+    if token.trim().is_empty() {
+        return false;
+    }
+    let all: std::collections::BTreeMap<String, SessionGrant> =
+        std::fs::read_to_string(grants_path())
+            .ok()
+            .and_then(|s| serde_json::from_str(&s).ok())
+            .unwrap_or_default();
+    all.get(token.trim()).is_some_and(|g| {
+        g.space == space && crate::model::now_ms().saturating_sub(g.at) < SESSION_LIFE_MS
+    })
 }
 
 /// The environment variable holding the key for Codex (`env_key` of its provider).
@@ -118,7 +180,11 @@ impl SpaceAi {
                 if !self.model.trim().is_empty() {
                     env.push(("ANTHROPIC_MODEL".into(), self.model.trim().to_string()));
                 }
-                Some(SpaceAiRun { env, args: vec![] })
+                Some(SpaceAiRun {
+                    env,
+                    args: vec![],
+                    late_args: vec![],
+                })
             }
             "codex" => {
                 let wire = if self.wire_api.trim().is_empty() {
@@ -145,6 +211,7 @@ impl SpaceAi {
                 Some(SpaceAiRun {
                     env: vec![(CODEX_KEY_VAR.to_string(), self.key.clone())],
                     args,
+                    late_args: vec![],
                 })
             }
             _ => None,
@@ -390,8 +457,24 @@ pub fn ai_key_of_client(name: &str) -> Option<&'static str> {
 
 /// How to run agent `tool` on the AI the space this process works in provides for it, if
 /// it provides one.
+/// A session token comes with it (`grant_session`): in the environment (Claude Code hands its
+/// environment to its MCP servers) and, for Codex, in its MCP server's settings.
 pub fn ai_run(tool: &str) -> Option<SpaceAiRun> {
-    current().space_ai(tool).and_then(|a| a.run())
+    let sp = current();
+    let mut run = sp.space_ai(tool).and_then(|a| a.run())?;
+    let token = grant_session(&sp.id);
+    if tool == "codex" {
+        run.late_args = vec![
+            "-c".into(),
+            format!(
+                "mcp_servers.{}.env.{SESSION_VAR}={}",
+                crate::setup::NAME,
+                serde_json::to_string(&token).unwrap_or_default()
+            ),
+        ];
+    }
+    run.env.push((SESSION_VAR.to_string(), token));
+    Some(run)
 }
 
 fn list_path() -> PathBuf {

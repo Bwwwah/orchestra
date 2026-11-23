@@ -982,6 +982,13 @@ impl NotesApp {
                 .collect();
             cmd = format!("codex {} {rest}", opts.join(" "));
         }
+        // After the command's own MCP servers, which they complete.
+        if let Some(run) = &space_ai {
+            for a in &run.late_args {
+                cmd.push(' ');
+                cmd.push_str(&crate::sessions::shell_quote(a));
+            }
+        }
         let c2 = ctx.clone();
         let mut envs = match &space_ai {
             Some(run) => run.env.clone(),
