@@ -103,10 +103,26 @@ impl NotesApp {
         self.peers.clear();
     }
 
+    /// A message leaves for a team server: note when, to know what its acknowledgement
+    /// covers (see `LiveMsg::Synced`).
+    fn team_mark(&mut self) {
+        if self.ws.whole_shared {
+            self.team_marks.push_back(crate::model::now_ms());
+        }
+    }
+
     pub(super) fn send_everything(&mut self) {
         let Some(l) = &self.live else { return };
         // Only the shared projects leave this computer.
-        let out = self.ws.shared_copy();
+        let mut out = self.ws.shared_copy();
+        // A team server already has what it acknowledged: only what is newer goes (with a
+        // minute to spare, for an AI's edit stamped by another program's clock).
+        if self.ws.whole_shared && self.ws.server_pushed > 0 {
+            let after = self.ws.server_pushed.saturating_sub(60_000);
+            out.pages.retain(|p| p.updated > after);
+            out.deleted.retain(|_, t| *t > after);
+            out.chat.retain(|_, m| m.at > after);
+        }
         l.send(&LiveMsg::Pages {
             pages: out.pages.clone(),
             deleted: out.deleted.clone(),
@@ -119,6 +135,9 @@ impl NotesApp {
         }
         self.chat_sent.extend(out.chat.keys().cloned());
         self.live_presence = None;
+        self.team_marks.clear();
+        self.team_mark();
+        self.team_mark();
     }
 
     /// Once per frame: merge what arrived, send what changed, keep presence fresh.
@@ -128,7 +147,26 @@ impl NotesApp {
         let mut merged_any = false;
         for msg in msgs {
             match msg {
-                LiveMsg::Connected => self.send_everything(),
+                LiveMsg::Connected => {
+                    self.send_everything();
+                    let sp = crate::space::current();
+                    if sp.role == "reader" {
+                        self.info(crate::trf!(
+                            "Vous êtes lecteur dans « {} » : vos modifications restent sur cet ordinateur.",
+                            "You are a reader in « {} »: your changes stay on this computer.",
+                            sp.name
+                        ));
+                    }
+                }
+                LiveMsg::Synced { seq, ack } => {
+                    if self.ws.whole_shared {
+                        self.ws.server_seq = self.ws.server_seq.max(seq);
+                        if ack && let Some(at) = self.team_marks.pop_front() {
+                            self.ws.server_pushed = self.ws.server_pushed.max(at);
+                        }
+                        self.dirty_since.get_or_insert_with(Instant::now);
+                    }
+                }
                 LiveMsg::Hello { name, .. } => {
                     // Someone joined (we host): give them everything.
                     self.peers.insert(
@@ -221,6 +259,7 @@ impl NotesApp {
                     msgs: new_msgs.clone(),
                 });
             }
+            self.team_mark();
             self.chat_sent.extend(new_msgs.into_iter().map(|m| m.id));
         }
         let deleted_now = self.ws.deleted.len();
@@ -231,6 +270,7 @@ impl NotesApp {
                     deleted: self.ws.deleted.clone(),
                 });
             }
+            self.team_mark();
             for p in changed {
                 self.live_sent.insert(p.id, p.updated);
             }

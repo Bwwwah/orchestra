@@ -61,7 +61,8 @@ orchestra export <dossier>          exporte toutes les pages en Markdown
 orchestra import <fichier.md>       importe un fichier Markdown comme page
 orchestra serveur [port] [code]     point de rencontre en direct, sans fenêtre (port 7878)
 orchestra equipe [port]             serveur d'équipe : un espace partagé par ses membres (port 7879)
-orchestra equipe inviter [ws://…]   une invitation à usage unique
+orchestra equipe inviter [wss://…] [lecteur]  une invitation à usage unique
+orchestra equipe membres | retirer | reintegrer | role   les membres et leurs droits
 orchestra aide | version
 ```
 

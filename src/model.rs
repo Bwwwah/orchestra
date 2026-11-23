@@ -615,7 +615,14 @@ pub struct Workspace {
     /// projects. Set when such a space is opened, never written.
     #[serde(skip)]
     pub whole_shared: bool,
+    /// A team space: the number of the last change of its server received here (team.rs).
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub server_seq: u64,
+    /// A team space: everything edited here before this time was taken by its server.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub server_pushed: u64,
 }
+
 
 /// One message of the inbox.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Default)]

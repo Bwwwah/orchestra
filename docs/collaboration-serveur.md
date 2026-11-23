@@ -135,10 +135,18 @@ accès au code). La documentation d'hébergement doit le dire.
     passent par le même chemin que le mode en direct.
   * [x] Vérifié avec le vrai programme : un serveur, deux personnes ; la page d'Ana arrive chez
     Bob, le bloc de Bob arrive chez Ana en direct.
-  * [ ] `wss://` (HTTPS derrière un proxy) : le client ne parle que `ws://` pour l'instant ;
-    à utiliser sur un réseau privé.
-  * [ ] Reprise après coupure par version (aujourd'hui : tout est renvoyé à la reconnexion).
-  * [ ] Asynchrone (tokio) pour des centaines de connexions (aujourd'hui : un fil par
-    connexion, 256 au plus).
-  * [ ] Administration : liste des membres, retrait d'un membre (la colonne existe, pas encore
-    la commande), rôles.
+  * [x] `wss://` : TLS dans l'appli (rustls, autorités de la liste Mozilla, plus celle d'une
+    entreprise avec `ORCHESTRA_CA=<fichier.pem>`). Le serveur reste en WebSocket simple,
+    derrière le proxy HTTPS de l'hébergeur. Vérifié : certificat inconnu refusé (message
+    clair, pas de nouvelles tentatives), accepté avec l'autorité de l'entreprise.
+  * [x] Reprise par numéro de changement : chaque changement stocké reçoit un numéro ; l'appli
+    garde le dernier reçu (`server_seq`) et ne reçoit que la suite ; le serveur accuse
+    réception de chaque envoi, l'appli ne renvoie que ce qui n'a pas été accusé
+    (`server_pushed`, une minute de marge). Vérifié : au retour de Bob, 1 page envoyée sur 2.
+  * [x] Charge : un fil par connexion avec une petite pile (256 Kio), 4096 connexions au plus.
+    Pas de tokio : à ce volume, des fils suffisent ; le goulot serait la base (une écriture à
+    la fois), pas les connexions.
+  * [x] Administration : `orchestra equipe membres`, `retirer` (coupé en moins de 5 s),
+    `reintegrer`, `role <admin|membre|lecteur>`, `inviter … lecteur`. Un lecteur voit tout ;
+    ses modifications ne sont pas prises (il en est prévenu). Vérifié en vrai.
+  * [ ] Administration depuis l'appli (aujourd'hui : en ligne de commande, chez l'hébergeur).

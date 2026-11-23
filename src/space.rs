@@ -58,6 +58,9 @@ pub struct Space {
     /// all of them.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub allowed_ai: Vec<String>,
+    /// A team space: the role its server gives this person (`team::Role::key`).
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub role: String,
 }
 
 impl Space {
@@ -68,6 +71,7 @@ impl Space {
             kind: SpaceKind::Local,
             ai_rule: AiRule::Free,
             allowed_ai: vec![],
+            role: String::new(),
         }
     }
 
@@ -156,6 +160,7 @@ impl Spaces {
             kind,
             ai_rule: AiRule::Free,
             allowed_ai: vec![],
+            role: String::new(),
         });
         id
     }

@@ -93,6 +93,9 @@ pub struct NotesApp {
     live_sent: HashMap<String, u64>,
     live_deleted_sent: usize,
     live_presence: Option<(Option<String>, Instant)>,
+    /// A team space: for each message sent to its server not yet acknowledged, the time it
+    /// left (everything edited before was in it). See team.rs.
+    team_marks: std::collections::VecDeque<u64>,
     tabs: Vec<Tab>,
     active_tab: usize,
     closed_tabs: Vec<Tab>,
@@ -221,6 +224,7 @@ impl NotesApp {
             live_sent: HashMap::new(),
             live_deleted_sent: 0,
             live_presence: None,
+            team_marks: Default::default(),
             tabs: vec![],
             active_tab: 0,
             closed_tabs: vec![],

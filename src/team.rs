@@ -4,15 +4,25 @@
 //! * **Who may connect**: members are known by the public half of their key (identity.rs).
 //!   The server sends a fresh challenge; the app answers with its key and a signature of it.
 //!   A key the server doesn't know comes in only with an unused invitation (one use each),
-//!   which makes it a member. No password, no shared code.
+//!   which makes it a member. No password, no shared code. A member taken off the space is
+//!   cut off within seconds, and refused after.
+//! * **Roles**: administrator (the first person in), member, reader. A reader's changes are
+//!   not taken.
 //! * **Wire**: WebSocket, one JSON message per frame. After the greeting, the messages are
 //!   those of live collaboration (`live::LiveMsg`), so the window merges, sends and shows
-//!   presence exactly as in live mode.
+//!   presence exactly as in live mode, plus `Seq` marks (below).
 //! * **Storage**: SQLite (`espace.sqlite`), one row per page. A page received is merged into
 //!   the stored one block by block (`collab::merge_page`), then passed on to the others.
-//! * **Encryption**: none of its own. On the Internet, put the server behind an HTTPS proxy
-//!   (Caddy, Traefik…) and join with `wss://` (coming next: the app speaks `ws://` only for
-//!   now, so keep to a private network: same network, Tailscale, WireGuard…).
+//! * **Picking up after a break**: every change stored gets the next number (`seq`). The app
+//!   keeps the last number it has and gives it when it connects: it receives only what came
+//!   after. Each message it sends is acknowledged with a number, so on reconnecting it sends
+//!   only what the server hasn't acknowledged.
+//! * **Encryption**: the server speaks plain WebSocket; on the Internet, put it behind an
+//!   HTTPS proxy (Caddy, Traefik…) and join with a `wss://` link (TLS, certificates checked
+//!   against the usual authorities, plus a company's own: `ORCHESTRA_CA=<file.pem>`). `ws://`
+//!   is for a private network (Tailscale, WireGuard…).
+//! * **Load**: one thread per connection, with a small stack; a few thousand connections at
+//!   once are fine. Changes are stored one at a time (one SQLite connection).
 
 use crate::live::{self, LiveMsg, Status};
 use crate::model::{ChatMsg, Page};
@@ -20,46 +30,94 @@ use crate::space::AiRule;
 use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
-use std::io::ErrorKind;
+use std::io::{ErrorKind, Read, Write};
 use std::net::{TcpListener, TcpStream};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::mpsc::{Receiver, Sender, channel};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tungstenite::{Message, WebSocket};
 
 pub const DEFAULT_PORT: u16 = 7879;
 /// Connections the server keeps at once.
-const MAX_CONNECTIONS: usize = 256;
-/// Largest message accepted (a whole workspace sent at once, with its pictures' links).
+const MAX_CONNECTIONS: usize = 4096;
+/// Stack of each connection's thread: what it does is shallow.
+const THREAD_STACK: usize = 256 * 1024;
+/// Largest message accepted (a whole workspace sent at once).
 const MAX_MESSAGE: usize = 32 * 1024 * 1024;
 /// How long a reader waits before looking at what is to be sent.
 const TICK: Duration = Duration::from_millis(100);
+/// How often a connected member's access is checked again (taken off the space meanwhile?).
+const RECHECK: Duration = Duration::from_secs(5);
 
-/// The greeting, before the messages of live collaboration.
+/// A member's role in the space.
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum Role {
+    Admin,
+    #[default]
+    Member,
+    /// Sees everything, changes nothing.
+    Reader,
+}
+
+impl Role {
+    pub fn key(self) -> &'static str {
+        match self {
+            Role::Admin => "admin",
+            Role::Member => "member",
+            Role::Reader => "reader",
+        }
+    }
+    pub fn from_key(k: &str) -> Option<Role> {
+        match k.trim() {
+            "admin" | "administrateur" => Some(Role::Admin),
+            "member" | "membre" => Some(Role::Member),
+            "reader" | "lecteur" => Some(Role::Reader),
+            _ => None,
+        }
+    }
+    pub fn label(self) -> &'static str {
+        match self {
+            Role::Admin => crate::tr!("administrateur", "administrator"),
+            Role::Member => crate::tr!("membre", "member"),
+            Role::Reader => crate::tr!("lecteur", "reader"),
+        }
+    }
+}
+
+/// The greeting, and the server's marks after it.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "t", rename_all = "snake_case")]
 pub enum Greeting {
     /// Server → app: sign this.
-    Challenge {
-        space: String,
-        nonce: String,
-    },
-    /// App → server: who I am, the signature, and an invitation for a first visit.
+    Challenge { space: String, nonce: String },
+    /// App → server: who I am, the signature, an invitation for a first visit, and the last
+    /// change number I have.
     Auth {
         key: String,
         name: String,
         sig: String,
         #[serde(default, skip_serializing_if = "String::is_empty")]
         invite: String,
+        #[serde(default)]
+        since: u64,
     },
-    /// Server → app: welcome, with what the space is.
+    /// Server → app: welcome, with what the space is and the member's role.
     Welcome {
         space: SpaceInfo,
         name: String,
+        #[serde(default)]
+        role: Role,
     },
-    Refused {
-        reason: String,
+    /// Server → app: not (or no longer) welcome.
+    Refused { reason: String },
+    /// Server → app: everything up to change `n` has been sent to you. `ack`: and the
+    /// message you sent last has been taken.
+    Seq {
+        n: u64,
+        #[serde(default)]
+        ack: bool,
     },
 }
 
@@ -99,6 +157,16 @@ pub fn parse_invitation(link: &str) -> Option<(String, String)> {
 
 // ------------------------------------------------------------------ the server's storage
 
+/// A member, as `orchestra equipe membres` lists them.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Member {
+    pub key: String,
+    pub name: String,
+    pub role: Role,
+    pub joined: u64,
+    pub revoked: bool,
+}
+
 /// The space on the server's disk.
 pub struct Db(Connection);
 
@@ -114,10 +182,19 @@ impl Db {
              CREATE TABLE IF NOT EXISTS invites (token TEXT PRIMARY KEY, role TEXT NOT NULL,
                  created INTEGER NOT NULL, used_by TEXT);
              CREATE TABLE IF NOT EXISTS pages (id TEXT PRIMARY KEY, json TEXT NOT NULL,
-                 updated INTEGER NOT NULL);
-             CREATE TABLE IF NOT EXISTS deleted (id TEXT PRIMARY KEY, at INTEGER NOT NULL);
-             CREATE TABLE IF NOT EXISTS chat (id TEXT PRIMARY KEY, json TEXT NOT NULL);",
+                 updated INTEGER NOT NULL, seq INTEGER NOT NULL DEFAULT 0);
+             CREATE TABLE IF NOT EXISTS deleted (id TEXT PRIMARY KEY, at INTEGER NOT NULL,
+                 seq INTEGER NOT NULL DEFAULT 0);
+             CREATE TABLE IF NOT EXISTS chat (id TEXT PRIMARY KEY, json TEXT NOT NULL,
+                 seq INTEGER NOT NULL DEFAULT 0);",
         )?;
+        // Spaces made before change numbers: add the column (0: sent to everyone once).
+        for t in ["pages", "deleted", "chat"] {
+            let _ = c.execute(
+                &format!("ALTER TABLE {t} ADD COLUMN seq INTEGER NOT NULL DEFAULT 0"),
+                [],
+            );
+        }
         let db = Db(c);
         if db.meta("id").is_none() {
             db.set_meta("id", &crate::model::new_id())?;
@@ -140,6 +217,17 @@ impl Db {
             params![k, v],
         )?;
         Ok(())
+    }
+
+    /// The number of the last change stored.
+    pub fn seq(&self) -> u64 {
+        self.meta("seq").and_then(|s| s.parse().ok()).unwrap_or(0)
+    }
+
+    fn next_seq(&self) -> u64 {
+        let n = self.seq() + 1;
+        let _ = self.set_meta("seq", &n.to_string());
+        n
     }
 
     pub fn info(&self) -> SpaceInfo {
@@ -174,29 +262,89 @@ impl Db {
             .unwrap_or(0) as usize
     }
 
-    /// A new one-time invitation (the first person to come in becomes the administrator,
-    /// whichever invitation they use: see `redeem`).
-    pub fn invite(&self) -> rusqlite::Result<String> {
+    /// Everyone who ever came in, revoked ones included.
+    pub fn member_list(&self) -> Vec<Member> {
+        let Ok(mut st) = self
+            .0
+            .prepare("SELECT key, name, role, joined, revoked FROM members ORDER BY joined")
+        else {
+            return vec![];
+        };
+        st.query_map([], |r| {
+            Ok(Member {
+                key: r.get(0)?,
+                name: r.get(1)?,
+                role: Role::from_key(&r.get::<_, String>(2)?).unwrap_or_default(),
+                joined: r.get::<_, i64>(3)? as u64,
+                revoked: r.get::<_, i64>(4)? != 0,
+            })
+        })
+        .map(|it| it.flatten().collect())
+        .unwrap_or_default()
+    }
+
+    /// The member `who` names: their whole key, the start of it (8 characters at least), or
+    /// their name when only one member has it.
+    pub fn find_member(&self, who: &str) -> Result<Member, String> {
+        let who = who.trim();
+        let all = self.member_list();
+        let by_key: Vec<&Member> = all
+            .iter()
+            .filter(|m| who.len() >= 8 && m.key.starts_with(who))
+            .collect();
+        let found: Vec<&Member> = if by_key.is_empty() {
+            all.iter().filter(|m| m.name == who).collect()
+        } else {
+            by_key
+        };
+        match found.as_slice() {
+            [m] => Ok((*m).clone()),
+            [] => Err(crate::trf!("aucun membre « {who} »", "no member « {who} »")),
+            _ => Err(crate::trf!(
+                "plusieurs membres « {who} » : donnez le début de la clé (orchestra equipe membres)",
+                "several members « {who} »: give the start of the key (orchestra equipe members)"
+            )),
+        }
+    }
+
+    /// Take `key` off the space (cut off within seconds if connected), or let it back in.
+    pub fn set_revoked(&self, key: &str, revoked: bool) -> rusqlite::Result<usize> {
+        self.0.execute(
+            "UPDATE members SET revoked = ?2 WHERE key = ?1",
+            params![key, revoked as i64],
+        )
+    }
+
+    pub fn set_role(&self, key: &str, role: Role) -> rusqlite::Result<usize> {
+        self.0.execute(
+            "UPDATE members SET role = ?2 WHERE key = ?1",
+            params![key, role.key()],
+        )
+    }
+
+    /// A new one-time invitation for `role` (the very first person to come in becomes the
+    /// administrator, whichever invitation they use: see `redeem`).
+    pub fn invite(&self, role: Role) -> rusqlite::Result<String> {
         let token = crate::identity::random_hex(16);
-        let role = "member";
         self.0.execute(
             "INSERT INTO invites (token, role, created) VALUES (?1, ?2, ?3)",
-            params![token, role, crate::model::now_ms() as i64],
+            params![token, role.key(), crate::model::now_ms() as i64],
         )?;
         Ok(token)
     }
 
-    /// The name a known, not revoked key goes by.
-    fn member(&self, key: &str) -> Option<String> {
+    /// The name and role a known, not revoked key goes by.
+    fn member(&self, key: &str) -> Option<(String, Role)> {
         self.0
             .query_row(
-                "SELECT name FROM members WHERE key = ?1 AND revoked = 0",
+                "SELECT name, role FROM members WHERE key = ?1 AND revoked = 0",
                 [key],
-                |r| r.get(0),
+                |r| Ok((r.get(0)?, r.get::<_, String>(1)?)),
             )
             .optional()
             .ok()
             .flatten()
+            .map(|(n, r)| (n, Role::from_key(&r).unwrap_or_default()))
     }
 
     fn revoked(&self, key: &str) -> bool {
@@ -210,9 +358,9 @@ impl Db {
             .is_some_and(|r| r != 0)
     }
 
-    /// Spend `token` to make `key` a member. False when it doesn't exist or was used.
-    fn redeem(&self, token: &str, key: &str, name: &str) -> bool {
-        let role: Option<String> = self
+    /// Spend `token` to make `key` a member. None when it doesn't exist or was used.
+    fn redeem(&self, token: &str, key: &str, name: &str) -> Option<Role> {
+        let role: String = self
             .0
             .query_row(
                 "SELECT role FROM invites WHERE token = ?1 AND used_by IS NULL",
@@ -221,12 +369,11 @@ impl Db {
             )
             .optional()
             .ok()
-            .flatten();
-        let Some(role) = role else { return false };
+            .flatten()?;
         let role = if self.members() == 0 {
-            "admin".to_string()
+            Role::Admin
         } else {
-            role
+            Role::from_key(&role).unwrap_or_default()
         };
         let used = self
             .0
@@ -235,15 +382,16 @@ impl Db {
                 params![token, key],
             )
             .unwrap_or(0);
-        used == 1
+        (used == 1
             && self
                 .0
                 .execute(
                     "INSERT INTO members (key, name, role, joined) VALUES (?1, ?2, ?3, ?4)
                      ON CONFLICT(key) DO NOTHING",
-                    params![key, name, role, crate::model::now_ms() as i64],
+                    params![key, name, role.key(), crate::model::now_ms() as i64],
                 )
-                .is_ok()
+                .is_ok())
+        .then_some(role)
     }
 
     fn page(&self, id: &str) -> Option<Page> {
@@ -256,27 +404,31 @@ impl Db {
         json.and_then(|j| serde_json::from_str(&j).ok())
     }
 
-    /// Everything, for whoever connects.
-    pub fn everything(&self) -> (Vec<Page>, BTreeMap<String, u64>, Vec<ChatMsg>) {
+    /// What changed after change `since` (everything with 0), for whoever connects.
+    pub fn since(&self, since: u64) -> (Vec<Page>, BTreeMap<String, u64>, Vec<ChatMsg>) {
         let rows = |sql: &str| -> Vec<String> {
             let Ok(mut st) = self.0.prepare(sql) else {
                 return vec![];
             };
-            st.query_map([], |r| r.get::<_, String>(0))
+            st.query_map([since as i64], |r| r.get::<_, String>(0))
                 .map(|it| it.flatten().collect())
                 .unwrap_or_default()
         };
-        let pages = rows("SELECT json FROM pages")
+        let pages = rows("SELECT json FROM pages WHERE seq > ?1 OR ?1 = 0")
             .iter()
             .filter_map(|j| serde_json::from_str(j).ok())
             .collect();
-        let chat = rows("SELECT json FROM chat")
+        let chat = rows("SELECT json FROM chat WHERE seq > ?1 OR ?1 = 0")
             .iter()
             .filter_map(|j| serde_json::from_str(j).ok())
             .collect();
         let mut deleted = BTreeMap::new();
-        if let Ok(mut st) = self.0.prepare("SELECT id, at FROM deleted")
-            && let Ok(it) = st.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)))
+        if let Ok(mut st) = self
+            .0
+            .prepare("SELECT id, at FROM deleted WHERE seq > ?1 OR ?1 = 0")
+            && let Ok(it) = st.query_map([since as i64], |r| {
+                Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?))
+            })
         {
             for (id, at) in it.flatten() {
                 deleted.insert(id, at as u64);
@@ -285,8 +437,14 @@ impl Db {
         (pages, deleted, chat)
     }
 
+    /// Everything.
+    #[cfg(test)]
+    pub fn everything(&self) -> (Vec<Page>, BTreeMap<String, u64>, Vec<ChatMsg>) {
+        self.since(0)
+    }
+
     /// Merge pages and deletions a member sent. Returns the pages as they now stand, and the
-    /// deletions that are news, to pass on.
+    /// deletions that are news, to pass on; each change stored gets the next number.
     pub fn absorb(
         &self,
         pages: Vec<Page>,
@@ -303,10 +461,11 @@ impl Db {
             if known.is_some_and(|k| k as u64 >= at) {
                 continue;
             }
+            let seq = self.next_seq();
             let _ = self.0.execute(
-                "INSERT INTO deleted (id, at) VALUES (?1, ?2)
-                 ON CONFLICT(id) DO UPDATE SET at = MAX(at, ?2)",
-                params![id, at as i64],
+                "INSERT INTO deleted (id, at, seq) VALUES (?1, ?2, ?3)
+                 ON CONFLICT(id) DO UPDATE SET at = MAX(at, ?2), seq = ?3",
+                params![id, at as i64, seq as i64],
             );
             // A page deleted for good, unless edited again after.
             let _ = self.0.execute(
@@ -337,13 +496,15 @@ impl Db {
                 }
                 None => p,
             };
+            let seq = self.next_seq();
             let _ = self.0.execute(
-                "INSERT INTO pages (id, json, updated) VALUES (?1, ?2, ?3)
-                 ON CONFLICT(id) DO UPDATE SET json = ?2, updated = ?3",
+                "INSERT INTO pages (id, json, updated, seq) VALUES (?1, ?2, ?3, ?4)
+                 ON CONFLICT(id) DO UPDATE SET json = ?2, updated = ?3, seq = ?4",
                 params![
                     merged.id,
                     serde_json::to_string(&merged).unwrap_or_default(),
-                    merged.updated as i64
+                    merged.updated as i64,
+                    seq as i64
                 ],
             );
             out.push(merged);
@@ -355,27 +516,44 @@ impl Db {
     pub fn absorb_chat(&self, msgs: Vec<ChatMsg>) -> Vec<ChatMsg> {
         msgs.into_iter()
             .filter(|m| {
-                !m.id.is_empty()
-                    && self
-                        .0
-                        .execute(
-                            "INSERT INTO chat (id, json) VALUES (?1, ?2) ON CONFLICT(id) DO NOTHING",
-                            params![m.id, serde_json::to_string(m).unwrap_or_default()],
-                        )
-                        .unwrap_or(0)
-                        == 1
+                if m.id.is_empty() {
+                    return false;
+                }
+                let known = self
+                    .0
+                    .query_row("SELECT 1 FROM chat WHERE id = ?1", [&m.id], |_| Ok(()))
+                    .optional()
+                    .ok()
+                    .flatten()
+                    .is_some();
+                if known {
+                    return false;
+                }
+                let seq = self.next_seq();
+                self.0
+                    .execute(
+                        "INSERT INTO chat (id, json, seq) VALUES (?1, ?2, ?3)",
+                        params![
+                            m.id,
+                            serde_json::to_string(m).unwrap_or_default(),
+                            seq as i64
+                        ],
+                    )
+                    .unwrap_or(0)
+                    == 1
             })
             .collect()
     }
 }
 
-/// Check a member's greeting; returns their name, or why not.
-fn admit(db: &Db, space: &str, nonce: &str, auth: &Greeting) -> Result<String, String> {
+/// Check a member's greeting; returns their name and role, or why not.
+fn admit(db: &Db, space: &str, nonce: &str, auth: &Greeting) -> Result<(String, Role), String> {
     let Greeting::Auth {
         key,
         name,
         sig,
         invite,
+        ..
     } = auth
     else {
         return Err(crate::tr!("salutation attendue", "greeting expected").into());
@@ -390,8 +568,8 @@ fn admit(db: &Db, space: &str, nonce: &str, auth: &Greeting) -> Result<String, S
         )
         .into());
     }
-    if let Some(n) = db.member(key) {
-        return Ok(n);
+    if let Some(m) = db.member(key) {
+        return Ok(m);
     }
     let name = name.trim().chars().take(60).collect::<String>();
     let name = if name.is_empty() {
@@ -399,8 +577,10 @@ fn admit(db: &Db, space: &str, nonce: &str, auth: &Greeting) -> Result<String, S
     } else {
         name
     };
-    if !invite.is_empty() && db.redeem(invite, key, &name) {
-        return Ok(name);
+    if !invite.is_empty()
+        && let Some(role) = db.redeem(invite, key, &name)
+    {
+        return Ok((name, role));
     }
     Err(crate::tr!(
         "invitation inconnue ou déjà utilisée",
@@ -418,15 +598,18 @@ struct Conn {
 
 type Conns = Arc<Mutex<Vec<Conn>>>;
 
-fn pass_on(conns: &Conns, from: u64, text: &str) {
+/// Queue `texts` for every connection but `from`, in order.
+fn pass_on(conns: &Conns, from: u64, texts: &[String]) {
     if let Ok(list) = conns.lock() {
         for c in list.iter().filter(|c| c.id != from) {
-            let _ = c.out.send(text.to_string());
+            for t in texts {
+                let _ = c.out.send(t.clone());
+            }
         }
     }
 }
 
-fn json(msg: &LiveMsg) -> String {
+fn json<T: Serialize>(msg: &T) -> String {
     serde_json::to_string(msg).unwrap_or_default()
 }
 
@@ -446,22 +629,31 @@ pub fn serve(dir: &std::path::Path, port: u16) -> Result<(), String> {
     let db = Arc::new(Mutex::new(Db::open(dir).map_err(|e| e.to_string())?));
     let listener = TcpListener::bind(("0.0.0.0", port)).map_err(|e| e.to_string())?;
     let conns: Conns = Arc::new(Mutex::new(vec![]));
+    let open = Arc::new(AtomicUsize::new(0));
     let next = AtomicU64::new(1);
     for stream in listener.incoming() {
         let Ok(stream) = stream else { continue };
-        if conns.lock().map(|c| c.len()).unwrap_or(0) >= MAX_CONNECTIONS {
+        // Counted from the first byte (a connection still greeting holds a thread too).
+        if open.load(Ordering::SeqCst) >= MAX_CONNECTIONS {
             continue;
         }
+        open.fetch_add(1, Ordering::SeqCst);
         let id = next.fetch_add(1, Ordering::SeqCst);
-        let (db, conns) = (db.clone(), conns.clone());
-        std::thread::spawn(move || {
-            if let Err(e) = serve_one(id, stream, &db, &conns) {
-                eprintln!("orchestra: connexion {id} : {e}");
-            }
-            if let Ok(mut l) = conns.lock() {
-                l.retain(|c| c.id != id);
-            }
-        });
+        let (db, conns, open2) = (db.clone(), conns.clone(), open.clone());
+        let spawned = std::thread::Builder::new()
+            .stack_size(THREAD_STACK)
+            .spawn(move || {
+                if let Err(e) = serve_one(id, stream, &db, &conns) {
+                    eprintln!("orchestra: connexion {id} : {e}");
+                }
+                if let Ok(mut l) = conns.lock() {
+                    l.retain(|c| c.id != id);
+                }
+                open2.fetch_sub(1, Ordering::SeqCst);
+            });
+        if spawned.is_err() {
+            open.fetch_sub(1, Ordering::SeqCst);
+        }
     }
     Ok(())
 }
@@ -482,12 +674,20 @@ fn serve_one(id: u64, stream: TcpStream, db: &Arc<Mutex<Db>>, conns: &Conns) -> 
         },
     )?;
     let auth: Greeting = read_json(&mut ws)?;
+    let since = match &auth {
+        Greeting::Auth { since, .. } => *since,
+        _ => 0,
+    };
+    let key = match &auth {
+        Greeting::Auth { key, .. } => key.clone(),
+        _ => String::new(),
+    };
     let admitted = {
         let d = db.lock().map_err(|e| e.to_string())?;
         admit(&d, &info.id, &nonce, &auth)
     };
-    let name = match admitted {
-        Ok(n) => n,
+    let (name, role) = match admitted {
+        Ok(m) => m,
         Err(reason) => {
             let _ = send_json(
                 &mut ws,
@@ -499,74 +699,131 @@ fn serve_one(id: u64, stream: TcpStream, db: &Arc<Mutex<Db>>, conns: &Conns) -> 
             return Err(reason);
         }
     };
-    eprintln!("+ {name}");
+    eprintln!("+ {name} ({})", role.label());
     send_json(
         &mut ws,
         &Greeting::Welcome {
             space: info,
             name: name.clone(),
+            role,
         },
     )?;
-    // Everything the space holds, then the others' news as it comes.
-    let (pages, deleted, chat) = db.lock().map_err(|e| e.to_string())?.everything();
-    ws.send(Message::text(json(&LiveMsg::Pages { pages, deleted })))
-        .map_err(|e| e.to_string())?;
-    ws.send(Message::text(json(&LiveMsg::Chat { msgs: chat })))
-        .map_err(|e| e.to_string())?;
+    // What came after the last change they have; then the others' news as it comes. Queued
+    // under the lock: nothing stored meanwhile can be numbered before and sent after.
     let (tx, rx) = channel::<String>();
-    if let Ok(mut l) = conns.lock() {
-        l.push(Conn { id, out: tx });
+    {
+        let d = db.lock().map_err(|e| e.to_string())?;
+        let (pages, deleted, chat) = d.since(since);
+        eprintln!(
+            "  {name} : {} page(s), {} suppression(s), {} message(s) après le changement {since}",
+            pages.len(),
+            deleted.len(),
+            chat.len()
+        );
+        let _ = tx.send(json(&LiveMsg::Pages { pages, deleted }));
+        let _ = tx.send(json(&LiveMsg::Chat { msgs: chat }));
+        let _ = tx.send(json(&Greeting::Seq {
+            n: d.seq(),
+            ack: false,
+        }));
+        if let Ok(mut l) = conns.lock() {
+            l.push(Conn {
+                id,
+                out: tx.clone(),
+            });
+        }
     }
     let _ = ws.get_mut().set_read_timeout(Some(TICK));
-    let result = pump(&mut ws, &rx, |text| {
-        let Ok(msg) = serde_json::from_str::<LiveMsg>(text) else {
-            return;
-        };
-        match msg {
-            LiveMsg::Pages { pages, deleted } => {
-                let Ok(d) = db.lock() else { return };
-                let (pages, deleted) = d.absorb(pages, deleted);
-                drop(d);
-                if !pages.is_empty() || !deleted.is_empty() {
-                    pass_on(conns, id, &json(&LiveMsg::Pages { pages, deleted }));
+    let mut checked = Instant::now();
+    let result = pump(
+        &mut ws,
+        &rx,
+        |text| {
+            let Ok(msg) = serde_json::from_str::<LiveMsg>(text) else {
+                return;
+            };
+            match msg {
+                LiveMsg::Pages { pages, deleted } => {
+                    let Ok(d) = db.lock() else { return };
+                    if role != Role::Reader {
+                        let (pages, deleted) = d.absorb(pages, deleted);
+                        if !pages.is_empty() || !deleted.is_empty() {
+                            let mark = json(&Greeting::Seq {
+                                n: d.seq(),
+                                ack: false,
+                            });
+                            pass_on(conns, id, &[json(&LiveMsg::Pages { pages, deleted }), mark]);
+                        }
+                    }
+                    let _ = tx.send(json(&Greeting::Seq {
+                        n: d.seq(),
+                        ack: true,
+                    }));
                 }
-            }
-            LiveMsg::Chat { msgs } => {
-                let Ok(d) = db.lock() else { return };
-                let msgs = d.absorb_chat(msgs);
-                drop(d);
-                if !msgs.is_empty() {
-                    pass_on(conns, id, &json(&LiveMsg::Chat { msgs }));
+                LiveMsg::Chat { msgs } => {
+                    let Ok(d) = db.lock() else { return };
+                    if role != Role::Reader {
+                        let msgs = d.absorb_chat(msgs);
+                        if !msgs.is_empty() {
+                            let mark = json(&Greeting::Seq {
+                                n: d.seq(),
+                                ack: false,
+                            });
+                            pass_on(conns, id, &[json(&LiveMsg::Chat { msgs }), mark]);
+                        }
+                    }
+                    let _ = tx.send(json(&Greeting::Seq {
+                        n: d.seq(),
+                        ack: true,
+                    }));
                 }
+                // Under the name the server knows, never the one a message claims.
+                LiveMsg::Presence {
+                    page, project, ai, ..
+                } => pass_on(
+                    conns,
+                    id,
+                    &[json(&LiveMsg::Presence {
+                        name: name.clone(),
+                        page,
+                        project,
+                        ai,
+                    })],
+                ),
+                _ => {}
             }
-            // Under the name the server knows, never the one a message claims.
-            LiveMsg::Presence {
-                page, project, ai, ..
-            } => pass_on(
-                conns,
-                id,
-                &json(&LiveMsg::Presence {
-                    name: name.clone(),
-                    page,
-                    project,
-                    ai,
-                }),
-            ),
-            _ => {}
-        }
-    });
+        },
+        || {
+            // Taken off the space meanwhile: cut off.
+            if checked.elapsed() < RECHECK {
+                return None;
+            }
+            checked = Instant::now();
+            let gone = db.lock().map(|d| d.member(&key).is_none()).unwrap_or(false);
+            gone.then(|| {
+                json(&Greeting::Refused {
+                    reason: crate::tr!(
+                        "votre accès à cet espace a été retiré",
+                        "your access to this space was removed"
+                    )
+                    .into(),
+                })
+            })
+        },
+    );
     eprintln!("- {name}");
-    pass_on(conns, id, &json(&LiveMsg::Bye { name }));
+    pass_on(conns, id, &[json(&LiveMsg::Bye { name })]);
     result
 }
 
-fn send_json<T: Serialize>(ws: &mut WebSocket<TcpStream>, v: &T) -> Result<(), String> {
-    ws.send(Message::text(serde_json::to_string(v).unwrap_or_default()))
-        .map_err(|e| e.to_string())
+fn send_json<S: Read + Write, T: Serialize>(ws: &mut WebSocket<S>, v: &T) -> Result<(), String> {
+    ws.send(Message::text(json(v))).map_err(|e| e.to_string())
 }
 
 /// The next text message, as `T` (blocking, within the socket's read timeout).
-fn read_json<T: for<'a> Deserialize<'a>>(ws: &mut WebSocket<TcpStream>) -> Result<T, String> {
+fn read_json<S: Read + Write, T: for<'a> Deserialize<'a>>(
+    ws: &mut WebSocket<S>,
+) -> Result<T, String> {
     loop {
         match ws.read().map_err(|e| e.to_string())? {
             Message::Text(t) => {
@@ -580,15 +837,22 @@ fn read_json<T: for<'a> Deserialize<'a>>(ws: &mut WebSocket<TcpStream>) -> Resul
     }
 }
 
-/// Until the connection ends: send what is queued in `rx`, hand each text received to `on`.
-fn pump(
-    ws: &mut WebSocket<TcpStream>,
+/// Until the connection ends: send what is queued in `rx`, hand each text received to `on`;
+/// `cut` may end it with a last message.
+fn pump<S: Read + Write>(
+    ws: &mut WebSocket<S>,
     rx: &Receiver<String>,
     mut on: impl FnMut(&str),
+    mut cut: impl FnMut() -> Option<String>,
 ) -> Result<(), String> {
     loop {
         while let Ok(text) = rx.try_recv() {
             ws.send(Message::text(text)).map_err(|e| e.to_string())?;
+        }
+        if let Some(last) = cut() {
+            let _ = ws.send(Message::text(last));
+            let _ = ws.close(None);
+            return Ok(());
         }
         match ws.read() {
             Ok(Message::Text(t)) => on(t.as_str()),
@@ -603,34 +867,108 @@ fn pump(
 
 // ------------------------------------------------------------------ the app's side
 
-/// `ws://host:port[/path]` → ("host:port", the URL).
-fn host_port(url: &str) -> Option<String> {
-    let rest = url.strip_prefix("ws://")?;
-    let host = rest.split('/').next()?.trim();
-    if host.is_empty() {
+/// The connection under the WebSocket: plain (`ws://`) or TLS (`wss://`).
+enum Net {
+    Plain(TcpStream),
+    Tls(Box<rustls::StreamOwned<rustls::ClientConnection, TcpStream>>),
+}
+
+impl Read for Net {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        match self {
+            Net::Plain(s) => s.read(buf),
+            Net::Tls(s) => s.read(buf),
+        }
+    }
+}
+
+impl Write for Net {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        match self {
+            Net::Plain(s) => s.write(buf),
+            Net::Tls(s) => s.write(buf),
+        }
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        match self {
+            Net::Plain(s) => s.flush(),
+            Net::Tls(s) => s.flush(),
+        }
+    }
+}
+
+/// The TLS settings: the usual certificate authorities (those of the Mozilla list).
+fn tls_config() -> Arc<rustls::ClientConfig> {
+    static CONFIG: std::sync::OnceLock<Arc<rustls::ClientConfig>> = std::sync::OnceLock::new();
+    CONFIG
+        .get_or_init(|| {
+            let mut roots = rustls::RootCertStore {
+                roots: webpki_roots::TLS_SERVER_ROOTS.to_vec(),
+            };
+            // A company's own certificate authority (PEM file), for a server whose
+            // certificate it signed.
+            if let Ok(path) = std::env::var("ORCHESTRA_CA")
+                && !path.trim().is_empty()
+            {
+                use rustls::pki_types::pem::PemObject;
+                match rustls::pki_types::CertificateDer::pem_file_iter(path.trim()) {
+                    Ok(certs) => {
+                        for c in certs.flatten() {
+                            let _ = roots.add(c);
+                        }
+                    }
+                    Err(e) => eprintln!("orchestra: ORCHESTRA_CA illisible : {e}"),
+                }
+            }
+            let provider = Arc::new(rustls::crypto::ring::default_provider());
+            Arc::new(
+                rustls::ClientConfig::builder_with_provider(provider)
+                    .with_safe_default_protocol_versions()
+                    .expect("TLS versions")
+                    .with_root_certificates(roots)
+                    .with_no_client_auth(),
+            )
+        })
+        .clone()
+}
+
+/// `ws://host:port/…` or `wss://host/…` → (host, port, TLS or not).
+fn endpoint(url: &str) -> Option<(String, u16, bool)> {
+    let (rest, tls) = if let Some(r) = url.strip_prefix("wss://") {
+        (r, true)
+    } else {
+        (url.strip_prefix("ws://")?, false)
+    };
+    let hostport = rest.split('/').next()?.trim();
+    if hostport.is_empty() {
         return None;
     }
-    Some(
-        if host
-            .rsplit_once(':')
-            .is_some_and(|(_, p)| p.parse::<u16>().is_ok())
-        {
-            host.to_string()
-        } else {
-            format!("{host}:{DEFAULT_PORT}")
-        },
-    )
+    let default = if tls { 443 } else { DEFAULT_PORT };
+    // An IPv6 address in brackets: [::1]:7879.
+    if let Some(r) = hostport.strip_prefix('[') {
+        let (h, after) = r.split_once(']')?;
+        let port = after
+            .strip_prefix(':')
+            .map(|p| p.parse().ok())
+            .unwrap_or(Some(default))?;
+        return Some((h.to_string(), port, tls));
+    }
+    match hostport.rsplit_once(':') {
+        Some((h, p)) => Some((h.to_string(), p.parse().ok()?, tls)),
+        None => Some((hostport.to_string(), default, tls)),
+    }
 }
 
 /// Connect to the team server of space `space_id` (its local id) at `url`, as this computer's
-/// identity, with `invite` on a first visit. Retries every 3 s after losing the connection;
-/// stops for good when the server refuses. What the server says of its space (name, AI rule)
-/// goes into the list of spaces.
+/// identity, with `invite` on a first visit, asking for what came after change `since`.
+/// Retries every 3 s after losing the connection; stops for good when the server refuses.
+/// What the server says of its space (name, AI rule, role) goes into the list of spaces.
 pub fn connect(
     space_id: &str,
     url: &str,
     invite: &str,
     name: &str,
+    since: u64,
     wake: live::Wake,
 ) -> live::Live {
     let (tx, inbox) = channel::<LiveMsg>();
@@ -644,35 +982,42 @@ pub fn connect(
         let (stop, status, outbox) = (stop.clone(), status.clone(), outbox.clone());
         let (space_id, url, name) = (space_id.to_string(), url.to_string(), name.to_string());
         let mut invite = invite.to_string();
+        let mut since = since;
+        let mut last: Option<String> = None;
         std::thread::spawn(move || {
             while !stop.load(Ordering::SeqCst) {
-                let refused = match session(
-                    &url, &invite, &name, &space_id, &tx, &outbox, &status, &stop, &wake,
-                ) {
-                    Ok(()) => false,
-                    Err((reason, refused)) => {
-                        if refused {
-                            stop.store(true, Ordering::SeqCst);
-                        }
-                        if let Ok(mut st) = status.lock() {
-                            st.connected = false;
-                            st.error = Some(reason.clone());
-                        }
-                        let _ = tx.send(LiveMsg::Disconnected { reason });
-                        wake();
-                        refused
-                    }
+                let mut s = Session {
+                    url: &url,
+                    invite: &mut invite,
+                    name: &name,
+                    space_id: &space_id,
+                    since: &mut since,
+                    tx: &tx,
+                    outbox: &outbox,
+                    status: &status,
+                    stop: &stop,
+                    wake: &wake,
                 };
+                if let Err((reason, refused)) = s.run() {
+                    if refused {
+                        stop.store(true, Ordering::SeqCst);
+                    }
+                    // Said once: not again at each attempt while the server stays out of reach.
+                    let was_in = status.lock().map(|st| st.connected).unwrap_or(false);
+                    let news = was_in || refused || last.as_deref() != Some(reason.as_str());
+                    if let Ok(mut st) = status.lock() {
+                        st.connected = false;
+                        st.error = Some(reason.clone());
+                    }
+                    if news {
+                        let _ = tx.send(LiveMsg::Disconnected {
+                            reason: reason.clone(),
+                        });
+                        wake();
+                    }
+                    last = Some(reason);
+                }
                 *outbox.lock().unwrap_or_else(|e| e.into_inner()) = None;
-                if refused {
-                    stop.store(true, Ordering::SeqCst);
-                    wake();
-                    break;
-                }
-                // Once in, the invitation is spent: later visits go by the key alone.
-                if status.lock().map(|s| s.peers > 0).unwrap_or(false) {
-                    invite.clear();
-                }
                 for _ in 0..30 {
                     if stop.load(Ordering::SeqCst) {
                         break;
@@ -691,144 +1036,174 @@ pub fn connect(
     live::Live::from_parts(inbox, out, status, stop)
 }
 
-/// One connection, from the greeting to its end. Err((why, refused by the server)).
-#[allow(clippy::too_many_arguments)]
-fn session(
-    url: &str,
-    invite: &str,
-    name: &str,
-    space_id: &str,
-    tx: &Sender<LiveMsg>,
-    outbox: &Arc<Mutex<Option<Sender<String>>>>,
-    status: &Arc<Mutex<Status>>,
-    stop: &Arc<AtomicBool>,
-    wake: &live::Wake,
-) -> Result<(), (String, bool)> {
-    let net = |e: String| {
-        (
-            crate::trf!("connexion impossible : {e}", "connection failed: {e}"),
-            false,
-        )
-    };
-    if url.starts_with("wss://") {
-        return Err((
-            crate::tr!(
-                "les adresses wss:// (HTTPS) arrivent bientôt ; utilisez ws:// sur un réseau privé",
-                "wss:// (HTTPS) addresses are coming soon; use ws:// on a private network"
-            )
-            .into(),
-            true,
-        ));
-    }
-    let target = host_port(url).ok_or_else(|| {
-        (
-            crate::tr!("adresse invalide", "invalid address").to_string(),
-            true,
-        )
-    })?;
-    let addr = std::net::ToSocketAddrs::to_socket_addrs(&target)
-        .map_err(|e| net(e.to_string()))?
-        .next()
-        .ok_or_else(|| net(crate::tr!("adresse introuvable", "address not found").into()))?;
-    let stream = TcpStream::connect_timeout(&addr, Duration::from_secs(5))
-        .map_err(|e| net(e.to_string()))?;
-    let _ = stream.set_nodelay(true);
-    let _ = stream.set_read_timeout(Some(Duration::from_secs(10)));
-    let _ = stream.set_write_timeout(Some(Duration::from_secs(10)));
-    let (mut ws, _) = tungstenite::client::client_with_config(url, stream, Some(ws_config()))
-        .map_err(|e| net(e.to_string()))?;
-    let key = crate::identity::key().map_err(|e| (e, true))?;
-    let (server_space, nonce) = match read_json::<Greeting>(&mut ws).map_err(net)? {
-        Greeting::Challenge { space, nonce } => (space, nonce),
-        _ => {
-            return Err(net(
-                crate::tr!("serveur inattendu", "unexpected server").into()
-            ));
-        }
-    };
-    send_json(
-        &mut ws,
-        &Greeting::Auth {
-            key: crate::identity::public_hex(&key),
-            name: name.to_string(),
-            sig: crate::identity::sign_hex(&key, &to_sign(&server_space, &nonce)),
-            invite: invite.to_string(),
-        },
-    )
-    .map_err(net)?;
-    let info = match read_json::<Greeting>(&mut ws).map_err(net)? {
-        Greeting::Welcome { space, .. } => space,
-        Greeting::Refused { reason } => return Err((reason, true)),
-        _ => {
-            return Err(net(
-                crate::tr!("serveur inattendu", "unexpected server").into()
-            ));
-        }
-    };
-    remember(space_id, &info);
-    let (otx, orx) = channel::<String>();
-    *outbox.lock().unwrap_or_else(|e| e.into_inner()) = Some(otx);
-    if let Ok(mut st) = status.lock() {
-        st.connected = true;
-        st.error = None;
-        st.peers = 1; // in: the invitation is spent
-    }
-    let _ = tx.send(LiveMsg::Connected);
-    wake();
-    let _ = ws.get_mut().set_read_timeout(Some(TICK));
-    let mut stopped = false;
-    let r = pump_until(&mut ws, &orx, stop, &mut stopped, |text| {
-        if let Ok(msg) = serde_json::from_str::<LiveMsg>(text) {
-            let _ = tx.send(msg);
-            wake();
-        }
-    });
-    if stopped {
-        let _ = ws.close(None);
-        return Ok(());
-    }
-    Err((
-        r.err()
-            .unwrap_or_else(|| crate::tr!("connexion perdue", "connection lost").into()),
-        false,
-    ))
+/// One connection, from the greeting to its end.
+struct Session<'a> {
+    url: &'a str,
+    invite: &'a mut String,
+    name: &'a str,
+    space_id: &'a str,
+    since: &'a mut u64,
+    tx: &'a Sender<LiveMsg>,
+    outbox: &'a Arc<Mutex<Option<Sender<String>>>>,
+    status: &'a Arc<Mutex<Status>>,
+    stop: &'a Arc<AtomicBool>,
+    wake: &'a live::Wake,
 }
 
-/// `pump`, also ending when `stop` is set.
-fn pump_until(
-    ws: &mut WebSocket<TcpStream>,
-    rx: &Receiver<String>,
-    stop: &AtomicBool,
-    stopped: &mut bool,
-    mut on: impl FnMut(&str),
-) -> Result<(), String> {
-    loop {
-        if stop.load(Ordering::SeqCst) {
-            *stopped = true;
+impl Session<'_> {
+    /// Err((why, refused by the server: no new attempt)).
+    fn run(&mut self) -> Result<(), (String, bool)> {
+        let net = |e: String| {
+            (
+                crate::trf!("connexion impossible : {e}", "connection failed: {e}"),
+                false,
+            )
+        };
+        let (host, port, tls) = endpoint(self.url).ok_or_else(|| {
+            (
+                crate::tr!("adresse invalide", "invalid address").to_string(),
+                true,
+            )
+        })?;
+        // Each address the name gives, in turn (« localhost »: IPv6 first, the server may
+        // listen on IPv4 only).
+        let addrs: Vec<_> = std::net::ToSocketAddrs::to_socket_addrs(&(host.as_str(), port))
+            .map_err(|e| net(e.to_string()))?
+            .collect();
+        let mut last = crate::tr!("adresse introuvable", "address not found").to_string();
+        let mut tcp = None;
+        for a in &addrs {
+            match TcpStream::connect_timeout(a, Duration::from_secs(5)) {
+                Ok(s) => {
+                    tcp = Some(s);
+                    break;
+                }
+                Err(e) => last = e.to_string(),
+            }
+        }
+        let tcp = tcp.ok_or_else(|| net(last))?;
+        let _ = tcp.set_nodelay(true);
+        let _ = tcp.set_read_timeout(Some(Duration::from_secs(10)));
+        let _ = tcp.set_write_timeout(Some(Duration::from_secs(10)));
+        // Kept to change the read timeout once greeted (the WebSocket owns the stream).
+        let raw = tcp.try_clone().map_err(|e| net(e.to_string()))?;
+        let stream = if tls {
+            let server = rustls::pki_types::ServerName::try_from(host.clone())
+                .map_err(|e| net(e.to_string()))?;
+            let conn = rustls::ClientConnection::new(tls_config(), server)
+                .map_err(|e| net(e.to_string()))?;
+            Net::Tls(Box::new(rustls::StreamOwned::new(conn, tcp)))
+        } else {
+            Net::Plain(tcp)
+        };
+        let (mut ws, _) =
+            tungstenite::client::client_with_config(self.url, stream, Some(ws_config()))
+                .map_err(|e| {
+                    let e = e.to_string();
+                    // A certificate the app doesn't trust: trying again won't change it.
+                    if e.contains("certificate") {
+                        (
+                            crate::trf!(
+                                "certificat du serveur non reconnu ({e}). Si votre entreprise a sa propre autorité de certification, indiquez son fichier avec ORCHESTRA_CA.",
+                                "server certificate not trusted ({e}). If your company has its own certificate authority, give its file with ORCHESTRA_CA."
+                            ),
+                            true,
+                        )
+                    } else {
+                        net(e)
+                    }
+                })?;
+        let key = crate::identity::key().map_err(|e| (e, true))?;
+        let (server_space, nonce) = match read_json::<_, Greeting>(&mut ws).map_err(net)? {
+            Greeting::Challenge { space, nonce } => (space, nonce),
+            _ => {
+                return Err(net(
+                    crate::tr!("serveur inattendu", "unexpected server").into()
+                ));
+            }
+        };
+        send_json(
+            &mut ws,
+            &Greeting::Auth {
+                key: crate::identity::public_hex(&key),
+                name: self.name.to_string(),
+                sig: crate::identity::sign_hex(&key, &to_sign(&server_space, &nonce)),
+                invite: self.invite.clone(),
+                since: *self.since,
+            },
+        )
+        .map_err(net)?;
+        let (info, role) = match read_json::<_, Greeting>(&mut ws).map_err(net)? {
+            Greeting::Welcome { space, role, .. } => (space, role),
+            Greeting::Refused { reason } => return Err((reason, true)),
+            _ => {
+                return Err(net(
+                    crate::tr!("serveur inattendu", "unexpected server").into()
+                ));
+            }
+        };
+        // In: the invitation is spent; later visits go by the key alone.
+        self.invite.clear();
+        remember(self.space_id, &info, role);
+        let (otx, orx) = channel::<String>();
+        *self.outbox.lock().unwrap_or_else(|e| e.into_inner()) = Some(otx);
+        if let Ok(mut st) = self.status.lock() {
+            st.connected = true;
+            st.error = None;
+        }
+        let _ = self.tx.send(LiveMsg::Connected);
+        (self.wake)();
+        let _ = raw.set_read_timeout(Some(TICK));
+        let mut refused: Option<String> = None;
+        let mut stopped = false;
+        let (tx, wake, stop) = (self.tx, self.wake, self.stop);
+        let since = &mut *self.since;
+        let r = pump(
+            &mut ws,
+            &orx,
+            |text| {
+                if let Ok(msg) = serde_json::from_str::<LiveMsg>(text) {
+                    let _ = tx.send(msg);
+                    wake();
+                    return;
+                }
+                match serde_json::from_str::<Greeting>(text) {
+                    Ok(Greeting::Seq { n, ack }) => {
+                        *since = (*since).max(n);
+                        let _ = tx.send(LiveMsg::Synced { seq: n, ack });
+                        wake();
+                    }
+                    Ok(Greeting::Refused { reason }) => refused = Some(reason),
+                    _ => {}
+                }
+            },
+            || {
+                if stop.load(Ordering::SeqCst) {
+                    stopped = true;
+                    return Some(json(&LiveMsg::Bye {
+                        name: String::new(),
+                    }));
+                }
+                None
+            },
+        );
+        if let Some(reason) = refused {
+            return Err((reason, true));
+        }
+        if stopped {
             return Ok(());
         }
-        while let Ok(text) = rx.try_recv() {
-            ws.send(Message::text(text)).map_err(|e| e.to_string())?;
-        }
-        match ws.read() {
-            Ok(Message::Text(t)) => on(t.as_str()),
-            Ok(Message::Close(_)) => {
-                return Err(crate::tr!(
-                    "le serveur a fermé la connexion",
-                    "the server closed the connection"
-                )
-                .into());
-            }
-            Ok(_) => {}
-            Err(e) if idle(&e) => {}
-            Err(e) => return Err(e.to_string()),
-        }
+        Err((
+            r.err()
+                .unwrap_or_else(|| crate::tr!("connexion perdue", "connection lost").into()),
+            false,
+        ))
     }
 }
 
-/// What the server says of its space goes into the list: its name, its AI rule. The
-/// invitation is spent.
-fn remember(space_id: &str, info: &SpaceInfo) {
+/// What the server says of its space goes into the list: its name, its AI rule, the role
+/// given here. The invitation is spent.
+fn remember(space_id: &str, info: &SpaceInfo, role: Role) {
     let mut list = crate::space::load();
     if let Some(s) = list.spaces.iter_mut().find(|s| s.id == space_id) {
         if !info.name.trim().is_empty() {
@@ -836,6 +1211,7 @@ fn remember(space_id: &str, info: &SpaceInfo) {
         }
         s.ai_rule = info.ai_rule;
         s.allowed_ai = info.allowed_ai.clone();
+        s.role = role.key().to_string();
         if let crate::space::SpaceKind::Server { invite, .. } = &mut s.kind {
             invite.clear();
         }
@@ -848,7 +1224,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn invitation_links() {
+    fn invitation_links_and_addresses() {
         let t = "0123456789abcdef0123456789abcdef";
         assert_eq!(
             parse_invitation(&format!("ws://192.168.1.20:7879/?invitation={t}")),
@@ -862,13 +1238,26 @@ mod tests {
         assert_eq!(parse_invitation(&format!("http://x/?invitation={t}")), None);
         assert_eq!(parse_invitation("ws://x/"), None);
         assert_eq!(
-            host_port("ws://machine/"),
-            Some(format!("machine:{DEFAULT_PORT}"))
+            endpoint("ws://machine/"),
+            Some(("machine".into(), DEFAULT_PORT, false))
         );
         assert_eq!(
-            host_port("ws://10.0.0.2:9000"),
-            Some("10.0.0.2:9000".into())
+            endpoint("ws://10.0.0.2:9000"),
+            Some(("10.0.0.2".into(), 9000, false))
         );
+        assert_eq!(
+            endpoint("wss://equipe.example/orchestra"),
+            Some(("equipe.example".into(), 443, true))
+        );
+        assert_eq!(
+            endpoint("wss://equipe.example:8443"),
+            Some(("equipe.example".into(), 8443, true))
+        );
+        assert_eq!(
+            endpoint("ws://[::1]:7000/"),
+            Some(("::1".into(), 7000, false))
+        );
+        assert_eq!(endpoint("http://x"), None);
     }
 
     fn db() -> Db {
@@ -882,6 +1271,7 @@ mod tests {
             name: "Ana".into(),
             sig: crate::identity::sign_hex(k, &to_sign(space, nonce)),
             invite: invite.into(),
+            since: 0,
         }
     }
 
@@ -893,23 +1283,48 @@ mod tests {
         let bob = ed25519_dalek::SigningKey::from_bytes(&[2u8; 32]);
         // Unknown, no invitation.
         assert!(admit(&d, &space, "n1", &auth(&ana, &space, "n1", "")).is_err());
-        let inv = d.invite().unwrap();
+        let inv = d.invite(Role::Member).unwrap();
         // A signature for another challenge, or another space, is worth nothing.
         assert!(admit(&d, &space, "n2", &auth(&ana, &space, "n1", &inv)).is_err());
         assert!(admit(&d, &space, "n2", &auth(&ana, "autre", "n2", &inv)).is_err());
+        // The first one in is the administrator.
         assert_eq!(
             admit(&d, &space, "n3", &auth(&ana, &space, "n3", &inv)),
-            Ok("Ana".into())
+            Ok(("Ana".into(), Role::Admin))
         );
         // Spent: Bob can't use it; Ana comes back without it.
         assert!(admit(&d, &space, "n4", &auth(&bob, &space, "n4", &inv)).is_err());
+        assert!(admit(&d, &space, "n5", &auth(&ana, &space, "n5", "")).is_ok());
+        // A reader's invitation makes a reader.
+        let read = d.invite(Role::Reader).unwrap();
         assert_eq!(
-            admit(&d, &space, "n5", &auth(&ana, &space, "n5", "")),
-            Ok("Ana".into())
+            admit(&d, &space, "n6", &auth(&bob, &space, "n6", &read)).map(|m| m.1),
+            Ok(Role::Reader)
         );
-        // Revoked.
-        d.0.execute("UPDATE members SET revoked = 1", []).unwrap();
-        assert!(admit(&d, &space, "n6", &auth(&ana, &space, "n6", "")).is_err());
+        // Taken off: refused.
+        let ana_key = crate::identity::public_hex(&ana);
+        d.set_revoked(&ana_key, true).unwrap();
+        assert!(admit(&d, &space, "n7", &auth(&ana, &space, "n7", "")).is_err());
+        assert_eq!(d.members(), 1);
+    }
+
+    #[test]
+    fn members_are_found_by_name_or_key() {
+        let d = db();
+        let space = d.info().id;
+        let ana = ed25519_dalek::SigningKey::from_bytes(&[1u8; 32]);
+        let inv = d.invite(Role::Member).unwrap();
+        admit(&d, &space, "n", &auth(&ana, &space, "n", &inv)).unwrap();
+        let key = crate::identity::public_hex(&ana);
+        assert_eq!(d.find_member("Ana").unwrap().key, key);
+        assert_eq!(d.find_member(&key[..10]).unwrap().name, "Ana");
+        assert!(d.find_member("Bob").is_err());
+        assert!(
+            d.find_member(&key[..4]).is_err(),
+            "too short a start of key"
+        );
+        d.set_role(&key, Role::Reader).unwrap();
+        assert_eq!(d.find_member("Ana").unwrap().role, Role::Reader);
     }
 
     #[test]
@@ -941,5 +1356,39 @@ mod tests {
         assert_eq!(gone, del);
         assert!(d.everything().0.is_empty());
         assert!(d.absorb(vec![p], BTreeMap::new()).0.is_empty());
+    }
+
+    #[test]
+    fn a_member_coming_back_gets_only_what_came_after() {
+        let d = db();
+        let page = |t: &str, at: u64| {
+            let mut p = Page::new(t, None);
+            p.updated = at;
+            p
+        };
+        d.absorb(vec![page("Un", 1), page("Deux", 2)], BTreeMap::new());
+        let seen = d.seq();
+        assert_eq!(seen, 2);
+        d.absorb(vec![page("Trois", 3)], BTreeMap::new());
+        let msg = ChatMsg {
+            id: "m1".into(),
+            project: "p".into(),
+            author: "Ana".into(),
+            text: "salut".into(),
+            at: 4,
+        };
+        assert_eq!(d.absorb_chat(vec![msg.clone()]).len(), 1);
+        assert!(
+            d.absorb_chat(vec![msg]).is_empty(),
+            "a message is stored once"
+        );
+        let (pages, _, chat) = d.since(seen);
+        assert_eq!(
+            pages.iter().map(|p| p.title.as_str()).collect::<Vec<_>>(),
+            ["Trois"]
+        );
+        assert_eq!(chat.len(), 1);
+        assert_eq!(d.since(d.seq()).0.len(), 0);
+        assert_eq!(d.since(0).0.len(), 3);
     }
 }

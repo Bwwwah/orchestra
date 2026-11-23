@@ -59,6 +59,13 @@ pub enum LiveMsg {
     },
     /// Local only: the connection is (re)established; send everything.
     Connected,
+    /// Local only (a team server, team.rs): everything up to change `seq` has arrived;
+    /// `ack`: the last message sent was taken.
+    Synced {
+        seq: u64,
+        #[serde(default)]
+        ack: bool,
+    },
     /// Local only: the connection dropped (the joiner retries on its own).
     Disconnected {
         reason: String,
@@ -457,7 +464,10 @@ fn serve_peer(
         };
         if matches!(
             msg,
-            LiveMsg::Connected | LiveMsg::Disconnected { .. } | LiveMsg::Hello { .. }
+            LiveMsg::Connected
+                | LiveMsg::Disconnected { .. }
+                | LiveMsg::Hello { .. }
+                | LiveMsg::Synced { .. }
         ) {
             continue;
         }

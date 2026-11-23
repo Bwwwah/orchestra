@@ -162,9 +162,11 @@ impl NotesApp {
             url,
             invite,
             &self.my_name(),
+            self.ws.server_seq,
             wake,
         ));
         self.live_sent.clear();
+        self.team_marks.clear();
         self.peers.clear();
     }
 
@@ -378,6 +380,17 @@ impl NotesApp {
                 None => crate::trf!("Non relié à {url}", "Not connected to {url}"),
             };
             ui.label(RichText::new(line).size(11.5).color(t.tertiary));
+            if let Some(role) = crate::team::Role::from_key(&cur.role) {
+                ui.label(
+                    RichText::new(crate::trf!(
+                        "Votre rôle : {}",
+                        "Your role: {}",
+                        role.label()
+                    ))
+                    .size(11.5)
+                    .color(t.tertiary),
+                );
+            }
             if self.live.as_ref().is_none_or(|l| l.stopped())
                 && ui
                     .button(crate::tr!("Se reconnecter", "Reconnect"))

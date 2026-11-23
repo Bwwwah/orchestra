@@ -23,6 +23,8 @@ vt100 = "0.18"
 ed25519-dalek = "2"
 getrandom = "0.2"
 tungstenite = { version = "0.30.0", default-features = false, features = ["handshake"] }
+rustls = { version = "0.23.46", default-features = false, features = ["ring", "std", "tls12"] }
+webpki-roots = "1.0.12"
 
 [dev-dependencies]
 egui_kittest = "0.37"

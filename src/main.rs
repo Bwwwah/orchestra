@@ -68,7 +68,11 @@ Utilisation :
   orchestra import <fichier.md>  importe un fichier Markdown comme page
   orchestra serveur [port] [code]  point de rencontre en direct, sans fenêtre (port 7878 par défaut)
   orchestra equipe [port]   serveur d'équipe : un espace partagé par ses membres (port 7879)
-  orchestra equipe inviter [ws://adresse:port]  une invitation à usage unique
+  orchestra equipe inviter [ws://adresse:port] [lecteur]  une invitation à usage unique
+  orchestra equipe membres  les membres, leur rôle, leur clé
+  orchestra equipe retirer <nom|clé>  retire un membre (coupé dans les secondes qui suivent)
+  orchestra equipe reintegrer <nom|clé>  lui rend l'accès
+  orchestra equipe role <nom|clé> <admin|membre|lecteur>
   orchestra equipe nom <nom>  le nom de l'espace
   orchestra equipe ia <libres|espace|aucune> [ia…]  les IA autorisées dans l'espace
   orchestra aide            cette aide
@@ -281,8 +285,8 @@ fn run_team(args: &[String]) -> i32 {
             return 1;
         }
     };
-    let link = |base: &str| -> i32 {
-        match db.invite() {
+    let link = |base: &str, role: team::Role| -> i32 {
+        match db.invite(role) {
             Ok(t) => {
                 println!("{}/?invitation={t}", base.trim_end_matches('/'));
                 0
@@ -296,8 +300,59 @@ fn run_team(args: &[String]) -> i32 {
     let here = |port: u16| format!("ws://{}:{port}", live::local_ip());
     match args.first().map(String::as_str) {
         Some("inviter") | Some("invite") => {
-            let base = args.get(1).cloned().unwrap_or_else(|| here(team::DEFAULT_PORT));
-            link(&base)
+            let rest = args.get(1..).unwrap_or(&[]);
+            let role = rest
+                .iter()
+                .find_map(|a| team::Role::from_key(a))
+                .unwrap_or(team::Role::Member);
+            let base = rest
+                .iter()
+                .find(|a| a.starts_with("ws://") || a.starts_with("wss://"))
+                .cloned()
+                .unwrap_or_else(|| here(team::DEFAULT_PORT));
+            link(&base, role)
+        }
+        Some("membres") | Some("members") => {
+            for m in db.member_list() {
+                println!(
+                    "{}  {}  {}{}",
+                    &m.key[..16.min(m.key.len())],
+                    m.name,
+                    m.role.label(),
+                    if m.revoked { "  (retiré)" } else { "" }
+                );
+            }
+            0
+        }
+        Some(cmd @ ("retirer" | "remove" | "reintegrer" | "restore" | "role")) => {
+            let Some(who) = args.get(1) else {
+                return usage("indiquez le nom ou le début de la clé du membre");
+            };
+            let m = match db.find_member(who) {
+                Ok(m) => m,
+                Err(e) => {
+                    eprintln!("orchestra: {e}");
+                    return 1;
+                }
+            };
+            let done = match cmd {
+                "retirer" | "remove" => db.set_revoked(&m.key, true),
+                "reintegrer" | "restore" => db.set_revoked(&m.key, false),
+                _ => match args.get(2).and_then(|r| team::Role::from_key(r)) {
+                    Some(r) => db.set_role(&m.key, r),
+                    None => return usage("role : admin, membre ou lecteur"),
+                },
+            };
+            match done {
+                Ok(_) => {
+                    println!("{} : fait", m.name);
+                    0
+                }
+                Err(e) => {
+                    eprintln!("orchestra: {e}");
+                    1
+                }
+            }
         }
         Some("nom") | Some("name") => match args.get(1..).map(|a| a.join(" ")) {
             Some(n) if !n.trim().is_empty() => match db.set_meta("name", n.trim()) {
@@ -334,14 +389,14 @@ fn run_team(args: &[String]) -> i32 {
             println!("Données : {}", dir.display());
             if db.members() == 0 {
                 print!("Première invitation (elle fera de vous l'administrateur) : ");
-                if link(&here(port)) != 0 {
+                if link(&here(port), team::Role::Member) != 0 {
                     return 1;
                 }
             } else {
                 println!("{} membre(s). Nouvelle invitation : orchestra equipe inviter", db.members());
             }
             println!(
-                "Sans chiffrement propre : sur Internet, derrière un proxy HTTPS ; sinon, réseau privé (Tailscale, WireGuard…)."
+                "Sur Internet : derrière un proxy HTTPS (Caddy, Traefik…), invitations en wss://votre-domaine ; sinon, réseau privé (Tailscale, WireGuard…)."
             );
             drop(db);
             match team::serve(&dir, port) {
