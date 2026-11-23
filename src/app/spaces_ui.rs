@@ -91,6 +91,7 @@ impl NotesApp {
         ws.settings = settings;
         // A team space: all its pages are the team's (a new one too, made empty here).
         ws.whole_shared = space::current().server().is_some();
+        crate::collab::give_documents(&mut ws, None, true);
         self.ws = ws;
         self.known_mtime = store::modified(&path);
         spaces.active = id.to_string();

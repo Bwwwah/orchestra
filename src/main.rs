@@ -15,6 +15,7 @@ mod awake;
 mod catalog;
 mod clip;
 mod collab;
+mod crdt;
 mod docs;
 mod drive;
 mod git;

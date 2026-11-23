@@ -165,6 +165,10 @@ pub struct Block {
     /// Last edit of this block, for merging edits block by block.
     #[serde(default)]
     pub updated: u64,
+    /// A team space: the text as a CRDT document (crdt.rs), so edits of the same block by
+    /// several people are merged character by character. None elsewhere.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub crdt: Option<String>,
 }
 
 impl Block {
@@ -177,6 +181,7 @@ impl Block {
             extra: String::new(),
             indent: 0,
             updated: now_ms(),
+            crdt: None,
         }
     }
 }

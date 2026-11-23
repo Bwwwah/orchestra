@@ -166,3 +166,20 @@ accès au code). La documentation d'hébergement doit le dire.
     reçues sur `/v1/messages` et `/v1/responses`, avec la clé de l'espace et son modèle.
   * Limite : le serveur MCP ne distingue pas un Claude Code lancé sur l'IA de l'espace d'un
     Claude Code lancé à la main sur l'abonnement de la personne.
+* [x] Étape 4 — écrire à plusieurs dans le même paragraphe (`src/crdt.rs`).
+  * Dans un espace d'équipe, le texte de chaque bloc vit aussi dans un petit document Loro
+    (`Block::crdt`). L'éditeur, les IA (MCP), l'import et l'export travaillent toujours sur
+    `Block::text` ; avant chaque envoi, la différence est versée dans le document
+    (`LoroText::update`), et une fusion joint les deux documents caractère par caractère.
+  * Une même modification versée deux fois porte le même nom (calculé du bloc, de l'état du
+    document et du texte visé) : Loro ne la compte qu'une fois. Un bloc reçoit son document
+    dès qu'il entre dans l'espace (à l'ouverture, à la réception, sur le serveur), avant toute
+    modification.
+  * Les espaces de cet ordinateur et le mode en direct gardent l'ancienne règle (le bloc
+    modifié en dernier l'emporte).
+  * Vérifié avec le vrai programme : serveur coupé, Ana et Bob complètent le même paragraphe
+    chacun de son côté ; au retour du serveur, les deux ajouts sont gardés, à l'identique chez
+    Ana, chez Bob et sur le serveur.
+  * Reste : l'ordre des blocs déplacés en même temps (encore « le dernier l'emporte »), les
+    curseurs des autres, et l'allègement de l'historique des documents (aujourd'hui gardé en
+    entier).

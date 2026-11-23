@@ -168,6 +168,8 @@ impl NotesApp {
         store::use_space(&spaces.active);
         let had_workspace = store::workspace_path().exists();
         let mut ws = store::load();
+        // A team space: every block gets its document before anyone edits it.
+        crate::collab::give_documents(&mut ws, None, true);
         if spaces.active != crate::space::LOCAL {
             // The person's settings, with this space's own open tabs.
             let tabs = std::mem::take(&mut ws.settings.open_tabs);
@@ -1517,6 +1519,8 @@ fn other_report_days(ws: &Workspace, day: &str) -> Vec<String> {
 fn block_key(b: &Block) -> String {
     let mut c = b.clone();
     c.updated = 0;
+    // Its document follows the text (crdt.rs): never an edit of its own.
+    c.crdt = None;
     serde_json::to_string(&c).unwrap_or_default()
 }
 
@@ -1524,6 +1528,9 @@ fn block_key(b: &Block) -> String {
 fn page_key(p: &Page) -> String {
     let mut c = p.clone();
     c.updated = 0;
+    for b in c.blocks.iter_mut() {
+        b.crdt = None;
+    }
     serde_json::to_string(&c).unwrap_or_default()
 }
 

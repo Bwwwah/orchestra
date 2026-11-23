@@ -6,6 +6,35 @@
 
 use crate::model::{Block, Page, Workspace};
 
+/// A team space: bring each block's text into its document (crdt.rs), for the pages `ids`
+/// (all of them with None). Done when the space is opened and pages arrive (so every block
+/// has its document before anyone edits it), and before pages leave (so an edit made here,
+/// by the window or an AI, is recorded once, here). Returns true when a document changed.
+pub fn give_documents(
+    ws: &mut Workspace,
+    ids: Option<&std::collections::HashSet<String>>,
+    missing_only: bool,
+) -> bool {
+    if !ws.whole_shared {
+        return false;
+    }
+    let mut changed = false;
+    for p in ws
+        .pages
+        .iter_mut()
+        .filter(|p| ids.is_none_or(|s| s.contains(&p.id)))
+    {
+        for b in p
+            .blocks
+            .iter_mut()
+            .filter(|b| !missing_only || b.crdt.is_none())
+        {
+            changed |= crate::crdt::reconcile(b);
+        }
+    }
+    changed
+}
+
 /// A page new here, received from another person: without what only this computer decides
 /// (see `Project::keep_local`).
 pub fn received_new(mut p: Page) -> Page {
@@ -85,6 +114,8 @@ pub fn merge_page(ours: &mut Page, theirs: &Page) -> bool {
         .blocks
         .iter()
         .map(|b| match older_by_id.get(b.id.as_str()) {
+            // A team space's block: both texts merged character by character (crdt.rs).
+            Some(o) if o.crdt.is_some() || b.crdt.is_some() => crate::crdt::merged(b, o),
             Some(o) if o.updated > b.updated => (*o).clone(),
             _ => b.clone(),
         })

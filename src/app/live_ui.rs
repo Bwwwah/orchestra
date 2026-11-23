@@ -112,6 +112,11 @@ impl NotesApp {
     }
 
     pub(super) fn send_everything(&mut self) {
+        if self.live.is_none() {
+            return;
+        }
+        // Edits made here go into the blocks' documents before leaving (crdt.rs).
+        crate::collab::give_documents(&mut self.ws, None, false);
         let Some(l) = &self.live else { return };
         // Only the shared projects leave this computer.
         let mut out = self.ws.shared_copy();
@@ -226,12 +231,24 @@ impl NotesApp {
             }
         }
         if merged_any {
+            // Blocks that arrived without a document get one at once (crdt.rs).
+            crate::collab::give_documents(&mut self.ws, None, true);
             // Remote edits are not ours to stamp or echo: refresh the snapshot, save to disk.
             self.take_snapshot();
             self.dirty_since.get_or_insert_with(Instant::now);
         }
         // Send pages whose last edit hasn't gone out yet (window, AI through MCP, imports).
         let shared = self.ws.shared_ids();
+        if self.ws.whole_shared {
+            let leaving: std::collections::HashSet<String> = self
+                .ws
+                .pages
+                .iter()
+                .filter(|p| self.live_sent.get(&p.id).is_none_or(|t| p.updated > *t))
+                .map(|p| p.id.clone())
+                .collect();
+            crate::collab::give_documents(&mut self.ws, Some(&leaving), false);
+        }
         let changed: Vec<Page> = self
             .ws
             .pages

@@ -573,6 +573,12 @@ impl Db {
             if gone.is_some_and(|at| p.updated <= at as u64) {
                 continue;
             }
+            // Every block kept here has its document (crdt.rs): a page from an app that
+            // didn't give them (an older version) gets them on arrival.
+            let mut p = p;
+            for b in p.blocks.iter_mut().filter(|b| b.crdt.is_none()) {
+                crate::crdt::reconcile(b);
+            }
             let merged = match self.page(&p.id) {
                 Some(mut ours) => {
                     if !crate::collab::merge_page(&mut ours, &p) {
