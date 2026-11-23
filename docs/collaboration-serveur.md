@@ -191,3 +191,11 @@ accès au code). La documentation d'hébergement doit le dire.
     modification hors ligne qui ne peut plus être fusionnée prend la règle de secours (la
     copie modifiée en dernier, sans doublon). Vérifié : le serveur allège, Ana reçoit la page
     allégée et l'adopte, même texte.
+* [x] Relais des IA d'espace par le serveur (`src/proxy.rs`) : les membres ne reçoivent plus
+  la clé de l'entreprise, seulement un jeton personnel ; leur agent appelle le serveur
+  (`/ia/<nom>/…`, même port que l'espace), qui vérifie le jeton à chaque appel (un membre
+  retiré est coupé aussitôt), compte l'appel, applique le quota du jour
+  (`ia-espace quota <nom> <n>`), puis transmet au modèle de l'entreprise avec la vraie clé et
+  renvoie la réponse au fil de l'eau. `ia-espace conso` : les appels par jour, membre et IA.
+  Vérifié en vrai : morceaux reçus à une seconde d'intervalle, passerelle ne voyant que la
+  clé de l'entreprise, Codex passant par le relais, faux jeton refusé, membre retiré coupé.

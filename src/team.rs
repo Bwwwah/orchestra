@@ -197,8 +197,16 @@ impl Db {
                  base_url TEXT NOT NULL, model TEXT NOT NULL DEFAULT '',
                  wire_api TEXT NOT NULL DEFAULT '');
              CREATE TABLE IF NOT EXISTS ai_keys (ai TEXT NOT NULL, member TEXT NOT NULL,
-                 key TEXT NOT NULL, PRIMARY KEY (ai, member));",
+                 key TEXT NOT NULL, PRIMARY KEY (ai, member));
+             CREATE TABLE IF NOT EXISTS proxy_tokens (token TEXT PRIMARY KEY,
+                 member TEXT NOT NULL UNIQUE);
+             CREATE TABLE IF NOT EXISTS usage (member TEXT NOT NULL, ai TEXT NOT NULL,
+                 day TEXT NOT NULL, n INTEGER NOT NULL, PRIMARY KEY (member, ai, day));",
         )?;
+        let _ = c.execute(
+            "ALTER TABLE space_ais ADD COLUMN quota INTEGER NOT NULL DEFAULT 0",
+            [],
+        );
         // Spaces made before change numbers: add the column (0: sent to everyone once).
         for t in ["pages", "deleted", "chat"] {
             let _ = c.execute(
@@ -385,30 +393,166 @@ impl Db {
         )
     }
 
-    /// The space's AIs as member `member` gets them: with their own key, else the one for
-    /// everyone; an AI with neither isn't theirs. A reader gets none (they change nothing).
+    /// The company's key of AI `ai` for `member`: their own, else the one for everyone.
+    fn upstream_key(&self, ai: &str, member: &str) -> Option<String> {
+        self.0
+            .query_row(
+                "SELECT key FROM ai_keys WHERE ai = ?1 AND member IN (?2, '*')
+                 ORDER BY member = '*' LIMIT 1",
+                params![ai, member],
+                |r| r.get(0),
+            )
+            .optional()
+            .ok()
+            .flatten()
+    }
+
+    /// Member `member`'s own token for the AIs of the space (made the first time).
+    pub fn proxy_token(&self, member: &str) -> String {
+        let known: Option<String> = self
+            .0
+            .query_row(
+                "SELECT token FROM proxy_tokens WHERE member = ?1",
+                [member],
+                |r| r.get(0),
+            )
+            .optional()
+            .ok()
+            .flatten();
+        if let Some(t) = known {
+            return t;
+        }
+        let t = format!("orch-{}", crate::identity::random_hex(24));
+        let _ = self.0.execute(
+            "INSERT INTO proxy_tokens (token, member) VALUES (?1, ?2)",
+            params![t, member],
+        );
+        t
+    }
+
+    /// The space's AIs as member `member` gets them: the address of this server's relay
+    /// (`/ia/<name>`, completed by the app with the server's own) and their token, never the
+    /// company's key. Only those with a key for them (theirs or everyone's). A reader gets
+    /// none (they change nothing).
     pub fn ais_for(&self, member: &str, role: Role) -> Vec<crate::space::SpaceAi> {
         if role == Role::Reader {
             return vec![];
         }
+        let token = self.proxy_token(member);
         self.space_ais()
             .into_iter()
-            .filter_map(|(mut a, _)| {
-                let key: Option<String> = self
-                    .0
-                    .query_row(
-                        "SELECT key FROM ai_keys WHERE ai = ?1 AND member IN (?2, '*')
-                         ORDER BY member = '*' LIMIT 1",
-                        params![a.name, member],
-                        |r| r.get(0),
-                    )
-                    .optional()
-                    .ok()
-                    .flatten();
-                a.key = key?;
-                Some(a)
+            .filter(|(a, _)| self.upstream_key(&a.name, member).is_some())
+            .map(|(mut a, _)| {
+                a.base_url = format!("/ia/{}", crate::proxy::slug(&a.name));
+                a.key = token.clone();
+                a
             })
             .collect()
+    }
+
+    /// Who may call AI `slug` through the relay with `token`: the AI and the company's key,
+    /// the call counted; or why not (unknown token, member taken off, reader, no key, daily
+    /// quota reached).
+    pub fn proxy_grant(
+        &self,
+        token: &str,
+        slug: &str,
+    ) -> Result<(crate::space::SpaceAi, String), String> {
+        let member: String = self
+            .0
+            .query_row(
+                "SELECT member FROM proxy_tokens WHERE token = ?1",
+                [token],
+                |r| r.get(0),
+            )
+            .optional()
+            .ok()
+            .flatten()
+            .ok_or_else(|| crate::tr!("jeton inconnu", "unknown token").to_string())?;
+        let (_, role) = self.member(&member).ok_or_else(|| {
+            crate::tr!(
+                "votre accès à cet espace a été retiré",
+                "your access to this space was removed"
+            )
+            .to_string()
+        })?;
+        if role == Role::Reader {
+            return Err(crate::tr!(
+                "les lecteurs n'utilisent pas les IA de l'espace",
+                "readers don't use the space's AIs"
+            )
+            .into());
+        }
+        let (ai, _) = self
+            .space_ais()
+            .into_iter()
+            .find(|(a, _)| crate::proxy::slug(&a.name) == slug)
+            .ok_or_else(|| crate::tr!("IA inconnue", "unknown AI").to_string())?;
+        let key = self.upstream_key(&ai.name, &member).ok_or_else(|| {
+            crate::tr!(
+                "pas de clé pour vous sur cette IA",
+                "no key for you on this AI"
+            )
+            .to_string()
+        })?;
+        let day = today();
+        let used: i64 = self
+            .0
+            .query_row(
+                "SELECT n FROM usage WHERE member = ?1 AND ai = ?2 AND day = ?3",
+                params![member, ai.name, day],
+                |r| r.get(0),
+            )
+            .optional()
+            .ok()
+            .flatten()
+            .unwrap_or(0);
+        let quota: i64 = self
+            .0
+            .query_row(
+                "SELECT quota FROM space_ais WHERE name = ?1",
+                [&ai.name],
+                |r| r.get(0),
+            )
+            .unwrap_or(0);
+        if quota > 0 && used >= quota {
+            return Err(crate::trf!(
+                "quota du jour atteint ({quota} appels)",
+                "daily quota reached ({quota} calls)"
+            ));
+        }
+        let _ = self.0.execute(
+            "INSERT INTO usage (member, ai, day, n) VALUES (?1, ?2, ?3, 1)
+             ON CONFLICT(member, ai, day) DO UPDATE SET n = n + 1",
+            params![member, ai.name, day],
+        );
+        Ok((ai, key))
+    }
+
+    /// Calls per day of an AI of the space to stop at (0: no limit), per member.
+    pub fn set_quota(&self, ai: &str, per_day: u64) -> rusqlite::Result<usize> {
+        self.0.execute(
+            "UPDATE space_ais SET quota = ?2 WHERE name = ?1",
+            params![ai, per_day as i64],
+        )
+    }
+
+    /// Calls made through the relay: (day, member's name, AI, calls), latest first.
+    pub fn usage(&self, days: u32) -> Vec<(String, String, String, u64)> {
+        let since = day_of(crate::model::now_ms().saturating_sub(days as u64 * 86_400_000));
+        self.0
+            .prepare(
+                "SELECT u.day, COALESCE(m.name, substr(u.member, 1, 12)), u.ai, u.n
+                 FROM usage u LEFT JOIN members m ON m.key = u.member
+                 WHERE u.day >= ?1 ORDER BY u.day DESC, u.n DESC",
+            )
+            .and_then(|mut st| {
+                st.query_map([since], |r| {
+                    Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get::<_, i64>(3)? as u64))
+                })
+                .map(|it| it.flatten().collect())
+            })
+            .unwrap_or_default()
     }
 
     /// A new one-time invitation for `role` (the very first person to come in becomes the
@@ -679,6 +823,31 @@ impl Db {
     }
 }
 
+/// A day as « 2026-11-23 » (UTC), for counting calls.
+fn day_of(ms: u64) -> String {
+    let days = (ms / 86_400_000) as i64;
+    // Civil date from days since 1970-01-01 (Howard Hinnant's algorithm).
+    let z = days + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z - era * 146_097;
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    let y = yoe + era * 400 + if m <= 2 { 1 } else { 0 };
+    format!("{y:04}-{m:02}-{d:02}")
+}
+
+fn today() -> String {
+    day_of(
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0),
+    )
+}
+
 /// Check a member's greeting; returns their name and role, or why not.
 fn admit(db: &Db, space: &str, nonce: &str, auth: &Greeting) -> Result<(String, Role), String> {
     let Greeting::Auth {
@@ -791,8 +960,24 @@ pub fn serve(dir: &std::path::Path, port: u16) -> Result<(), String> {
         let spawned = std::thread::Builder::new()
             .stack_size(THREAD_STACK)
             .spawn(move || {
-                if let Err(e) = serve_one(id, stream, &db, &conns) {
-                    eprintln!("orchestra: connexion {id} : {e}");
+                // WebSocket (the space) or plain HTTP (the relay of the space's AIs).
+                match read_head(stream) {
+                    Ok((stream, head, raw, rest)) if head.is_websocket() => {
+                        let mut pre = raw;
+                        pre.extend_from_slice(&rest);
+                        let replay = Replay {
+                            pre,
+                            pos: 0,
+                            inner: stream,
+                        };
+                        if let Err(e) = serve_one(id, replay, &db, &conns) {
+                            eprintln!("orchestra: connexion {id} : {e}");
+                        }
+                    }
+                    Ok((stream, head, _, rest)) => {
+                        crate::proxy::serve_http(stream, head, rest, &db)
+                    }
+                    Err(_) => {}
                 }
                 if let Ok(mut l) = conns.lock() {
                     l.retain(|c| c.id != id);
@@ -806,10 +991,64 @@ pub fn serve(dir: &std::path::Path, port: u16) -> Result<(), String> {
     Ok(())
 }
 
-fn serve_one(id: u64, stream: TcpStream, db: &Arc<Mutex<Db>>, conns: &Conns) -> Result<(), String> {
+/// A connection whose first bytes were already read (to tell WebSocket from HTTP): they are
+/// read again first.
+struct Replay {
+    pre: Vec<u8>,
+    pos: usize,
+    inner: TcpStream,
+}
+
+impl Read for Replay {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        if self.pos < self.pre.len() {
+            let n = buf.len().min(self.pre.len() - self.pos);
+            buf[..n].copy_from_slice(&self.pre[self.pos..self.pos + n]);
+            self.pos += n;
+            return Ok(n);
+        }
+        self.inner.read(buf)
+    }
+}
+
+impl Write for Replay {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.inner.write(buf)
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.inner.flush()
+    }
+}
+
+/// The request's head (up to the empty line, 64 Kio at most): parsed, as read, and what came
+/// after it.
+type HeadRead = (TcpStream, crate::proxy::Head, Vec<u8>, Vec<u8>);
+
+fn read_head(mut stream: TcpStream) -> Result<HeadRead, String> {
     let _ = stream.set_nodelay(true);
     let _ = stream.set_read_timeout(Some(Duration::from_secs(10)));
     let _ = stream.set_write_timeout(Some(Duration::from_secs(10)));
+    let mut buf = Vec::new();
+    let mut chunk = [0u8; 4096];
+    loop {
+        if let Some(end) = buf.windows(4).position(|w| w == b"\r\n\r\n") {
+            let head = crate::proxy::parse_head(&buf[..end + 4]).ok_or("not HTTP")?;
+            let rest = buf[end + 4..].to_vec();
+            buf.truncate(end + 4);
+            return Ok((stream, head, buf, rest));
+        }
+        if buf.len() > 64 * 1024 {
+            return Err("head too long".into());
+        }
+        let n = stream.read(&mut chunk).map_err(|e| e.to_string())?;
+        if n == 0 {
+            return Err("closed".into());
+        }
+        buf.extend_from_slice(&chunk[..n]);
+    }
+}
+
+fn serve_one(id: u64, stream: Replay, db: &Arc<Mutex<Db>>, conns: &Conns) -> Result<(), String> {
     let mut ws =
         tungstenite::accept_with_config(stream, Some(ws_config())).map_err(|e| e.to_string())?;
     let info = db.lock().map_err(|e| e.to_string())?.info();
@@ -883,7 +1122,7 @@ fn serve_one(id: u64, stream: TcpStream, db: &Arc<Mutex<Db>>, conns: &Conns) -> 
             });
         }
     }
-    let _ = ws.get_mut().set_read_timeout(Some(TICK));
+    let _ = ws.get_mut().inner.set_read_timeout(Some(TICK));
     let mut checked = Instant::now();
     let result = pump(
         &mut ws,
@@ -1048,7 +1287,7 @@ impl Write for Net {
 }
 
 /// The TLS settings: the usual certificate authorities (those of the Mozilla list).
-fn tls_config() -> Arc<rustls::ClientConfig> {
+pub fn tls_config() -> Arc<rustls::ClientConfig> {
     static CONFIG: std::sync::OnceLock<Arc<rustls::ClientConfig>> = std::sync::OnceLock::new();
     CONFIG
         .get_or_init(|| {
@@ -1353,6 +1592,19 @@ impl Session<'_> {
     }
 }
 
+/// The team server's address for plain HTTP (its relay of the space's AIs):
+/// `wss://equipe.example/x` → `https://equipe.example/x`, `ws://…` → `http://…`.
+pub fn http_base(url: &str) -> String {
+    let u = url.trim().trim_end_matches('/');
+    if let Some(r) = u.strip_prefix("wss://") {
+        format!("https://{r}")
+    } else if let Some(r) = u.strip_prefix("ws://") {
+        format!("http://{r}")
+    } else {
+        u.to_string()
+    }
+}
+
 /// What the server says of its space goes into the list: its name, its AI rule, the role
 /// given here. The invitation is spent.
 fn remember(space_id: &str, info: &SpaceInfo, role: Role, ais: Vec<crate::space::SpaceAi>) {
@@ -1364,8 +1616,18 @@ fn remember(space_id: &str, info: &SpaceInfo, role: Role, ais: Vec<crate::space:
         s.ai_rule = info.ai_rule;
         s.allowed_ai = info.allowed_ai.clone();
         s.role = role.key().to_string();
-        // Replaced each time: an AI or a key the server took back is gone here too.
-        s.ais = ais;
+        // Replaced each time: an AI or a key the server took back is gone here too. Their
+        // address is this server's relay, completed with the server's own address.
+        let base = http_base(&s.server().map(|(u, _)| u.to_string()).unwrap_or_default());
+        s.ais = ais
+            .into_iter()
+            .map(|mut a| {
+                if a.base_url.starts_with('/') {
+                    a.base_url = format!("{base}{}", a.base_url);
+                }
+                a
+            })
+            .collect();
         if let crate::space::SpaceKind::Server { invite, .. } = &mut s.kind {
             invite.clear();
         }
@@ -1513,25 +1775,66 @@ mod tests {
     }
 
     #[test]
-    fn each_member_gets_the_space_ais_with_their_own_key() {
+    fn members_get_a_token_for_the_relay_never_the_company_key() {
         let d = db();
-        let ai = crate::space::SpaceAi {
+        let space = d.info().id;
+        let ana = ed25519_dalek::SigningKey::from_bytes(&[1u8; 32]);
+        let bob = ed25519_dalek::SigningKey::from_bytes(&[2u8; 32]);
+        let i1 = d.invite(Role::Member).unwrap();
+        admit(&d, &space, "n", &auth(&ana, &space, "n", &i1)).unwrap();
+        let i2 = d.invite(Role::Member).unwrap();
+        admit(&d, &space, "m", &auth(&bob, &space, "m", &i2)).unwrap();
+        let (ka, kb) = (
+            crate::identity::public_hex(&ana),
+            crate::identity::public_hex(&bob),
+        );
+        d.set_space_ai(&crate::space::SpaceAi {
             name: "Modèle maison".into(),
             tool: "codex".into(),
             base_url: "https://ia.example/v1".into(),
             ..Default::default()
-        };
-        d.set_space_ai(&ai).unwrap();
+        })
+        .unwrap();
         // No key: nobody gets it.
-        assert!(d.ais_for("ana", Role::Member).is_empty());
+        assert!(d.ais_for(&ka, Role::Member).is_empty());
         d.set_ai_key("Modèle maison", "*", "cle-commune").unwrap();
-        d.set_ai_key("Modèle maison", "ana", "cle-ana").unwrap();
-        assert_eq!(d.ais_for("ana", Role::Member)[0].key, "cle-ana");
-        assert_eq!(d.ais_for("bob", Role::Member)[0].key, "cle-commune");
-        assert!(d.ais_for("bob", Role::Reader).is_empty());
-        assert_eq!(d.space_ais()[0].1, 2);
+        d.set_ai_key("Modèle maison", &ka, "cle-ana").unwrap();
+        let got = d.ais_for(&ka, Role::Member);
+        assert_eq!(got[0].base_url, "/ia/mod-le-maison");
+        assert!(
+            got[0].key.starts_with("orch-"),
+            "a token, not the company key"
+        );
+        assert_eq!(got[0].key, d.proxy_token(&ka), "the same token each time");
+        assert!(d.ais_for(&kb, Role::Reader).is_empty());
+        // Through the relay: each one's company key.
+        assert_eq!(
+            d.proxy_grant(&got[0].key, "mod-le-maison").unwrap().1,
+            "cle-ana"
+        );
+        let tb = d.proxy_token(&kb);
+        assert_eq!(
+            d.proxy_grant(&tb, "mod-le-maison").unwrap().1,
+            "cle-commune"
+        );
+        assert!(d.proxy_grant("orch-faux", "mod-le-maison").is_err());
+        assert!(d.proxy_grant(&tb, "autre").is_err());
+        // Daily quota: Bob made 1 call; at 2, one more passes, then no.
+        d.set_quota("Modèle maison", 2).unwrap();
+        assert!(d.proxy_grant(&tb, "mod-le-maison").is_ok());
+        assert!(d.proxy_grant(&tb, "mod-le-maison").is_err());
+        assert_eq!(d.usage(1).iter().map(|u| u.3).sum::<u64>(), 3);
+        // Taken off the space: cut off at once.
+        d.set_revoked(&ka, true).unwrap();
+        assert!(d.proxy_grant(&got[0].key, "mod-le-maison").is_err());
+        assert_eq!(d.space_ais().len(), 1);
         d.remove_space_ai("Modèle maison").unwrap();
-        assert!(d.ais_for("ana", Role::Member).is_empty());
+        assert!(d.ais_for(&kb, Role::Member).is_empty());
+        assert_eq!(
+            http_base("wss://equipe.example/x/"),
+            "https://equipe.example/x"
+        );
+        assert_eq!(http_base("ws://10.0.0.2:7879"), "http://10.0.0.2:7879");
     }
 
     #[test]

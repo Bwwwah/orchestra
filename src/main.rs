@@ -25,6 +25,7 @@ mod mcp;
 mod model;
 mod opener;
 mod proc;
+mod proxy;
 mod project;
 mod review;
 mod richtext;
@@ -77,6 +78,8 @@ Utilisation :
   orchestra equipe ia-espace ajouter <nom> <claude-code|codex> <url> [modèle] [chat]
   orchestra equipe ia-espace cle <nom> <membre|tous> <clé>
   orchestra equipe ia-espace retirer <nom> | liste
+  orchestra equipe ia-espace quota <nom> <appels par jour et par membre, 0 : sans limite>
+  orchestra equipe ia-espace conso [jours]  les appels par jour, par membre et par IA
   orchestra equipe alleger [jours]  allège l'historique des blocs inchangés depuis 7 jours
   orchestra equipe nom <nom>  le nom de l'espace
   orchestra equipe ia <libres|espace|aucune> [ia…]  les IA autorisées dans l'espace
@@ -370,6 +373,17 @@ fn run_team(args: &[String]) -> i32 {
                     db.set_ai_key(a(2), &member, a(4))
                 }
                 "retirer" | "remove" => db.remove_space_ai(a(2)),
+                "quota" => match a(3).parse::<u64>() {
+                    Ok(n) if !a(2).is_empty() => db.set_quota(a(2), n),
+                    _ => return usage("ia-espace quota <nom> <appels par jour>"),
+                },
+                "conso" | "usage" => {
+                    let days = a(2).parse().unwrap_or(30);
+                    for (day, who, ai, n) in db.usage(days) {
+                        println!("{day}  {who}  {ai}  {n} appel(s)");
+                    }
+                    return 0;
+                }
                 _ => return usage("ia-espace : ajouter, cle, retirer ou liste"),
             };
             match done {
