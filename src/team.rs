@@ -396,6 +396,7 @@ impl Db {
                 id: m.key,
                 name: m.name,
                 role: m.role,
+                ai: String::new(),
             })
             .collect()
     }

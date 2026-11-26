@@ -9,6 +9,7 @@
 //! from the list: a program that chooses nothing (an MCP server, an autonomous session) works
 //! in "Mon espace", never in a shared space by default. See docs/collaboration-serveur.md.
 
+use crate::project::ProjectMember;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
@@ -88,6 +89,10 @@ pub struct SpaceAi {
     pub key: String,
 }
 
+/// How the id of an AI's membership starts: a person's is their key, in hexadecimal, so the
+/// two never meet.
+pub const AI_MEMBER_PREFIX: &str = "ia:";
+
 /// What it takes to run an agent on a space's AI: environment variables (the key goes there,
 /// never on a command line) and options placed right after the program's name.
 #[derive(Clone, Debug, PartialEq, Default)]
@@ -162,6 +167,17 @@ pub fn granted(token: &str, space: &str) -> bool {
 pub const CODEX_KEY_VAR: &str = "ORCHESTRA_ESPACE_CLE";
 
 impl SpaceAi {
+    /// It as a member of the space's projects, one work can be given to. The server knows its
+    /// AIs by name: the id is the same on every computer.
+    pub fn member(&self) -> ProjectMember {
+        ProjectMember {
+            id: format!("{AI_MEMBER_PREFIX}{}", self.name),
+            name: crate::richtext::one_line(&self.name, crate::project::RECEIVED_AUTHOR_MAX),
+            role: crate::team::Role::Member,
+            ai: self.tool.clone(),
+        }
+    }
+
     /// How to run its agent on it; None for an agent Orchestra can't point elsewhere.
     pub fn run(&self) -> Option<SpaceAiRun> {
         if self.key.is_empty() || self.base_url.trim().is_empty() {
@@ -274,6 +290,18 @@ impl Space {
         self.ais
             .iter()
             .find(|a| a.tool == tool && a.run().is_some())
+    }
+
+    /// The space's AIs as members: those this person can run here (none with « no AI »).
+    pub fn ai_members(&self) -> Vec<ProjectMember> {
+        if self.ai_rule == AiRule::NoAi {
+            return vec![];
+        }
+        self.ais
+            .iter()
+            .filter(|a| a.run().is_some())
+            .map(SpaceAi::member)
+            .collect()
     }
 
     /// May agent `tool` work here at all: on the space's AI if it provides one for it (that
@@ -693,6 +721,42 @@ mod tests {
             ]),
             vec!["exec".to_string(), "fin".to_string()]
         );
+    }
+
+    #[test]
+    fn the_ais_of_a_space_are_members_with_the_same_id_for_everyone() {
+        let ai = SpaceAi {
+            name: "Maison".into(),
+            tool: "codex".into(),
+            base_url: "https://ia.example/v1".into(),
+            key: "sk-ana".into(),
+            ..Default::default()
+        };
+        let mut s = Spaces::default();
+        s.add("Boîte", SpaceKind::Local);
+        // Without a key, this person can't run it: not offered.
+        s.spaces[1].ais = vec![
+            ai.clone(),
+            SpaceAi {
+                name: "Sans clé".into(),
+                key: String::new(),
+                ..ai.clone()
+            },
+        ];
+        let members = s.spaces[1].ai_members();
+        assert_eq!(members.len(), 1);
+        assert_eq!(members[0].id, "ia:Maison");
+        assert_eq!(members[0].name, "Maison");
+        assert_eq!(members[0].ai, "codex");
+        // Someone else's token gives the same member, which carries no secret.
+        let bobs = SpaceAi {
+            key: "sk-bob".into(),
+            ..ai
+        };
+        assert_eq!(bobs.member(), members[0]);
+        assert!(!serde_json::to_string(&members).unwrap().contains("sk-"));
+        s.spaces[1].ai_rule = AiRule::NoAi;
+        assert!(s.spaces[1].ai_members().is_empty());
     }
 
     #[test]

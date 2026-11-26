@@ -356,14 +356,19 @@ pub struct Project {
     pub members: Vec<ProjectMember>,
 }
 
-/// A person of a project's team space, as its server knows them.
+/// A member of a project's team space, one work can be given to: a person, as its server
+/// knows them, or one of the space's AIs (`SpaceAi::member`).
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub struct ProjectMember {
-    /// The public half of their key (identity.rs): the same on every team server.
+    /// A person: the public half of their key (identity.rs), the same on every team server.
+    /// An AI: `space::AI_MEMBER_PREFIX` and its name.
     pub id: String,
     pub name: String,
     #[serde(default)]
     pub role: crate::team::Role,
+    /// An AI: the agent it runs (`Ai::key`). Empty for a person.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub ai: String,
 }
 
 /// How the next autonomous session of a project starts, as last chosen by the person.
@@ -1180,10 +1185,9 @@ impl Workspace {
             .collect()
     }
 
-    /// What may leave this computer: the shared projects, their pages and discussions,
-    /// without what is this computer's own (`shareable`).
-    /// A team space: keep the members its server just gave (names on one short line, each
-    /// member once) and attach them to its projects. Returns true when something changed.
+    /// A team space: keep the people its server just gave (names on one short line, each
+    /// one once, none passing for an AI); `attach_members` then gives them to the projects.
+    /// Returns true when the list changed.
     pub fn set_space_members(&mut self, members: Vec<ProjectMember>) -> bool {
         if !self.whole_shared {
             return false;
@@ -1191,27 +1195,34 @@ impl Workspace {
         let mut seen = std::collections::HashSet::new();
         let members: Vec<ProjectMember> = members
             .into_iter()
-            .filter(|m| !m.id.trim().is_empty() && seen.insert(m.id.clone()))
+            .filter(|m| {
+                !m.id.trim().is_empty()
+                    && !m.id.starts_with(crate::space::AI_MEMBER_PREFIX)
+                    && seen.insert(m.id.clone())
+            })
             .map(|mut m| {
                 m.name = crate::richtext::one_line(&m.name, RECEIVED_AUTHOR_MAX);
+                m.ai.clear();
                 m
             })
             .collect();
         let news = members != self.space_members;
         self.space_members = members;
-        self.attach_members() || news
+        news
     }
 
-    /// A team space: every project has the space's members, one made or received since
-    /// too. Not an edit of its page (`updated` stays). Returns true when a project changed.
-    pub fn attach_members(&mut self) -> bool {
+    /// A team space: every project has the space's members, its people then its AIs (`ais`,
+    /// `Space::ai_members`), one made or received since too. Not an edit of its page
+    /// (`updated` stays). Returns true when a project changed.
+    pub fn attach_members(&mut self, ais: &[ProjectMember]) -> bool {
         if !self.whole_shared {
             return false;
         }
+        let members = [self.space_members.as_slice(), ais].concat();
         let mut changed = false;
         for x in self.pages.iter_mut().filter_map(|p| p.project.as_mut()) {
-            if x.members != self.space_members {
-                x.members = self.space_members.clone();
+            if x.members != members {
+                x.members = members.clone();
                 changed = true;
             }
         }
@@ -1645,6 +1656,7 @@ mod tests {
             id: id.into(),
             name: name.into(),
             role: Default::default(),
+            ai: String::new(),
         };
         let mut ws = Workspace::default();
         let mut page = Page::new("Projet", None);
@@ -1659,17 +1671,30 @@ mod tests {
             member("a", "Ana\nMartin"),
             member("a", "Ana bis"),
             member(" ", "sans clé"),
+            member("ia:Maison", "se fait passer pour une IA"),
         ]));
+        let ai = ProjectMember {
+            ai: "codex".into(),
+            ..member("ia:Maison", "Maison")
+        };
+        let ais = std::slice::from_ref(&ai);
+        assert!(ws.attach_members(ais));
         let ours = ws.pages[0].project.clone().unwrap();
-        assert_eq!(ours.members, [member("a", "Ana")]);
+        assert_eq!(ours.members, [member("a", "Ana"), ai.clone()]);
         assert_eq!(ws.pages[0].updated, before, "not an edit of the page");
-        assert!(!ws.attach_members(), "nothing more to do");
+        assert!(!ws.attach_members(ais), "nothing more to do");
         // A project made afterwards gets them too.
         let mut later = Page::new("Autre", None);
         later.project = Some(Project::default());
         ws.pages.push(later);
-        assert!(ws.attach_members());
+        assert!(ws.attach_members(ais));
         assert_eq!(ws.pages[2].project.as_ref().unwrap().members, ours.members);
+        // An AI the space takes back is gone from the projects, the people stay.
+        assert!(ws.attach_members(&[]));
+        assert_eq!(
+            ws.pages[0].project.as_ref().unwrap().members,
+            [member("a", "Ana")]
+        );
         // They don't leave with the page, and another copy's are never taken.
         let sent = shareable(&ws.pages[0]);
         assert!(sent.project.unwrap().members.is_empty());

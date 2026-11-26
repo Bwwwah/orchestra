@@ -284,8 +284,12 @@ impl NotesApp {
             self.take_snapshot();
             self.dirty_since.get_or_insert_with(Instant::now);
         }
-        // A project made here or just arrived gets the space's members too.
-        if self.ws.attach_members() {
+        // The space's people and AIs, on every project: one made here or just arrived too.
+        if self.ws.whole_shared
+            && self
+                .ws
+                .attach_members(&crate::space::current().ai_members())
+        {
             self.dirty_since.get_or_insert_with(Instant::now);
         }
         // Send pages whose last edit hasn't gone out yet (window, AI through MCP, imports).
