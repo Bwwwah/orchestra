@@ -2173,10 +2173,15 @@ impl NotesApp {
                 ui.label(RichText::new(crate::tr!("Orchestration", "Orchestration")).font(bold(super::style::TITLE)).color(t.text));
                 ui.label(RichText::new(crate::tr!("Des IA qui avancent seules sur vos projets, dans une copie à part.", "AIs moving your projects forward on their own, in a separate copy.")).color(t.secondary));
                 ui.add_space(14.0);
+                // The summary first: AIs at work and today's work, at a glance.
+                let top = ui.cursor().min;
+                self.stats_row(ui, &t);
+                mark_from(ui, "orch:stats", top);
+                ui.add_space(14.0);
                 self.screen_card(ui, &t);
                 self.measure_card(ui, &t);
-                // What is happening first (sessions at work, questions waiting), then what
-                // can start, then the budget it all runs within, then the settings.
+                // Then what is happening (sessions at work, questions waiting), what can
+                // start, the budget it all runs within, and the settings.
                 let top = ui.cursor().min;
                 self.running_card(ui, &t, actions);
                 mark_from(ui, "orch:running", top);
@@ -2237,10 +2242,6 @@ impl NotesApp {
                 let top = ui.cursor().min;
                 self.week_bar(ui, &t);
                 mark_from(ui, "orch:week", top);
-                ui.add_space(14.0);
-                let top = ui.cursor().min;
-                self.stats_row(ui, &t);
-                mark_from(ui, "orch:stats", top);
                 ui.add_space(14.0);
                 let top = ui.cursor().min;
                 self.limits_card(ui, &t);
@@ -2341,7 +2342,7 @@ impl NotesApp {
         }
     }
 
-    /// Three tiles at the top: the subscription, the AIs at work, today's work.
+    /// Two tiles at the top of the page: the AIs at work, today's work.
     fn stats_row(&mut self, ui: &mut egui::Ui, t: &Tone) {
         let running = self.orch.runs.len();
         let ready = self
@@ -2513,8 +2514,7 @@ impl NotesApp {
                 return;
             }
             ui.add_space(8.0);
-            // The 5-hour window's use is shown once, in the tile at the top (with this limit
-            // as the tick of its ring): here, only the settings.
+            // The 5-hour window's use is shown in « Limits per AI »: here, only the settings.
             let w = ui.available_width();
             let lk = super::settings::look(ui.visuals().dark_mode);
             let row = |ui: &mut egui::Ui,
