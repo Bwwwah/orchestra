@@ -390,6 +390,73 @@ pub struct Project {
     /// elsewhere. Given by the space's server to each computer, never taken from a page.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub members: Vec<ProjectMember>,
+    /// The modules turned on or off for this project, by `Module::key`; one without a choice
+    /// follows its default (read and written with `has_module` and `set_module`). By name, so
+    /// that a module of a newer version, in a shared project, is kept rather than refused.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub module_choices: std::collections::BTreeMap<String, bool>,
+}
+
+/// A part of the project view that a project may do without.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Module {
+    Git,
+    Terminal,
+    /// The autonomous sessions.
+    Autonomous,
+    Budget,
+    Versions,
+}
+
+#[allow(dead_code)] // Read by the project view in the next « Modules » steps.
+impl Module {
+    pub const ALL: [Module; 5] = [
+        Module::Git,
+        Module::Terminal,
+        Module::Autonomous,
+        Module::Budget,
+        Module::Versions,
+    ];
+
+    /// The name the module is saved under: never to be changed.
+    pub fn key(self) -> &'static str {
+        match self {
+            Module::Git => "git",
+            Module::Terminal => "terminal",
+            Module::Autonomous => "autonomous",
+            Module::Budget => "budget",
+            Module::Versions => "versions",
+        }
+    }
+}
+
+#[allow(dead_code)] // Same.
+impl Project {
+    /// Whether `module` is on: the choice made for this project, else on.
+    pub fn has_module(&self, module: Module) -> bool {
+        self.module_choices.get(module.key()).copied().unwrap_or(true)
+    }
+
+    /// The modules that are on, in the order of `Module::ALL`.
+    pub fn modules(&self) -> Vec<Module> {
+        Module::ALL
+            .into_iter()
+            .filter(|m| self.has_module(*m))
+            .collect()
+    }
+
+    /// Turn `module` on or off for this project (None: its default again).
+    pub fn set_module(&mut self, module: Module, on: Option<bool>) {
+        let before = self.module_choices.get(module.key()).copied();
+        if before == on {
+            return;
+        }
+        match on {
+            Some(on) => self.module_choices.insert(module.key().to_string(), on),
+            None => self.module_choices.remove(module.key()),
+        };
+        self.touch();
+    }
 }
 
 /// A member of a project's team space, one work can be given to: a person, as its server
@@ -2013,6 +2080,29 @@ mod tests {
             "no folder, nothing forced: no kind"
         );
         let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn a_project_keeps_the_modules_chosen_for_it() {
+        let mut p = Project::new("");
+        assert_eq!(p.modules(), Module::ALL, "all on without a choice");
+        assert!(
+            !serde_json::to_string(&p).unwrap().contains("module_choices"),
+            "no choice is not written"
+        );
+        p.set_module(Module::Terminal, Some(false));
+        p.set_module(Module::Git, Some(true));
+        let back: Project = serde_json::from_str(&serde_json::to_string(&p).unwrap()).unwrap();
+        assert!(!back.has_module(Module::Terminal) && back.has_module(Module::Git));
+        assert_eq!(back.modules().len(), Module::ALL.len() - 1);
+        p.set_module(Module::Terminal, None);
+        assert!(p.has_module(Module::Terminal));
+        assert!(!p.module_choices.contains_key(Module::Terminal.key()));
+
+        // A module this version doesn't know is read and written back.
+        let newer: Project = serde_json::from_str(r#"{"module_choices":{"later":false}}"#).unwrap();
+        assert_eq!(newer.modules(), Module::ALL);
+        assert!(serde_json::to_string(&newer).unwrap().contains("\"later\":false"));
     }
 
     #[test]
