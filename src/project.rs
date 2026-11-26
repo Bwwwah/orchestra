@@ -190,6 +190,11 @@ pub struct Step {
     /// Decided on this computer only, like the model: the AIs plugged in differ per computer.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agent: Option<crate::auto::Agent>,
+    /// The person responsible for the step (`ProjectMember::id`; empty: nobody). Unlike the
+    /// AI and the model, it is the team's: shared with the other copies. It may name someone
+    /// who is no longer, or not yet, among `Project::members`.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub assignee: String,
 }
 
 /// `source` of a step typed by the person in the window.
@@ -207,6 +212,17 @@ impl Step {
 
 /// Longest title of a step received from another computer.
 pub const RECEIVED_STEP_MAX: usize = 300;
+
+/// Longest id of a step's responsible person received from another computer.
+const RECEIVED_ASSIGNEE_MAX: usize = 200;
+
+/// A responsible person's id as received: dropped unless it could be a person's.
+fn received_assignee(id: &str) -> String {
+    let ok = id.len() <= RECEIVED_ASSIGNEE_MAX
+        && !id.chars().any(char::is_control)
+        && !id.starts_with(crate::space::AI_MEMBER_PREFIX);
+    if ok { id.to_string() } else { String::new() }
+}
 
 /// Longest message of a team discussion received from another computer (characters).
 pub const RECEIVED_CHAT_MAX: usize = 4000;
@@ -504,6 +520,7 @@ impl Project {
                     s.updated = ts.updated;
                     s.held_by = ts.held_by.clone();
                     s.held_at = ts.held_at;
+                    s.assignee = received_assignee(&ts.assignee);
                     changed = true;
                 }
                 Some(_) => {}
@@ -511,6 +528,7 @@ impl Project {
                     let mut s = ts.clone();
                     s.title = clean(ts);
                     s.received = true;
+                    s.assignee = received_assignee(&ts.assignee);
                     // Decided on each computer: another's AIs and models aren't ours.
                     s.model.clear();
                     s.agent = None;
@@ -565,6 +583,7 @@ impl Project {
             held_at: 0,
             model: String::new(),
             agent: None,
+            assignee: String::new(),
         };
         let id = s.id.clone();
         self.steps.push(s);
@@ -609,6 +628,25 @@ impl Project {
         if s.agent != agent {
             s.agent = agent;
             self.touch();
+        }
+        true
+    }
+
+    /// Make the person `member` responsible for step `id` (empty: nobody). An edit of the
+    /// step, so the other copies of a shared project take it. False: no such step, or
+    /// `member` isn't a person among the project's members.
+    pub fn set_step_assignee(&mut self, id: &str, member: &str) -> bool {
+        let person = |m: &ProjectMember| m.id == member && m.ai.is_empty();
+        if !member.is_empty() && !self.members.iter().any(person) {
+            return false;
+        }
+        let Some(s) = self.steps.iter_mut().find(|s| s.id == id) else {
+            return false;
+        };
+        if s.assignee != member {
+            s.assignee = member.to_string();
+            s.updated = now_ms();
+            self.last_activity = s.updated;
         }
         true
     }
@@ -1708,6 +1746,55 @@ mod tests {
         let mut new_here = forged;
         new_here.keep_local(None);
         assert!(new_here.members.is_empty());
+    }
+
+    #[test]
+    fn a_steps_responsible_person_is_shared_between_copies() {
+        let member = |id: &str, ai: &str| ProjectMember {
+            id: id.into(),
+            name: id.into(),
+            role: Default::default(),
+            ai: ai.into(),
+        };
+        let mut ours = Project::default();
+        ours.members = vec![member("ana", ""), member("ia:Maison", "codex")];
+        let a = ours.add_step("A", "moi");
+        // An older file, or a step with nobody: nothing written.
+        assert!(!serde_json::to_string(&ours.steps[0]).unwrap().contains("assignee"));
+        // Only a person of the project.
+        assert!(!ours.set_step_assignee(&a, "inconnu"));
+        assert!(!ours.set_step_assignee(&a, "ia:Maison"));
+        assert!(!ours.set_step_assignee("autre", "ana"));
+        let mut theirs = ours.clone();
+        ours.steps[0].updated = 1;
+        theirs.steps[0].updated = 1;
+        assert!(ours.set_step_assignee(&a, "ana"));
+        assert!(ours.steps[0].updated > 1);
+        assert!(theirs.merge_steps(&ours.steps, &Default::default()));
+        assert_eq!(theirs.steps[0].assignee, "ana");
+        // It stays with the page that leaves, unlike the AI.
+        ours.set_step_agent(&a, Some(crate::auto::Agent::ClaudeCode));
+        let mut sent = ours.clone();
+        sent.strip_local();
+        assert_eq!(sent.steps[0].assignee, "ana");
+        assert_eq!(sent.steps[0].agent, None);
+        // A step new on the other side comes with it, our members known or not.
+        let mut fresh = Project::default();
+        fresh.merge_steps(&sent.steps, &Default::default());
+        assert_eq!(fresh.steps[0].assignee, "ana");
+        // What can't be a person's id is dropped.
+        for bad in ["ia:Maison".to_string(), "a\nb".into(), "x".repeat(201)] {
+            sent.steps[0].assignee = bad;
+            let mut fresh = Project::default();
+            fresh.merge_steps(&sent.steps, &Default::default());
+            assert!(fresh.steps[0].assignee.is_empty());
+        }
+        // Taken back: nobody, everywhere.
+        theirs.steps[0].updated = 1;
+        ours.steps[0].updated = 1;
+        assert!(ours.set_step_assignee(&a, ""));
+        theirs.merge_steps(&ours.steps, &Default::default());
+        assert!(theirs.steps[0].assignee.is_empty());
     }
 
     #[test]
