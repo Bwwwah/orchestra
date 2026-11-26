@@ -1113,14 +1113,15 @@ impl NotesApp {
                             .map(|r| ui.rect_contains_pointer(r))
                             .unwrap_or(false);
                         let header_top = ui.cursor().top();
-                        // A short gap from the page bar to the icon (the 78 px glyph already has room above it).
-                        ui.add_space(if page.icon.is_empty() { 40.0 } else { 32.0 });
-                        // Icon (78 px), or "Ajouter une icône" shown on hover.
+                        let head = header_sizes(page.project.is_some());
+                        // A short gap from the page bar to the icon (the glyph already has room above it).
+                        ui.add_space(if page.icon.is_empty() { head.top_bare } else { head.top_icon });
+                        // Icon, or "Ajouter une icône" shown on hover.
                         ui.horizontal(|ui| {
                             ui.add_space(gutter);
                             let has_icon = !page.icon.is_empty();
                             let label = if has_icon {
-                                RichText::new(page.icon.clone()).size(78.0)
+                                RichText::new(page.icon.clone()).size(head.icon)
                             } else {
                                 RichText::new(crate::tr!("☺  Ajouter une icône", "☺  Add an icon"))
                                     .size(14.0)
@@ -1162,9 +1163,9 @@ impl NotesApp {
                             });
                         });
                         if !page.icon.is_empty() {
-                            ui.add_space(26.0);
+                            ui.add_space(head.below_icon);
                         }
-                        // Title: 40 px bold.
+                        // Title, in bold.
                         let title_key = format!("title-{}", page.id);
                         let title_id = egui::Id::unique(&title_key);
                         let tr = ui
@@ -1174,7 +1175,7 @@ impl NotesApp {
                                     egui::TextEdit::singleline(&mut page.title)
                                         .id(title_id)
                                         .interactive(!locked)
-                                        .font(bold(40.0))
+                                        .font(bold(head.title))
                                         .text_color(t.text)
                                         .hint_text(
                                             RichText::new(crate::tr!("Sans titre", "Untitled"))
@@ -1200,7 +1201,7 @@ impl NotesApp {
                         {
                             new_focus = Some((b.id.clone(), Some(0)));
                         }
-                        ui.add_space(20.0);
+                        ui.add_space(head.below_title);
                         let page_id = page.id.clone();
                         let page_title = page.display_title();
                         if let Some(pr) = page.project.as_mut() {
@@ -3243,6 +3244,40 @@ fn page_icon(p: &Page) -> &str {
 
 fn title_with_icon(p: &Page) -> String {
     format!("{} {}", page_icon(p), p.display_title())
+}
+
+/// Sizes of a page's header: icon glyph, title and the gaps around them.
+struct HeaderSizes {
+    top_bare: f32,
+    top_icon: f32,
+    icon: f32,
+    below_icon: f32,
+    title: f32,
+    below_title: f32,
+}
+
+/// Notion's large header for a document; a compact one for a project page,
+/// whose cards should show without scrolling.
+fn header_sizes(project: bool) -> HeaderSizes {
+    if project {
+        HeaderSizes {
+            top_bare: 20.0,
+            top_icon: 16.0,
+            icon: 40.0,
+            below_icon: 8.0,
+            title: 28.0,
+            below_title: 12.0,
+        }
+    } else {
+        HeaderSizes {
+            top_bare: 40.0,
+            top_icon: 32.0,
+            icon: 78.0,
+            below_icon: 26.0,
+            title: 40.0,
+            below_title: 20.0,
+        }
+    }
 }
 
 fn rgb(c: [u8; 3]) -> Color32 {
