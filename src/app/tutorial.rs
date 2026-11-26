@@ -134,21 +134,12 @@ pub(super) fn tour_stops() -> Vec<Stop> {
             ),
         },
         Stop {
-            target: "orch:launch",
+            target: "orch:running",
             place: Place::View(View::Orchestra),
             title: crate::tr!("Orchestration", "Orchestration"),
             text: crate::tr!(
-                "Le tableau de bord de tous les projets : ce qui tourne, et le bouton « Lancer » de chacun.",
-                "The dashboard of every project: what runs, and each one's « Start » button."
-            ),
-        },
-        Stop {
-            target: "orch:limits",
-            place: Place::View(View::Orchestra),
-            title: crate::tr!("Réglages et limites", "Settings and limits"),
-            text: crate::tr!(
-                "Les réglages communs des sessions. « Limites de chaque IA » ouvre Paramètres › IA : où ses sessions s'arrêtent et la réserve qu'elle vous laisse.",
-                "The sessions' common settings. « Each AI's limits » opens Settings › AI: where its sessions stop and the reserve it leaves you."
+                "La vue d'ensemble : les sessions en cours ou suspendues de tous les projets. Une IA se lance depuis la page d'un projet ou d'une étape ; réglages et limites sont dans Paramètres › IA.",
+                "The overview: every project's running or suspended sessions. An AI starts from a project's page or a step; settings and limits are in Settings › AI."
             ),
         },
         Stop {

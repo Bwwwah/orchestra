@@ -1110,10 +1110,9 @@ impl Workspace {
         v
     }
 
-    /// Projects in « Lancer une session »: most recent real activity first (steps, sessions,
-    /// state of play), without the page's own edit time, which a change of their launch
-    /// controls (« arrêt à » %, commits, sans fin) bumps: the project being set would jump
-    /// to the top under the pointer and swap places with the others.
+    /// Projects a session may start on, as the Orchestration page lists them: most recent
+    /// real activity first (steps, sessions, state of play), without the page's own edit
+    /// time, which a mere change of their launch settings bumps.
     pub fn launch_projects(&self) -> Vec<&Page> {
         let mut v: Vec<&Page> = self
             .pages

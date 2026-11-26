@@ -1543,6 +1543,7 @@ impl NotesApp {
                 }
             },
         );
+        self.session_settings(ui, t, l);
         // Subscription or API key, for each AI that bills by key.
         section(ui, crate::tr!("Abonnement ou clé API", "Subscription or API key"), t, l);
         for agent in crate::auto::Agent::ALL {

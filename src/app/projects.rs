@@ -1427,8 +1427,8 @@ pub(super) fn project_panel(ui: &mut egui::Ui, cx: &mut Cx) -> Option<super::not
                         .inner;
                     let why = blocked.map_or("", LaunchBlock::why);
                     let r = r.on_disabled_hover_text(why).on_hover_text(crate::tr!(
-                        "Une IA avance seule sur les étapes ouvertes, dans une copie à part du dossier, avec les réglages de ce projet dans Orchestration.",
-                        "An AI works alone on the open steps, in a separate copy of the folder, with this project's settings in Orchestration."
+                        "Une IA avance seule sur les étapes ouvertes, dans une copie à part du dossier, avec les réglages de lancement de ce projet (« Réglages… »).",
+                        "An AI works alone on the open steps, in a separate copy of the folder, with this project's launch settings (« Settings… »)."
                     ));
                     if r.clicked() {
                         launch = true;
@@ -3457,7 +3457,7 @@ mod card_layout_tests {
         assert_eq!(tab_of_mark("card:versions"), Some(Versions));
         assert_eq!(tab_of_mark("card:sessions"), Some(Overview));
         assert_eq!(tab_of_mark("card:pages"), Some(Pages));
-        assert_eq!(tab_of_mark("orch:limits"), None);
+        assert_eq!(tab_of_mark("orch:running"), None);
     }
 }
 

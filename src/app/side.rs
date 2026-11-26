@@ -596,7 +596,7 @@ impl NotesApp {
                 .response
                 .on_hover_text(crate::tr!(
                     "Économe = modèle plus léger et peu de réflexion, Qualité = modèle plus haut et plus de réflexion. Gardé pour les prochaines sessions du projet (modifiable dans le lancement autonome).",
-                    "Economical = lighter model and little thinking, Quality = higher model and more thinking. Kept for the project's next sessions (also editable in the autonomous launch card)."
+                    "Economical = lighter model and little thinking, Quality = higher model and more thinking. Kept for the project's next sessions (also editable in the project's launch settings)."
                 ));
         });
         if saving != before {

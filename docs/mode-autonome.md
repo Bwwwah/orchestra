@@ -28,6 +28,18 @@ ni abandonnée, sa branche est ouverte dans la copie : git refuse d'y passer dep
 dossier (« already used by worktree »), l'encadré Versions l'explique et indique où se
 trouve la copie.
 
+## Où la lancer et la suivre
+
+Une session se lance depuis la **page du projet** (« Lancer une IA », avec « Réglages… » pour
+l'IA, le modèle, le plafond, une consigne, le mode sans fin) ou depuis une **étape** confiée à
+une IA (« Lancer »). En mode sans fin avec « sur main » coché, les réglages de lancement
+s'ouvrent pour demander confirmation.
+
+La page **Orchestration** est la vue d'ensemble de tous les projets : les sessions en cours ou
+suspendues, les questions en attente et les copies à traiter. Sans session, elle mène aux
+projets qui ont des étapes ouvertes. Les réglages communs des sessions sont dans
+**Paramètres › IA**, rubrique « Sessions autonomes ».
+
 ## Les étapes : la matière première
 
 Le mode autonome ne fait que les étapes du projet : leur qualité décide de celle du travail.
@@ -47,14 +59,14 @@ ajouté sans votre clic. Le texte de la consigne est dans `sync::ask_tasks`.
 ## Les limites
 
 Chaque IA a les siennes, sur son propre abonnement : **Paramètres › IA**, sous la ligne de
-l'IA branchée (aussi par « Limites de chaque IA » sur la page Orchestration). Ce qui n'y est
-pas réglé suit les valeurs communes.
+l'IA branchée. Ce qui n'y est pas réglé suit les valeurs communes, au même endroit
+(« Sessions autonomes »).
 
 | Réglage | Par défaut | Effet |
 |---|---|---|
 | Limite globale | 60 % | part de la fenêtre de 5 h de l'abonnement, tous projets confondus |
 | Réserve minimum | 5 % | part de la semaine gardée pour vous, demandée à la première visite de la page : les sessions s'arrêtent avant de l'entamer |
-| Part par projet | 20 % | réglée sur la ligne de chaque projet au lancement ; les parts ensemble ne dépassent jamais la limite globale |
+| Arrêt à | usage actuel + 20 % | plafond de la fenêtre de 5 h propre à chaque projet, dans ses réglages de lancement ; jamais au-delà de la limite globale |
 | Tours au plus | 30 | nombre de tours d'une session |
 | Commits | non | l'IA peut faire des commits sur sa branche ; Orchestra envoie la branche sur GitHub après chaque tour et en fin de session |
 | Rapport du jour | 19 h | heure du bilan de la journée, dès qu'une session a fini dans la journée (même un seul projet, même si d'autres sessions tournent encore) |
