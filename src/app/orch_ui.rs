@@ -619,6 +619,15 @@ fn launch_help() -> &'static str {
     )
 }
 
+/// The name under which a session of `agent` on computer `computer` reserves steps: what
+/// `store::holder_id` gives its MCP server.
+fn holder_of(agent: Agent, computer: &str) -> String {
+    match agent.holder() {
+        "" => computer.to_string(),
+        h => format!("{computer}#{h}"),
+    }
+}
+
 fn default_mission() -> &'static str {
     crate::tr!(
         "Avance sur les étapes ouvertes du projet, dans l'ordre, en vérifiant ton travail.",
@@ -759,7 +768,8 @@ impl NotesApp {
     /// Start an autonomous session on a project. `fix`: a security fix (CVE watch), always on
     /// a branch of its own named `orchestra/auto-fix-…`, never on `dev`. `model`: the model
     /// the AI works with (empty: its own default). `step`: the only step the session is
-    /// sent on (`auto::step_mission`; `mission` then only completes it).
+    /// sent on (`auto::step_mission`; `mission` then only completes it); it is « doing »,
+    /// reserved for the session, once that has started.
     #[allow(clippy::too_many_arguments)]
     fn launch_run(
         &mut self,
@@ -832,6 +842,26 @@ impl NotesApp {
                 "a session is already running on this project with this AI"
             )
             .into());
+        }
+        // A step that a session running here is doing isn't given to a second one.
+        if let Some(id) = step {
+            let computer = crate::store::computer_id();
+            let held = pr
+                .steps
+                .iter()
+                .find(|s| s.id == id)
+                .map_or("", |s| s.held_by.as_str());
+            if self.orch.runs.iter().any(|r| {
+                r.project == project
+                    && (held == holder_of(r.agent, &computer)
+                        || self.ws.runs.iter().any(|x| x.id == r.id && x.step == id))
+            }) {
+                return Err(crate::tr!(
+                    "une session travaille déjà sur cette étape",
+                    "a session is already working on this step"
+                )
+                .into());
+            }
         }
         // The AI chosen: wired for working alone, and plugged in.
         if !agent.ready() {
@@ -1016,12 +1046,14 @@ impl NotesApp {
         )?;
         term.resize(42, 140);
         let id = crate::model::new_id();
-        let mission = if let Some(id) = step {
-            auto::step_mission(id, mission)
-        } else if mission.trim().is_empty() {
-            default_mission().to_string()
-        } else {
-            mission.trim().to_string()
+        // Kept in the record, to start again: on one step, only what completes its mission.
+        let kept_mission = match step {
+            None if mission.trim().is_empty() => default_mission().to_string(),
+            _ => mission.trim().to_string(),
+        };
+        let mission = match step {
+            Some(id) => auto::step_mission(id, &kept_mission),
+            None => kept_mission.clone(),
         };
         let first_prompt = auto::mission_prompt(
             &self
@@ -1047,7 +1079,8 @@ impl NotesApp {
             branch: copy.branch.clone(),
             started: crate::model::now_ms(),
             commits_allowed: commits,
-            mission: mission.clone(),
+            mission: kept_mission,
+            step: step.unwrap_or_default().to_string(),
             limit,
             ceiling,
             endless: endless.clone(),
@@ -1105,6 +1138,13 @@ impl NotesApp {
             paused_screen: 0,
             budget_micro: o.budget_micro(self.ws.settings.api_mode(agent.ai().key())),
         });
+        // Now that the session exists: its step shows « doing », under the name its own MCP
+        // server reserves with, which its update_step then renews.
+        if let Some(id) = step
+            && let Some(pr) = self.ws.page_mut(project).and_then(|p| p.project.as_mut())
+        {
+            pr.start_step(id, &holder_of(agent, &crate::store::computer_id()));
+        }
         Ok(())
     }
 
@@ -1639,7 +1679,8 @@ impl NotesApp {
                 let share = if rec.limit > 0.0 { rec.limit } else { o.default_limit };
                 ceiling_choice(None, five, share, o.five_limit(agent))
             };
-            match self.launch_run(ctx, &rec.project, &rec.mission, ceiling, rec.commits_allowed, rec.endless.clone(), agent, rec.branch.contains("/auto-fix-"), &rec.model, None) {
+            let step = Some(rec.step.as_str()).filter(|s| !s.is_empty());
+            match self.launch_run(ctx, &rec.project, &rec.mission, ceiling, rec.commits_allowed, rec.endless.clone(), agent, rec.branch.contains("/auto-fix-"), &rec.model, step) {
                 Ok(()) => self.ws.notify(
                     "info",
                     &rec.project,

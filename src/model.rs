@@ -738,6 +738,10 @@ pub struct RunRecord {
     /// The mission and the project's share it was given, to start it again.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub mission: String,
+    /// The id of the only step the session was sent on (« Lancer » on its line); empty: a
+    /// session on the project. `mission` then only completes `auto::step_mission`.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub step: String,
     #[serde(default)]
     pub limit: f32,
     /// Where it stopped, in absolute % of the 5-hour window (0: not known, older records).

@@ -841,12 +841,32 @@ impl Project {
 
     /// The project as a session sent on step `id` alone sees it: that step and no other, so
     /// that what is read from the next step (AI, model, difficulty) is read from it. None:
-    /// no such step, or not one an AI of computer `me` can take at `now` (finished, or
-    /// reserved by another computer's AI).
-    pub fn focused_on(&self, id: &str, me: &str, now: u64) -> Option<Project> {
+    /// no such step, or not one an AI of computer `computer` can take at `now` (finished, or
+    /// reserved by another computer's AI). A reservation by an AI of this computer doesn't
+    /// count: starting a session on the step takes it over (`start_step`).
+    pub fn focused_on(&self, id: &str, computer: &str, now: u64) -> Option<Project> {
         let mut p = self.clone();
-        p.steps.retain(|s| s.id == id);
-        p.next_step_for(me, now).is_some().then_some(p)
+        p.steps.retain(|s| {
+            s.id == id && s.status != StepStatus::Done && !s.held_by_other_computer(computer, now)
+        });
+        for s in &mut p.steps {
+            s.held_by.clear();
+        }
+        (!p.steps.is_empty()).then_some(p)
+    }
+
+    /// A session on step `id` alone starts: the step is « doing », reserved for `holder`, even
+    /// if another AI of the same computer held it (the person, or the restart of its own
+    /// session, sends this one on it). False: no such step, or `focused_on` refuses it.
+    pub fn start_step(&mut self, id: &str, holder: &str) -> bool {
+        let computer = holder.split('#').next().unwrap_or_default();
+        if self.focused_on(id, computer, now_ms()).is_none() {
+            return false;
+        }
+        if let Some(s) = self.steps.iter_mut().find(|s| s.id == id) {
+            s.held_by.clear();
+        }
+        self.claim_step(id, holder).is_ok()
     }
 
     /// Add a session, or refresh it if already known (same tool and id).
@@ -1610,7 +1630,22 @@ mod tests {
         pr.steps[1].held_at = 10;
         assert!(pr.focused_on(&b, "ici", 20).is_none());
         assert!(pr.focused_on(&b, "ailleurs", 20).is_some());
+        // Reserved by an AI of this computer: its session can start again on it, and still
+        // reads its AI from it.
+        pr.steps[1].held_by = "ici#codex".into();
+        pr.steps[1].held_at = now_ms();
+        let aim = pr.focused_on(&b, "ici", now_ms()).unwrap();
+        assert_eq!(aim.agent_for_next(Agent::ClaudeCode, "ici", now_ms()), Agent::Codex);
+        // Starting takes the step: « doing », held by the session, whoever here had it.
+        assert!(pr.start_step(&b, "ici#claude-code"));
+        assert_eq!(pr.steps[1].held_by, "ici#claude-code");
+        assert!(!pr.start_step(&b, "ailleurs#codex"), "another computer's");
+        assert_eq!(pr.steps[1].held_by, "ici#claude-code");
+        assert!(pr.start_step(&a, "ici"));
+        assert_eq!(pr.steps[0].status, StepStatus::Doing);
         pr.steps[1].status = StepStatus::Done;
+        assert!(!pr.start_step(&b, "ici"));
+        assert_eq!(pr.steps[1].status, StepStatus::Done);
         assert!(pr.focused_on(&b, "ailleurs", 20).is_none());
         let mission = crate::auto::step_mission(&b, "  ");
         assert!(mission.contains(&b) && !mission.contains('\n'));
