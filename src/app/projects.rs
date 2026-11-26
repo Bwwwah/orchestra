@@ -891,6 +891,33 @@ fn drag_handle(ui: &mut egui::Ui, height: f32, shown: bool, held: bool, t: &Tone
     h.on_hover_cursor(egui::CursorIcon::Grab)
 }
 
+/// A folded step: its text on one line, cut with "…". When it is cut, hovering shows all
+/// of it; a click (the caller's) unfolds it in place.
+fn step_line(ui: &mut egui::Ui, job: egui::text::LayoutJob, width: f32) -> egui::Response {
+    let width = width.max(30.0);
+    let mut full = job.clone();
+    let mut job = job;
+    job.wrap = egui::text::TextWrapping::truncate_at_width(width);
+    let g = ui.fonts_mut(|f| f.layout_job(job));
+    let cut = g.elided;
+    let (r, resp) = ui.allocate_exact_size(egui::vec2(width, g.size().y), egui::Sense::click());
+    ui.painter().galley(r.min, g, t_text_fallback());
+    // Screen readers (and the tests) find it by its whole text.
+    resp.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, &full.text));
+    let resp = resp.on_hover_cursor(egui::CursorIcon::PointingHand);
+    if !cut {
+        return resp;
+    }
+    // Read in the tooltip: a finished step isn't struck through there.
+    for sec in full.sections.iter_mut() {
+        sec.format.strikethrough = egui::Stroke::NONE;
+    }
+    resp.on_hover_ui(|ui| {
+        ui.set_max_width(420.0);
+        ui.add(egui::Label::new(full).wrap());
+    })
+}
+
 /// Status of a step as a round icon: ○ to do, ◐ in progress, ● done.
 fn step_icon(ui: &mut egui::Ui, step_id: &str, st: StepStatus, t: &Tone) -> egui::Response {
     let (r, resp) = ui.allocate_exact_size(egui::vec2(18.0, 20.0), egui::Sense::click());
@@ -2094,7 +2121,7 @@ fn steps_card(ui: &mut egui::Ui, cx: &mut Cx, extra: f32) -> f32 {
                     })
                     .inner
                 } else {
-                    line(ui, job, room)
+                    step_line(ui, job, room)
                 };
                 // The whole row up to its right edge, where the "×" sits: the cross must stay
                 // visible while the pointer is on it, not only over the text.
@@ -2709,6 +2736,36 @@ mod new_step_field_tests {
         h.state_mut().pr.add_step("Relire", "moi");
         h.run();
         h.get_by_label("Sans thème");
+    }
+
+    /// A step too long for its line: hovering shows all of it, a click unfolds it.
+    #[test]
+    fn a_cut_step_is_read_whole_on_hover_or_click() {
+        let mut h = harness(|ui, cx| {
+            steps_card(ui, cx, 0.0);
+        });
+        let long = "afficher le texte complet d'une étape bien trop longue pour tenir sur la \
+                    seule ligne que la carte lui laisse, jusqu'au tout dernier mot";
+        h.state_mut().pr.add_step(long, "moi");
+        h.state_mut().pr.add_step("courte", "moi");
+        h.run();
+        // The folded row and, once hovered, its tooltip both carry the text.
+        let shown = |h: &Harness<S>| h.query_all_by_label(long).count();
+        let folded = h.get_by_label(long).rect();
+        h.get_by_label(long).hover();
+        h.run();
+        assert_eq!(shown(&h), 2, "the tooltip shows the whole step");
+        // A line that fits has nothing more to say.
+        h.get_by_label("courte").hover();
+        h.run();
+        h.get_by_label("courte");
+        h.get_by_label(long).click();
+        h.run();
+        h.event(egui::Event::PointerGone);
+        h.run();
+        let open = h.get_by_label(long).rect();
+        assert!(open.height() > folded.height() * 1.5, "{folded:?} {open:?}");
+        assert!(open.right() <= 700.0, "{open:?}");
     }
 
     #[derive(Default)]
