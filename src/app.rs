@@ -87,6 +87,8 @@ pub struct NotesApp {
     settings_snapshot: String,
     dirty_since: Option<Instant>,
     known_mtime: Option<SystemTime>,
+    /// Pages edited here, waiting for their next version (history.rs).
+    history: crate::history::Pending,
     /// Inbox messages deleted here: a merge with the file on disk must not bring them back.
     inbox_removed: HashSet<String>,
     last_poll: Instant,
@@ -232,6 +234,7 @@ impl NotesApp {
             settings_snapshot: String::new(),
             dirty_since: None,
             known_mtime: None,
+            history: Default::default(),
             inbox_removed: HashSet::new(),
             last_poll: Instant::now(),
             export_dir,
@@ -484,6 +487,7 @@ impl NotesApp {
     fn detect_changes(&mut self) {
         let mut changed = false;
         let t = now_ms();
+        let history_dir = crate::history::dir();
         let ids: HashSet<&String> = self.ws.pages.iter().map(|p| &p.id).collect();
         if ids.len() != self.snapshot.len() || self.snapshot.keys().any(|k| !ids.contains(k)) {
             changed = true;
@@ -516,6 +520,8 @@ impl NotesApp {
                         for id in gone {
                             p.deleted_blocks.insert(id, t);
                         }
+                        self.history
+                            .edited(&history_dir, &oldp, p, Instant::now());
                     }
                     p.updated = t.max(p.updated);
                     changed = true;
@@ -917,7 +923,13 @@ impl NotesApp {
                     self.ack(crate::tr!("Page restaurée.", "Page restored."));
                 }
                 Action::DeleteForever(id) => {
+                    let mut gone = self.ws.descendants(&id);
+                    gone.push(id.clone());
                     self.ws.delete_forever(&id);
+                    let dir = crate::history::dir();
+                    for page in gone {
+                        crate::history::forget(&dir, &page);
+                    }
                 }
                 Action::Duplicate(id) => {
                     if let Some(n) = self.ws.duplicate(&id) {
@@ -1889,6 +1901,7 @@ impl eframe::App for NotesApp {
             self.detect_changes();
         }
         self.live_tick();
+        self.history_tick();
         if let Some(t) = self.dirty_since
             && t.elapsed() > Duration::from_millis(400)
         {
@@ -1950,6 +1963,7 @@ impl NotesApp {
     fn conductor_tick(&mut self, ctx: &egui::Context) {
         self.poll_file();
         self.orch_tick(ctx, false);
+        self.history_tick();
         if let Some(t) = self.dirty_since
             && t.elapsed() > Duration::from_millis(400)
         {
@@ -1971,9 +1985,16 @@ impl NotesApp {
 
     fn save_on_exit(&mut self) {
         self.detect_changes();
+        self.history.flush(&crate::history::dir(), &self.ws);
         if self.dirty_since.is_some() {
             self.save_now();
         }
+    }
+
+    /// Keep a version of the pages edited for ten minutes.
+    fn history_tick(&mut self) {
+        self.history
+            .tick(&crate::history::dir(), &self.ws, Instant::now());
     }
 }
 

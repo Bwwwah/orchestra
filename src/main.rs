@@ -21,6 +21,7 @@ mod data_folder;
 mod docs;
 mod drive;
 mod git;
+mod history;
 mod identity;
 mod live;
 mod mcp;

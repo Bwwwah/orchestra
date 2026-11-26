@@ -496,8 +496,14 @@ impl NotesApp {
             }
             match self.ws.pages.iter_mut().find(|p| p.id == incoming.id) {
                 Some(ours) => {
+                    // Edited by the others: it waits for its version too (history.rs).
+                    let was = (!self.history.waits(&ours.id)).then(|| ours.clone());
                     if collab::merge_page(ours, &incoming) {
                         changed = true;
+                        if let Some(was) = was {
+                            let dir = crate::history::dir();
+                            self.history.edited(&dir, &was, ours, Instant::now());
+                        }
                     }
                     // Only echo back if our merge kept something they don't have (what
                     // stays on this computer aside).

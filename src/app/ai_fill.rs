@@ -234,8 +234,14 @@ pub fn put_plan(page: &mut crate::model::Page, plan: &str, by: &str) {
 
 impl NotesApp {
     fn write_plan(&mut self, page_id: &str, plan: &str, by: &str) {
+        // What was typed until now is noted as the person's edit first.
+        self.detect_changes();
         if let Some(p) = self.ws.page_mut(page_id) {
+            // An AI writes the page: kept as it was and as it is (history.rs).
+            let history = crate::history::dir();
+            crate::history::record(&history, p, crate::history::By::Ai);
             put_plan(p, plan, by);
+            crate::history::record(&history, p, crate::history::By::Ai);
             self.dirty_since.get_or_insert_with(Instant::now);
         }
     }
