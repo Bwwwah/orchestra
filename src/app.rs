@@ -57,6 +57,8 @@ enum Action {
     WatchRun(String),
     /// Open a project's « Réglages de lancement ».
     LaunchSettings(String),
+    /// « Versions de la page… » in the page's « … » menu.
+    PageVersions(String),
     /// « Gérer les membres… » on a team project's page: the space's administration window.
     ManageMembers,
 }
@@ -122,6 +124,8 @@ pub struct NotesApp {
     new_project: Option<projects::NewProject>,
     /// The project whose « Réglages de lancement » window is open.
     launch_settings: Option<String>,
+    /// The page whose « Versions » window is open, with its versions (history.rs).
+    page_versions: Option<page_versions::Open>,
     /// Text of the "add a step" field on a project page.
     new_step: String,
     /// Claude Code / Codex sessions read live from disk, and which project each belongs to.
@@ -260,6 +264,7 @@ impl NotesApp {
             closed_tabs: vec![],
             new_project: None,
             launch_settings: None,
+            page_versions: None,
             new_step: String::new(),
             watcher: None,
             agents: Default::default(),
@@ -994,6 +999,7 @@ impl NotesApp {
                 Action::ShowOrchestra => self.view = View::Orchestra,
                 Action::WatchRun(run) => self.watch_run(run),
                 Action::LaunchSettings(id) => self.launch_settings = Some(id),
+                Action::PageVersions(id) => self.page_versions = Some(page_versions::Open::of(&self.ws, &id)),
                 Action::ManageMembers => {
                     self.admin_open = true;
                     self.send_admin(crate::team::AdminOp::List);
@@ -1849,6 +1855,7 @@ impl eframe::App for NotesApp {
         self.search_window(&ctx, &mut actions);
         self.settings_window(&ctx, &mut actions);
         self.launch_settings_window(&ctx);
+        self.page_versions_window(&ctx);
         self.team_admin_window(&ctx);
         let had_actions = !actions.is_empty();
         // Starting a session needs the context (its terminal, its repaints): done here.
@@ -3204,6 +3211,7 @@ mod live_ui;
 mod members_ui;
 mod notices;
 mod orch_ui;
+mod page_versions;
 mod projects;
 mod rich;
 mod search;

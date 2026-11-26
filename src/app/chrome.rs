@@ -1329,6 +1329,10 @@ impl NotesApp {
                             }
                         });
                     });
+                    if ui.button(crate::tr!("Versions de la page…", "Page versions…")).on_hover_text(crate::tr!("Les versions gardées sur cet ordinateur, à remettre en place", "The versions kept on this computer, to put back")).clicked() {
+                        actions.push(Action::PageVersions(cur.to_string()));
+                        ui.close();
+                    }
                     if ui.button(crate::tr!("Exporter en Markdown", "Export as Markdown")).clicked() {
                         actions.push(Action::Export(cur.to_string()));
                         ui.close();

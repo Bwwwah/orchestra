@@ -74,6 +74,18 @@ impl Content {
     pub fn same(&self, other: &Content) -> bool {
         self.key() == other.key()
     }
+
+    /// Puts this content back on `page`, its blocks now (so that the others take it over the
+    /// blocks they still hold). The page's other fields stay as they are.
+    pub fn apply_to(&self, page: &mut Page, now: u64) {
+        page.title = self.title.clone();
+        page.icon = self.icon.clone();
+        page.blocks = self.blocks.clone();
+        for b in &mut page.blocks {
+            b.updated = now;
+        }
+        page.database = self.database.clone();
+    }
 }
 
 /// Where a snapshot comes from.
@@ -132,6 +144,14 @@ fn files(folder: &Path) -> Vec<(u64, PathBuf)> {
 
 fn read(path: &Path) -> Option<Snapshot> {
     serde_json::from_str(&std::fs::read_to_string(path).ok()?).ok()
+}
+
+/// The versions of a page, newest first. Empty for an id that has none.
+pub fn list(root: &Path, id: &str) -> Vec<Snapshot> {
+    let Some(folder) = page_dir(root, id) else {
+        return vec![];
+    };
+    files(&folder).iter().rev().filter_map(|(_, p)| read(p)).collect()
 }
 
 /// Keep `page` as it is now, unless it is blank or the same as its latest snapshot. True when
@@ -385,6 +405,32 @@ mod tests {
         assert!(pending.waits(&first.id));
         pending.flush(&d.0, &ws);
         assert_eq!(versions(&d.0, &first.id), ["a", "abc", "abcd"]);
+    }
+
+    #[test]
+    fn versions_come_newest_first_and_one_can_be_put_back() {
+        let d = Scratch::new();
+        let mut p = page("un");
+        record_at(&d.0, &p, By::Ai, 10).unwrap();
+        p.blocks[0].text = "deux".into();
+        record_at(&d.0, &p, By::Edit, 20).unwrap();
+        let listed: Vec<String> = list(&d.0, &p.id)
+            .iter()
+            .map(|s| s.content.blocks[0].text.clone())
+            .collect();
+        assert_eq!(listed, ["deux", "un"]);
+        assert!(list(&d.0, "absent").is_empty());
+        assert!(list(&d.0, "../x").is_empty());
+
+        // Put the first one back: title, blocks and their new times; the rest of the page stays.
+        let old = list(&d.0, &p.id).pop().unwrap();
+        let mut current = p.clone();
+        current.favorite = true;
+        old.content.apply_to(&mut current, 99);
+        assert_eq!(current.blocks[0].text, "un");
+        assert_eq!(current.blocks[0].updated, 99);
+        assert!(current.favorite);
+        assert!(Content::of(&current).same(&old.content));
     }
 
     #[test]
