@@ -290,7 +290,6 @@ struct Draft {
     /// that of a session already running (see `draft_ceiling`).
     touched: bool,
     commits: bool,
-    pick: bool,
     /// Endless mode, and its end conditions as set in the launch card.
     endless: bool,
     end: crate::model::EndConditions,
@@ -315,7 +314,6 @@ impl Draft {
             ceiling: pr.and_then(|x| x.session_ceiling),
             touched: false,
             commits: prefs.commits,
-            pick: false,
             endless: prefs.endless,
             end: prefs.end,
             agent: prefs.agent.unwrap_or(Agent::ClaudeCode),
@@ -421,25 +419,25 @@ fn row_share(running: Option<f32>, suspended_endless: bool) -> Option<f32> {
     }
 }
 
-/// What a picked project's session may take from the 5-hour window, in percentage points:
+/// What a project's next session may take from the 5-hour window, in percentage points:
 /// its ceiling less what is already taken, that is what the window holds (`five`) or, when
 /// higher, the ceiling of a session already running (`running`: the room up to it is that
 /// session's too). Never below zero.
-fn picked_share(ceiling: f32, five: Option<f32>, running: Option<f32>) -> f32 {
+fn may_take_share(ceiling: f32, five: Option<f32>, running: Option<f32>) -> f32 {
     let taken = five.unwrap_or(0.0).max(running.unwrap_or(0.0));
     (ceiling - taken).max(0.0)
 }
 
-/// Whether a launch row shows what its session may take (`picked_share`) rather than its
-/// base share: once picked, or once its ceiling was set by hand in the card; never while
-/// its session runs (its own use is shown then).
-fn shows_picked_share(picked: bool, set_by_hand: bool, busy: bool) -> bool {
-    (picked || set_by_hand) && !busy
+/// Whether a launch row shows what its session may take (`may_take_share`) rather than its
+/// base share: once its ceiling was set by hand in the card; never while its session runs
+/// (its own use is shown then).
+fn shows_may_take(set_by_hand: bool, busy: bool) -> bool {
+    set_by_hand && !busy
 }
 
-/// How `picked_share` was worked out, for its tooltip.
-fn picked_share_text(ceiling: f32, five: Option<f32>, running: Option<f32>) -> String {
-    let p = picked_share(ceiling, five, running);
+/// How `may_take_share` was worked out, for its tooltip.
+fn may_take_text(ceiling: f32, five: Option<f32>, running: Option<f32>) -> String {
+    let p = may_take_share(ceiling, five, running);
     let f = five.unwrap_or(0.0);
     match running {
         Some(r) if r > f => crate::trf!(
@@ -583,8 +581,8 @@ pub struct Orch {
     copy_jobs: Vec<CopyJob>,
     /// The window was closed during one of them: close it once they are all done.
     quit_after_jobs: bool,
-    /// An endless session on main waiting for the person to confirm the warning: a project
-    /// id, or SELECTION for « Lancer la sélection ».
+    /// An endless session on main waiting for the person to confirm the warning: its
+    /// project id.
     confirm_main: Option<String>,
     started: bool,
     /// Finished sessions to merge into main by themselves, once their terminal is closed.
@@ -598,9 +596,6 @@ pub struct Orch {
     /// The person put the permission card away for this launch.
     screen_dismissed: bool,
 }
-
-/// `Orch::confirm_main` for the « Lancer la sélection » button.
-const SELECTION: &str = "*selection*";
 
 /// An endless session whose work goes into main by itself: hours of unreviewed commits
 /// land on the main branch. Worth a warning before it starts.
@@ -616,11 +611,11 @@ fn endless_main_warning() -> &'static str {
 }
 
 /// The one line of help at the top of « Lancer une session », in sight rather than in
-/// tooltips: what a session does, when it stops, and how to start several.
+/// tooltips: what a session does, and when it stops.
 fn launch_help() -> &'static str {
     crate::tr!(
-        "Une session lance une IA sur les étapes ouvertes du projet. Elle s'arrête quand la fenêtre de 5 h atteint son « arrêt à ». Cochez plusieurs projets pour les lancer ensemble.",
-        "A session sets an AI to work on the project's open steps. It stops when the 5-hour window reaches its « stops at ». Tick several projects to start them together."
+        "Une session lance une IA sur les étapes ouvertes du projet. Elle s'arrête quand la fenêtre de 5 h atteint son « arrêt à ».",
+        "A session sets an AI to work on the project's open steps. It stops when the 5-hour window reaches its « stops at »."
     )
 }
 
@@ -795,7 +790,7 @@ impl NotesApp {
             .into());
         }
         // Nothing to work on (and not endless, where the AI finds its steps): it would stop
-        // at once, after starting Claude Code for nothing. Also for « Lancer la sélection ».
+        // at once, after starting Claude Code for nothing.
         if endless.is_none()
             && !pr
                 .steps
@@ -3162,14 +3157,8 @@ impl NotesApp {
             .collect();
         let running: Vec<String> = self.orch.runs.iter().map(|r| r.project.clone()).collect();
         let plugged = self.ais.plugged().contains(&crate::setup::Ai::ClaudeCode);
-        let mut start: Vec<String> = vec![];
-        let picked: Vec<String> = projects
-            .iter()
-            .filter(|(id, _, _)| {
-                self.orch.drafts.get(id).is_some_and(|d| d.pick) && !running.contains(id)
-            })
-            .map(|(id, _, _)| id.clone())
-            .collect();
+        // The line whose « Lancer » was clicked: one session at a time, from its own line.
+        let mut start: Option<String> = None;
         let limits = self.ws.settings.orch.clone();
         // Each session stops at its own ceiling on the 5-hour window (absolute), all under the
         // global limit: nothing to share out between them. One started beside them begins
@@ -3262,7 +3251,7 @@ impl NotesApp {
                 .map(|(id, _, _)| LaunchRow {
                     busy: running.contains(id),
                     open: open_steps.get(id).copied().unwrap_or(0),
-                    keep: drafts.get(id).is_some_and(|d| d.endless || d.pick),
+                    keep: drafts.get(id).is_some_and(|d| d.endless),
                 })
                 .collect();
             let idle_key = egui::Id::unique("orch-show-idle");
@@ -3280,7 +3269,6 @@ impl NotesApp {
                 let wide = ui.available_width() >= LAUNCH_ONE_LINE;
                 let row = ui.vertical(|ui| {
                     ui.horizontal(|ui| {
-                        ui.add_enabled(!busy, egui::Checkbox::without_text(&mut d.pick)).on_hover_text(crate::tr!("Sélectionner pour lancer plusieurs projets ensemble", "Select to start several projects together"));
                         // A round badge with the project's initial.
                         let (r, _) = ui.allocate_exact_size(egui::vec2(32.0, 32.0), egui::Sense::hover());
                         let hue = project_color(title);
@@ -3294,16 +3282,16 @@ impl NotesApp {
                                 // Its state; when « Lancer » is greyed for the window, why, in sight.
                                 let (txt, col) = if busy { (crate::tr!("au travail", "at work").to_string(), super::projects::GREEN) } else if open == 0 && !d.endless { (crate::tr!("aucune étape ouverte", "no open step").to_string(), t.tertiary) } else if !room_left(five, global) { (crate::tr!("limite de 5 h atteinte", "5-hour limit reached").to_string(), super::projects::ORANGE) } else if open == 0 { (crate::tr!("sans fin", "endless").to_string(), t.secondary) } else { ({ let s = crate::i18n::plural(open); crate::trf!("{open} étape{s} ouverte{s}", "{open} open step{s}") }, t.secondary) };
                                 ui.label(RichText::new(txt).size(12.0).color(col));
-                                // Picked, or its ceiling set by hand (and not running): what its
-                                // session may take, above what is already taken; else what it took.
-                                let picked = shows_picked_share(d.pick, d.touched, busy).then(|| {
+                                // Its ceiling set by hand (and not running): what its session
+                                // may take, above what is already taken; else what it took.
+                                let may = shows_may_take(d.touched, busy).then(|| {
                                     let c = ceiling_choice(draft_ceiling(d, running_at), five, dl, global);
-                                    (picked_share(c, five, running_at), picked_share_text(c, five, running_at))
+                                    (may_take_share(c, five, running_at), may_take_text(c, five, running_at))
                                 });
                                 let taken = row_share(run_pct.get(id).copied(), suspended_endless.contains(id));
-                                if let Some(fig) = row_figure(taken, picked.as_ref().map(|(p, _)| *p)) {
-                                    let col = if picked.is_some() { super::projects::BLUE } else if busy { super::projects::GREEN } else { t.tertiary };
-                                    let hover = picked.map(|(_, h)| h).unwrap_or_else(|| crate::tr!("Ce que la session de ce projet a pris de la fenêtre de 5 h depuis son lancement : 0 % tant qu'elle n'est pas lancée.", "What this project's session took from the 5-hour window since it started: 0 % until it is started.").to_string());
+                                if let Some(fig) = row_figure(taken, may.as_ref().map(|(p, _)| *p)) {
+                                    let col = if may.is_some() { super::projects::BLUE } else if busy { super::projects::GREEN } else { t.tertiary };
+                                    let hover = may.map(|(_, h)| h).unwrap_or_else(|| crate::tr!("Ce que la session de ce projet a pris de la fenêtre de 5 h depuis son lancement : 0 % tant qu'elle n'est pas lancée.", "What this project's session took from the 5-hour window since it started: 0 % until it is started.").to_string());
                                     ui.label(RichText::new("·").size(12.0).color(t.tertiary));
                                     ui.label(RichText::new(fig).size(12.0).color(col)).on_hover_text(hover);
                                 }
@@ -3321,7 +3309,7 @@ impl NotesApp {
                     // Narrow: the controls under the project, left to right, instead of over it.
                     if !wide {
                         ui.horizontal_wrapped(|ui| {
-                            ui.add_space(70.0);
+                            ui.add_space(LAUNCH_INDENT);
                             launch_controls(ui, LaunchCx { id, d: &mut *d, busy, plugged, open, five, running_at, default_share: dl, global, to_main: &mut to_main, start: &mut start, confirm_main: &mut confirm_main, ceilings: &mut ceilings, t });
                         });
                     }
@@ -3329,7 +3317,7 @@ impl NotesApp {
                     // its page): here, only what differs from the usual, and the way there.
                     if !busy {
                         ui.horizontal_wrapped(|ui| {
-                            ui.add_space(70.0);
+                            ui.add_space(LAUNCH_INDENT);
                             let mut s = options_summary((!d.auto).then_some(d.agent), d.endless, !d.mission.trim().is_empty(), to_main.get(id).copied(), d.commits);
                             // A model imposed: said beside its AI.
                             if !d.model.is_empty() {
@@ -3352,7 +3340,7 @@ impl NotesApp {
                         }
                         if risky {
                             ui.horizontal(|ui| {
-                                ui.add_space(70.0);
+                                ui.add_space(LAUNCH_INDENT);
                                 egui::Frame::new()
                                     .fill(super::projects::ORANGE.gamma_multiply(0.08))
                                     .stroke(egui::Stroke::new(1.0, super::projects::ORANGE.gamma_multiply(0.45)))
@@ -3365,7 +3353,7 @@ impl NotesApp {
                                             ui.add_space(4.0);
                                             ui.horizontal_wrapped(|ui| {
                                                 if ui.add(egui::Button::new(RichText::new(crate::tr!("Lancer quand même", "Start anyway")).size(13.0).color(super::projects::ORANGE))).clicked() {
-                                                    start.push(id.clone());
+                                                    start = Some(id.clone());
                                                     confirm_main = None;
                                                 }
                                                 if super::projects::quiet_link(ui, crate::tr!("Annuler", "Cancel"), t).clicked() {
@@ -3409,68 +3397,6 @@ impl NotesApp {
                     ui.ctx().data_mut(|d| d.insert_temp(idle_key, !show_idle));
                 }
             }
-            if !picked.is_empty() {
-                ui.add_space(4.0);
-                // Picked projects set to endless on main: confirmed once for the whole selection.
-                let risky: Vec<&str> = projects
-                    .iter()
-                    .filter(|(id, _, _)| {
-                        picked.contains(id)
-                            && drafts.get(id).is_some_and(|d| {
-                                endless_on_main(
-                                    d.endless,
-                                    to_main.get(id).copied().unwrap_or(false),
-                                )
-                            })
-                    })
-                    .map(|(_, title, _)| title.as_str())
-                    .collect();
-                if risky.is_empty() && confirm_main.as_deref() == Some(SELECTION) {
-                    confirm_main = None;
-                }
-                if confirm_main.as_deref() == Some(SELECTION) {
-                    ui.label(
-                        RichText::new(crate::trf!(
-                            "⚠ {} ({})",
-                            "⚠ {} ({})",
-                            endless_main_warning(),
-                            risky.join(", ")
-                        ))
-                        .size(12.5)
-                        .color(super::projects::ORANGE),
-                    );
-                    ui.horizontal_wrapped(|ui| {
-                        if ui
-                            .add(egui::Button::new(
-                                RichText::new(crate::tr!("Lancer quand même", "Start anyway"))
-                                    .size(13.0)
-                                    .color(super::projects::ORANGE),
-                            ))
-                            .clicked()
-                        {
-                            start.extend(picked.iter().cloned());
-                            confirm_main = None;
-                        }
-                        if super::projects::quiet_link(ui, crate::tr!("Annuler", "Cancel"), t)
-                            .clicked()
-                        {
-                            confirm_main = None;
-                        }
-                    });
-                }
-                ui.horizontal_wrapped(|ui| {
-                    if ui.add_enabled(plugged, egui::Button::new(RichText::new(crate::trf!("Lancer la sélection ({})", "Start the selection ({})", picked.len())).size(13.5))).clicked() {
-                        if risky.is_empty() {
-                            start.extend(picked.iter().cloned());
-                        } else {
-                            confirm_main = Some(SELECTION.to_string());
-                        }
-                    }
-                    let s = crate::i18n::plural(picked.len());
-                    let note = crate::trf!("{} projet{s} en parallèle · chacun s'arrête à son plafond, sous la limite de son IA", "{} project{s} in parallel · each stops at its ceiling, under its AI's limit", picked.len());
-                    ui.label(RichText::new(note).size(12.5).color(t.tertiary));
-                });
-            }
         });
         self.orch.confirm_main = confirm_main;
         if to_main != to_main_before {
@@ -3505,8 +3431,7 @@ impl NotesApp {
                 self.dirty_since.get_or_insert_with(Instant::now);
             }
         }
-        start.dedup();
-        for id in start {
+        if let Some(id) = start {
             let d = self.orch.drafts.get(&id).cloned().unwrap();
             // « Automatique »: the AI picked now, measured on its own subscription.
             let (agent, why) = self.pick_agent(&id, &d);
@@ -3517,16 +3442,12 @@ impl NotesApp {
                 .map(|p| p.display_title())
                 .unwrap_or_default();
             let o = &self.ws.settings.orch;
-            // As shown in the card: the sessions started together in a selection don't change
-            // each other's ceiling.
+            // As shown in the card.
             let want = draft_ceiling(&d, running_of(d.agent));
             let ceiling = ceiling_choice(want, five_of(d.agent), o.default_limit, o.five_limit(d.agent));
             let endless = if d.endless { Some(d.end.clone()) } else { None };
             match self.launch_run(ctx, &id, &d.mission, ceiling, d.commits, endless, d.agent, false, "") {
                 Ok(()) => {
-                    if let Some(x) = self.orch.drafts.get_mut(&id) {
-                        x.pick = false;
-                    }
                     msg = Some(super::notices::Notice::Ack(match &why {
                         Some(w) => crate::trf!(
                             "Session autonome lancée sur {title} · IA choisie : {w}.",
@@ -3728,7 +3649,7 @@ impl NotesApp {
         if code {
             to_main.insert(id.clone(), on_main_before);
         }
-        let (mut close, mut launch) = (false, false);
+        let mut close = false;
         let resp = egui::Modal::new(egui::Id::unique("launch-settings"))
             .backdrop_color(Color32::from_black_alpha(100))
             .frame(
@@ -3815,13 +3736,11 @@ impl NotesApp {
                     );
                 }
                 ui.add_space(6.0);
+                // Settings only: a session starts from « Lancer », on the project's line in
+                // Orchestration or on its page.
                 ui.horizontal(|ui| {
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        ui.spacing_mut().item_spacing.x = 8.0;
-                        if !busy && super::style::primary(ui, crate::tr!("▶  Lancer", "▶  Start")).clicked() {
-                            launch = true;
-                        }
-                        if super::style::secondary(ui, crate::tr!("Fermer", "Close")).clicked() {
+                        if super::style::primary(ui, crate::tr!("Fermer", "Close")).clicked() {
                             close = true;
                         }
                     });
@@ -3849,11 +3768,8 @@ impl NotesApp {
                 self.dirty_since.get_or_insert_with(Instant::now);
             }
         }
-        if close || launch || resp.should_close() {
+        if close || resp.should_close() {
             self.launch_settings = None;
-        }
-        if launch && let Some(n) = self.launch_from_project(ctx, &id) {
-            self.notice(n);
         }
     }
 
@@ -5902,7 +5818,7 @@ struct LaunchRow {
     busy: bool,
     /// Its steps not done.
     open: usize,
-    /// Kept in view even with nothing open: endless (the AI finds its steps), or picked.
+    /// Kept in view even with nothing open: endless (the AI finds its steps).
     keep: bool,
 }
 
@@ -5937,6 +5853,9 @@ fn launch_order(rows: &[LaunchRow], show_idle: bool) -> (Vec<usize>, usize) {
 /// Below this width, a project's controls in « Lancer une session » go under it.
 const LAUNCH_ONE_LINE: f32 = 620.0;
 
+/// What goes under a project's line there starts under its title: past its badge.
+const LAUNCH_INDENT: f32 = 40.0;
+
 /// What a project's launch controls work on.
 struct LaunchCx<'a> {
     id: &'a String,
@@ -5952,7 +5871,7 @@ struct LaunchCx<'a> {
     default_share: f32,
     global: f32,
     to_main: &'a mut HashMap<String, bool>,
-    start: &'a mut Vec<String>,
+    start: &'a mut Option<String>,
     confirm_main: &'a mut Option<String>,
     /// Ceilings the person has just changed, to keep in their projects.
     ceilings: &'a mut Vec<(String, f32)>,
@@ -6019,7 +5938,7 @@ fn launch_controls(ui: &mut egui::Ui, c: LaunchCx<'_>) {
         if endless_on_main(d.endless, to_main.get(id).copied().unwrap_or(false)) {
             *confirm_main = Some(id.clone());
         } else {
-            start.push(id.clone());
+            *start = Some(id.clone());
         }
     }
     ui.add_space(8.0);
@@ -6398,8 +6317,8 @@ mod tests {
         // switched on.
         let d = Draft::new(None, true);
         assert_eq!(
-            (d.ceiling, d.commits, d.endless, d.pick),
-            (None, true, false, false)
+            (d.ceiling, d.commits, d.endless),
+            (None, true, false)
         );
         assert_eq!(d.end.hours, Some(4.0));
         assert_eq!(d.prefs(), default_prefs(true));
@@ -6513,7 +6432,7 @@ mod tests {
     /// it: its window, and the ceilings of the sessions running with that same AI only.
     #[test]
     fn percentages_are_worked_out_on_the_ai_chosen() {
-        use super::{Agent, Draft, ceiling_choice, draft_ceiling, picked_share, running_ceiling_of};
+        use super::{Agent, Draft, ceiling_choice, draft_ceiling, may_take_share, running_ceiling_of};
         let runs = [(Agent::ClaudeCode, Some(50.0)), (Agent::Codex, Some(30.0)), (Agent::Codex, None)];
         assert_eq!(running_ceiling_of(&runs, Agent::ClaudeCode), Some(50.0));
         assert_eq!(running_ceiling_of(&runs, Agent::Codex), Some(30.0));
@@ -6525,7 +6444,7 @@ mod tests {
         let (five, running) = (Some(10.0), running_ceiling_of(&runs, d.agent));
         let c = ceiling_choice(draft_ceiling(&d, running), five, 20.0, 90.0);
         assert_eq!(c, 30.0);
-        assert_eq!(picked_share(c, five, running), 0.0);
+        assert_eq!(may_take_share(c, five, running), 0.0);
         // The same project on Claude Code: Claude's figures.
         d.agent = Agent::ClaudeCode;
         let (five, running) = (Some(45.0), running_ceiling_of(&runs, d.agent));
@@ -6548,17 +6467,16 @@ mod tests {
     #[test]
     fn the_launch_card_explains_itself_in_sight() {
         let h = super::launch_help();
-        // What a session does, when it stops, how to start several: all in one visible line.
+        // What a session does and when it stops: all in one visible line.
         assert!(h.contains("5 h"), "{h}");
         assert!(h.contains("arrêt à") || h.contains("stops at"), "{h}");
-        assert!(h.contains("plusieurs") || h.contains("several"), "{h}");
     }
 
     #[test]
     fn launch_figures_say_what_they_measure() {
         use super::{launch_subtitle, row_figure};
         let fr = |s: Option<String>| s.unwrap_or_default();
-        // What it took (0 % before it starts), or what it may take once picked: never a bare number.
+        // What it took (0 % before it starts), or what it may take: never a bare number.
         let took = fr(row_figure(Some(0.0), None));
         assert!(took == "pris 0 %" || took == "took 0 %", "{took}");
         let may = fr(row_figure(Some(4.0), Some(13.0)));
@@ -6570,33 +6488,32 @@ mod tests {
         assert_eq!(launch_subtitle(None), "");
     }
 
-    /// Picked, a project shows what its session may take: its ceiling less what the window
-    /// holds (37 % used, « stop at 50 % »: up to +13 %).
+    /// Its ceiling set by hand, a project shows what its session may take: that ceiling less
+    /// what the window holds (37 % used, « stop at 50 % »: up to +13 %).
     #[test]
-    fn a_picked_session_shows_what_it_may_take() {
-        use super::{Draft, ceiling_choice, draft_ceiling, picked_share, picked_share_text};
-        assert_eq!(picked_share(50.0, Some(37.0), None), 13.0);
-        assert_eq!(picked_share(50.0, None, None), 50.0);
-        assert_eq!(picked_share(50.0, Some(55.0), None), 0.0);
+    fn a_ceiling_set_by_hand_shows_what_the_session_may_take() {
+        use super::{Draft, ceiling_choice, draft_ceiling, may_take_share, may_take_text};
+        assert_eq!(may_take_share(50.0, Some(37.0), None), 13.0);
+        assert_eq!(may_take_share(50.0, None, None), 50.0);
+        assert_eq!(may_take_share(50.0, Some(55.0), None), 0.0);
         // As the card works it out: from the draft's ceiling, in bounds.
         let mut d = Draft::new(None, true);
         (d.ceiling, d.touched) = (Some(50.0), true);
         let c = ceiling_choice(draft_ceiling(&d, None), Some(37.0), 20.0, 90.0);
-        assert_eq!(picked_share(c, Some(37.0), None), 13.0);
+        assert_eq!(may_take_share(c, Some(37.0), None), 13.0);
         // A session already running up to 50 %, the window at 42 %: « stop at 60 % » takes
         // 10 for itself; at the same 50 %, nothing of its own (the room is shared).
-        assert_eq!(picked_share(60.0, Some(42.0), Some(50.0)), 10.0);
-        assert_eq!(picked_share(50.0, Some(42.0), Some(50.0)), 0.0);
+        assert_eq!(may_take_share(60.0, Some(42.0), Some(50.0)), 10.0);
+        assert_eq!(may_take_share(50.0, Some(42.0), Some(50.0)), 0.0);
         // The window already past the running ceiling: counted from the window.
-        assert_eq!(picked_share(60.0, Some(55.0), Some(50.0)), 5.0);
-        let t = picked_share_text(60.0, Some(42.0), Some(50.0));
+        assert_eq!(may_take_share(60.0, Some(55.0), Some(50.0)), 5.0);
+        let t = may_take_text(60.0, Some(42.0), Some(50.0));
         assert!(t.contains("50 %") && t.contains("10 %"), "{t}");
-        // Shown once picked, and also once the ceiling is set by hand; not while running.
-        use super::shows_picked_share;
-        assert!(!shows_picked_share(false, false, false));
-        assert!(shows_picked_share(true, false, false));
-        assert!(shows_picked_share(false, true, false));
-        assert!(!shows_picked_share(true, true, true));
+        // Shown once the ceiling is set by hand; not while running.
+        use super::shows_may_take;
+        assert!(!shows_may_take(false, false));
+        assert!(shows_may_take(true, false));
+        assert!(!shows_may_take(true, true));
     }
 
     #[test]
@@ -6947,7 +6864,6 @@ mod tests {
                     ceiling: Some(50.0),
                     touched: false,
                     commits: true,
-                    pick: false,
                     endless: false,
                     end: Default::default(),
                     agent: super::Agent::ClaudeCode, auto: false, model: String::new(),
@@ -6955,10 +6871,10 @@ mod tests {
                 };
                 let mut to_main: super::HashMap<String, bool> =
                     [(id.clone(), false)].into_iter().collect();
-                let (mut start, mut confirm) = (vec![], None);
+                let (mut start, mut confirm) = (None, None);
                 ui.scope(|ui| {
                     ui.horizontal_wrapped(|ui| {
-                        ui.add_space(70.0);
+                        ui.add_space(super::LAUNCH_INDENT);
                         super::launch_controls(
                             ui,
                             super::LaunchCx {
@@ -7019,7 +6935,6 @@ mod tests {
                     ceiling: Some(50.0),
                     touched: false,
                     commits: true,
-                    pick: false,
                     endless: false,
                     end: Default::default(),
                     agent: super::Agent::ClaudeCode, auto: false, model: String::new(),

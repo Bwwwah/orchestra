@@ -138,8 +138,8 @@ pub(super) fn tour_stops() -> Vec<Stop> {
             place: Place::View(View::Orchestra),
             title: crate::tr!("Orchestration", "Orchestration"),
             text: crate::tr!(
-                "Le tableau de bord de tous les projets : ce qui tourne, et plusieurs projets lancés d'un coup.",
-                "The dashboard of every project: what runs, and several projects started at once."
+                "Le tableau de bord de tous les projets : ce qui tourne, et le bouton « Lancer » de chacun.",
+                "The dashboard of every project: what runs, and each one's « Start » button."
             ),
         },
         Stop {
