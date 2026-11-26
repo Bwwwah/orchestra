@@ -1922,24 +1922,16 @@ impl NotesApp {
         if let Some(x) = self.ws.runs.iter_mut().find(|x| x.id == id) {
             x.report = Some(page.clone());
         }
-        let (e, c) = (
-            crate::i18n::plural(rec.steps_done.len()),
-            crate::i18n::plural(commits.len()),
-        );
-        let mut text = crate::trf!(
-            "{why} · {} étape{e} · ≈ {:.0} % · {} commit{c}",
-            "{why} · {} step{e} · ≈ {:.0} % · {} commit{c}",
-            rec.steps_done.len(),
-            rec.pct,
-            commits.len()
-        );
-        if resume_at > 0 {
-            text.push_str(&crate::trf!(
-                " · reprendra seule dans {} (après la remise à zéro du quota)",
-                " · will start again by itself in {} (after the quota resets)",
-                crate::usage::left_text(resume_at.saturating_sub(now))
-            ));
-        }
+        let (end_title, text) = end_message(&SessionEnd {
+            project: &rec.title,
+            why: &why,
+            steps: rec.steps_done.len(),
+            saved: commits.len(),
+            unsaved: dirty,
+            pct: rec.pct,
+            resume_in: (resume_at > 0)
+                .then(|| crate::usage::left_text(resume_at.saturating_sub(now))),
+        });
         // Commits on main allowed for this project: merge once Claude Code has closed.
         let to_main = self
             .ws
@@ -1955,7 +1947,7 @@ impl NotesApp {
         self.ws.notify(
             "fin",
             &project,
-            &crate::trf!("Fin de session sur {}", "End of session on {}", rec.title),
+            &end_title,
             &text,
             Some(page),
         );
@@ -4605,14 +4597,16 @@ impl Stop {
     fn text(&self) -> String {
         match self {
             Stop::Asked(s) | Stop::EndlessEnd(s) => s.clone(),
-            Stop::TooLong => {
-                crate::tr!("un tour a duré trop longtemps", "a turn took too long").into()
-            }
+            Stop::TooLong => crate::tr!(
+                "elle a mis trop de temps à répondre",
+                "it took too long to answer"
+            )
+            .into(),
             Stop::MissionDone => crate::tr!("mission terminée", "mission complete").into(),
             Stop::Blocked => crate::tr!("l'IA est bloquée", "the AI is blocked").into(),
             Stop::Budget(l) => crate::trf!(
-                "limite du projet atteinte ({l:.0} %)",
-                "project limit reached ({l:.0} %)"
+                "ce projet a utilisé toute la part d'abonnement prévue pour lui ({l:.0} %)",
+                "this project used all the share of the subscription set for it ({l:.0} %)"
             ),
             Stop::Dollars(b) => crate::trf!(
                 "budget en dollars atteint ({})",
@@ -4620,16 +4614,16 @@ impl Stop {
                 crate::pricing::dollars(*b)
             ),
             Stop::Ceiling(c) => crate::trf!(
-                "plafond de la session atteint ({c:.0} % de la fenêtre de 5 h)",
-                "session ceiling reached ({c:.0} % of the 5-hour window)"
+                "la session a atteint son maximum ({c:.0} % de la limite de 5 heures de l'abonnement)",
+                "the session reached its maximum ({c:.0} % of the subscription's 5-hour limit)"
             ),
             Stop::GlobalLimit(g) => crate::trf!(
-                "limite globale atteinte ({g:.0} %)",
-                "global limit reached ({g:.0} %)"
+                "la limite d'utilisation réglée dans Orchestra est atteinte ({g:.0} % de l'abonnement)",
+                "the usage limit set in Orchestra is reached ({g:.0} % of the subscription)"
             ),
             Stop::WeekReserve(r) => crate::trf!(
-                "pause : la réserve minimum de la semaine ({r:.0} %) approche",
-                "paused: the week's minimum reserve ({r:.0} %) is near"
+                "pause pour vous laisser au moins {r:.0} % de l'abonnement de la semaine",
+                "paused to leave you at least {r:.0} % of the week's subscription"
             ),
             // Any agent's (Claude, Codex…): the session knows which by its card.
             Stop::SubscriptionLimit => crate::tr!(
@@ -4638,11 +4632,14 @@ impl Stop {
             )
             .into(),
             Stop::Unmeasured => crate::tr!(
-                "utilisation de l'abonnement impossible à mesurer",
-                "subscription use can't be measured"
+                "impossible de savoir ce qu'elle consomme de l'abonnement, arrêt par prudence",
+                "what it uses of the subscription can't be measured, stopped to be safe"
             )
             .into(),
-            Stop::Turns(n) => crate::trf!("{n} tours atteints", "{n} turns reached"),
+            Stop::Turns(n) => crate::trf!(
+                "nombre maximum d'échanges atteint ({n})",
+                "maximum number of exchanges reached ({n})"
+            ),
         }
     }
 }
@@ -5080,6 +5077,79 @@ fn day_group(at: u64, now: u64, offset: i64) -> &'static str {
         2..=6 => crate::tr!("Cette semaine", "This week"),
         _ => crate::tr!("Plus ancien", "Older"),
     }
+}
+
+/// What the end message of an autonomous session tells.
+struct SessionEnd<'a> {
+    project: &'a str,
+    /// Why it stopped (`Stop::text` and the like): a few words, no final full stop.
+    why: &'a str,
+    steps: usize,
+    /// Commits made, and changed files left without one.
+    saved: usize,
+    unsaved: usize,
+    /// Share of the subscription used, in %; 0 when it isn't known.
+    pct: f32,
+    /// In how long it starts again by itself, if it does.
+    resume_in: Option<String>,
+}
+
+/// The inbox message at the end of a session: its title and its text, in everyday words
+/// (one sentence per line, the reason first; the report it opens has the technical detail).
+fn end_message(e: &SessionEnd) -> (String, String) {
+    let done = e.why == Stop::MissionDone.text();
+    let title = if done {
+        crate::trf!("L'IA a terminé son travail sur {}", "The AI finished its work on {}", e.project)
+    } else {
+        crate::trf!("L'IA s'est arrêtée sur {}", "The AI stopped on {}", e.project)
+    };
+    let mut lines = vec![];
+    if !done {
+        let why = e.why.trim().trim_end_matches('.');
+        lines.push(crate::trf!("Raison : {why}.", "Reason: {why}."));
+    }
+    let steps = match e.steps {
+        0 => crate::tr!("Aucune étape terminée", "No step finished").to_string(),
+        n => {
+            let s = crate::i18n::plural(n);
+            crate::trf!("{n} étape{s} terminée{s}", "{n} step{s} finished")
+        }
+    };
+    let saved = match e.saved {
+        0 => String::new(),
+        n => {
+            let s = crate::i18n::plural(n);
+            crate::trf!(
+                ", {n} modification{s} enregistrée{s}",
+                ", {n} change{s} saved"
+            )
+        }
+    };
+    lines.push(format!("{steps}{saved}."));
+    if e.unsaved > 0 {
+        let n = e.unsaved;
+        let s = crate::i18n::plural(n);
+        lines.push(crate::trf!(
+            "{n} fichier{s} modifié{s} mais pas encore enregistré{s}.",
+            "{n} file{s} changed but not saved yet."
+        ));
+    }
+    if e.pct >= 0.5 {
+        lines.push(crate::trf!(
+            "Part de votre abonnement utilisée : environ {:.0} %.",
+            "Share of your subscription used: about {:.0} %.",
+            e.pct
+        ));
+    }
+    // Right after the reason: the card only shows the first lines (`TEXT_LINES`).
+    if let Some(left) = &e.resume_in {
+        let at = usize::from(!done);
+        lines.insert(at, crate::trf!(
+            "Elle reprendra toute seule dans {left}, quand votre abonnement le permettra à nouveau.",
+            "It will start again by itself in {left}, once your subscription allows it again."
+        ));
+    }
+    (title, lines.join("\n"))
 }
 
 /// An inbox message's text for reading: Markdown headings and bold marks dropped (session
@@ -7359,6 +7429,37 @@ mod tests {
         let (q, a) = super::split_analysis("Quoi faire ?\n\n— Analyse du répondeur :\nOption C.");
         assert_eq!((q, a), ("Quoi faire ?", Some("Option C.")));
         assert_eq!(super::split_analysis("Sans analyse"), ("Sans analyse", None));
+    }
+
+    #[test]
+    fn end_of_session_message_reads_in_everyday_words() {
+        let end = |why: &str, steps, saved, unsaved, pct, resume_in: Option<&str>| {
+            super::end_message(&super::SessionEnd {
+                project: "Site",
+                why,
+                steps,
+                saved,
+                unsaved,
+                pct,
+                resume_in: resume_in.map(String::from),
+            })
+        };
+        // The mission done: said by the title, no reason to repeat.
+        let done = super::Stop::MissionDone.text();
+        assert_eq!(
+            end(&done, 2, 1, 0, 12.4, None),
+            (
+                "L'IA a terminé son travail sur Site".to_string(),
+                "2 étapes terminées, 1 modification enregistrée.\nPart de votre abonnement utilisée : environ 12 %.".to_string()
+            )
+        );
+        // Stopped otherwise: the reason first; an unknown share isn't shown as 0 %.
+        let (title, text) = end("l'IA est bloquée.", 0, 0, 3, 0.0, Some("2 h"));
+        assert_eq!(title, "L'IA s'est arrêtée sur Site");
+        assert_eq!(
+            text,
+            "Raison : l'IA est bloquée.\nElle reprendra toute seule dans 2 h, quand votre abonnement le permettra à nouveau.\nAucune étape terminée.\n3 fichiers modifiés mais pas encore enregistrés."
+        );
     }
 
     #[test]

@@ -899,7 +899,10 @@ impl EndConditions {
         if let Some(n) = self.turns.filter(|n| *n > 0)
             && turns >= n
         {
-            return Some(crate::trf!("{n} tours atteints", "{n} turns reached"));
+            return Some(crate::trf!(
+                "nombre maximum d'échanges atteint ({n})",
+                "maximum number of exchanges reached ({n})"
+            ));
         }
         if done_streak >= 1 && self.when_done {
             return Some(crate::tr!("mission terminée", "mission complete").into());
@@ -907,8 +910,8 @@ impl EndConditions {
         if done_streak >= 2 {
             return Some(
                 crate::tr!(
-                    "plus rien à faire, deux tours de suite",
-                    "nothing left to do, two turns in a row"
+                    "plus rien à faire, a-t-elle répondu deux fois de suite",
+                    "nothing left to do, it said so twice in a row"
                 )
                 .into(),
             );
