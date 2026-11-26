@@ -42,6 +42,7 @@ mod space;
 mod store;
 mod sync;
 mod team;
+mod templates;
 mod terminal;
 mod triage;
 mod update;

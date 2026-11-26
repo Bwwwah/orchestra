@@ -68,6 +68,7 @@ relève le résultat à chaque image dans une fonction `…_tick`.
 | Module | Rôle |
 |---|---|
 | `docs.rs` | README, `docs/`, `CLAUDE.md`, CHANGELOG d'un projet repris en pages, tenus à jour |
+| `templates.rs` | les modèles de projet (code, étudiant, équipe, événement) : modules et pages de départ |
 | `git.rs` | `git` et `gh` de la personne ; l'application ne manipule jamais de jeton |
 | `collab.rs` | fusion de copies de l'espace, page par page puis bloc par bloc |
 | `live.rs`, `secure.rs` | travail en direct sur TCP, chiffré (SPAKE2 + ChaCha20-Poly1305) |
