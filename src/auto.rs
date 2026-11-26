@@ -2555,7 +2555,8 @@ fn mission_text(
          7. Une seule étape par tour : dès qu'elle est faite et vérifiée, arrête-toi ; Orchestra te relancera pour la suivante.\n\
          Quand tu t'arrêtes pour ce tour, termine ta réponse par une seule de ces lignes : \
          [[CONTINUER]] s'il reste une étape ouverte que tu peux avancer, [[FINI]] s'il n'en reste aucune, \
-         [[BLOQUÉ]] seulement si aucune étape ouverte ne peut plus avancer (une question posée avec ask_human n'est pas un blocage tant qu'il reste d'autres étapes).",
+         [[BLOQUÉ]] seulement si aucune étape ouverte ne peut plus avancer (une question posée avec ask_human n'est pas un blocage tant qu'il reste d'autres étapes). \
+         Avant [[BLOQUÉ]], écris sur la dernière ligne une phrase simple : ce qui te bloque et ce que la personne doit faire (elle la lira telle quelle).",
         "You are working autonomously for Orchestra on the project « {title} » (id {project_id}). \
          {intro}\n\
          1. Call get_project_state with project = « {project_id} » for the current state and the steps.\n\
@@ -2574,7 +2575,8 @@ fn mission_text(
          7. One step per turn: as soon as it is done and checked, stop; Orchestra will start you again for the next one.\n\
          When you stop for this turn, end your answer with exactly one of these lines: \
          [[CONTINUER]] if an open step is left that you can move forward, [[FINI]] if none is left, \
-         [[BLOQUÉ]] only if no open step can move forward any more (a question asked with ask_human is not a block while other steps are left)."
+         [[BLOQUÉ]] only if no open step can move forward any more (a question asked with ask_human is not a block while other steps are left). \
+         Before [[BLOQUÉ]], write one plain sentence on the last line: what blocks you and what the person has to do (they read it as it is)."
     )
 }
 
@@ -2706,6 +2708,30 @@ pub fn signal(text: &str) -> Signal {
     {
         Some((_, s)) => s,
         None => Signal::Continue,
+    }
+}
+
+/// The longest reason kept from a blocked answer.
+const BLOCK_REASON_MAX: usize = 200;
+
+/// Why a blocked AI says it is: the last line it wrote before its marker (the mission asks
+/// for that sentence there). Empty when it wrote nothing else.
+pub fn block_reason(text: &str) -> String {
+    let line = strip_markers(text)
+        .lines()
+        .rev()
+        .map(|l| crate::richtext::one_line(l, BLOCK_REASON_MAX))
+        .find(|l| l.chars().any(char::is_alphanumeric))
+        .unwrap_or_default();
+    // « Raison : … » would be said twice.
+    match line.split_once(':') {
+        Some((head, rest))
+            if ["raison", "reason", "blocage", "bloqué", "blocked"]
+                .contains(&head.trim().to_lowercase().as_str()) =>
+        {
+            rest.trim().to_string()
+        }
+        _ => line,
     }
 }
 
@@ -3246,6 +3272,15 @@ mod tests {
     fn signals_and_screen() {
         assert_eq!(signal("fait.\n[[FINI]]"), Signal::Done);
         assert_eq!(signal("[[CONTINUER]] puis… [[BLOQUÉ]]"), Signal::Blocked);
+        assert_eq!(
+            block_reason("J'ai essayé.\n\nRaison : il manque la **clé API**.\n\n[[BLOQUÉ]]\n"),
+            "il manque la clé API."
+        );
+        assert_eq!(
+            block_reason("- Ajoutez le mot de passe du serveur. [[BLOQUE]]"),
+            "Ajoutez le mot de passe du serveur."
+        );
+        assert_eq!(block_reason("```\n[[BLOQUÉ]]"), "");
         assert_eq!(signal("rien"), Signal::Continue);
         assert_eq!(
             read_screen("Do you trust the files in this folder?\n❯ 1. Yes, proceed"),

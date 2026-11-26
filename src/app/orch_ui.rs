@@ -1480,6 +1480,11 @@ impl NotesApp {
                             too_long,
                             endless_end,
                             signal: sig,
+                            blocked_why: if sig == Signal::Blocked {
+                                auto::block_reason(&r.reader.last_text)
+                            } else {
+                                String::new()
+                            },
                             endless: r.endless.is_some(),
                             pct: r.pct,
                             limit: r.limit,
@@ -1564,10 +1569,7 @@ impl NotesApp {
             self.ws.notify(
                 "info",
                 &project,
-                &crate::trf!(
-                    "{title} attend votre réponse",
-                    "{title} waits for your answer"
-                ),
+                &waiting_title(&title),
                 why.label(),
                 None,
             );
@@ -2675,6 +2677,8 @@ impl NotesApp {
         let watching = self.orch.watching.clone();
         let mut stop: Option<(usize, bool)> = None;
         let mut watch: Option<Option<String>> = None;
+        // « Ouvrir le terminal » of a paused session (`watch` belongs to the links).
+        let mut open_terminal: Option<String> = None;
         let n = self.orch.runs.len();
         let awake = self.orch.awake.held();
         // Each session's bar on the 5-hour window of its own AI's subscription.
@@ -2710,6 +2714,25 @@ impl NotesApp {
                 Some((x.id.clone(), (name, why)))
             })
             .collect();
+        // The question each paused session waits on, the latest it asked.
+        let questions: HashMap<String, String> = self
+            .orch
+            .runs
+            .iter()
+            .filter(|r| r.waiting == Some(Wait::Question))
+            .filter_map(|r| {
+                let m = self.ws.inbox.iter().rev().find(|m| {
+                    m.kind == "question"
+                        && m.project == r.project
+                        && m.at >= r.started_wall
+                        && m.answer.trim().is_empty()
+                })?;
+                let text = if m.text.trim().is_empty() { &m.title } else { &m.text };
+                Some((r.id.clone(), plain_text(split_analysis(text).0)))
+            })
+            .collect();
+        // « Répondre à sa question »: to the inbox.
+        let mut to_inbox = false;
         super::projects::card(ui, t, 0.0, |ui| {
             super::projects::card_title(ui, crate::tr!("EN COURS", "RUNNING"), &n.to_string(), t);
             if awake {
@@ -2866,16 +2889,29 @@ impl NotesApp {
                                 super::projects::cut_label(ui, job).on_hover_text(step);
                             });
                         }
-                        ui.horizontal(|ui| {
-                            ui.add_space(20.0);
-                            let mut job = egui::text::LayoutJob::single_section(
-                                r.last_line.clone(),
-                                egui::TextFormat::simple(FontId::proportional(12.5), t.tertiary),
-                            );
-                            job.wrap =
-                                egui::text::TextWrapping::truncate_at_width(ui.available_width());
-                            super::projects::cut_label(ui, job);
-                        });
+                        if let Some(why) = r.waiting {
+                            // Blocked on the person: the whole reason, and the way to act.
+                            let action = Unblock::of_wait(why, &r.id);
+                            ui.add_space(4.0);
+                            let open = watching.as_deref() == Some(r.id.as_str());
+                            if blocked_box(ui, why.label(), questions.get(&r.id), (!(open && action != Unblock::Answer)).then(|| action.label()), t) {
+                                match action {
+                                    Unblock::Terminal(id) => open_terminal = Some(id),
+                                    _ => to_inbox = true,
+                                }
+                            }
+                        } else {
+                            ui.horizontal(|ui| {
+                                ui.add_space(20.0);
+                                let mut job = egui::text::LayoutJob::single_section(
+                                    r.last_line.clone(),
+                                    egui::TextFormat::simple(FontId::proportional(12.5), t.tertiary),
+                                );
+                                job.wrap =
+                                    egui::text::TextWrapping::truncate_at_width(ui.available_width());
+                                super::projects::cut_label(ui, job);
+                            });
+                        }
                         if let Some(why) = &r.stop {
                             ui.horizontal(|ui| {
                                 ui.add_space(20.0);
@@ -2914,8 +2950,12 @@ impl NotesApp {
                 ui.add_space(8.0);
             }
         });
-        if let Some(w) = watch {
+        if let Some(w) = open_terminal.map(Some).or(watch) {
             self.orch.watching = w;
+        }
+        if to_inbox {
+            ui.data_mut(|d| d.insert_temp(inbox_filter_id(), 1u8));
+            self.view = View::Inbox;
         }
         if let Some(p) = add_tasks {
             super::projects::focus_steps(ui.ctx(), &p);
@@ -3830,6 +3870,13 @@ impl NotesApp {
         let mut answer: Option<(usize, String)> = None;
         let mut run_act: Option<(String, &'static str)> = None;
         let confirm = self.copy_states();
+        let paused: Vec<(String, String, Wait)> = self
+            .orch
+            .runs
+            .iter()
+            .filter_map(|r| Some((r.id.clone(), r.title.clone(), r.waiting?)))
+            .collect();
+        let mut unblock: Option<Unblock> = None;
         ui.add_space(50.0);
         ui.horizontal(|ui| {
             ui.add_space(((avail - width) / 2.0).max(20.0));
@@ -3866,7 +3913,7 @@ impl NotesApp {
                 ui.label(RichText::new(crate::tr!("Questions des IA, fins de session, rapports et messages de l'application.", "AI questions, session ends, reports and the app's messages.")).color(t.secondary));
                 ui.add_space(14.0);
                 // Filters: everything, the questions still waiting for an answer, the unread.
-                let filter_id = egui::Id::unique("inbox-filter");
+                let filter_id = inbox_filter_id();
                 let mut filter = ui.data(|d| d.get_temp::<u8>(filter_id)).unwrap_or(0);
                 let waiting = self.ws.inbox.iter().filter(|m| m.waits_for_person()).count();
                 let unread = self.ws.unread();
@@ -4029,6 +4076,12 @@ impl NotesApp {
                                     answer = Some((i, text));
                                 }
                             }
+                            if let Some(a) = inbox_unblock(m, &self.ws.inbox, &self.ws.runs, run, &paused) {
+                                ui.add_space(6.0);
+                                if super::style::secondary(ui, a.label()).clicked() {
+                                    unblock = Some(a);
+                                }
+                            }
                             if let Some(r) = run {
                                 let asking = confirm.iter().find(|(id, _)| *id == r.id).map(|(_, a)| *a);
                                 if let Some(a) = run_actions(ui, r, asking, &t) {
@@ -4071,6 +4124,20 @@ impl NotesApp {
         }
         if let Some((i, text)) = answer {
             self.save_answer(i, text);
+        }
+        match unblock {
+            Some(Unblock::Answer) => {
+                ui.data_mut(|d| d.insert_temp(inbox_filter_id(), 1u8));
+            }
+            Some(Unblock::Terminal(id)) => {
+                self.orch.watching = Some(id);
+                self.view = View::Orchestra;
+            }
+            Some(Unblock::Steps(project)) => {
+                super::projects::focus_steps(ui.ctx(), &project);
+                actions.push(Action::Open(project));
+            }
+            None => {}
         }
         if let Some((id, a)) = run_act {
             self.run_action(&ui.ctx().clone(), &id, a);
@@ -4534,6 +4601,8 @@ struct TurnEnd {
     /// Endless mode: the end condition reached, if any.
     endless_end: Option<String>,
     signal: Signal,
+    /// What the AI says blocks it, with `Signal::Blocked` (`auto::block_reason`).
+    blocked_why: String,
     endless: bool,
     /// The session's use of the 5-hour window, and its budget.
     pct: f32,
@@ -4562,7 +4631,8 @@ enum Stop {
     TooLong,
     EndlessEnd(String),
     MissionDone,
-    Blocked,
+    /// With what the AI says blocks it (empty: it didn't say).
+    Blocked(String),
     Budget(f32),
     /// An API-mode session spent its budget in dollars (micro-dollars).
     Dollars(u64),
@@ -4603,7 +4673,10 @@ impl Stop {
             )
             .into(),
             Stop::MissionDone => crate::tr!("mission terminée", "mission complete").into(),
-            Stop::Blocked => crate::tr!("l'IA est bloquée", "the AI is blocked").into(),
+            Stop::Blocked(why) if why.is_empty() => blocked_text().into(),
+            Stop::Blocked(why) => {
+                crate::trf!("{} : {why}", "{}: {why}", blocked_text())
+            }
             Stop::Budget(l) => crate::trf!(
                 "ce projet a utilisé toute la part d'abonnement prévue pour lui ({l:.0} %)",
                 "this project used all the share of the subscription set for it ({l:.0} %)"
@@ -4644,6 +4717,92 @@ impl Stop {
     }
 }
 
+/// How every reason of a blocked session starts (`Stop::Blocked`).
+fn blocked_text() -> &'static str {
+    crate::tr!("l'IA est bloquée", "the AI is blocked")
+}
+
+/// What the person can do for a blocked AI: the button shown with the reason.
+#[derive(Debug, PartialEq)]
+enum Unblock {
+    /// It asked a question: answer it in the inbox.
+    Answer,
+    /// Claude Code asks something on its screen: answer in the session's terminal (its id).
+    Terminal(String),
+    /// It stopped, nothing asked: the project's steps (its id), to change them or start again.
+    Steps(String),
+}
+
+impl Unblock {
+    fn label(&self) -> &'static str {
+        match self {
+            Unblock::Answer => crate::tr!("Répondre à sa question", "Answer its question"),
+            Unblock::Terminal(_) => crate::tr!("Ouvrir le terminal", "Open the terminal"),
+            Unblock::Steps(_) => crate::tr!("Voir les étapes du projet", "See the project's steps"),
+        }
+    }
+
+    /// For a paused session `id`.
+    fn of_wait(why: Wait, id: &str) -> Self {
+        match why {
+            Wait::Question => Unblock::Answer,
+            Wait::Trust | Wait::Permission => Unblock::Terminal(id.to_string()),
+        }
+    }
+}
+
+/// The title of the inbox message saying that the session `title` is paused.
+fn waiting_title(title: &str) -> String {
+    crate::trf!(
+        "{title} attend votre réponse",
+        "{title} waits for your answer"
+    )
+}
+
+/// The button of an inbox message about a blocked AI, only while it is of use: a pause still
+/// going on (`paused`: id, title and reason of each paused session; the newest message of
+/// each), or the end of a blocked session (`run`) with no session on its project since.
+fn inbox_unblock(
+    m: &crate::model::InboxMsg,
+    inbox: &[crate::model::InboxMsg],
+    runs: &[crate::model::RunRecord],
+    run: Option<&crate::model::RunRecord>,
+    paused: &[(String, String, Wait)],
+) -> Option<Unblock> {
+    if m.kind == "info" {
+        let (id, title, why) = paused.iter().find(|(id, title, _)| {
+            runs.iter().any(|r| &r.id == id && r.project == m.project)
+                && m.title == waiting_title(title)
+        })?;
+        let newer = inbox
+            .iter()
+            .any(|x| x.at > m.at && x.project == m.project && x.title == waiting_title(title));
+        return (!newer).then(|| Unblock::of_wait(*why, id));
+    }
+    let run = run.filter(|r| r.outcome.starts_with(blocked_text()))?;
+    if runs
+        .iter()
+        .any(|r| r.project == run.project && r.started > run.started)
+    {
+        return None;
+    }
+    Some(
+        if inbox
+            .iter()
+            .any(|x| x.project == run.project && x.waits_for_person())
+        {
+            Unblock::Answer
+        } else {
+            Unblock::Steps(run.project.clone())
+        },
+    )
+}
+
+/// The inbox's chosen filter: 0 all, 1 to answer, 2 unread.
+fn inbox_filter_id() -> egui::Id {
+    egui::Id::unique("inbox-filter")
+}
+
 /// Whether a session stops after a turn, and why: the first reason in this order. None:
 /// it goes on.
 fn stop_reason(t: &TurnEnd) -> Option<Stop> {
@@ -4657,7 +4816,7 @@ fn stop_reason(t: &TurnEnd) -> Option<Stop> {
         // Endless mode has its own end conditions instead of [[FINI]].
         Stop::MissionDone
     } else if t.signal == Signal::Blocked {
-        Stop::Blocked
+        Stop::Blocked(t.blocked_why.clone())
     } else if let Some(b) = t.budget_micro
         && t.spent_micro >= b
     {
@@ -5185,6 +5344,36 @@ fn split_analysis(text: &str) -> (&str, Option<&str>) {
 
 /// Lines of a message's text shown before « Afficher tout ».
 const TEXT_LINES: usize = 4;
+
+/// In a paused session's card: why the AI is stopped (and the question it asked), in full,
+/// with the button to act; true when clicked.
+fn blocked_box(
+    ui: &mut egui::Ui,
+    why: &str,
+    question: Option<&String>,
+    button: Option<&str>,
+    t: &Tone,
+) -> bool {
+    let orange = super::projects::ORANGE;
+    let mut clicked = false;
+    egui::Frame::new()
+        .fill(orange.gamma_multiply(0.08))
+        .corner_radius(8.0)
+        .inner_margin(egui::Margin::symmetric(10, 8))
+        .show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            ui.add(egui::Label::new(RichText::new(why).size(13.0).color(t.text)).wrap());
+            if let Some(q) = question {
+                ui.add_space(4.0);
+                ui.add(egui::Label::new(RichText::new(q).font(semibold(13.0)).color(t.text)).wrap());
+            }
+            if let Some(b) = button {
+                ui.add_space(6.0);
+                clicked = super::style::primary(ui, b).clicked();
+            }
+        });
+    clicked
+}
 
 /// The kind of an inbox message, as a small tinted pill.
 fn kind_badge(ui: &mut egui::Ui, text: &str, accent: Color32) {
@@ -7168,6 +7357,7 @@ mod tests {
             too_long: false,
             endless_end: None,
             signal: super::Signal::Continue,
+            blocked_why: String::new(),
             endless: false,
             pct: 2.0,
             limit: 20.0,
@@ -7217,7 +7407,18 @@ mod tests {
         );
         assert_eq!(with(&|t| t.too_long = true), Some(Stop::TooLong));
         assert_eq!(with(&|t| t.signal = Signal::Done), Some(Stop::MissionDone));
-        assert_eq!(with(&|t| t.signal = Signal::Blocked), Some(Stop::Blocked));
+        assert_eq!(
+            with(&|t| {
+                t.signal = Signal::Blocked;
+                t.blocked_why = "il manque la clé".into();
+            }),
+            Some(Stop::Blocked("il manque la clé".into()))
+        );
+        assert!(
+            Stop::Blocked("il manque la clé".into())
+                .text()
+                .ends_with("il manque la clé")
+        );
         assert_eq!(with(&|t| t.pct = 20.0), Some(Stop::Budget(20.0)));
         assert_eq!(
             with(&|t| t.five = Some(60.0)),
@@ -7429,6 +7630,56 @@ mod tests {
         let (q, a) = super::split_analysis("Quoi faire ?\n\n— Analyse du répondeur :\nOption C.");
         assert_eq!((q, a), ("Quoi faire ?", Some("Option C.")));
         assert_eq!(super::split_analysis("Sans analyse"), ("Sans analyse", None));
+    }
+
+    #[test]
+    fn a_blocked_ai_comes_with_a_button_while_it_is_of_use() {
+        use super::{Unblock, Wait, inbox_unblock, waiting_title};
+        use crate::model::{InboxMsg, RunRecord};
+        let run = |id: &str, started, outcome: &str| RunRecord {
+            id: id.into(),
+            project: "p".into(),
+            started,
+            outcome: outcome.into(),
+            ..Default::default()
+        };
+        let msg = |kind: &str, at, title: String| InboxMsg {
+            kind: kind.into(),
+            project: "p".into(),
+            at,
+            title,
+            ..Default::default()
+        };
+        // Paused: only the newest message of the pause, and only while it lasts.
+        let runs = vec![run("r1", 1, "")];
+        let inbox = vec![
+            msg("info", 2, waiting_title("Projet")),
+            msg("info", 3, waiting_title("Projet")),
+        ];
+        let paused = vec![("r1".to_string(), "Projet".to_string(), Wait::Permission)];
+        assert_eq!(inbox_unblock(&inbox[0], &inbox, &runs, None, &paused), None);
+        assert_eq!(
+            inbox_unblock(&inbox[1], &inbox, &runs, None, &paused),
+            Some(Unblock::Terminal("r1".into()))
+        );
+        assert_eq!(inbox_unblock(&inbox[1], &inbox, &runs, None, &[]), None);
+        assert_eq!(Unblock::of_wait(Wait::Question, "r1"), Unblock::Answer);
+        // Ended blocked: the question to answer if one waits, else the project's steps.
+        let why = super::Stop::Blocked("il manque la clé".into()).text();
+        let mut runs = vec![run("r1", 1, &why)];
+        let end = msg("fin", 4, "fin".into());
+        let of = |inbox: &[InboxMsg], runs: &[RunRecord]| {
+            inbox_unblock(&end, inbox, runs, Some(&runs[0]), &[])
+        };
+        assert_eq!(of(&[], &runs), Some(Unblock::Steps("p".into())));
+        let asked = [msg("question", 2, "?".into())];
+        assert_eq!(of(&asked, &runs), Some(Unblock::Answer));
+        // A later session on the project: the block is old news.
+        runs.push(run("r2", 5, ""));
+        assert_eq!(of(&asked, &runs), None);
+        // Stopped for another reason: no button.
+        let runs = vec![run("r1", 1, &super::Stop::MissionDone.text())];
+        assert_eq!(of(&asked, &runs), None);
     }
 
     #[test]
