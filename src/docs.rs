@@ -290,6 +290,36 @@ pub fn discover(folder: &Path) -> Vec<Node> {
     out
 }
 
+/// A project's README and documentation pages, which the sidebar shows under one « Docs »
+/// item. Empty unless there are at least two: a group around a single page would only hide it.
+/// Only the display is grouped, the pages stay the project's own sub-pages.
+pub fn docs_group(ws: &Workspace, project_id: &str) -> Vec<String> {
+    if ws.page(project_id).is_none_or(|p| p.project.is_none()) {
+        return vec![];
+    }
+    let ids: Vec<String> = ws
+        .children(Some(project_id))
+        .iter()
+        .filter(|p| {
+            p.source.as_ref().is_some_and(|s| {
+                let rel = s.rel.to_lowercase();
+                if s.is_dir {
+                    ["docs", "doc", "documentation"].contains(&rel.as_str())
+                } else {
+                    ["readme.md", "readme.markdown", "readme.mdx"].contains(&rel.as_str())
+                }
+            })
+        })
+        .map(|p| p.id.clone())
+        .collect();
+    if ids.len() < 2 { vec![] } else { ids }
+}
+
+/// The key of a project's « Docs » item among the sidebar's unfolded rows.
+pub fn docs_group_key(project_id: &str) -> String {
+    format!("docs:{project_id}")
+}
+
 #[derive(Debug, Default, PartialEq)]
 pub struct Stats {
     pub created: usize,
@@ -663,6 +693,14 @@ mod tests {
 
         // Nothing changed: nothing to do.
         assert_eq!(sync_project(&mut ws, &id), Stats::default());
+
+        // README and Documentation go together under the sidebar's « Docs » item.
+        assert_eq!(docs_group(&ws, &id), vec![readme.clone(), doc.clone()]);
+        assert!(docs_group(&ws, &doc).is_empty());
+        // Alone, a page is not grouped.
+        ws.set_trashed(&doc, true);
+        assert!(docs_group(&ws, &id).is_empty());
+        ws.set_trashed(&doc, false);
 
         // The file changes: the page follows.
         std::fs::write(root.join("README.md"), "# Mon projet\n\nUne app mobile.\n").unwrap();

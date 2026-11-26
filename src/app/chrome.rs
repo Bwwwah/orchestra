@@ -933,11 +933,49 @@ impl NotesApp {
                     t.tertiary,
                 );
             }
-            for k in kids {
-                self.tree_row(ui, &k, depth + 1, actions, t);
+            // README and Documentation sit under one « Docs » item, where the first one was.
+            let docs = crate::docs::docs_group(&self.ws, id);
+            for k in &kids {
+                if !docs.contains(k) {
+                    self.tree_row(ui, k, depth + 1, actions, t);
+                } else if docs.first() == Some(k) {
+                    self.docs_row(ui, id, &docs, depth + 1, actions, t);
+                }
             }
         }
         drag.map(|d| d.with_new_rect(rect))
+    }
+
+    /// A project's « Docs » item, folded until asked for: not a page, a click unfolds it.
+    fn docs_row(
+        &self,
+        ui: &mut egui::Ui,
+        project: &str,
+        pages: &[String],
+        depth: usize,
+        actions: &mut Vec<Action>,
+        t: &Tone,
+    ) {
+        let key = crate::docs::docs_group_key(project);
+        let open = self.expanded.contains(&key);
+        let next =
+            egui::Rect::from_min_size(ui.cursor().min, egui::vec2(ui.available_width(), SIDE_ROW));
+        // On hover the icon becomes the expand arrow, as on the other rows.
+        let icon = if !ui.rect_contains_pointer(next) {
+            SideIcon::Emoji("📚")
+        } else if open {
+            SideIcon::Line(Icon::ChevronDown)
+        } else {
+            SideIcon::Line(Icon::ChevronRight)
+        };
+        if side_item(ui, icon, "Docs", false, depth as f32 * 12.0, t).clicked() {
+            actions.push(Action::ToggleExpand(key));
+        }
+        if open {
+            for page in pages {
+                self.tree_row(ui, page, depth + 1, actions, t);
+            }
+        }
     }
 
     /// What a project's dot in the sidebar says: an AI at work there (green, pulsing), else

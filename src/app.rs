@@ -821,6 +821,12 @@ impl NotesApp {
                     for anc in &path {
                         self.fold_other_report_days(anc);
                     }
+                    // Opening a README or a documentation page also unfolds its « Docs » item.
+                    for pair in path.windows(2) {
+                        if crate::docs::docs_group(&self.ws, &pair[0]).contains(&pair[1]) {
+                            self.expanded.insert(crate::docs::docs_group_key(&pair[0]));
+                        }
+                    }
                     for anc in path {
                         self.expanded.insert(anc);
                     }
