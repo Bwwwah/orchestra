@@ -350,6 +350,20 @@ pub struct Project {
     /// The example project the tutorial walks through (see `Workspace::create_example_project`).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub example: bool,
+    /// The members of the team space the project is in (`Workspace::attach_members`); empty
+    /// elsewhere. Given by the space's server to each computer, never taken from a page.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub members: Vec<ProjectMember>,
+}
+
+/// A person of a project's team space, as its server knows them.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct ProjectMember {
+    /// The public half of their key (identity.rs): the same on every team server.
+    pub id: String,
+    pub name: String,
+    #[serde(default)]
+    pub role: crate::team::Role,
 }
 
 /// How the next autonomous session of a project starts, as last chosen by the person.
@@ -418,6 +432,7 @@ impl Project {
         self.sessions_cleared = 0;
         self.cve_watch = false;
         self.cve_seen = 0;
+        self.members.clear();
     }
 
     /// A project received from another person, with what only this computer decides put
@@ -444,6 +459,7 @@ impl Project {
                 self.sessions_cleared = o.sessions_cleared;
                 self.cve_watch = o.cve_watch;
                 self.cve_seen = o.cve_seen;
+                self.members = o.members.clone();
             }
             None => {
                 let theirs = std::mem::take(&mut self.steps);
@@ -1166,6 +1182,42 @@ impl Workspace {
 
     /// What may leave this computer: the shared projects, their pages and discussions,
     /// without what is this computer's own (`shareable`).
+    /// A team space: keep the members its server just gave (names on one short line, each
+    /// member once) and attach them to its projects. Returns true when something changed.
+    pub fn set_space_members(&mut self, members: Vec<ProjectMember>) -> bool {
+        if !self.whole_shared {
+            return false;
+        }
+        let mut seen = std::collections::HashSet::new();
+        let members: Vec<ProjectMember> = members
+            .into_iter()
+            .filter(|m| !m.id.trim().is_empty() && seen.insert(m.id.clone()))
+            .map(|mut m| {
+                m.name = crate::richtext::one_line(&m.name, RECEIVED_AUTHOR_MAX);
+                m
+            })
+            .collect();
+        let news = members != self.space_members;
+        self.space_members = members;
+        self.attach_members() || news
+    }
+
+    /// A team space: every project has the space's members, one made or received since
+    /// too. Not an edit of its page (`updated` stays). Returns true when a project changed.
+    pub fn attach_members(&mut self) -> bool {
+        if !self.whole_shared {
+            return false;
+        }
+        let mut changed = false;
+        for x in self.pages.iter_mut().filter_map(|p| p.project.as_mut()) {
+            if x.members != self.space_members {
+                x.members = self.space_members.clone();
+                changed = true;
+            }
+        }
+        changed
+    }
+
     pub fn shared_copy(&self) -> Workspace {
         let ids = self.shared_ids();
         Workspace {
@@ -1585,6 +1637,52 @@ mod tests {
         new_here.keep_local(None);
         assert_eq!(new_here.session_limit, None);
         assert_eq!(new_here.launch, None);
+    }
+
+    #[test]
+    fn a_team_space_gives_its_members_to_every_project_and_a_page_gives_none() {
+        let member = |id: &str, name: &str| ProjectMember {
+            id: id.into(),
+            name: name.into(),
+            role: Default::default(),
+        };
+        let mut ws = Workspace::default();
+        let mut page = Page::new("Projet", None);
+        page.project = Some(Project::default());
+        ws.pages = vec![page, Page::new("Notes", None)];
+        // Outside a team space: nobody.
+        assert!(!ws.set_space_members(vec![member("a", "Ana")]));
+        assert!(ws.pages[0].project.as_ref().unwrap().members.is_empty());
+        ws.whole_shared = true;
+        let before = ws.pages[0].updated;
+        assert!(ws.set_space_members(vec![
+            member("a", "Ana\nMartin"),
+            member("a", "Ana bis"),
+            member(" ", "sans clé"),
+        ]));
+        let ours = ws.pages[0].project.clone().unwrap();
+        assert_eq!(ours.members, [member("a", "Ana")]);
+        assert_eq!(ws.pages[0].updated, before, "not an edit of the page");
+        assert!(!ws.attach_members(), "nothing more to do");
+        // A project made afterwards gets them too.
+        let mut later = Page::new("Autre", None);
+        later.project = Some(Project::default());
+        ws.pages.push(later);
+        assert!(ws.attach_members());
+        assert_eq!(ws.pages[2].project.as_ref().unwrap().members, ours.members);
+        // They don't leave with the page, and another copy's are never taken.
+        let sent = shareable(&ws.pages[0]);
+        assert!(sent.project.unwrap().members.is_empty());
+        let forged = Project {
+            members: vec![member("x", "Intrus")],
+            ..Default::default()
+        };
+        let mut theirs = forged.clone();
+        theirs.keep_local(Some(&ours));
+        assert_eq!(theirs.members, ours.members);
+        let mut new_here = forged;
+        new_here.keep_local(None);
+        assert!(new_here.members.is_empty());
     }
 
     #[test]

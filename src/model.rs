@@ -625,6 +625,9 @@ pub struct Workspace {
     /// projects. Set when such a space is opened, never written.
     #[serde(skip)]
     pub whole_shared: bool,
+    /// A team space: its members, as its server last gave them (kept to be known offline).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub space_members: Vec<crate::project::ProjectMember>,
     /// A team space: the number of the last change of its server received here (team.rs).
     #[serde(default, skip_serializing_if = "is_zero")]
     pub server_seq: u64,

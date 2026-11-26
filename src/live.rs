@@ -68,6 +68,10 @@ pub enum LiveMsg {
     Admin { req: serde_json::Value },
     /// Local only: a team server's answer to it (`team::AdminView`).
     AdminReply { reply: serde_json::Value },
+    /// From a team server only (team.rs): who the members of the space are now.
+    Members {
+        members: Vec<crate::project::ProjectMember>,
+    },
     /// Local only (a team server, team.rs): everything up to change `seq` has arrived;
     /// `ack`: the last message sent was taken.
     Synced {
@@ -479,6 +483,7 @@ fn serve_peer(
                 | LiveMsg::Synced { .. }
                 | LiveMsg::Admin { .. }
                 | LiveMsg::AdminReply { .. }
+                | LiveMsg::Members { .. }
         ) {
             continue;
         }

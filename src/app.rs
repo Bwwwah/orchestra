@@ -1556,6 +1556,10 @@ fn page_key(p: &Page) -> String {
         b.crdt = None;
     }
     c.order_crdt = None;
+    // The space's members, attached by each computer: never an edit.
+    if let Some(x) = c.project.as_mut() {
+        x.members.clear();
+    }
     serde_json::to_string(&c).unwrap_or_default()
 }
 

@@ -199,6 +199,11 @@ impl NotesApp {
                     }
                 }
                 LiveMsg::Admin { .. } => {}
+                LiveMsg::Members { members } => {
+                    if self.ws.set_space_members(members) {
+                        self.dirty_since.get_or_insert_with(Instant::now);
+                    }
+                }
                 LiveMsg::Synced { seq, ack } => {
                     if self.ws.whole_shared {
                         self.ws.server_seq = self.ws.server_seq.max(seq);
@@ -277,6 +282,10 @@ impl NotesApp {
             crate::collab::give_documents(&mut self.ws, None, true);
             // Remote edits are not ours to stamp or echo: refresh the snapshot, save to disk.
             self.take_snapshot();
+            self.dirty_since.get_or_insert_with(Instant::now);
+        }
+        // A project made here or just arrived gets the space's members too.
+        if self.ws.attach_members() {
             self.dirty_since.get_or_insert_with(Instant::now);
         }
         // Send pages whose last edit hasn't gone out yet (window, AI through MCP, imports).
@@ -451,8 +460,10 @@ impl NotesApp {
                     if collab::merge_page(ours, &incoming) {
                         changed = true;
                     }
-                    // Only echo back if our merge kept something they don't have.
-                    if serde_json::to_string(&*ours).unwrap_or_default() == incoming_json {
+                    // Only echo back if our merge kept something they don't have (what
+                    // stays on this computer aside).
+                    let shown = crate::project::shareable(ours);
+                    if serde_json::to_string(&shown).unwrap_or_default() == incoming_json {
                         self.live_sent.insert(ours.id.clone(), ours.updated);
                     } else {
                         self.live_sent.remove(&ours.id);

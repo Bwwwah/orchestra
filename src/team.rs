@@ -26,6 +26,7 @@
 
 use crate::live::{self, LiveMsg, Status};
 use crate::model::{ChatMsg, Page};
+use crate::project::ProjectMember;
 use crate::space::AiRule;
 use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
@@ -384,6 +385,19 @@ impl Db {
         })
         .map(|it| it.flatten().collect())
         .unwrap_or_default()
+    }
+
+    /// The space's members as every member may know them (those taken off aside).
+    pub fn roster(&self) -> Vec<ProjectMember> {
+        self.member_list()
+            .into_iter()
+            .filter(|m| !m.revoked)
+            .map(|m| ProjectMember {
+                id: m.key,
+                name: m.name,
+                role: m.role,
+            })
+            .collect()
     }
 
     /// The member `who` names: their whole key, the start of it (8 characters at least), or
@@ -1322,6 +1336,12 @@ fn serve_one(id: u64, stream: Replay, db: &Arc<Mutex<Db>>, conns: &Conns) -> Res
     {
         let d = db.lock().map_err(|e| e.to_string())?;
         let (pages, deleted, chat) = d.since(since);
+        // Who the members are: to this one, and to the others (this one may be new).
+        let members = json(&LiveMsg::Members {
+            members: d.roster(),
+        });
+        pass_on(conns, id, std::slice::from_ref(&members));
+        let _ = tx.send(members);
         eprintln!(
             "  {name} : {} page(s), {} suppression(s), {} message(s) après le changement {since}",
             pages.len(),
@@ -1388,6 +1408,7 @@ fn serve_one(id: u64, stream: Replay, db: &Arc<Mutex<Db>>, conns: &Conns) -> Res
                 // Only an administrator (checked again: the role may have changed since).
                 LiveMsg::Admin { req } => {
                     let Ok(d) = db.lock() else { return };
+                    let roster_before = d.roster();
                     let view = match (d.member(&key), serde_json::from_value::<AdminOp>(req)) {
                         (Some((_, Role::Admin)), Ok(op)) => d.admin(op, &key),
                         (Some((_, Role::Admin)), Err(e)) => AdminView {
@@ -1404,6 +1425,14 @@ fn serve_one(id: u64, stream: Replay, db: &Arc<Mutex<Db>>, conns: &Conns) -> Res
                         },
                     };
                     let _ = tx.send(json(&Greeting::AdminReply { view }));
+                    // A member taken off, let back in or given another role: all are told.
+                    if d.roster() != roster_before {
+                        let members = json(&LiveMsg::Members {
+                            members: d.roster(),
+                        });
+                        pass_on(conns, id, std::slice::from_ref(&members));
+                        let _ = tx.send(members);
+                    }
                 }
                 // Under the name the server knows, never the one a message claims.
                 LiveMsg::Presence {
@@ -1974,6 +2003,36 @@ mod tests {
         d.set_revoked(&ana_key, true).unwrap();
         assert!(admit(&d, &space, "n7", &auth(&ana, &space, "n7", "")).is_err());
         assert_eq!(d.members(), 1);
+    }
+
+    #[test]
+    fn every_member_may_know_who_is_in_the_space_not_who_was_taken_off() {
+        let d = db();
+        let space = d.info().id;
+        let ana = ed25519_dalek::SigningKey::from_bytes(&[1u8; 32]);
+        let bob = ed25519_dalek::SigningKey::from_bytes(&[2u8; 32]);
+        for k in [&ana, &bob] {
+            let inv = d.invite(Role::Member).unwrap();
+            admit(&d, &space, "n", &auth(k, &space, "n", &inv)).unwrap();
+        }
+        let (ka, kb) = (
+            crate::identity::public_hex(&ana),
+            crate::identity::public_hex(&bob),
+        );
+        let roster = d.roster();
+        assert_eq!(roster.len(), 2);
+        assert!(roster.iter().any(|m| m.id == ka && m.role == Role::Admin));
+        d.set_revoked(&kb, true).unwrap();
+        assert_eq!(
+            d.roster().iter().map(|m| &m.id).collect::<Vec<_>>(),
+            [&ka]
+        );
+        // The wire: what the app reads is a live message.
+        let sent = json(&LiveMsg::Members { members: d.roster() });
+        assert!(matches!(
+            serde_json::from_str::<LiveMsg>(&sent),
+            Ok(LiveMsg::Members { members }) if members == d.roster()
+        ));
     }
 
     #[test]
