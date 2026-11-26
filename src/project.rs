@@ -624,6 +624,35 @@ impl Project {
         self.last_activity = self.summary_updated;
     }
 
+    /// Steps added since the state of play was written (0 while none is written).
+    pub fn steps_since_summary(&self) -> usize {
+        if self.summary.trim().is_empty() || self.summary_updated == 0 {
+            return 0;
+        }
+        self.steps
+            .iter()
+            .filter(|s| s.created > self.summary_updated)
+            .count()
+    }
+
+    /// The line saying the state of play is out of date, if steps were added since.
+    pub fn stale_summary_note(&self) -> Option<String> {
+        match self.steps_since_summary() {
+            0 => None,
+            1 => Some(
+                crate::tr!(
+                    "Peut-être périmé : 1 étape ajoutée depuis son écriture.",
+                    "May be out of date: 1 step added since it was written."
+                )
+                .to_string(),
+            ),
+            n => Some(crate::trf!(
+                "Peut-être périmé : {n} étapes ajoutées depuis son écriture.",
+                "May be out of date: {n} steps added since it was written."
+            )),
+        }
+    }
+
     /// (done, total)
     /// Clear the sessions history: forget the linked sessions and hide the ones found on
     /// disk up to now. Nothing is deleted from disk.
@@ -978,6 +1007,12 @@ impl Workspace {
             )];
             if let Some(x) = p.project.as_mut() {
                 x.example = true;
+                let done = x.add_step(&crate::tr!("Exemple : créer le projet", "Example: create the project"), "Orchestra");
+                x.set_step_status(&done, StepStatus::Done);
+                let doing = x.add_step(&crate::tr!("Exemple : découvrir les étapes", "Example: discover the steps"), "Orchestra");
+                x.set_step_status(&doing, StepStatus::Doing);
+                x.add_step(&crate::tr!("Exemple : lancer une session autonome", "Example: start an autonomous session"), "Orchestra");
+                // After the steps: it must not show as out of date.
                 x.set_summary(
                     &crate::tr!(
                         "### Fait\n- Le projet exemple est créé.\n\n### En cours\n- Découvrir les étapes.\n\n### Bloquants\n- Aucun.",
@@ -985,11 +1020,6 @@ impl Workspace {
                     ),
                     "Orchestra",
                 );
-                let done = x.add_step(&crate::tr!("Exemple : créer le projet", "Example: create the project"), "Orchestra");
-                x.set_step_status(&done, StepStatus::Done);
-                let doing = x.add_step(&crate::tr!("Exemple : découvrir les étapes", "Example: discover the steps"), "Orchestra");
-                x.set_step_status(&doing, StepStatus::Doing);
-                x.add_step(&crate::tr!("Exemple : lancer une session autonome", "Example: start an autonomous session"), "Orchestra");
             }
         }
         id
@@ -1304,6 +1334,9 @@ pub fn project_to_markdown(page: &Page) -> String {
                 "\n_written by {}_\n",
                 pr.summary_by
             ));
+        }
+        if let Some(note) = pr.stale_summary_note() {
+            out.push_str(&format!("\n⚠ {note}\n"));
         }
     }
     out.push_str(crate::tr!(
@@ -1815,6 +1848,31 @@ mod tests {
         assert_eq!(p.sessions.len(), 2);
         assert_eq!(p.sessions[0].title, "Refonte");
         assert_eq!(p.sessions[0].last_activity, 50);
+    }
+
+    #[test]
+    fn steps_added_after_the_state_of_play_make_it_stale() {
+        let mut pr = Project::new("");
+        pr.add_step("A : faire", "ia");
+        // None written: nothing to be out of date.
+        assert!(pr.stale_summary_note().is_none());
+        pr.set_summary("- fait", "ia");
+        pr.steps[0].created = pr.summary_updated - 10;
+        assert_eq!(pr.steps_since_summary(), 0);
+        let id = pr.add_step("B : faire", "ia");
+        pr.steps[1].created = pr.summary_updated + 10;
+        assert_eq!(pr.steps_since_summary(), 1);
+        assert!(pr.stale_summary_note().is_some());
+        // A status change alone doesn't count, and writing it again clears the note.
+        pr.set_step_status(&id, StepStatus::Done);
+        assert_eq!(pr.steps_since_summary(), 1);
+        pr.steps[1].created = pr.summary_updated;
+        assert!(pr.stale_summary_note().is_none());
+
+        let mut ws = crate::model::Workspace::default();
+        let ex = ws.create_example_project();
+        let x = ws.page_mut(&ex).unwrap().project.as_ref().unwrap();
+        assert_eq!(x.steps_since_summary(), 0);
     }
 
     #[test]

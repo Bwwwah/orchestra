@@ -871,11 +871,12 @@ fn call_tool(name: &str, args: &Value) -> Result<String, ToolError> {
             let src = s(args, "source").unwrap_or("ia");
             let id = ws.create_project(title, &folder);
             let pr = ws.page_mut(&id).unwrap().project.as_mut().unwrap();
-            if let Some(sum) = summary_arg(args) {
-                pr.set_summary(&sum, src);
-            }
             for st in str_list(args, "steps") {
                 pr.add_step(&st, src);
+            }
+            // After the steps: a state of play written with them isn't out of date.
+            if let Some(sum) = summary_arg(args) {
+                pr.set_summary(&sum, src);
             }
             // README, docs/… become pages under the project.
             crate::docs::sync_project(&mut ws, &id);

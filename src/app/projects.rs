@@ -1890,6 +1890,13 @@ fn summary_card(ui: &mut egui::Ui, cx: &mut Cx, folded_h: f32, extra: f32) -> f3
             }
             return;
         }
+        // Above the text, so it shows while the card is folded.
+        if !cx.ai.filling(page_id)
+            && let Some(note) = pr.stale_summary_note()
+        {
+            ui.label(RichText::new(note).size(12.5).color(ORANGE));
+            ui.add_space(6.0);
+        }
         let key = ("summary-open", page_id);
         let open = flag(ui, key);
         // Drawn in a clipped child, not a scroll area: the mouse wheel keeps scrolling
