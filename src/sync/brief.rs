@@ -97,14 +97,14 @@ pub fn with_project(folder: &str, known: &str, budget: usize, question: &str) ->
 }
 
 /// The first `max` characters of `s`, marked when some are left out.
-fn cut(s: &str, max: usize) -> String {
+pub(super) fn cut(s: &str, max: usize) -> String {
     match s.char_indices().nth(max) {
         Some((i, _)) => format!("{}\n[…]", &s[..i]),
         None => s.to_string(),
     }
 }
 
-fn describe(root: &Path, known: &str, budget: usize) -> String {
+pub(super) fn describe(root: &Path, known: &str, budget: usize) -> String {
     let files = list(root);
     let mut out = String::new();
     // Adds a section of `max` characters at most, within what is left of the budget.

@@ -1,5 +1,6 @@
 //! The right-hand panel of a project: the team discussion (first tab) and the AI
-//! conversation of one of its sessions, read live from Claude Code / Codex (second tab).
+//! conversation (second tab). For a code project, that of one of its sessions, read live from
+//! Claude Code / Codex; for a project without code, its own conversation (`side_chat`).
 
 use super::chrome::relative_time;
 use super::*;
@@ -160,6 +161,15 @@ fn waiting(listed: bool, asked_at: f64, now: f64) -> Waiting {
     }
 }
 
+/// The way back to the conversation of a project without code; true when clicked.
+fn back_to_talk(ui: &mut egui::Ui) -> bool {
+    super::projects::action_link(
+        ui,
+        crate::tr!("‹ Conversation du projet", "‹ The project's conversation"),
+    )
+    .clicked()
+}
+
 /// A steady colour per person, for the round faces.
 pub(super) fn person_color(name: &str) -> Color32 {
     const COLORS: [Color32; 8] = [
@@ -263,6 +273,8 @@ impl NotesApp {
         self.side_open = true;
         self.side_tab = 1;
         self.thread_pid = None;
+        // A project without code shows its own conversation unless a session is asked for.
+        self.talks.sessions_of = Some(r.project.clone());
         self.ai_session = Some(r.resume.session.clone());
         ctx.data_mut(|d| d.insert_temp(pending_key(), r));
     }
@@ -613,9 +625,17 @@ impl NotesApp {
         t: &Tone,
     ) {
         let live: Vec<SessionInfo> = self.agents.by_project.get(pid).cloned().unwrap_or_default();
+        // A project without code has its conversation here, without a terminal.
+        let talks = !pr.is_code();
         // The thread shown before the panel was closed comes back as it was (the answers and
         // the replies live in the app, not in the panel).
         if self.thread_pid.as_deref() == Some(pid) {
+            if talks && self.ai.answers.contains_key(pid) && back_to_talk(ui) {
+                self.thread_pid = None;
+                self.talks.sessions_of = None;
+                ui.ctx().request_repaint();
+                return;
+            }
             if self.quick_thread_view(ui, pid, t) {
                 if self.ai.asking(pid).is_some() {
                     ui.ctx().request_repaint_after(std::time::Duration::from_millis(500));
@@ -668,6 +688,31 @@ impl NotesApp {
                         Some(r.resume.cmd.clone()),
                     );
                 }
+            }
+        }
+        if talks {
+            if self.talks.sessions_of.as_deref() != Some(pid) || live.is_empty() {
+                if !live.is_empty()
+                    && super::projects::action_link(
+                        ui,
+                        crate::tr!(
+                            "Voir les sessions Claude Code et Codex",
+                            "See the Claude Code and Codex sessions"
+                        ),
+                    )
+                    .clicked()
+                {
+                    self.talks.sessions_of = Some(pid.to_string());
+                    ui.ctx().request_repaint();
+                    return;
+                }
+                self.project_talk(ui, pid, live.first().map(|s| s.tool), t);
+                return;
+            }
+            if back_to_talk(ui) {
+                self.talks.sessions_of = None;
+                ui.ctx().request_repaint();
+                return;
             }
         }
         if live.is_empty() {

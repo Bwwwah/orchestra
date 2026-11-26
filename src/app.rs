@@ -155,6 +155,8 @@ pub struct NotesApp {
     /// The project whose quick-question thread the side panel shows (kept when it is closed).
     thread_pid: Option<String>,
     ai_session: Option<String>,
+    /// The conversations projects without code have with an AI in the side panel.
+    talks: side_chat::Talks,
     transcripts: HashMap<String, (u64, std::sync::Arc<Vec<crate::sessions::Turn>>)>,
     /// Space taken this frame by the side panel (right) and the terminal dock (bottom).
     side_w: f32,
@@ -276,6 +278,7 @@ impl NotesApp {
             thread_draft: String::new(),
             thread_pid: None,
             ai_session: None,
+            talks: side_chat::Talks::default(),
             transcripts: HashMap::new(),
             side_w: 0.0,
             dock_h: 0.0,
@@ -1614,6 +1617,7 @@ impl eframe::App for NotesApp {
         self.take_conversation_request(&ctx);
         self.review_tick(&ctx);
         self.ai_tick(&ctx);
+        self.talk_tick(&ctx);
         self.ais_tick();
         self.orch_tick(&ctx, true);
         self.install_tick(&ctx);
@@ -3115,6 +3119,7 @@ mod rich;
 mod search;
 mod settings;
 mod side;
+mod side_chat;
 mod slash;
 mod spaces_ui;
 mod style;

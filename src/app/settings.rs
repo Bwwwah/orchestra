@@ -1419,13 +1419,14 @@ impl NotesApp {
         );
     }
 
-    /// Who fills projects in and suggests their steps: Claude Code or Codex, else a model
-    /// behind an OpenAI-compatible address, with its name, address and key.
+    /// Who fills projects in, suggests their steps and talks with the person about a project
+    /// without code: Claude Code or Codex, else a model behind an OpenAI-compatible address,
+    /// with its name, address and key.
     fn text_model_settings(&mut self, ui: &mut egui::Ui, t: &Tone, l: &Look) {
         use crate::sync::openai::{OpenAi, Service};
         section(
             ui,
-            crate::tr!("Remplir et suggérer des étapes", "Filling in and suggesting steps"),
+            crate::tr!("Remplir, suggérer des étapes et discuter", "Filling in, suggesting steps and chatting"),
             t,
             l,
         );
@@ -1445,8 +1446,8 @@ impl NotesApp {
             ui,
             crate::tr!("IA utilisée", "AI used"),
             crate::tr!(
-                "Pour « Remplir avec l'IA » (aussi à l'ajout d'un projet) et « Suggérer des étapes ». Claude Code et Codex lisent le dossier. Un autre modèle ne le peut pas : Orchestra envoie à son serveur le titre et les étapes du projet, les noms des fichiers, l'état de git, le début du README et de quelques fichiers (jamais les fichiers cachés), ou le texte et les images que vous donnez.",
-                "For « Fill in with the AI » (also when a project is added) and « Suggest steps ». Claude Code and Codex read the folder. Another model can't: Orchestra sends its server the project's title and steps, the file names, the git state, the beginning of the README and of a few files (never hidden ones), or the text and images you give."
+                "Pour « Remplir avec l'IA » (aussi à l'ajout d'un projet), « Suggérer des étapes » et la conversation d'un projet sans code (volet de droite). Claude Code et Codex lisent le dossier. Un autre modèle ne le peut pas : Orchestra envoie à son serveur le titre et les étapes du projet, les noms des fichiers, l'état de git, le début du README et de quelques fichiers (jamais les fichiers cachés), ou le texte et les images que vous donnez. Pour la conversation, il reçoit aussi vos messages, l'état des lieux et le texte de la page du projet.",
+                "For « Fill in with the AI » (also when a project is added), « Suggest steps » and the conversation of a project without code (right-hand panel). Claude Code and Codex read the folder. Another model can't: Orchestra sends its server the project's title and steps, the file names, the git state, the beginning of the README and of a few files (never hidden ones), or the text and images you give. For the conversation, it also gets your messages, the state of play and the text of the project's page."
             ),
             t,
             |ui| {

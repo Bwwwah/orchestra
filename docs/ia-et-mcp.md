@@ -47,7 +47,17 @@ Habitude conseillée à une IA : `get_project_state` (avec `folder` = son dossie
   évoque un secret ni ceux qu'un lien sort du dossier. Le résumé est court pour un modèle
   sur cet ordinateur. « Depuis un texte » n'envoie que le texte et les images. Si le modèle
   échoue, aucune autre IA ne répond à sa place. Les autres demandes (question rapide,
-  regard extérieur…) restent à Claude Code ou Codex.
+  regard extérieur…) restent à Claude Code ou Codex, sauf la conversation ci-dessous.
+- Un **projet sans code** a sa conversation avec une IA dans le volet de droite
+  (`src/app/side_chat.rs`, `src/sync/talk.rs`), sans terminal. L'IA est celle du réglage
+  ci-dessus. Chaque message part avec la fiche du projet, le texte de sa page et les
+  derniers échanges, dans une taille limitée. Claude Code et Codex peuvent aussi lire le
+  dossier du projet (sans dossier, ils tournent dans un dossier vide) ; Claude Code n'est
+  autorisé qu'à chercher sur le web, et l'écriture, les commandes et les outils d'Orchestra
+  lui sont refusés. L'IA ne modifie rien : les étapes qu'elle propose attendent dans
+  l'encadré Étapes. L'historique (200 messages au plus par projet) est rangé dans le dossier
+  `conversations` à côté de `workspace.json`, jamais dedans : il n'est pas partagé avec
+  l'équipe.
 - L'état des lieux peut être écrit par une IA ; les **étapes** sont à vous : une IA les
   propose, vous choisissez.
 - En mode autonome, l'IA travaille dans une copie du dépôt et ne pousse jamais (voir

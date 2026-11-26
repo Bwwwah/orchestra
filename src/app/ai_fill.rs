@@ -240,6 +240,23 @@ impl NotesApp {
         }
     }
 
+    /// Put steps an AI proposed in the project's Steps box, where they wait for the person's
+    /// choice; how many were new.
+    pub(super) fn propose_steps(&mut self, page_id: &str, steps: Vec<String>) -> usize {
+        let existing: Vec<String> = self
+            .ws
+            .page(page_id)
+            .and_then(|p| p.project.as_ref())
+            .map(|pr| pr.steps.iter().map(|s| s.title.clone()).collect())
+            .unwrap_or_default();
+        let list = self.ai.proposals.entry(page_id.to_string()).or_default();
+        let n = merge_proposals(list, &existing, steps);
+        if list.is_empty() {
+            self.ai.proposals.remove(page_id);
+        }
+        n
+    }
+
     fn known_of(&self, page_id: &str) -> String {
         self.ws
             .page(page_id)
@@ -404,20 +421,7 @@ impl NotesApp {
                     e
                 })
                 .unwrap_or_default();
-            let existing: Vec<String> = self
-                .ws
-                .page(&id)
-                .and_then(|p| p.project.as_ref())
-                .map(|pr| pr.steps.iter().map(|s| s.title.clone()).collect())
-                .unwrap_or_default();
-            let n = merge_proposals(
-                self.ai.proposals.entry(id.clone()).or_default(),
-                &existing,
-                steps,
-            );
-            if self.ai.proposals.get(&id).is_some_and(Vec::is_empty) {
-                self.ai.proposals.remove(&id);
-            }
+            let n = self.propose_steps(&id, steps);
             self.ai.answers.insert(
                 id,
                 QuickAnswer {

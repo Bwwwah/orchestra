@@ -15,6 +15,7 @@
 mod brief;
 pub mod openai;
 pub mod provider;
+pub mod talk;
 
 use crate::LockOrRecover;
 use provider::{Provider, Reply, Request};

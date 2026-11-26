@@ -45,7 +45,8 @@ découpé par zone :
 | `app/term_ui.rs` | le terminal intégré (dock en bas) |
 | `app/settings.rs` | la fenêtre des réglages |
 | `app/search.rs`, `app/slash.rs`, `app/database.rs`, `app/rich.rs` | recherche, menu `/`, bases, texte riche |
-| `app/live_ui.rs`, `app/side.rs` | travail en direct, panneau latéral (discussion d'équipe) |
+| `app/live_ui.rs`, `app/side.rs` | travail en direct, panneau latéral (discussion d'équipe, conversation IA) |
+| `app/side_chat.rs`, `sync/talk.rs` | la conversation d'un projet sans code avec une IA : l'historique sur cet ordinateur et la demande envoyée |
 | `app/icons.rs` | les icônes, dessinées en traits (pas de police d'icônes) |
 
 Le travail long (appel d'une IA, `git`, téléchargement) tourne dans un fil à part ; la fenêtre
