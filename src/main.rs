@@ -16,6 +16,7 @@ mod catalog;
 mod clip;
 mod collab;
 mod crdt;
+mod data_folder;
 mod docs;
 mod drive;
 mod git;
@@ -87,7 +88,8 @@ Utilisation :
   orchestra version         la version
 
 Lancée sans argument hors d'un terminal (Finder, raccourci), elle ouvre la fenêtre.
-Données : $ORCHESTRA_DIR, sinon le dossier de données de l'utilisateur.";
+Données : $ORCHESTRA_DIR, sinon le dossier choisi dans les réglages, sinon le dossier de
+données de l'utilisateur.";
 
 /// The original's console behaviour (capture/runs): run from a terminal with no
 /// arguments, `--help` or `--version`, it prints nothing and exits with code 1
@@ -525,6 +527,8 @@ fn app_icon() -> eframe::egui::IconData {
 
 fn run_window(open: Option<String>) -> i32 {
     use model::original::*;
+    // Before anything is read: the data folder chosen in the settings takes effect now.
+    data_folder::apply_at_launch();
     let options = eframe::NativeOptions {
         viewport: eframe::egui::ViewportBuilder::default()
             .with_title("Orchestra")

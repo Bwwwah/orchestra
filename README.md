@@ -67,8 +67,9 @@ orchestra equipe ia-espace ajouter | cle | retirer | liste   les IA fournies par
 orchestra aide | version
 ```
 
-Les données sont dans `$ORCHESTRA_DIR`, sinon dans le dossier de données de l'utilisateur
-(`~/Library/Application Support/orchestra` sur macOS), fichier `workspace.json`.
+Les données sont dans `$ORCHESTRA_DIR`, sinon dans le dossier choisi dans Réglages → Général
+(« Changer de dossier », pris en compte au prochain lancement), sinon dans le dossier de données de
+l'utilisateur (`~/Library/Application Support/orchestra` sur macOS), fichier `workspace.json`.
 
 ## Brancher une IA
 

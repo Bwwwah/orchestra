@@ -82,6 +82,8 @@ pub struct NotesApp {
     last_poll: Instant,
     export_dir: String,
     import_path: String,
+    /// The path being typed in « Changer de dossier » (settings).
+    data_dir_draft: String,
     new_col: (String, ColumnKind),
     applied_theme: Option<egui::ThemePreference>,
     shot: Option<crate::shot::Shot>,
@@ -220,6 +222,7 @@ impl NotesApp {
             last_poll: Instant::now(),
             export_dir,
             import_path: String::new(),
+            data_dir_draft: String::new(),
             new_col: (String::new(), ColumnKind::Text),
             applied_theme: None,
             shot: crate::shot::Shot::from_env(),
@@ -274,6 +277,12 @@ impl NotesApp {
         // Reports of older versions, all projects mixed under each day: each to its project.
         if app.ws.sort_reports_by_project() > 0 {
             app.dirty_since = Some(Instant::now());
+        }
+        if let Some(e) = crate::data_folder::launch_failure() {
+            app.fail(crate::trf!(
+                "Le dossier des données n'a pas changé : {e}",
+                "The data folder didn't change: {e}"
+            ));
         }
         app.restore_terminals(&cc.egui_ctx);
         if std::env::var_os("ORCHESTRA_NO_SESSIONS").is_none() {

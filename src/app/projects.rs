@@ -20,41 +20,44 @@ pub struct LiveIndex {
     pub unassigned: Vec<(String, Vec<SessionInfo>)>,
 }
 
-/// The system's folder picker for the new-project form, run on its own thread so the
-/// window keeps drawing; the chosen folder is picked up on the next frame.
-mod folder_picker {
+/// The system's folder picker for a form, run on its own thread so the window keeps
+/// drawing; the chosen folder is picked up on the next frame, by the form that asked.
+pub(super) mod folder_picker {
     use std::path::PathBuf;
     use std::sync::Mutex;
     use std::sync::atomic::{AtomicBool, Ordering};
 
     static BUSY: AtomicBool = AtomicBool::new(false);
-    static PICKED: Mutex<Option<PathBuf>> = Mutex::new(None);
+    static PICKED: Mutex<Option<(&str, PathBuf)>> = Mutex::new(None);
 
     pub fn busy() -> bool {
         BUSY.load(Ordering::Relaxed)
     }
 
-    pub fn start(ctx: &eframe::egui::Context, from: Option<PathBuf>) {
+    pub fn start(
+        ctx: &eframe::egui::Context,
+        form: &'static str,
+        prompt: &'static str,
+        from: Option<PathBuf>,
+    ) {
         if BUSY.swap(true, Ordering::SeqCst) {
             return;
         }
         let ctx = ctx.clone();
         std::thread::spawn(move || {
-            let got = crate::opener::pick_folder(
-                crate::tr!("Dossier du projet", "Project folder"),
-                from.as_deref(),
-            );
+            let got = crate::opener::pick_folder(prompt, from.as_deref());
             if let Some(p) = got {
-                *PICKED.lock().unwrap_or_else(|e| e.into_inner()) = Some(p);
+                *PICKED.lock().unwrap_or_else(|e| e.into_inner()) = Some((form, p));
             }
             BUSY.store(false, Ordering::SeqCst);
             ctx.request_repaint();
         });
     }
 
-    /// The folder chosen since the last call, if any.
-    pub fn take() -> Option<PathBuf> {
-        PICKED.lock().unwrap_or_else(|e| e.into_inner()).take()
+    /// The folder chosen for `form` since the last call, if any.
+    pub fn take(form: &str) -> Option<PathBuf> {
+        let mut picked = PICKED.lock().unwrap_or_else(|e| e.into_inner());
+        picked.take_if(|(f, _)| *f == form).map(|(_, p)| p)
     }
 }
 
@@ -276,7 +279,7 @@ impl NotesApp {
                         ui.add_space(8.0);
                         egui::Grid::new("new-project").num_columns(2).spacing([12.0, 8.0]).show(ui, |ui| {
                             ui.label(crate::tr!("Dossier", "Folder"));
-                            if let Some(dir) = folder_picker::take() {
+                            if let Some(dir) = folder_picker::take("new-project") {
                                 *folder = dir.display().to_string();
                             }
                             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -287,7 +290,7 @@ impl NotesApp {
                                     .on_disabled_hover_text(crate::tr!("Fenêtre de choix ouverte", "Picker window open"));
                                 if browse.clicked() {
                                     let start = crate::project::normalize_folder(folder.trim());
-                                    folder_picker::start(ui.ctx(), start.is_dir().then_some(start).or_else(dirs::home_dir));
+                                    folder_picker::start(ui.ctx(), "new-project", crate::tr!("Dossier du projet", "Project folder"), start.is_dir().then_some(start).or_else(dirs::home_dir));
                                 }
                                 let fr = ui.add(egui::TextEdit::singleline(folder).hint_text(crate::tr!("~/Code/mon-projet", "~/Code/my-project")).font(FontId::monospace(13.0)).desired_width(f32::INFINITY));
                                 if title.is_empty() && folder.is_empty() && !fr.has_focus() && !busy {

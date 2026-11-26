@@ -974,16 +974,7 @@ impl NotesApp {
                 }
             },
         );
-        row(
-            ui,
-            crate::tr!("Changer de dossier", "Change folder"),
-            crate::tr!(
-                "Lancez l'application avec la variable ORCHESTRA_DIR pour utiliser un autre dossier.",
-                "Launch the app with the ORCHESTRA_DIR variable to use another folder."
-            ),
-            t,
-            |_| {},
-        );
+        self.data_folder_choice(ui, t, l);
         // On macOS the app goes to the Trash with no uninstaller: this undoes, first, what
         // Orchestra set up outside its folder (Windows' uninstaller runs it by itself).
         row(
@@ -1007,6 +998,127 @@ impl NotesApp {
         );
         self.update_settings(ui, t, l);
         self.third_party(ui, t, l);
+    }
+
+    /// « Changer de dossier »: pick another data folder, used from the next launch (see
+    /// data_folder.rs).
+    fn data_folder_choice(&mut self, ui: &mut egui::Ui, t: &Tone, l: &Look) {
+        use crate::data_folder;
+        use super::projects::folder_picker;
+        let title = crate::tr!("Changer de dossier", "Change folder");
+        if store::forced_data_dir().is_some() {
+            let desc = crate::tr!(
+                "Ce dossier est imposé par la variable ORCHESTRA_DIR : lancez Orchestra sans elle pour le choisir ici.",
+                "This folder is imposed by the ORCHESTRA_DIR variable: launch Orchestra without it to choose it here."
+            );
+            row(ui, title, desc, t, |_| {});
+            return;
+        }
+        let (base, usual) = (data_folder::base_dir(), store::usual_data_dir());
+        let current = store::data_dir();
+        let chosen = data_folder::chosen_in(&base);
+        if let Some(dir) = folder_picker::take("data-folder") {
+            self.data_dir_draft = dir.display().to_string();
+        }
+        if let Some(wanted) = data_folder::wanted_in(&base) {
+            let to = wanted.display().to_string();
+            let what = match data_folder::check(&current, &wanted, &usual) {
+                Ok(data_folder::Plan::Copy) => crate::tr!(
+                    "Vos données d'aujourd'hui y seront copiées.",
+                    "Today's data will be copied there."
+                )
+                .to_string(),
+                Ok(data_folder::Plan::UseExisting) => crate::tr!(
+                    "Il contient déjà des données : elles seront utilisées telles quelles, rien n'y sera copié.",
+                    "It already holds data: it will be used as it is, nothing will be copied there."
+                )
+                .to_string(),
+                Err(e) => crate::trf!("Impossible en l'état : {e}.", "Not possible as it is: {e}."),
+            };
+            row(
+                ui,
+                crate::tr!("Nouveau dossier au prochain lancement", "New folder at the next launch"),
+                &crate::trf!(
+                    "{to}\n{what} Fermez les sessions d'IA en cours (elles écriraient encore dans l'ancien dossier), puis quittez et rouvrez Orchestra.",
+                    "{to}\n{what} Close the running AI sessions (they would still write to the old folder), then quit and reopen Orchestra."
+                ),
+                t,
+                |ui| {
+                    if button(ui, crate::tr!("Annuler", "Cancel"), t, l).clicked() {
+                        data_folder::cancel_in(&base);
+                    }
+                },
+            );
+            return;
+        }
+        let missing = chosen.as_ref().filter(|c| **c != current);
+        let desc = match missing {
+            Some(c) => crate::trf!(
+                "Le dossier choisi ({}) était introuvable au lancement : le dossier habituel est utilisé. Rebranchez son disque puis relancez Orchestra.",
+                "The chosen folder ({}) wasn't found at launch: the usual folder is in use. Plug its disk back in, then relaunch Orchestra.",
+                c.display()
+            ),
+            None => crate::tr!(
+                "Pris en compte au prochain lancement. Un dossier vide reçoit une copie de vos données ; un dossier de données d'Orchestra est utilisé tel quel. Rien n'est effacé de l'ancien, qui garde aussi les copies des sessions autonomes.",
+                "Takes effect at the next launch. An empty folder gets a copy of your data; an Orchestra data folder is used as it is. Nothing is deleted from the old one, which also keeps the copies of autonomous sessions."
+            )
+            .to_string(),
+        };
+        row(ui, title, &desc, t, |ui| {
+            if missing.is_some() {
+                if button(ui, crate::tr!("Oublier ce dossier", "Forget this folder"), t, l).clicked() {
+                    data_folder::forget_in(&base);
+                }
+            } else if chosen.is_some()
+                && button(ui, crate::tr!("Revenir au dossier habituel", "Back to the usual folder"), t, l).clicked()
+                && let Err(e) = data_folder::request_in(&base, &current, &usual, &usual)
+            {
+                self.fail(crate::trf!(
+                    "Impossible de changer de dossier : {e}",
+                    "Couldn't change the folder: {e}"
+                ));
+            }
+        });
+        ui.horizontal(|ui| {
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                let typed = !self.data_dir_draft.trim().is_empty();
+                let apply = ui
+                    .add_enabled_ui(typed, |ui| {
+                        button(ui, crate::tr!("Utiliser ce dossier", "Use this folder"), t, l)
+                    })
+                    .inner;
+                if apply.clicked() {
+                    let target = data_folder::expand(&self.data_dir_draft);
+                    match data_folder::request_in(&base, &current, &target, &usual) {
+                        Ok(()) => self.data_dir_draft.clear(),
+                        Err(e) => self.fail(crate::trf!(
+                            "Impossible de changer de dossier : {e}",
+                            "Couldn't change the folder: {e}"
+                        )),
+                    }
+                }
+                let browse = ui
+                    .add_enabled_ui(!folder_picker::busy(), |ui| {
+                        button(ui, crate::tr!("Parcourir…", "Browse…"), t, l)
+                    })
+                    .inner;
+                if browse.clicked() {
+                    folder_picker::start(
+                        ui.ctx(),
+                        "data-folder",
+                        crate::tr!("Dossier des données", "Data folder"),
+                        dirs::home_dir(),
+                    );
+                }
+                ui.add(field(
+                    &mut self.data_dir_draft,
+                    crate::tr!("/chemin/du/nouveau/dossier", "/path/to/the/new/folder"),
+                    f32::INFINITY,
+                    t,
+                    l,
+                ));
+            });
+        });
     }
 
     /// « Licences tierces »: the software shipped with Orchestra, its licence and where it

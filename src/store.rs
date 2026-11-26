@@ -7,14 +7,36 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
-/// Folder holding the workspace. `ORCHESTRA_DIR` overrides the default.
+/// Folder holding the workspace: `ORCHESTRA_DIR`, else the one chosen in the settings (see
+/// data_folder.rs), else the usual one.
 pub fn data_dir() -> PathBuf {
-    if let Ok(d) = std::env::var("ORCHESTRA_DIR")
-        && !d.trim().is_empty()
-    {
-        return PathBuf::from(d);
+    if let Some(d) = forced_data_dir() {
+        return d;
     }
-    let base = dirs::data_dir().unwrap_or_else(|| PathBuf::from("."));
+    // Tests never follow the choice made on this computer.
+    if cfg!(test) {
+        return usual_data_dir();
+    }
+    // Read once: a program keeps the same folder from start to end.
+    static CHOSEN: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+    CHOSEN
+        .get_or_init(|| {
+            crate::data_folder::folder_in(&crate::data_folder::base_dir(), &usual_data_dir())
+        })
+        .clone()
+}
+
+/// The folder `ORCHESTRA_DIR` imposes, if any.
+pub fn forced_data_dir() -> Option<PathBuf> {
+    std::env::var("ORCHESTRA_DIR")
+        .ok()
+        .filter(|d| !d.trim().is_empty())
+        .map(PathBuf::from)
+}
+
+/// The data folder when nothing else was chosen.
+pub fn usual_data_dir() -> PathBuf {
+    let base = crate::data_folder::base_dir();
     let dir = base.join("orchestra");
     // The app was called "Tableau IA" before: take its data along the first time.
     let old = base.join("tableau-ia");

@@ -25,6 +25,8 @@ vient d'écrire par MCP, une synchronisation est passée).
   (`Workspace::runs`) vivent aussi dans l'espace de travail.
 - `store.rs` : emplacement des données (`$ORCHESTRA_DIR`), chargement, enregistrement
   atomique, export / import Markdown.
+- `data_folder.rs` : le dossier des données choisi dans les réglages, appliqué au lancement
+  de la fenêtre (copie dans un dossier vide ; l'ancien n'est jamais effacé).
 
 ## La fenêtre — `app.rs` et `app/`
 
