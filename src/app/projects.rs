@@ -1567,8 +1567,7 @@ pub(super) fn project_panel(ui: &mut egui::Ui, cx: &mut Cx) -> Option<super::not
     ui.add_space(14.0);
     // The rest in tabs: the overview (where it stands, what is left, the sessions) is what
     // one comes for; versions, the watch, the pages and the outside view are a click away.
-    let code = shows_git(ui.ctx(), cx.pr);
-    let tabs = project_tabs(code, !cx.pr.members.is_empty(), &cx.pr.modules());
+    let tabs = project_tabs(!cx.pr.members.is_empty(), &cx.pr.modules());
     let tab_key = egui::Id::unique(("project-tab", cx.page_id));
     let mut tab: ProjectTab = ui.ctx().data(|d| d.get_temp(tab_key)).unwrap_or_default();
     // A tour pointing at a card shows its tab.
@@ -1750,7 +1749,7 @@ pub(super) fn project_menu(
         pr.read_only = ro;
     }
     // Code or not: detected from the folder, or forced here (the detection can be wrong).
-    let detected = detected_code(ui.ctx(), &pr.folder);
+    let detected = crate::project::detected_code(&pr.folder);
     let kind = if pr.code.unwrap_or(detected) {
         crate::tr!("Code", "Code")
     } else {
@@ -1786,8 +1785,8 @@ pub(super) fn project_menu(
         })
         .response
         .on_hover_text(crate::tr!(
-            "Projet de code ou non : décide de la carte Versions (git) et de ce que l'IA regarde et répond. Détecté d'après le dossier ; choisissez ici si la détection se trompe.",
-            "Code project or not: decides the Versions (git) card and what the AI looks at and answers. Detected from the folder; choose here if the detection is wrong."
+            "Projet de code ou non : décide des modules code (Versions, veille, terminal) et de ce que l'IA regarde et répond. Détecté d'après le dossier (un dépôt Git compte comme du code) ; choisissez ici si la détection se trompe.",
+            "Code project or not: decides the code modules (Versions, watch, terminal) and what the AI looks at and answers. Detected from the folder (a git repository counts as code); choose here if the detection is wrong."
         ));
     });
     let label = if pr.shared {
@@ -1840,12 +1839,12 @@ impl ProjectTab {
     }
 }
 
-/// The tabs shown: versions and the vulnerability watch only for code projects with the
-/// git module (`modules`: those that are on), versions with theirs too; the members only
-/// for a project of a team space.
-pub(super) fn project_tabs(code: bool, team: bool, modules: &[Module]) -> Vec<ProjectTab> {
+/// The tabs shown: versions and the vulnerability watch only with the git module
+/// (`modules`: those that are on, by default for code projects), versions with theirs too;
+/// the members only for a project of a team space.
+pub(super) fn project_tabs(team: bool, modules: &[Module]) -> Vec<ProjectTab> {
     let mut v = vec![ProjectTab::Overview];
-    if code && modules.contains(&Module::Git) {
+    if modules.contains(&Module::Git) {
         if modules.contains(&Module::Versions) {
             v.push(ProjectTab::Versions);
         }
@@ -1926,26 +1925,6 @@ fn tab_bar(
         egui::Stroke::new(1.0, t.border),
     );
     picked
-}
-
-/// Whether the project page shows the git card, re-detected every few seconds per folder
-/// (a `git init` or new source files show it without reopening the page).
-/// The person's forced choice (code / non-code) wins.
-pub(super) fn shows_git(ctx: &egui::Context, pr: &Project) -> bool {
-    pr.code.unwrap_or_else(|| detected_code(ctx, &pr.folder))
-}
-
-fn detected_code(ctx: &egui::Context, folder: &str) -> bool {
-    let key = egui::Id::unique(("shows-git", folder.trim().to_string()));
-    let now_t = ctx.input(|i| i.time);
-    if let Some((at, v)) = ctx.data(|d| d.get_temp::<(f64, bool)>(key))
-        && now_t - at < 5.0
-    {
-        return v;
-    }
-    let v = crate::project::shows_git_card(folder);
-    ctx.data_mut(|d| d.insert_temp(key, (now_t, v)));
-    v
 }
 
 /// The questions the AIs asked about this project (ask_human) and the person's answers:
@@ -3479,18 +3458,21 @@ mod card_layout_tests {
         assert!(provider_groups(&[], &[]).is_empty());
     }
 
-    /// The page opens on the overview; versions and the watch only for code projects; a
-    /// tour pointing at a card finds it in its tab.
+    /// The page opens on the overview; versions and the watch only with their modules (a
+    /// project without code has none by itself); a tour pointing at a card finds it in its
+    /// tab.
     #[test]
     fn project_tabs_follow_the_kind_of_project() {
         use ProjectTab::*;
-        let all = &Module::ALL;
-        assert_eq!(project_tabs(true, false, all), [Overview, Versions, Watch, Pages, Review]);
-        assert_eq!(project_tabs(false, false, all), [Overview, Pages, Review]);
-        assert_eq!(project_tabs(false, true, all), [Overview, Pages, Review, Members]);
+        let mut pr = crate::project::Project::new("");
+        pr.code = Some(true);
+        assert_eq!(project_tabs(false, &pr.modules()), [Overview, Versions, Watch, Pages, Review]);
+        pr.code = Some(false);
+        assert_eq!(project_tabs(false, &pr.modules()), [Overview, Pages, Review]);
+        assert_eq!(project_tabs(true, &pr.modules()), [Overview, Pages, Review, Members]);
         // A module turned off takes its tabs with it; versions need git too.
-        assert_eq!(project_tabs(true, false, &[Module::Git]), [Overview, Watch, Pages, Review]);
-        assert_eq!(project_tabs(true, false, &[Module::Versions]), [Overview, Pages, Review]);
+        assert_eq!(project_tabs(false, &[Module::Git]), [Overview, Watch, Pages, Review]);
+        assert_eq!(project_tabs(false, &[Module::Versions]), [Overview, Pages, Review]);
         assert_eq!(tab_of_mark("card:members"), Some(Members));
         assert_eq!(ProjectTab::default(), Overview);
         assert_eq!(tab_of_mark("card:versions"), Some(Versions));
@@ -4873,7 +4855,7 @@ fn quick_question(ui: &mut egui::Ui, cx: &mut Cx) {
     let text_key = egui::Id::unique(("quick-question", page_id));
     let mut text: String = ui.ctx().data(|d| d.get_temp(text_key)).unwrap_or_default();
     let asking = cx.ai.asking(page_id).map(String::from);
-    let hint = if shows_git(ui.ctx(), cx.pr) {
+    let hint = if cx.pr.is_code() {
         crate::tr!(
             "Question rapide à l'IA, ex. « telle fonctionnalité serait-elle intéressante ? »",
             "Quick question to the AI, e.g. « would this feature be worth it? »"
@@ -5110,7 +5092,7 @@ fn review_card(ui: &mut egui::Ui, cx: &mut Cx) {
     let pr = &*cx.pr;
     let prefer = cx.live.first().map(|s| s.tool);
     let reviewing = cx.reviewing || cx.ai.filling(page_id);
-    let code = shows_git(ui.ctx(), pr);
+    let code = pr.is_code();
     card(ui, t, 0.0, |ui| {
         let by = pr
             .review

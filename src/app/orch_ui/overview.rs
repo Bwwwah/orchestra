@@ -1160,7 +1160,7 @@ impl NotesApp {
                 let pr = p.project.as_ref()?;
                 Some((
                     p.display_title(),
-                    super::projects::shows_git(ctx, pr),
+                    pr.is_code(),
                     pr.commit_to_main,
                     pr.launch.clone(),
                     pr.session_ceiling,
