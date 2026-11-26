@@ -143,12 +143,12 @@ pub(super) fn tour_stops() -> Vec<Stop> {
             ),
         },
         Stop {
-            target: "orch:week",
+            target: "orch:limits",
             place: Place::View(View::Orchestra),
-            title: crate::tr!("Limites par IA", "Limits per AI"),
+            title: crate::tr!("Réglages et limites", "Settings and limits"),
             text: crate::tr!(
-                "Chaque IA sur son propre abonnement : glissez les repères pour dire où ses sessions s'arrêtent et la réserve qu'elle vous laisse.",
-                "Each AI on its own subscription: drag the handles to say where its sessions stop and the reserve it leaves you."
+                "Les réglages communs des sessions. « Limites de chaque IA » ouvre Paramètres › IA : où ses sessions s'arrêtent et la réserve qu'elle vous laisse.",
+                "The sessions' common settings. « Each AI's limits » opens Settings › AI: where its sessions stop and the reserve it leaves you."
             ),
         },
         Stop {

@@ -1451,6 +1451,7 @@ impl NotesApp {
                 )
                 .to_string(),
             };
+            let plugged_in = st.as_ref().is_some_and(|x| x.plugged);
             let desc = format!("{} · {state}", ai.what());
             row(ui, ai.label(), &desc, t, |ui| {
                 if busy.as_deref() == Some(ai.key()) {
@@ -1504,6 +1505,13 @@ impl NotesApp {
                     }
                 }
             });
+            // Its limits, right under it, for an agent that can work on its own.
+            if plugged_in
+                && let Some(agent) = crate::auto::Agent::ALL.into_iter().find(|a| a.ai() == ai)
+            {
+                ui.push_id(("ai-limits", ai.key()), |ui| self.ai_limits(ui, agent, t));
+                ui.add_space(8.0);
+            }
         }
         let mut auto = !self.ws.settings.no_auto_mcp;
         row(

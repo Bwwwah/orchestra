@@ -3457,7 +3457,7 @@ mod card_layout_tests {
         assert_eq!(tab_of_mark("card:versions"), Some(Versions));
         assert_eq!(tab_of_mark("card:sessions"), Some(Overview));
         assert_eq!(tab_of_mark("card:pages"), Some(Pages));
-        assert_eq!(tab_of_mark("orch:week"), None);
+        assert_eq!(tab_of_mark("orch:limits"), None);
     }
 }
 
