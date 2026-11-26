@@ -743,7 +743,7 @@ impl NotesApp {
         let five = self.agent_figures(d.agent).five;
         let ceiling = ceiling_choice(ceiling_kept, five, o.default_limit, o.five_limit(d.agent));
         let mission = super::watch::fix_mission(&req.findings);
-        let n = match self.launch_run(ctx, &req.project, &mission, ceiling, true, None, d.agent, true, "") {
+        let n = match self.launch_run(ctx, &req.project, &mission, ceiling, true, None, d.agent, true, "", None) {
             Ok(()) => super::notices::Notice::Info(crate::tr!(
                 "Session de correction lancée sur une branche fix : fusionnez-la une fois vérifiée.",
                 "Fix session started on a fix branch: merge it once checked."
@@ -758,7 +758,8 @@ impl NotesApp {
 
     /// Start an autonomous session on a project. `fix`: a security fix (CVE watch), always on
     /// a branch of its own named `orchestra/auto-fix-…`, never on `dev`. `model`: the model
-    /// the AI works with (empty: its own default).
+    /// the AI works with (empty: its own default). `step`: the only step the session is
+    /// sent on (`auto::step_mission`; `mission` then only completes it).
     #[allow(clippy::too_many_arguments)]
     fn launch_run(
         &mut self,
@@ -771,6 +772,7 @@ impl NotesApp {
         agent: Agent,
         fix: bool,
         model: &str,
+        step: Option<&str>,
     ) -> Result<(), String> {
         let page = self
             .ws
@@ -803,8 +805,19 @@ impl NotesApp {
             )
             .into());
         }
+        // What the session takes first: the step it is sent on, else the project's next one.
+        let aim = match step {
+            Some(id) => std::borrow::Cow::Owned(
+                pr.focused_on(id, &crate::store::computer_id(), crate::model::now_ms())
+                    .ok_or(crate::tr!(
+                        "cette étape est terminée, supprimée ou réservée par l'IA d'un autre ordinateur",
+                        "this step is finished, deleted or reserved by another computer's AI"
+                    ))?,
+            ),
+            None => std::borrow::Cow::Borrowed(pr),
+        };
         // The AI assigned to the step taken first wins over the card's; none: the card's.
-        let agent = pr.agent_for_next(agent, &crate::store::computer_id(), crate::model::now_ms());
+        let agent = aim.agent_for_next(agent, &crate::store::computer_id(), crate::model::now_ms());
         // One session at a time per project and per AI. Two different AIs go in parallel: each
         // works in its own copy and reserves its steps under its own name (`Agent::holder`), so
         // they never take the same step. Merging stays per branch.
@@ -908,7 +921,7 @@ impl NotesApp {
         let code = crate::project::code_kind(&folder, pr.code);
         // Estimated before anything starts, from the step the AI will take first.
         let difficulty = crate::catalog::estimate_session(
-            pr,
+            &aim,
             mission,
             fix,
             &crate::store::computer_id(),
@@ -921,7 +934,7 @@ impl NotesApp {
         // (Vibe without its own list): the AI's own default.
         let imposed = if model.trim().is_empty() {
             crate::catalog::imposed(
-                pr,
+                &aim,
                 agent,
                 &crate::store::computer_id(),
                 crate::model::now_ms(),
@@ -1003,7 +1016,9 @@ impl NotesApp {
         )?;
         term.resize(42, 140);
         let id = crate::model::new_id();
-        let mission = if mission.trim().is_empty() {
+        let mission = if let Some(id) = step {
+            auto::step_mission(id, mission)
+        } else if mission.trim().is_empty() {
             default_mission().to_string()
         } else {
             mission.trim().to_string()
@@ -1180,7 +1195,7 @@ impl NotesApp {
         {
             let o = &self.ws.settings.orch;
             let l = ceiling_choice(None, self.orch.five, o.default_limit, o.five_limit(Agent::ClaudeCode));
-            if let Err(e) = self.launch_run(ctx, &pid, "", l, true, None, Agent::ClaudeCode, false, "") {
+            if let Err(e) = self.launch_run(ctx, &pid, "", l, true, None, Agent::ClaudeCode, false, "", None) {
                 eprintln!("auto-run : {e}");
             }
         }
@@ -1624,7 +1639,7 @@ impl NotesApp {
                 let share = if rec.limit > 0.0 { rec.limit } else { o.default_limit };
                 ceiling_choice(None, five, share, o.five_limit(agent))
             };
-            match self.launch_run(ctx, &rec.project, &rec.mission, ceiling, rec.commits_allowed, rec.endless.clone(), agent, rec.branch.contains("/auto-fix-"), &rec.model) {
+            match self.launch_run(ctx, &rec.project, &rec.mission, ceiling, rec.commits_allowed, rec.endless.clone(), agent, rec.branch.contains("/auto-fix-"), &rec.model, None) {
                 Ok(()) => self.ws.notify(
                     "info",
                     &rec.project,
@@ -3446,7 +3461,7 @@ impl NotesApp {
             let want = draft_ceiling(&d, running_of(d.agent));
             let ceiling = ceiling_choice(want, five_of(d.agent), o.default_limit, o.five_limit(d.agent));
             let endless = if d.endless { Some(d.end.clone()) } else { None };
-            match self.launch_run(ctx, &id, &d.mission, ceiling, d.commits, endless, d.agent, false, "") {
+            match self.launch_run(ctx, &id, &d.mission, ceiling, d.commits, endless, d.agent, false, "", None) {
                 Ok(()) => {
                     msg = Some(super::notices::Notice::Ack(match &why {
                         Some(w) => crate::trf!(
@@ -3537,15 +3552,31 @@ impl NotesApp {
     /// « Lancer une IA » on a project's page: the same start as its line in Orchestration,
     /// with the choices kept for that project (AI, ceiling, commits, endless). What needs a
     /// decision first (an endless session merging into main) opens Orchestration instead.
+    ///
+    /// `step`: « Lancer » on the line of a step entrusted to an AI. A session on that step
+    /// alone, with its AI, never endless; another AI's session on the project may be running.
     pub(super) fn launch_from_project(
         &mut self,
         ctx: &egui::Context,
         id: &str,
+        step: Option<&str>,
     ) -> Option<super::notices::Notice> {
-        if self.orch.runs.iter().any(|r| r.project == id) {
+        if step.is_none() && self.orch.runs.iter().any(|r| r.project == id) {
             self.view = View::Orchestra;
             return None;
         }
+        let step_agent = match step {
+            Some(sid) => Some(
+                self.ws
+                    .page(id)
+                    .and_then(|p| p.project.as_ref())?
+                    .steps
+                    .iter()
+                    .find(|s| s.id == sid)?
+                    .agent?,
+            ),
+            None => None,
+        };
         let dc = self.ws.settings.orch.allow_commits;
         let pr = self.ws.page(id).and_then(|p| p.project.as_ref())?;
         let main = on_main(pr);
@@ -3555,7 +3586,7 @@ impl NotesApp {
             .entry(id.to_string())
             .or_insert_with(|| Draft::new(Some(pr), dc))
             .clone();
-        if endless_on_main(d.endless, main) {
+        if step.is_none() && endless_on_main(d.endless, main) {
             self.orch.confirm_main = Some(id.to_string());
             self.view = View::Orchestra;
             return None;
@@ -3566,8 +3597,16 @@ impl NotesApp {
             .map(|p| p.display_title())
             .unwrap_or_default();
         // « Automatique »: the AI picked now; the rest is measured on its subscription.
-        let (agent, why) = self.pick_agent(id, &d);
-        let d = Draft { agent, ..d };
+        // A step's own AI is the person's choice: nothing to pick.
+        let (agent, why) = match step_agent {
+            Some(a) => (a, None),
+            None => self.pick_agent(id, &d),
+        };
+        let d = Draft {
+            agent,
+            endless: d.endless && step.is_none(),
+            ..d
+        };
         let global = self.ws.settings.orch.five_limit(d.agent);
         let figs = self.figures_by_agent();
         let five = figs.get(&d.agent).and_then(|f| f.five);
@@ -3584,7 +3623,7 @@ impl NotesApp {
         let ceiling = ceiling_choice(want, five, self.ws.settings.orch.default_limit, global);
         let endless = if d.endless { Some(d.end.clone()) } else { None };
         Some(
-            match self.launch_run(ctx, id, &d.mission, ceiling, d.commits, endless, d.agent, false, "") {
+            match self.launch_run(ctx, id, &d.mission, ceiling, d.commits, endless, d.agent, false, "", step) {
                 Ok(()) => super::notices::Notice::Ack(match &why {
                     Some(w) => crate::trf!(
                         "Session autonome lancée sur {title} · IA choisie : {w}.",

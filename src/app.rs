@@ -49,6 +49,8 @@ enum Action {
     LocalCopy(String),
     /// « Lancer une IA » on a project's page: an autonomous session with its kept choices.
     LaunchAuto(String),
+    /// « Lancer » on a step entrusted to an AI (project id, step id): a session on it alone.
+    LaunchStep(String, String),
     /// Show the Orchestration page.
     ShowOrchestra,
     /// Open a project's « Réglages de lancement ».
@@ -961,7 +963,7 @@ impl NotesApp {
                     self.navigate(target);
                     self.view = View::Page;
                 }
-                Action::LaunchAuto(_) => {}
+                Action::LaunchAuto(_) | Action::LaunchStep(..) => {}
                 Action::ShowOrchestra => self.view = View::Orchestra,
                 Action::LaunchSettings(id) => self.launch_settings = Some(id),
                 Action::ManageMembers => {
@@ -1758,16 +1760,17 @@ impl eframe::App for NotesApp {
         self.team_admin_window(&ctx);
         let had_actions = !actions.is_empty();
         // Starting a session needs the context (its terminal, its repaints): done here.
-        let launches: Vec<String> = actions
+        let launches: Vec<(String, Option<String>)> = actions
             .iter()
             .filter_map(|a| match a {
-                Action::LaunchAuto(id) => Some(id.clone()),
+                Action::LaunchAuto(id) => Some((id.clone(), None)),
+                Action::LaunchStep(id, step) => Some((id.clone(), Some(step.clone()))),
                 _ => None,
             })
             .collect();
         self.apply(actions);
-        for id in launches {
-            if let Some(n) = self.launch_from_project(&ctx, &id) {
+        for (id, step) in launches {
+            if let Some(n) = self.launch_from_project(&ctx, &id, step.as_deref()) {
                 self.notice(n);
             }
         }

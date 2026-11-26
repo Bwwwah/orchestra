@@ -839,6 +839,16 @@ impl Project {
         self.next_step_for(me, now).and_then(|s| s.agent).unwrap_or(default)
     }
 
+    /// The project as a session sent on step `id` alone sees it: that step and no other, so
+    /// that what is read from the next step (AI, model, difficulty) is read from it. None:
+    /// no such step, or not one an AI of computer `me` can take at `now` (finished, or
+    /// reserved by another computer's AI).
+    pub fn focused_on(&self, id: &str, me: &str, now: u64) -> Option<Project> {
+        let mut p = self.clone();
+        p.steps.retain(|s| s.id == id);
+        p.next_step_for(me, now).is_some().then_some(p)
+    }
+
     /// Add a session, or refresh it if already known (same tool and id).
     pub fn link_session(&mut self, mut s: SessionRef) {
         s.title = crate::richtext::one_line(&s.title, 120);
@@ -1580,6 +1590,31 @@ mod tests {
         assert_eq!(pr.agent_for_next(Agent::ClaudeCode, "", 0), Agent::Vibe);
         pr.steps[0].status = StepStatus::Done;
         assert_eq!(pr.agent_for_next(Agent::ClaudeCode, "", 0), Agent::Codex);
+    }
+
+    /// A session sent on one step reads its AI from that step, wherever it is in the list.
+    #[test]
+    fn a_session_on_one_step_sees_that_step_alone() {
+        use crate::auto::Agent;
+        let mut pr = Project::default();
+        let a = pr.add_step("première", "moi");
+        let b = pr.add_step("seconde", "moi");
+        pr.set_step_agent(&a, Some(Agent::Vibe));
+        pr.set_step_agent(&b, Some(Agent::Codex));
+        let aim = pr.focused_on(&b, "ici", 0).unwrap();
+        assert_eq!(aim.agent_for_next(Agent::ClaudeCode, "ici", 0), Agent::Codex);
+        assert!(pr.focused_on("nope", "ici", 0).is_none());
+        // Reserved by another computer's AI, then finished: nothing to start.
+        pr.steps[1].status = StepStatus::Doing;
+        pr.steps[1].held_by = "ailleurs".into();
+        pr.steps[1].held_at = 10;
+        assert!(pr.focused_on(&b, "ici", 20).is_none());
+        assert!(pr.focused_on(&b, "ailleurs", 20).is_some());
+        pr.steps[1].status = StepStatus::Done;
+        assert!(pr.focused_on(&b, "ailleurs", 20).is_none());
+        let mission = crate::auto::step_mission(&b, "  ");
+        assert!(mission.contains(&b) && !mission.contains('\n'));
+        assert!(crate::auto::step_mission(&b, "Sans toucher au style").ends_with("\nSans toucher au style"));
     }
 
     #[test]

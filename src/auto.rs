@@ -2580,6 +2580,22 @@ fn mission_text(
     )
 }
 
+/// The mission of a session started on one step (« Lancer » on its line): that step and no
+/// other, then the project's own instructions (`more`), if any. The step is named by its id
+/// alone: its title may come from another member of a shared project.
+pub fn step_mission(step_id: &str, more: &str) -> String {
+    let only = crate::trf!(
+        "Ne fais que l'étape dont le step_id est {step_id} (get_project_state la décrit) : cela remplace la règle « les étapes une par une », ne prends aucune autre étape. \
+         Dès qu'elle est « done » (ou si elle l'est déjà), termine par [[FINI]], même s'il reste des étapes ouvertes.",
+        "Do only the step whose step_id is {step_id} (get_project_state describes it): this replaces the rule « the steps one by one », take no other step. \
+         As soon as it is « done » (or if it already is), end with [[FINI]], even if open steps are left."
+    );
+    match more.trim() {
+        "" => only,
+        more => format!("{only}\n{more}"),
+    }
+}
+
 /// Put before the mission when a session goes on in a new conversation (short sessions:
 /// one per step done; `paused`: after a pause longer than the cache's life): the AI has none
 /// of the earlier turns, and is told where the state of the work is rather than left to

@@ -1627,6 +1627,25 @@ fn launch_block(can_launch: bool, folder_ok: bool, pr: &Project) -> Option<Launc
     }
 }
 
+/// Room kept at the end of a step's row for its « Lancer » button.
+const STEP_LAUNCH_W: f32 = 60.0;
+
+/// What keeps a step's « Lancer » greyed out, said on hover.
+fn step_launch_block(can_launch: bool, folder_ok: bool, held_elsewhere: bool) -> Option<&'static str> {
+    if held_elsewhere {
+        Some(crate::tr!(
+            "Une IA d'un autre ordinateur a réservé cette étape.",
+            "An AI on another computer has reserved this step."
+        ))
+    } else if !can_launch {
+        Some(LaunchBlock::NoAi.why())
+    } else if !folder_ok {
+        Some(LaunchBlock::NoFolder.why())
+    } else {
+        None
+    }
+}
+
 /// The reason under the greyed button, on its side of the page; when a step is what is
 /// missing, with the way to add one. True when that is asked.
 fn launch_block_line(ui: &mut egui::Ui, block: LaunchBlock, t: &Tone) -> bool {
@@ -2061,6 +2080,8 @@ fn steps_card(ui: &mut egui::Ui, cx: &mut Cx, extra: f32) -> f32 {
     let ai = &mut *cx.ai;
     let prefer = cx.live.first().map(|s| s.tool);
     let me = cx.team.me.as_str();
+    let (running, can_launch) = (cx.running, cx.can_launch);
+    let actions = &mut *cx.actions;
     // ---- Steps: open ones first, one line each; done ones folded.
     let (done, total) = pr.progress();
     let (start, width) = (ui.cursor().min, ui.available_width());
@@ -2182,7 +2203,13 @@ fn steps_card(ui: &mut egui::Ui, cx: &mut Cx, extra: f32) -> f32 {
                     chip(ui, ag.short_name(), Color32::from_rgb(r, g, b), egui::Sense::hover())
                         .on_hover_text(crate::trf!("Confiée à {}", "Entrusted to {}", ag.label()));
                 }
-                let room = ui.available_width() - 26.0;
+                // « Lancer »: a session on this step alone, with its AI. Not on the step a
+                // running session is already doing.
+                let offer = !ro
+                    && s.agent.is_some()
+                    && s.status != StepStatus::Done
+                    && !(running && s.status == StepStatus::Doing);
+                let room = ui.available_width() - if offer { 26.0 + STEP_LAUNCH_W } else { 26.0 };
                 let mut job = super::rich::inline_job(text, TEXT, color, false, t);
                 if s.status == StepStatus::Done {
                     for sec in job.sections.iter_mut() {
@@ -2279,6 +2306,30 @@ fn steps_card(ui: &mut egui::Ui, cx: &mut Cx, extra: f32) -> f32 {
                     .clicked()
                     {
                         remove = Some(s.id.clone());
+                    }
+                    if offer && let Some(ag) = s.agent {
+                        let why = step_launch_block(
+                            can_launch,
+                            !pr.folder.trim().is_empty(),
+                            s.held_by_other_computer(&crate::store::computer_id(), crate::model::now_ms()),
+                        );
+                        let r = ui.add_enabled(
+                            why.is_none(),
+                            egui::Button::new(
+                                RichText::new(crate::tr!("Lancer", "Start")).size(12.0),
+                            )
+                            .small(),
+                        );
+                        let r = r
+                            .on_disabled_hover_text(why.unwrap_or_default())
+                            .on_hover_text(crate::trf!(
+                                "Lancer {} sur cette étape seule, avec les réglages de ce projet.",
+                                "Start {} on this step alone, with this project's settings.",
+                                ag.label()
+                            ));
+                        if r.clicked() {
+                            actions.push(Action::LaunchStep(page_id.to_string(), s.id.clone()));
+                        }
                     }
                 });
                 resp
@@ -3084,6 +3135,31 @@ mod new_step_field_tests {
         h.run();
         assert!(h.state().pr.steps[0].assignee.is_empty());
         assert!(h.query_by_label("Responsable : Membre inconnu").is_none());
+    }
+
+    /// « Lancer » is on the open steps entrusted to an AI only, and asks for a session on
+    /// that step.
+    #[test]
+    fn a_step_entrusted_to_an_ai_can_be_started_from_its_row() {
+        let mut h = harness(|ui, cx| {
+            steps_card(ui, cx, 0.0);
+        });
+        let pr = &mut h.state_mut().pr;
+        pr.folder = "/tmp/projet".into();
+        pr.add_step("Relire", "moi");
+        let id = pr.add_step("Tester", "moi");
+        h.run();
+        assert!(h.query_by_label("Lancer").is_none(), "no AI, no button");
+        h.state_mut().pr.set_step_agent(&id, Some(crate::auto::Agent::Codex));
+        h.run();
+        h.get_by_label("Lancer").click();
+        h.run();
+        assert!(h.state().actions.iter().any(
+            |a| matches!(a, Action::LaunchStep(p, s) if p == "p1" && *s == id)
+        ));
+        h.state_mut().pr.set_step_status(&id, crate::project::StepStatus::Done);
+        h.run();
+        assert!(h.query_by_label("Lancer").is_none(), "finished");
     }
 
     /// Without a team there is nobody to name: no « Responsable » menu.
