@@ -1323,6 +1323,7 @@ pub(super) fn project_panel(ui: &mut egui::Ui, cx: &mut Cx) -> Option<super::not
             .data_mut(|d| d.insert_temp(appear_key(), (cx.page_id.to_string(), now_t)));
     }
     let (cx_launch, cx_follow, cx_settings);
+    let mut add_step_asked = false;
     {
         let (page_id, t, live) = (cx.page_id, cx.t, cx.live);
         let peers = cx.peers.clone();
@@ -1338,6 +1339,8 @@ pub(super) fn project_panel(ui: &mut egui::Ui, cx: &mut Cx) -> Option<super::not
         let mut launch = false;
         let mut follow = false;
         let mut settings = false;
+        // Why « Lancer une IA » is greyed out: also said under it, not only on hover.
+        let mut blocked = None;
         ui.horizontal(|ui| {
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 ui.spacing_mut().item_spacing.x = 8.0;
@@ -1350,19 +1353,11 @@ pub(super) fn project_panel(ui: &mut egui::Ui, cx: &mut Cx) -> Option<super::not
                     }
                 } else if !pr.read_only {
                     let folder_ok = !pr.folder.trim().is_empty();
-                    let open = pr.steps.iter().any(|s| s.status != StepStatus::Done);
-                    let endless = pr.launch.as_ref().is_some_and(|l| l.endless);
-                    let ok = cx_can_launch && folder_ok && (open || endless);
+                    blocked = launch_block(cx_can_launch, folder_ok, pr);
                     let r = ui
-                        .add_enabled_ui(ok, |ui| super::style::primary(ui, crate::tr!("▶  Lancer une IA", "▶  Start an AI")))
+                        .add_enabled_ui(blocked.is_none(), |ui| super::style::primary(ui, crate::tr!("▶  Lancer une IA", "▶  Start an AI")))
                         .inner;
-                    let why = if !cx_can_launch {
-                        crate::tr!("Branchez d'abord Claude Code (Paramètres › IA)", "Plug in Claude Code first (Settings › AI)")
-                    } else if !folder_ok {
-                        crate::tr!("Indiquez d'abord le dossier du projet", "Set the project's folder first")
-                    } else {
-                        crate::tr!("Aucune étape ouverte : ajoutez-en une, l'IA les prend une à une", "No open step: add one, the AI takes them one by one")
-                    };
+                    let why = blocked.map_or("", LaunchBlock::why);
                     let r = r.on_disabled_hover_text(why).on_hover_text(crate::tr!(
                         "Une IA avance seule sur les étapes ouvertes, dans une copie à part du dossier, avec les réglages de ce projet dans Orchestration.",
                         "An AI works alone on the open steps, in a separate copy of the folder, with this project's settings in Orchestration."
@@ -1456,6 +1451,9 @@ pub(super) fn project_panel(ui: &mut egui::Ui, cx: &mut Cx) -> Option<super::not
                 });
             });
         });
+        if let Some(why) = blocked {
+            add_step_asked = launch_block_line(ui, why, t);
+        }
         let editing_folder =
             !pr.read_only && (flag(ui, ("edit-folder", page_id)) || pr.folder.trim().is_empty());
         // Line 2: the folder. Code, Lecture seule and Privé are in the page's « … » menu
@@ -1503,8 +1501,11 @@ pub(super) fn project_panel(ui: &mut egui::Ui, cx: &mut Cx) -> Option<super::not
     {
         tab = to;
     }
-    if !tabs.contains(&tab) {
+    if !tabs.contains(&tab) || add_step_asked {
         tab = ProjectTab::Overview;
+    }
+    if add_step_asked {
+        open_new_step(ui.ctx(), cx.page_id);
     }
     let tabs_top = ui.cursor().min;
     if let Some(t2) = tab_bar(ui, &tabs, tab, cx.t) {
@@ -1553,6 +1554,84 @@ pub(super) fn project_panel(ui: &mut egui::Ui, cx: &mut Cx) -> Option<super::not
         ProjectTab::Review => review_card(ui, cx),
     }
     cx.msg.take()
+}
+
+/// What keeps « Lancer une IA » greyed out.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum LaunchBlock {
+    NoAi,
+    NoFolder,
+    NoStep,
+    /// There are steps, all of them finished.
+    AllDone,
+}
+
+impl LaunchBlock {
+    fn why(self) -> &'static str {
+        match self {
+            LaunchBlock::NoAi => crate::tr!(
+                "Pour lancer une IA, branchez d'abord Claude Code (Paramètres › IA).",
+                "To start an AI, plug in Claude Code first (Settings › AI)."
+            ),
+            LaunchBlock::NoFolder => crate::tr!(
+                "Pour lancer une IA, indiquez d'abord le dossier du projet.",
+                "To start an AI, set the project's folder first."
+            ),
+            LaunchBlock::NoStep => crate::tr!(
+                "Pour lancer une IA, ajoutez d'abord une étape : elle les prend une à une.",
+                "To start an AI, add a step first: it takes them one by one."
+            ),
+            LaunchBlock::AllDone => crate::tr!(
+                "Toutes les étapes sont terminées : ajoutez-en une pour relancer une IA.",
+                "All steps are finished: add one to start an AI again."
+            ),
+        }
+    }
+}
+
+/// The first thing missing to start an AI on this project, if any. The endless mode
+/// needs no open step.
+fn launch_block(can_launch: bool, folder_ok: bool, pr: &Project) -> Option<LaunchBlock> {
+    let open = pr.steps.iter().any(|s| s.status != StepStatus::Done);
+    let endless = pr.launch.as_ref().is_some_and(|l| l.endless);
+    if !can_launch {
+        Some(LaunchBlock::NoAi)
+    } else if !folder_ok {
+        Some(LaunchBlock::NoFolder)
+    } else if open || endless {
+        None
+    } else if pr.steps.is_empty() {
+        Some(LaunchBlock::NoStep)
+    } else {
+        Some(LaunchBlock::AllDone)
+    }
+}
+
+/// The reason under the greyed button, on its side of the page; when a step is what is
+/// missing, with the way to add one. True when that is asked.
+fn launch_block_line(ui: &mut egui::Ui, block: LaunchBlock, t: &Tone) -> bool {
+    let mut add = false;
+    ui.with_layout(egui::Layout::top_down(egui::Align::Max), |ui| {
+        ui.add(
+            egui::Label::new(RichText::new(block.why()).size(12.5).color(t.secondary)).wrap(),
+        );
+        if matches!(block, LaunchBlock::NoStep | LaunchBlock::AllDone) {
+            add = link(ui, crate::tr!("+ Ajouter une étape", "+ Add a step"));
+        }
+    });
+    add
+}
+
+fn steps_scroll_key(page_id: &str) -> egui::Id {
+    egui::Id::unique(("steps-scroll-once", page_id))
+}
+
+/// Opens the « Ajouter une étape » field of this project's Steps card and brings it into view.
+fn open_new_step(ctx: &egui::Context, page_id: &str) {
+    ctx.data_mut(|d| {
+        d.insert_temp(egui::Id::unique(("adding-step", page_id)), true);
+        d.insert_temp(steps_scroll_key(page_id), true);
+    });
 }
 
 /// A project's settings in its page's « … » menu: Lecture seule, code or not, Privé or
@@ -1937,7 +2016,10 @@ fn take_steps_scroll(ctx: &egui::Context, page_id: &str) -> bool {
 
 fn steps_card(ui: &mut egui::Ui, cx: &mut Cx, extra: f32) -> f32 {
     let (page_id, t, ro) = (cx.page_id, cx.t, cx.pr.read_only);
-    if take_steps_scroll(ui.ctx(), page_id) {
+    let asked = ui
+        .ctx()
+        .data_mut(|d| d.remove_temp::<bool>(steps_scroll_key(page_id)));
+    if take_steps_scroll(ui.ctx(), page_id) || asked.is_some() {
         ui.scroll_to_cursor(Some(egui::Align::TOP));
     }
     let pr = &mut *cx.pr;
@@ -2766,6 +2848,42 @@ mod new_step_field_tests {
         let open = h.get_by_label(long).rect();
         assert!(open.height() > folded.height() * 1.5, "{folded:?} {open:?}");
         assert!(open.right() <= 700.0, "{open:?}");
+    }
+
+    /// A greyed « Lancer une IA » says why on the page; with no step to take, a link
+    /// opens the field to add one.
+    #[test]
+    fn a_greyed_launch_button_says_why_on_the_page() {
+        use super::{LaunchBlock, launch_block};
+        let mut pr = Project::default();
+        assert_eq!(launch_block(false, false, &pr), Some(LaunchBlock::NoAi));
+        assert_eq!(launch_block(true, false, &pr), Some(LaunchBlock::NoFolder));
+        assert_eq!(launch_block(true, true, &pr), Some(LaunchBlock::NoStep));
+        pr.add_step("Relire", "moi");
+        assert_eq!(launch_block(true, true, &pr), None);
+        let id = pr.steps[0].id.clone();
+        pr.set_step_status(&id, crate::project::StepStatus::Done);
+        assert_eq!(launch_block(true, true, &pr), Some(LaunchBlock::AllDone));
+
+        // The line and the card it leads to (the whole panel needs the system's emoji).
+        let mut h = harness(|ui, cx| {
+            if let Some(why) = launch_block(true, true, cx.pr)
+                && super::launch_block_line(ui, why, cx.t)
+            {
+                super::open_new_step(ui.ctx(), cx.page_id);
+            }
+            steps_card(ui, cx, 0.0);
+        });
+        h.run();
+        h.get_by_label(LaunchBlock::NoStep.why());
+        h.get_by_label("+ Ajouter une étape").click();
+        h.run();
+        type_text(&mut h, "Relire");
+        h.key_press(egui::Key::Enter);
+        h.run();
+        assert_eq!(h.state().pr.steps.len(), 1);
+        // A step to take: the button is ready, the reason is gone.
+        assert!(h.query_by_label(LaunchBlock::NoStep.why()).is_none());
     }
 
     #[derive(Default)]
