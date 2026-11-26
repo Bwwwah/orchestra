@@ -1210,7 +1210,6 @@ pub(super) fn project_panel(ui: &mut egui::Ui, cx: &mut Cx) -> Option<super::not
         ui.ctx()
             .data_mut(|d| d.insert_temp(appear_key(), (cx.page_id.to_string(), now_t)));
     }
-    let mut cx_copy = false;
     let (cx_launch, cx_follow, cx_settings);
     {
         let (page_id, t, live) = (cx.page_id, cx.t, cx.live);
@@ -1347,87 +1346,27 @@ pub(super) fn project_panel(ui: &mut egui::Ui, cx: &mut Cx) -> Option<super::not
         });
         let editing_folder =
             !pr.read_only && (flag(ui, ("edit-folder", page_id)) || pr.folder.trim().is_empty());
+        // Line 2: the folder. Code, Lecture seule and Privé are in the page's « … » menu
+        // (`project_menu`).
         ui.horizontal(|ui| {
-            // Lecture seule, on the right of the folder line.
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                // Privé / Partagé, with the local copy.
-                let (label, color) = if pr.shared { (crate::tr!("👥 Partagé ▾", "👥 Shared ▾"), super::style::BLUE) } else { (crate::tr!("Privé ▾", "Private ▾"), t.tertiary) };
-                let btn = ui.add(egui::Button::new(RichText::new(label).size(12.5).color(color)).frame(false)).on_hover_text(
-                    crate::tr!("Seuls les projets partagés quittent cette machine (collaboration). Les autres restent privés.", "Only shared projects leave this computer (collaboration). The others stay private."),
-                );
-                egui::Popup::menu(&btn).show(|ui| {
-                    ui.set_min_width(260.0);
-                    if pr.shared {
-                        if ui.button(crate::tr!("Rendre privé", "Make private")).on_hover_text(crate::tr!("Le projet ne part plus chez les autres ; ils gardent leur copie.", "The project no longer goes to the others; they keep their copy.")).clicked() {
-                            pr.shared = false;
-                            ui.close();
-                        }
-                        if ui.button(crate::tr!("Garder une copie locale", "Keep a local copy")).on_hover_text(crate::tr!("Une copie privée qui ne suit plus le projet partagé.", "A private copy that no longer follows the shared project.")).clicked() {
-                            cx_copy = true;
-                            ui.close();
-                        }
-                    } else if ui.button(crate::tr!("Partager avec l'équipe", "Share with the team")).on_hover_text(crate::tr!("Le projet, ses pages et sa discussion partent par la collaboration branchée.", "The project, its pages and its discussion go through the collaboration you set up.")).clicked() {
-                        pr.shared = true;
-                        ui.close();
-                    }
-                });
-                ui.add_space(10.0);
-                let mut ro = pr.read_only;
-                let ro_color = if ro { ORANGE } else { t.tertiary };
-                if ui
-                    .checkbox(&mut ro, RichText::new(crate::tr!("Lecture seule", "Read-only")).size(12.5).color(ro_color))
-                    .on_hover_text(crate::tr!("Empêche de modifier ce projet et ses pages par erreur. Les IA peuvent toujours mettre à jour l'état des lieux et les étapes.", "Prevents editing this project and its pages by mistake. The AIs can still update the current state and the steps."))
-                    .changed()
-                {
-                    pr.read_only = ro;
-                }
-                // Code or not: detected from the folder, or forced here (the detection can be wrong).
-                ui.add_space(10.0);
-                let detected = detected_code(ui.ctx(), &pr.folder);
-                let is_code = pr.code.unwrap_or(detected);
-                let kind = if is_code { crate::tr!("Code", "Code") } else { crate::tr!("Sans code", "No code") };
-                let label = if pr.code.is_some() { format!("{kind} ▾") } else { crate::trf!("{kind} (auto) ▾", "{kind} (auto) ▾") };
-                let btn = ui
-                    .add_enabled(!pr.read_only, egui::Button::new(RichText::new(label).size(12.5).color(t.tertiary)).frame(false))
-                    .on_hover_text(crate::tr!(
-                        "Projet de code ou non : décide de la carte Versions (git) et de ce que l'IA regarde et répond. Détecté d'après le dossier ; choisissez ici si la détection se trompe.",
-                        "Code project or not: decides the Versions (git) card and what the AI looks at and answers. Detected from the folder; choose here if the detection is wrong."
-                    ));
-                egui::Popup::menu(&btn).show(|ui| {
-                    ui.set_min_width(220.0);
-                    let auto = crate::trf!("Automatique (détecté : {})", "Automatic (detected: {})", if detected { crate::tr!("code", "code") } else { crate::tr!("sans code", "no code") });
-                    for (choice, text) in [(None, auto.as_str()), (Some(true), crate::tr!("Projet de code", "Code project")), (Some(false), crate::tr!("Projet sans code", "Project without code"))] {
-                        if ui.selectable_label(pr.code == choice, text).clicked() {
-                            pr.code = choice;
-                            ui.close();
-                        }
-                    }
-                });
-                ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
             if editing_folder {
                 let r = ui.add(egui::TextEdit::singleline(&mut pr.folder).hint_text(crate::tr!("Dossier du projet, ex. ~/Code/mon-projet", "Project folder, e.g. ~/Code/my-project")).font(FontId::monospace(12.5)).desired_width(f32::INFINITY));
                 if r.lost_focus() && !pr.folder.trim().is_empty() && flag(ui, ("edit-folder", page_id)) {
                     toggle_flag(ui, ("edit-folder", page_id));
                 }
             } else {
-                // The folder's name only, cut to the room left of the settings on the right
-                // (the full path, which could run under them, shows under the pointer).
+                // The folder's name only (the full path shows under the pointer).
                 let r = ui.add(egui::Label::new(RichText::new(format!("📁 {}", short_folder(&pr.folder))).size(12.5).color(t.tertiary)).sense(egui::Sense::click()).truncate());
                 let tip = if pr.read_only { crate::tr!("Lecture seule", "Read-only") } else { crate::tr!("Cliquer pour modifier le dossier", "Click to change the folder") };
                 if r.on_hover_text(format!("{}\n{tip}", tilde(&pr.folder))).clicked() && !pr.read_only {
                     toggle_flag(ui, ("edit-folder", page_id));
                 }
             }
-                });
-            });
         });
         ui.add_space(12.0);
         cx_launch = launch;
         cx_follow = follow;
         cx_settings = settings;
-    }
-    if cx_copy {
-        cx.actions.push(Action::LocalCopy(cx.page_id.to_string()));
     }
     if cx_launch {
         cx.actions.push(Action::LaunchAuto(cx.page_id.to_string()));
@@ -1502,6 +1441,89 @@ pub(super) fn project_panel(ui: &mut egui::Ui, cx: &mut Cx) -> Option<super::not
         ProjectTab::Review => review_card(ui, cx),
     }
     cx.msg.take()
+}
+
+/// A project's settings in its page's « … » menu: Lecture seule, code or not, Privé or
+/// Partagé. Sharing has effects beyond the project (sending, notice): the choice made is
+/// returned in `share` for the caller to apply; so is a local copy, in `copy`.
+pub(super) fn project_menu(
+    ui: &mut egui::Ui,
+    pr: &mut Project,
+    share: &mut Option<bool>,
+    copy: &mut bool,
+) {
+    let mut ro = pr.read_only;
+    if ui
+        .checkbox(&mut ro, crate::tr!("Lecture seule", "Read-only"))
+        .on_hover_text(crate::tr!("Empêche de modifier ce projet et ses pages par erreur. Les IA peuvent toujours mettre à jour l'état des lieux et les étapes.", "Prevents editing this project and its pages by mistake. The AIs can still update the current state and the steps."))
+        .changed()
+    {
+        pr.read_only = ro;
+    }
+    // Code or not: detected from the folder, or forced here (the detection can be wrong).
+    let detected = detected_code(ui.ctx(), &pr.folder);
+    let kind = if pr.code.unwrap_or(detected) {
+        crate::tr!("Code", "Code")
+    } else {
+        crate::tr!("Sans code", "No code")
+    };
+    let label = if pr.code.is_some() {
+        crate::trf!("Type : {kind}", "Type: {kind}")
+    } else {
+        crate::trf!("Type : {kind} (auto)", "Type: {kind} (auto)")
+    };
+    ui.add_enabled_ui(!pr.read_only, |ui| {
+        ui.menu_button(label, |ui| {
+            ui.set_min_width(220.0);
+            let auto = crate::trf!(
+                "Automatique (détecté : {})",
+                "Automatic (detected: {})",
+                if detected {
+                    crate::tr!("code", "code")
+                } else {
+                    crate::tr!("sans code", "no code")
+                }
+            );
+            for (choice, text) in [
+                (None, auto.as_str()),
+                (Some(true), crate::tr!("Projet de code", "Code project")),
+                (Some(false), crate::tr!("Projet sans code", "Project without code")),
+            ] {
+                if ui.selectable_label(pr.code == choice, text).clicked() {
+                    pr.code = choice;
+                    ui.close();
+                }
+            }
+        })
+        .response
+        .on_hover_text(crate::tr!(
+            "Projet de code ou non : décide de la carte Versions (git) et de ce que l'IA regarde et répond. Détecté d'après le dossier ; choisissez ici si la détection se trompe.",
+            "Code project or not: decides the Versions (git) card and what the AI looks at and answers. Detected from the folder; choose here if the detection is wrong."
+        ));
+    });
+    let label = if pr.shared {
+        crate::tr!("Visibilité : Partagé", "Visibility: Shared")
+    } else {
+        crate::tr!("Visibilité : Privé", "Visibility: Private")
+    };
+    ui.menu_button(label, |ui| {
+        ui.set_min_width(240.0);
+        if pr.shared {
+            if ui.button(crate::tr!("Rendre privé", "Make private")).on_hover_text(crate::tr!("Le projet ne part plus chez les autres ; ils gardent leur copie.", "The project no longer goes to the others; they keep their copy.")).clicked() {
+                *share = Some(false);
+                ui.close();
+            }
+            if ui.button(crate::tr!("Garder une copie locale", "Keep a local copy")).on_hover_text(crate::tr!("Une copie privée qui ne suit plus le projet partagé.", "A private copy that no longer follows the shared project.")).clicked() {
+                *copy = true;
+                ui.close();
+            }
+        } else if ui.button(crate::tr!("Partager avec l'équipe", "Share with the team")).on_hover_text(crate::tr!("Le projet, ses pages et sa discussion partent par la collaboration branchée.", "The project, its pages and its discussion go through the collaboration you set up.")).clicked() {
+            *share = Some(true);
+            ui.close();
+        }
+    })
+    .response
+    .on_hover_text(crate::tr!("Seuls les projets partagés quittent cette machine (collaboration). Les autres restent privés.", "Only shared projects leave this computer (collaboration). The others stay private."));
 }
 
 /// The tabs of a project's page.

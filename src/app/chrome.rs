@@ -1260,6 +1260,12 @@ impl NotesApp {
             let resp = resp.on_hover_text(crate::tr!("Qui voit cette page", "Who sees this page"));
             egui::Popup::menu(&resp).show(|ui| self.share_menu(ui, cur, actions));
             }
+            // Why nothing can be edited here; unticked in the project's « … » menu.
+            if self.ws.is_locked(cur) {
+                ui.add_space(6.0);
+                ui.label(RichText::new(crate::tr!("Lecture seule", "Read-only")).size(14.0).color(super::projects::ORANGE))
+                    .on_hover_text(crate::tr!("Se décoche dans le menu « … » de la page du projet", "Untick it in the “…” menu of the project's page"));
+            }
 
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 ui.spacing_mut().item_spacing.x = 4.0;
@@ -1269,8 +1275,14 @@ impl NotesApp {
                 let Some(page) = self.ws.page_mut(cur) else { return };
                 let words: usize = page.blocks.iter().map(|b| b.text.split_whitespace().count()).sum();
                 let mut reformatted = None;
+                let mut share = None;
+                let mut local_copy = false;
                 egui::Popup::menu(&more).show(|ui| {
                     ui.set_min_width(230.0);
+                    if let Some(pr) = page.project.as_mut() {
+                        super::projects::project_menu(ui, pr, &mut share, &mut local_copy);
+                        ui.separator();
+                    }
                     ui.checkbox(&mut page.full_width, crate::tr!("Pleine largeur", "Full width"));
                     if ui.button(crate::tr!("Dupliquer", "Duplicate")).clicked() {
                         actions.push(Action::Duplicate(cur.to_string()));
@@ -1313,6 +1325,12 @@ impl NotesApp {
                 if let Some(n) = reformatted {
                     self.ack(crate::trf!("{n} bloc{s} remis en forme.", "{n} block{s} reformatted.", s = crate::i18n::plural(n)));
                 }
+                if let Some(v) = share {
+                    self.set_project_shared(cur, v);
+                }
+                if local_copy {
+                    actions.push(Action::LocalCopy(cur.to_string()));
+                }
                 if icons::button(ui, Icon::Link, 28.0, t.text, t.hover, crate::tr!("Copier le lien (Cmd/Ctrl+L)", "Copy link (Cmd/Ctrl+L)")).clicked() {
                     ui.ctx().copy_text(format!("orchestra://page/{cur}"));
                     self.ack(crate::tr!("Lien copié.", "Link copied."));
@@ -1340,6 +1358,31 @@ impl NotesApp {
                 }
             });
         });
+    }
+
+    /// Shares the project with the team, or makes it private again.
+    fn set_project_shared(&mut self, pid: &str, shared: bool) {
+        let Some(page) = self.ws.page_mut(pid) else {
+            return;
+        };
+        if let Some(x) = page.project.as_mut() {
+            x.shared = shared;
+        }
+        page.updated = crate::model::now_ms();
+        let title = page.display_title();
+        self.dirty_since.get_or_insert_with(std::time::Instant::now);
+        if shared {
+            self.send_everything();
+            self.ack(crate::trf!(
+                "« {title} » est partagé.",
+                "« {title} » is shared."
+            ));
+        } else {
+            self.ack(crate::trf!(
+                "« {title} » est redevenu privé.",
+                "« {title} » is private again."
+            ));
+        }
     }
 
     /// The "Partager" menu: share or unshare the page's project, and the state of the connection.
@@ -1416,25 +1459,7 @@ impl NotesApp {
             }
         }
         if let Some(v) = set {
-            if let Some(pr) = self.ws.page_mut(&pid) {
-                if let Some(x) = pr.project.as_mut() {
-                    x.shared = v;
-                }
-                pr.updated = crate::model::now_ms();
-            }
-            self.dirty_since.get_or_insert_with(std::time::Instant::now);
-            if v {
-                self.send_everything();
-                self.ack(crate::trf!(
-                    "« {title} » est partagé.",
-                    "« {title} » is shared."
-                ));
-            } else {
-                self.ack(crate::trf!(
-                    "« {title} » est redevenu privé.",
-                    "« {title} » is private again."
-                ));
-            }
+            self.set_project_shared(&pid, v);
         }
         ui.separator();
         // How it leaves this computer.
