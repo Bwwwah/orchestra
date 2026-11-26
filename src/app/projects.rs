@@ -1731,8 +1731,97 @@ fn open_new_step(ctx: &egui::Context, page_id: &str) {
     });
 }
 
-/// A project's settings in its page's « … » menu: Lecture seule, code or not, Privé or
-/// Partagé. Sharing has effects beyond the project (sending, notice): the choice made is
+/// A module's name and what it shows, in the « Modules » menu.
+fn module_texts(module: Module) -> (&'static str, &'static str) {
+    match module {
+        Module::Git => (
+            crate::tr!("Git", "Git"),
+            crate::tr!(
+                "Les onglets Versions et Veille CVE, et la veille automatique.",
+                "The Versions and CVE watch tabs, and the automatic watch."
+            ),
+        ),
+        Module::Terminal => (
+            crate::tr!("Terminal", "Terminal"),
+            crate::tr!(
+                "La carte pour ouvrir une session dans le terminal, et la reprise d'une session.",
+                "The card to open a session in the terminal, and resuming a session."
+            ),
+        ),
+        Module::Autonomous => (
+            crate::tr!("Sessions autonomes", "Autonomous sessions"),
+            crate::tr!(
+                "Lancer une IA qui travaille seule, sur le projet ou sur une étape, et la veille automatique.",
+                "Starting an AI that works on its own, on the project or on a step, and the automatic watch."
+            ),
+        ),
+        Module::Budget => (
+            crate::tr!("Budget", "Budget"),
+            crate::tr!(
+                "Les tokens et le coût estimé du projet et de ses sessions.",
+                "The tokens and estimated cost of the project and its sessions."
+            ),
+        ),
+        Module::Versions => (
+            crate::tr!("Versions", "Versions"),
+            crate::tr!("L'onglet Versions.", "The Versions tab."),
+        ),
+    }
+}
+
+/// « Modules », in a project's settings: one box per module, and the way back to the
+/// defaults once a choice was made. Stays open on a click inside, to set several in a row.
+fn modules_menu(ui: &mut egui::Ui, pr: &mut Project) {
+    egui::containers::menu::SubMenuButton::new(crate::tr!("Modules", "Modules"))
+        .config(
+            egui::containers::menu::MenuConfig::new()
+                .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside),
+        )
+        .ui(ui, |ui| {
+            ui.set_min_width(220.0);
+            // Read once per frame: for a code module without a choice, the folder is looked at.
+            let git = pr.has_module(Module::Git);
+            for module in Module::ALL {
+                let (name, what) = module_texts(module);
+                // The Versions tab only comes with Git (`project_tabs`): off without it.
+                let needs_git = module == Module::Versions && !git;
+                let mut on = !needs_git && pr.has_module(module);
+                if ui
+                    .add_enabled(!needs_git, egui::Checkbox::new(&mut on, name))
+                    .on_hover_text(what)
+                    .on_disabled_hover_text(crate::tr!(
+                        "Demande le module Git.",
+                        "Needs the Git module."
+                    ))
+                    .changed()
+                {
+                    pr.set_module(module, Some(on));
+                }
+            }
+            // Only our own modules: the choice for one of a newer version is kept.
+            let chosen = Module::ALL
+                .iter()
+                .any(|m| pr.module_choices.contains_key(m.key()));
+            if chosen {
+                ui.separator();
+                if ui
+                    .button(crate::tr!("Revenir à l'automatique", "Back to automatic"))
+                    .on_hover_text(crate::tr!(
+                        "Git, Terminal et Versions suivent le type du projet ; les autres sont activés.",
+                        "Git, Terminal and Versions follow the project's type; the others are on."
+                    ))
+                    .clicked()
+                {
+                    for module in Module::ALL {
+                        pr.set_module(module, None);
+                    }
+                }
+            }
+        });
+}
+
+/// A project's settings in its page's « … » menu: Lecture seule, code or not, its modules,
+/// Privé or Partagé. Sharing has effects beyond the project (sending, notice): the choice made is
 /// returned in `share` for the caller to apply; so is a local copy, in `copy`.
 pub(super) fn project_menu(
     ui: &mut egui::Ui,
@@ -1788,6 +1877,7 @@ pub(super) fn project_menu(
             "Projet de code ou non : décide des modules code (Versions, veille, terminal) et de ce que l'IA regarde et répond. Détecté d'après le dossier (un dépôt Git compte comme du code) ; choisissez ici si la détection se trompe.",
             "Code project or not: decides the code modules (Versions, watch, terminal) and what the AI looks at and answers. Detected from the folder (a git repository counts as code); choose here if the detection is wrong."
         ));
+        modules_menu(ui, pr);
     });
     let label = if pr.shared {
         crate::tr!("Visibilité : Partagé", "Visibility: Shared")
@@ -3269,6 +3359,43 @@ mod new_step_field_tests {
         h.run_steps(3);
         assert!(h.query_by_label("Regarder").is_none());
         h.get_by_label("Lancer");
+    }
+
+    /// The project's settings turn modules off and on, several in a row from the « … » menu,
+    /// and give them back to their defaults.
+    #[test]
+    fn the_project_settings_turn_modules_on_and_off() {
+        let mut pr = Project::new("");
+        pr.code = Some(true);
+        let mut h = Harness::builder().with_size([700.0, 700.0]).build_ui_state(
+            |ui, pr: &mut Project| {
+                let open = ui.button("…");
+                egui::Popup::menu(&open).show(|ui| {
+                    super::project_menu(ui, pr, &mut None, &mut false);
+                });
+            },
+            pr,
+        );
+        h.get_by_label("…").click();
+        h.run();
+        h.get_by_label_contains("Modules").click();
+        h.run();
+        assert!(h.query_by_label("Revenir à l'automatique").is_none());
+        h.get_by_label("Terminal").click();
+        h.run();
+        assert!(!h.state().has_module(Module::Terminal));
+        // The menu stayed open: another box, without opening it again.
+        h.get_by_label("Git").click();
+        h.run();
+        assert!(!h.state().has_module(Module::Git));
+        // Versions can't be ticked without Git, and its own choice is left alone.
+        h.get_by_label("Versions").click();
+        h.run();
+        assert!(h.state().has_module(Module::Versions));
+        h.get_by_label("Revenir à l'automatique").click();
+        h.run();
+        assert_eq!(h.state().modules(), Module::ALL);
+        assert!(h.state().module_choices.is_empty());
     }
 
     /// With the autonomous module off, a step entrusted to an AI has no « Lancer ».

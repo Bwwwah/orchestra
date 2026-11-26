@@ -463,7 +463,6 @@ impl Project {
     }
 
     /// Turn `module` on or off for this project (None: its default again).
-    #[allow(dead_code)] // Called by the project's settings in a next « Modules » step.
     pub fn set_module(&mut self, module: Module, on: Option<bool>) {
         let before = self.module_choices.get(module.key()).copied();
         if before == on {
