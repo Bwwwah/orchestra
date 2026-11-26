@@ -6,6 +6,7 @@ use super::chrome::relative_time;
 use super::*;
 use crate::project::{Module, Project, ProjectMember, ProjectStatus, StepStatus};
 use crate::sessions::{SessionInfo, human_tokens};
+use crate::templates::Template;
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -219,6 +220,51 @@ pub fn mcp_command() -> String {
     format!("claude mcp add --scope user orchestra -- \"{exe}\" mcp")
 }
 
+/// What the « Nouveau projet » form holds.
+#[derive(Default)]
+pub(super) struct NewProject {
+    pub title: String,
+    pub folder: String,
+    /// None: a bare project, whose kind and modules are guessed from its folder.
+    pub template: Option<Template>,
+}
+
+impl NewProject {
+    /// Create the project in `ws` and return its page id.
+    pub fn create_in(&self, ws: &mut Workspace) -> String {
+        match self.template {
+            Some(template) => ws.create_project_from(template, &self.title, &self.folder),
+            None => ws.create_project(&self.title, &self.folder),
+        }
+    }
+}
+
+/// The choice of a template in the « Nouveau projet » form, and what the choice gives.
+fn template_picker(ui: &mut egui::Ui, chosen: &mut Option<Template>, t: &Tone) {
+    ui.horizontal_wrapped(|ui| {
+        ui.label(crate::tr!("Modèle", "Template"));
+        ui.selectable_value(chosen, None, crate::tr!("Aucun", "None"));
+        for template in Template::ALL {
+            let text = format!("{} {}", template.icon(), template.label());
+            ui.selectable_value(chosen, Some(template), text);
+        }
+    });
+    let about = match *chosen {
+        Some(template) => {
+            let pages: Vec<&str> = template.pages().iter().map(|p| p.title).collect();
+            let pages = pages.join(", ");
+            let description = template.description();
+            crate::trf!("{description} Pages : {pages}.", "{description} Pages: {pages}.")
+        }
+        None => crate::tr!(
+            "Un projet vide : ses modules suivent le contenu de son dossier.",
+            "An empty project: its modules follow what its folder holds."
+        )
+        .to_string(),
+    };
+    ui.label(RichText::new(about).size(12.5).color(t.tertiary));
+}
+
 impl NotesApp {
     /// "Projets": every AI project as a card, most recent activity first.
     pub(super) fn projects_view(&mut self, ui: &mut egui::Ui, actions: &mut Vec<Action>) {
@@ -237,7 +283,7 @@ impl NotesApp {
                             let r = super::style::primary(ui, crate::tr!("+ Nouveau projet", "+ New project"));
                             super::tutorial::mark(ui, "projects:new", r.rect);
                             if r.clicked() {
-                                self.new_project = Some((String::new(), String::new()));
+                                self.new_project = Some(NewProject::default());
                             }
                         }
                         let busy = self.sync_dialog.is_some() || self.sync_run.is_some();
@@ -261,13 +307,15 @@ impl NotesApp {
                 let dropped: Option<std::path::PathBuf> = ui.ctx().input(|i| i.raw.dropped_files.iter().map(|f| f.path().to_path_buf()).find(|p| p.is_dir()));
                 if let Some(dir) = dropped {
                     let name = dir.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
-                    self.new_project = Some((name, dir.display().to_string()));
+                    // A template already picked in the open form stays picked.
+                    let template = self.new_project.as_ref().and_then(|f| f.template);
+                    self.new_project = Some(NewProject { title: name, folder: dir.display().to_string(), template });
                 }
 
                 // New project form: a name, the folder, and whether an AI should analyse it.
                 let mut create = None;
                 let mut cancel = false;
-                if let Some((title, folder)) = self.new_project.as_mut() {
+                if let Some(NewProject { title, folder, template }) = self.new_project.as_mut() {
                     egui::Frame::new().fill(t.card).stroke(egui::Stroke::new(1.0, t.border)).corner_radius(12.0).inner_margin(egui::Margin::symmetric(18, 16)).show(ui, |ui| {
                         ui.set_width(width - 38.0);
                         ui.label(RichText::new(crate::tr!("Nouveau projet", "New project")).font(semibold(16.0)).color(t.text));
@@ -303,6 +351,8 @@ impl NotesApp {
                             ui.add(egui::TextEdit::singleline(title).hint_text(if auto.is_empty() { crate::tr!("Mon projet", "My project").to_string() } else { auto }).desired_width(f32::INFINITY));
                             ui.end_row();
                         });
+                        ui.add_space(8.0);
+                        template_picker(ui, template, &t);
                         let analyse_key = egui::Id::unique("new-project-analyse");
                         let mut analyse = ui.ctx().data(|d| d.get_temp::<bool>(analyse_key)).unwrap_or(true);
                         let folder_ok = crate::project::normalize_folder(folder.trim()).is_dir();
@@ -315,7 +365,8 @@ impl NotesApp {
                         if !folder.trim().is_empty() && !folder_ok {
                             ui.label(RichText::new(crate::tr!("Ce dossier n'existe pas sur cette machine.", "This folder doesn't exist on this computer.")).size(12.5).color(ORANGE));
                         }
-                        if folder_ok {
+                        // A template says the kind of project itself.
+                        if folder_ok && template.is_none() {
                             // Detected once per folder typed, not on every frame.
                             let kind_key = egui::Id::unique(("new-project-code", folder.trim().to_string()));
                             let code = ui.ctx().data(|d| d.get_temp::<bool>(kind_key)).unwrap_or_else(|| {
@@ -337,7 +388,8 @@ impl NotesApp {
                             let enter = ui.input(|i| i.key_pressed(Key::Enter));
                             let label = if analyse && folder_ok { crate::tr!("Créer et analyser", "Create and analyse") } else { crate::tr!("Créer", "Create") };
                             if ui.add_enabled(ok, egui::Button::new(label)).clicked() || (ok && enter) {
-                                create = Some((name, folder.trim().to_string(), analyse && folder_ok));
+                                let new = NewProject { title: name, folder: folder.trim().to_string(), template: *template };
+                                create = Some((new, analyse && folder_ok));
                             }
                             if ui.button(crate::tr!("Annuler", "Cancel")).clicked() || ui.input(|i| i.key_pressed(Key::Escape)) {
                                 cancel = true;
@@ -346,8 +398,9 @@ impl NotesApp {
                     });
                     ui.add_space(16.0);
                 }
-                if let Some((title, folder, analyse)) = create {
-                    actions.push(Action::NewProject(title, folder.clone()));
+                if let Some((new, analyse)) = create {
+                    let folder = new.folder.clone();
+                    actions.push(Action::NewProject(new));
                     self.new_project = None;
                     if analyse {
                         super::ai_fill::request(ui.ctx(), super::ai_fill::AiReq::FillFolder { folder });
@@ -501,7 +554,7 @@ impl NotesApp {
                         self.sync_dialog = Some(self.sync_candidates());
                     }
                     if super::style::secondary(ui, crate::tr!("+ Nouveau projet", "+ New project")).on_hover_text(crate::tr!("À partir d'un dossier ; astuce : glissez-le sur la fenêtre", "From a folder; tip: drop it on the window")).clicked() {
-                        self.new_project = Some((String::new(), String::new()));
+                        self.new_project = Some(NewProject::default());
                     }
                 });
             });
@@ -3359,6 +3412,42 @@ mod new_step_field_tests {
         h.run_steps(3);
         assert!(h.query_by_label("Regarder").is_none());
         h.get_by_label("Lancer");
+    }
+
+    /// The « Nouveau projet » form offers every template, or none, and the project it
+    /// creates is the one of the choice.
+    #[test]
+    fn the_new_project_form_offers_the_templates() {
+        let mut h = Harness::builder().with_size([700.0, 200.0]).build_ui_state(
+            |ui, form: &mut NewProject| {
+                // The emojis come from the system's fonts, which the tests don't load.
+                ui.ctx()
+                    .set_missing_glyph_policy(egui::epaint::text::MissingGlyphPolicy::Tofu);
+                template_picker(ui, &mut form.template, &tone(true));
+            },
+            NewProject::default(),
+        );
+        h.run();
+        assert_eq!(h.state().template, None);
+        for template in Template::ALL {
+            h.get_by_label(&format!("{} {}", template.icon(), template.label()))
+                .click();
+            h.run();
+            assert_eq!(h.state().template, Some(template));
+            // What the choice gives is said under it.
+            h.get_by_label_contains(template.description());
+        }
+        let mut ws = Workspace::default();
+        let event = h.state().create_in(&mut ws);
+        let pages = ws.pages.iter().filter(|p| p.parent.as_ref() == Some(&event));
+        assert_eq!(pages.count(), Template::Event.pages().len());
+
+        h.get_by_label(crate::tr!("Aucun", "None")).click();
+        h.run();
+        assert_eq!(h.state().template, None);
+        let bare = h.state().create_in(&mut ws);
+        assert!(ws.pages.iter().all(|p| p.parent.as_ref() != Some(&bare)));
+        assert_eq!(ws.page(&bare).unwrap().project.as_ref().unwrap().code, None);
     }
 
     /// The project's settings turn modules off and on, several in a row from the « … » menu,

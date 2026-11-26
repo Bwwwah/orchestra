@@ -44,7 +44,7 @@ enum Action {
         view: DbView,
     },
     Export(String),
-    NewProject(String, String),
+    NewProject(projects::NewProject),
     RevertDoc(String),
     LocalCopy(String),
     /// « Lancer une IA » on a project's page: an autonomous session with its kept choices.
@@ -112,8 +112,8 @@ pub struct NotesApp {
     tabs: Vec<Tab>,
     active_tab: usize,
     closed_tabs: Vec<Tab>,
-    /// "Nouveau projet" form: (name, folder).
-    new_project: Option<(String, String)>,
+    /// The « Nouveau projet » form, when open.
+    new_project: Option<projects::NewProject>,
     /// The project whose « Réglages de lancement » window is open.
     launch_settings: Option<String>,
     /// Text of the "add a step" field on a project page.
@@ -989,8 +989,8 @@ impl NotesApp {
                         "Couldn't read the file again: {e}"
                     )),
                 },
-                Action::NewProject(title, folder) => {
-                    let id = self.ws.create_project(&title, &folder);
+                Action::NewProject(new) => {
+                    let id = new.create_in(&mut self.ws);
                     crate::docs::sync_project(&mut self.ws, &id);
                     self.navigate(id);
                     self.view = View::Page;

@@ -2,9 +2,6 @@
 //! A template is only applied at creation: nothing remembers it afterwards, and everything
 //! it sets can be changed like on any project.
 
-// Used by the tests only until the creation window offers the choice: to be removed then.
-#![cfg_attr(not(test), allow(dead_code))]
-
 use crate::model::{Column, ColumnKind, Database, DbView, Page, Workspace, new_id};
 use crate::project::Module;
 
@@ -153,7 +150,7 @@ impl Template {
             Template::Code => vec![
                 text(
                     "Architecture",
-                    "🏗️",
+                    "📐",
                     crate::tr!(
                         "## Vue d'ensemble\nÀ quoi sert le logiciel, et pour qui.\n\n## Composants\n- \n\n## Lancer et tester\n- ",
                         "## Overview\nWhat the software is for, and for whom.\n\n## Components\n- \n\n## Run and test\n- "
@@ -205,7 +202,7 @@ impl Template {
                 ),
                 text(
                     crate::tr!("Comptes rendus", "Meeting notes"),
-                    "🗒️",
+                    "📓",
                     crate::tr!(
                         "## Réunion du \n### Présents\n- \n\n### Décisions\n- \n\n### À faire\n- [ ] ",
                         "## Meeting of \n### Attendees\n- \n\n### Decisions\n- \n\n### To do\n- [ ] "
@@ -213,7 +210,7 @@ impl Template {
                 ),
                 text(
                     crate::tr!("Fonctionnement", "How we work"),
-                    "🤝",
+                    "📖",
                     crate::tr!(
                         "## Objectif\nCe que l'équipe veut obtenir.\n\n## Rôles\n- \n\n## Règles communes\n- ",
                         "## Goal\nWhat the team wants to achieve.\n\n## Roles\n- \n\n## Shared rules\n- "
@@ -373,6 +370,20 @@ mod tests {
             let home = ws.page(&id).unwrap();
             assert!(home.blocks.iter().all(|b| b.extra.is_empty()));
         }
+    }
+
+    /// `fix_icons` replaces some icons each time the workspace is read: a template must not
+    /// use them.
+    #[test]
+    fn the_icons_of_a_template_are_kept_when_the_workspace_is_read() {
+        let mut ws = Workspace::default();
+        for template in Template::ALL {
+            ws.create_project_from(template, "P", "");
+        }
+        let icons = |ws: &Workspace| ws.pages.iter().map(|p| p.icon.clone()).collect::<Vec<_>>();
+        let before = icons(&ws);
+        crate::store::fix_icons(&mut ws);
+        assert_eq!(icons(&ws), before);
     }
 
     #[test]

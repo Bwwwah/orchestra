@@ -526,7 +526,7 @@ impl NotesApp {
                 {
                     self.view = View::Projects;
                     if self.new_project.is_none() {
-                        self.new_project = Some((String::new(), String::new()));
+                        self.new_project = Some(Default::default());
                     }
                 }
                 ui.add_space(10.0);
