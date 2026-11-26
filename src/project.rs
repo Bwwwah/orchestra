@@ -1488,8 +1488,21 @@ pub fn project_to_markdown(page: &Page) -> String {
         } else {
             ""
         };
+        // The person in charge, by name only: an id nobody here has is received text.
+        let who = if s.assignee.is_empty() {
+            String::new()
+        } else {
+            match pr.members.iter().find(|m| m.id == s.assignee && m.ai.is_empty()) {
+                Some(m) => crate::trf!(" — responsable : « {} »", " — responsible: « {} »", m.name),
+                None => crate::tr!(
+                    " — responsable : membre inconnu",
+                    " — responsible: unknown member"
+                )
+                .to_string(),
+            }
+        };
         out.push_str(&format!(
-            "- [{mark}] {} (step_id: {}){src}{from}{held}\n",
+            "- [{mark}] {} (step_id: {}){src}{from}{who}{held}\n",
             s.title, s.id
         ));
     }

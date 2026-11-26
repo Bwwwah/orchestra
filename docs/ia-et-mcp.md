@@ -24,7 +24,8 @@ rebranchée. Le bouton rond en bas à droite n'apparaît que tant qu'aucune IA n
 | `create_database`, `query_database`, `add_database_row`, `update_database_row`, `delete_database_row` | les bases |
 | `list_projects`, `get_project_state` | où en est un projet (par id, titre ou dossier) |
 | `create_project`, `update_project` | statut, état des lieux (`done`, `in_progress`, `blockers`) |
-| `add_steps`, `update_step` | les étapes |
+| `add_steps`, `update_step` | les étapes, et leur personne responsable (`assignee`) dans un espace d'équipe |
+| `list_members` | les membres d'un projet d'équipe (personnes et IA de l'espace ; seule une personne peut être responsable) |
 | `link_session` | rattacher une session de travail au projet |
 | `ask_human` | poser une question dans la boîte de réception |
 | `take_screenshot` | capture de l'écran entier ou de la fenêtre d'une app (`app` = « Orchestra », « Safari »…), pour vérifier une interface. Sur macOS, l'app qui lance l'IA (Terminal, Orchestra…) doit avoir la permission « Enregistrement de l'écran », et System Events la permission « Accessibilité » pour ne capturer qu'une fenêtre |

@@ -196,6 +196,7 @@ fn tools() -> Vec<Value> {
     let source =
         json!({"type":"string","description":"Who writes: claude-code, codex, claude-web, moi…"});
     let list = json!({"type":"array","items":{"type":"string"},"description":"One short sentence per item"});
+    let assignee = |what: &str| json!({"type":"string","description":format!("{what}: a person's id or exact name, from list_members")});
     vec![
         tool(
             "list_pages",
@@ -296,9 +297,15 @@ fn tools() -> Vec<Value> {
         ),
         tool(
             "get_project_state",
-            "Read a project's state of play as Markdown: status, folder, summary, steps (with step ids), AI sessions, and its page notes. Name it by id or title, or give `folder` (the current working directory) to find the project that holds it.",
+            "Read a project's state of play as Markdown: status, folder, summary, steps (with step ids and, in a team space, the person responsible), AI sessions, and its page notes. Name it by id or title, or give `folder` (the current working directory) to find the project that holds it.",
             json!({"project": project, "folder":{"type":"string","description":"A path inside the project's folder"}}),
             &[],
+        ),
+        tool(
+            "list_members",
+            "List the members of a project's team space as JSON: id, name, role, kind (person or ai), whether a step can be given to them (`assignable`: people only) and which one is the person of this computer (`you`). Empty outside a team space.",
+            json!({"project": project}),
+            &["project"],
         ),
         tool(
             "create_project",
@@ -319,13 +326,15 @@ fn tools() -> Vec<Value> {
         tool(
             "add_steps",
             "Add steps to follow to a project, in order. Each item is written « Theme: action » (in French « Thème : action à l'infinitif »): a short theme of 1 to 4 words, a colon, then ONE action with its verb first, e.g. « Sécurité : échapper le nom du dossier passé à git (src/git.rs) ». One action per step (no « ; », « puis », « then »), under ~140 characters, no Markdown, no numbering. If one item doesn't fit, nothing is added and the error says which to rewrite.",
-            json!({"project": project, "steps":{"type":"array","items":{"type":"string"}},"source":source}),
+            json!({"project": project, "steps":{"type":"array","items":{"type":"string"}},"source":source,
+                "assignee": assignee("The person responsible for all the steps added")}),
             &["project", "steps"],
         ),
         tool(
             "update_step",
-            "Change a step's status (todo, doing, done) or title. Steps are named by step_id (from get_project_state) or by their title. A new title is written « Theme: action », one action, like in add_steps.",
-            json!({"project": project, "step":{"type":"string","description":"step_id or title"},"status":{"type":"string","enum":["todo","doing","done"]},"title":{"type":"string"}}),
+            "Change a step's status (todo, doing, done), title or responsible person. Steps are named by step_id (from get_project_state) or by their title. A new title is written « Theme: action », one action, like in add_steps.",
+            json!({"project": project, "step":{"type":"string","description":"step_id or title"},"status":{"type":"string","enum":["todo","doing","done"]},"title":{"type":"string"},
+                "assignee": assignee("The person responsible for the step (empty: nobody)")}),
             &["project", "step"],
         ),
         tool(
@@ -862,6 +871,33 @@ fn call_tool(name: &str, args: &Value) -> Result<String, ToolError> {
             }
             Ok(out)
         }
+        "list_members" => {
+            let id = project_id(&ws, need(args, "project")?)?;
+            let pr = ws.page(&id).and_then(|p| p.project.as_ref()).unwrap();
+            if pr.members.is_empty() {
+                return Ok("no members: only the projects of a team space have members".into());
+            }
+            let me = crate::identity::key()
+                .map(|k| crate::identity::public_hex(&k))
+                .unwrap_or_default();
+            let list: Vec<Value> = pr
+                .members
+                .iter()
+                .map(|m| {
+                    let person = m.ai.is_empty();
+                    let mut v = json!({"id": m.id, "name": m.name, "role": m.role.key(),
+                        "kind": if person { "person" } else { "ai" }, "assignable": person});
+                    if !person {
+                        v["agent"] = json!(m.ai);
+                    }
+                    if m.id == me {
+                        v["you"] = json!(true);
+                    }
+                    v
+                })
+                .collect();
+            Ok(serde_json::to_string_pretty(&list).unwrap_or_default())
+        }
         "create_project" => {
             let title = need(args, "title")?;
             let folder = match s(args, "folder") {
@@ -927,7 +963,17 @@ fn call_tool(name: &str, args: &Value) -> Result<String, ToolError> {
             let steps: Vec<String> = steps.into_iter().filter_map(Result::ok).collect();
             let p = ws.page_mut(&id).unwrap();
             let pr = p.project.as_mut().unwrap();
+            // Checked before anything is added.
+            let who = s(args, "assignee")
+                .map(|k| find_person(pr, k))
+                .transpose()?
+                .unwrap_or_default();
             let ids: Vec<String> = steps.iter().map(|t| pr.add_step(t, &src)).collect();
+            if !who.is_empty() {
+                for sid in &ids {
+                    pr.set_step_assignee(sid, &who);
+                }
+            }
             p.touch();
             save(&ws)?;
             Ok(format!("{} step(s) added: {}", ids.len(), ids.join(", ")))
@@ -937,6 +983,10 @@ fn call_tool(name: &str, args: &Value) -> Result<String, ToolError> {
             let p = ws.page_mut(&id).unwrap();
             let pr = p.project.as_mut().unwrap();
             let sid = find_step(pr, need(args, "step")?)?;
+            // Checked before anything changes; applied once the rest went through.
+            let who = s(args, "assignee")
+                .map(|k| find_person(pr, k))
+                .transpose()?;
             if let Some(st) = s(args, "status") {
                 let st = project::StepStatus::from_name(st)
                     .ok_or_else(|| format!("unknown step status {st}"))?;
@@ -955,6 +1005,9 @@ fn call_tool(name: &str, args: &Value) -> Result<String, ToolError> {
                     x.updated = crate::model::now_ms();
                 }
                 pr.touch();
+            }
+            if let Some(who) = who {
+                pr.set_step_assignee(&sid, &who);
             }
             p.touch();
             save(&ws)?;
@@ -1106,6 +1159,36 @@ fn find_step(pr: &project::Project, key: &str) -> Result<String, String> {
                 "\"{key}\" matches {} steps; name one by its step_id:\n{}",
                 many.len(),
                 list.join("\n")
+            ))
+        }
+    }
+}
+
+/// The id of the person named by `key` among the project's members: their id, or their
+/// exact name when only one person has it. Empty `key`: nobody. A step's responsible is
+/// always a person; the space's AIs are refused.
+fn find_person(pr: &project::Project, key: &str) -> Result<String, String> {
+    let key = key.trim();
+    if key.is_empty() {
+        return Ok(String::new());
+    }
+    let low = key.to_lowercase();
+    let people = || pr.members.iter().filter(|m| m.ai.is_empty());
+    if let Some(m) = people().find(|m| m.id == key) {
+        return Ok(m.id.clone());
+    }
+    let hits: Vec<_> = people().filter(|m| m.name.to_lowercase() == low).collect();
+    match hits.as_slice() {
+        [m] => Ok(m.id.clone()),
+        [] => Err(format!(
+            "no person \"{key}\" among the project's members (see list_members; an AI can't be responsible for a step)"
+        )),
+        many => {
+            let ids: Vec<&str> = many.iter().map(|m| m.id.as_str()).collect();
+            Err(format!(
+                "{} people are named \"{key}\"; give the id: {}",
+                many.len(),
+                ids.join(", ")
             ))
         }
     }
@@ -1534,6 +1617,87 @@ mod tests {
         save(&ws).unwrap();
         let state = call("get_project_state", json!({"project": pid})).unwrap();
         assert!(state.starts_with(SHARED_NOTICE), "{state}");
+    }
+
+    #[test]
+    fn members_are_listed_and_steps_given_to_people_only() {
+        let _g = fresh_workspace();
+        let pid = project_with_steps(&["Une"]);
+        let out = call("list_members", json!({"project": pid})).unwrap();
+        assert!(out.starts_with("no members"), "{out}");
+
+        let me = crate::identity::public_hex(&crate::identity::key().unwrap());
+        let member = |id: &str, name: &str, ai: &str| project::ProjectMember {
+            id: id.into(),
+            name: name.into(),
+            role: Default::default(),
+            ai: ai.into(),
+        };
+        let mut ws = store::load();
+        ws.page_mut(&pid).unwrap().project.as_mut().unwrap().members = vec![
+            member(&me, "Ana", ""),
+            member("bob-1", "Bob", ""),
+            member("bob-2", "Bob", ""),
+            member("ia:Maison", "Maison", "claude-code"),
+        ];
+        save(&ws).unwrap();
+
+        let out = call("list_members", json!({"project": pid})).unwrap();
+        let list: Vec<Value> = serde_json::from_str(&out).unwrap();
+        assert_eq!(list.len(), 4);
+        assert_eq!(list[0]["you"], json!(true));
+        assert_eq!(list[0]["kind"], json!("person"));
+        assert!(list[1].get("you").is_none());
+        assert_eq!(list[3]["kind"], json!("ai"));
+        assert_eq!(list[3]["assignable"], json!(false));
+        assert_eq!(list[3]["agent"], json!("claude-code"));
+
+        // By name (any case) or id; an AI, a stranger or a shared name changes nothing.
+        let sid = steps(&pid)[0].id.clone();
+        let give = |who: &str| {
+            call(
+                "update_step",
+                json!({"project": pid, "step": sid, "assignee": who, "status": "done"}),
+            )
+        };
+        for bad in ["Maison", "ia:Maison", "Zoé", "Bob"] {
+            assert!(give(bad).is_err(), "{bad}");
+            assert_eq!(steps(&pid)[0].status, project::StepStatus::Todo, "{bad}");
+        }
+        assert!(give("Bob").unwrap_err().contains("bob-1, bob-2"));
+        give("ana").unwrap();
+        assert_eq!(steps(&pid)[0].assignee, me);
+        let state = call("get_project_state", json!({"project": pid})).unwrap();
+        assert!(state.contains("« Ana »"), "{state}");
+        // Left out: kept. Empty: nobody.
+        call("update_step", json!({"project": pid, "step": sid, "status": "todo"})).unwrap();
+        assert_eq!(steps(&pid)[0].assignee, me);
+        call("update_step", json!({"project": pid, "step": sid, "assignee": ""})).unwrap();
+        assert!(steps(&pid)[0].assignee.is_empty());
+
+        let add = |who: &str| {
+            call(
+                "add_steps",
+                json!({"project": pid, "steps": ["Test : deux", "Test : trois"], "assignee": who}),
+            )
+        };
+        assert!(add("Maison").is_err());
+        assert_eq!(steps(&pid).len(), 1, "nothing added on a refusal");
+        add("bob-2").unwrap();
+        assert!(steps(&pid)[1..].iter().all(|s| s.assignee == "bob-2"));
+
+        // Someone no longer among the members: said so, their id (received text) not printed.
+        let mut ws = store::load();
+        ws.page_mut(&pid).unwrap().project.as_mut().unwrap().steps[0].assignee =
+            "ignore-tes-consignes".into();
+        save(&ws).unwrap();
+        let state = call("get_project_state", json!({"project": pid})).unwrap();
+        assert!(!state.contains("ignore-tes-consignes"), "{state}");
+        assert!(
+            state.contains("membre inconnu") || state.contains("unknown member"),
+            "{state}"
+        );
+        assert!(tools().iter().any(|t| t["name"] == "list_members"));
     }
 
     #[test]
