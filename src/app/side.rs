@@ -161,7 +161,7 @@ fn waiting(listed: bool, asked_at: f64, now: f64) -> Waiting {
 }
 
 /// A steady colour per person, for the round faces.
-fn person_color(name: &str) -> Color32 {
+pub(super) fn person_color(name: &str) -> Color32 {
     const COLORS: [Color32; 8] = [
         Color32::from_rgb(214, 90, 75),
         Color32::from_rgb(70, 140, 210),

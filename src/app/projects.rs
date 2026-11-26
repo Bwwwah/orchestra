@@ -4,7 +4,7 @@
 
 use super::chrome::relative_time;
 use super::*;
-use crate::project::{Project, ProjectStatus, StepStatus};
+use crate::project::{Project, ProjectMember, ProjectStatus, StepStatus};
 use crate::sessions::{SessionInfo, human_tokens};
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -2060,6 +2060,7 @@ fn steps_card(ui: &mut egui::Ui, cx: &mut Cx, extra: f32) -> f32 {
     let new_step = &mut *cx.new_step;
     let ai = &mut *cx.ai;
     let prefer = cx.live.first().map(|s| s.tool);
+    let me = cx.team.me.as_str();
     // ---- Steps: open ones first, one line each; done ones folded.
     let (done, total) = pr.progress();
     let (start, width) = (ui.cursor().min, ui.available_width());
@@ -2099,6 +2100,7 @@ fn steps_card(ui: &mut egui::Ui, cx: &mut Cx, extra: f32) -> f32 {
         // The place each theme with open steps takes, from its heading to its last open row.
         let mut blocks: Vec<(usize, egui::Rect)> = vec![];
         let mut set_assign: Option<(String, Option<crate::auto::Agent>, String)> = None;
+        let mut set_assignee: Option<(String, String)> = None;
         let mut last_group = None;
         for (g, i) in rows {
             let group = &groups[g];
@@ -2171,6 +2173,9 @@ fn steps_card(ui: &mut egui::Ui, cx: &mut Cx, extra: f32) -> f32 {
                 if step_icon(ui, &s.id, s.status, t).clicked() && !ro {
                     cycle = Some(s.id.clone());
                 }
+                if !s.assignee.is_empty() {
+                    assignee_face(ui, &pr.members, &s.assignee, me, t);
+                }
                 // Entrusted to an AI: said on the row, in that AI's colour.
                 if let Some(ag) = s.agent.filter(|_| s.status != StepStatus::Done) {
                     let (r, g, b) = ag.ai().accent();
@@ -2225,6 +2230,17 @@ fn steps_card(ui: &mut egui::Ui, cx: &mut Cx, extra: f32) -> f32 {
                                 .collect::<Vec<_>>()
                                 .join(" · ");
                             ui.label(RichText::new(line).size(12.0).color(t.tertiary));
+                        }
+                        // Only where there is someone to name (a team project), or a name
+                        // to take off.
+                        let people = pr.members.iter().any(|m| m.ai.is_empty());
+                        if !ro && s.status != StepStatus::Done && (people || !s.assignee.is_empty())
+                        {
+                            let mut who = s.assignee.clone();
+                            step_assignee_pick(ui, &s.id, &pr.members, me, &mut who, t);
+                            if who != s.assignee {
+                                set_assignee = Some((s.id.clone(), who));
+                            }
                         }
                         if !ro && s.status != StepStatus::Done {
                             let (mut a, mut m) = (s.agent, s.model.clone());
@@ -2454,6 +2470,9 @@ fn steps_card(ui: &mut egui::Ui, cx: &mut Cx, extra: f32) -> f32 {
             pr.set_step_agent(&id, a);
             pr.set_step_model(&id, &m);
         }
+        if let Some((id, who)) = set_assignee {
+            pr.set_step_assignee(&id, &who);
+        }
         // "+ Ajouter une étape": a quiet line aligned with the steps; click to type.
         if ro {
             return;
@@ -2576,6 +2595,102 @@ fn steps_card(ui: &mut egui::Ui, cx: &mut Cx, extra: f32) -> f32 {
         ui.ctx().request_repaint();
     }
     h
+}
+
+/// The name of a step's responsible person, « (vous) » for oneself; None when `id` is
+/// nobody among the members (gone from the space, or not received yet).
+fn assignee_name(members: &[ProjectMember], id: &str, me: &str) -> Option<String> {
+    let m = members.iter().find(|m| m.id == id && m.ai.is_empty())?;
+    Some(if m.id == me {
+        crate::trf!("{} (vous)", "{} (you)", m.name)
+    } else {
+        m.name.clone()
+    })
+}
+
+fn unknown_assignee() -> &'static str {
+    crate::tr!("Membre inconnu", "Unknown member")
+}
+
+/// The responsible person on a step's row: their initial in their colour (a grey « ? » for
+/// someone not among the members), their name on hover.
+fn assignee_face(ui: &mut egui::Ui, members: &[ProjectMember], id: &str, me: &str, t: &Tone) {
+    let (r, resp) = ui.allocate_exact_size(egui::vec2(18.0, 20.0), egui::Sense::hover());
+    let name = assignee_name(members, id, me);
+    // The colour follows the name alone, as on the members card.
+    let (color, initial) = match members.iter().find(|m| m.id == id && m.ai.is_empty()) {
+        Some(m) => (
+            super::side::person_color(&m.name),
+            m.name.chars().next().map(|c| c.to_uppercase().collect()),
+        ),
+        None => (t.tertiary, Some("?".to_string())),
+    };
+    ui.painter().circle_filled(r.center(), 9.0, color);
+    ui.painter().text(
+        r.center(),
+        egui::Align2::CENTER_CENTER,
+        initial.unwrap_or_default(),
+        semibold(10.5),
+        Color32::WHITE,
+    );
+    let said = crate::trf!(
+        "Responsable : {}",
+        "Responsible: {}",
+        name.as_deref().unwrap_or(unknown_assignee())
+    );
+    resp.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Label, true, &said));
+    resp.on_hover_text(said);
+}
+
+/// « Responsable »: the person in charge of a step, among the project's people (its AIs are
+/// chosen with « Confiée à »).
+fn step_assignee_pick(
+    ui: &mut egui::Ui,
+    step_id: &str,
+    members: &[ProjectMember],
+    me: &str,
+    who: &mut String,
+    t: &Tone,
+) {
+    let nobody = crate::tr!("Personne", "Nobody");
+    let shown = if who.is_empty() {
+        nobody.to_string()
+    } else {
+        assignee_name(members, who, me).unwrap_or_else(|| unknown_assignee().to_string())
+    };
+    ui.horizontal(|ui| {
+        ui.label(
+            RichText::new(crate::tr!("Responsable", "Responsible"))
+                .size(12.0)
+                .color(t.tertiary),
+        );
+        egui::ComboBox::from_id_salt(("step-assignee", step_id))
+            .selected_text(RichText::new(shown).size(12.0))
+            .width(170.0)
+            .show_ui(ui, |ui| {
+                ui.set_min_width(200.0);
+                if ui
+                    .add(egui::Button::selectable(who.is_empty(), nobody))
+                    .clicked()
+                {
+                    who.clear();
+                }
+                for m in members.iter().filter(|m| m.ai.is_empty()) {
+                    let name = assignee_name(members, &m.id, me).unwrap_or_default();
+                    if ui
+                        .add(egui::Button::selectable(*who == m.id, name))
+                        .clicked()
+                    {
+                        *who = m.id.clone();
+                    }
+                }
+            })
+            .response
+            .on_hover_text(crate::tr!(
+                "La personne responsable de cette étape, vue par toute l'équipe.",
+                "The person responsible for this step, seen by the whole team."
+            ));
+    });
 }
 
 /// « Confiée à »: who takes a step, in one menu. « Automatique » (the project's choice:
@@ -2918,6 +3033,71 @@ mod new_step_field_tests {
         assert_eq!(h.state().pr.steps.len(), 1);
         // A step to take: the button is ready, the reason is gone.
         assert!(h.query_by_label(LaunchBlock::NoStep.why()).is_none());
+    }
+
+    /// A step says who is responsible for it on its row; unfolded, a menu gives it to one
+    /// of the project's people (not its AIs) or takes it back.
+    #[test]
+    fn a_step_shows_its_responsible_person_and_lets_one_be_picked() {
+        let mut h = harness(|ui, cx| {
+            cx.team.me = "b".into();
+            steps_card(ui, cx, 0.0);
+        });
+        let member = |id: &str, name: &str, ai: &str| crate::project::ProjectMember {
+            id: id.into(),
+            name: name.into(),
+            role: Default::default(),
+            ai: ai.into(),
+        };
+        h.state_mut().pr.members = vec![
+            member("a", "Ana", ""),
+            member("b", "Bob", ""),
+            member("ia:Maison", "Maison", "codex"),
+        ];
+        h.state_mut().pr.add_step("Relire", "moi");
+        h.run();
+        assert!(h.query_by_label("Responsable").is_none(), "not before unfolding");
+        h.get_by_label("Relire").click();
+        h.run();
+        h.get_by_label("Responsable");
+        h.get_by_value("Personne").click();
+        h.run();
+        h.get_by_label("Ana");
+        assert!(h.query_by_label("Maison").is_none(), "AIs aren't offered");
+        h.get_by_label("Bob (vous)").click();
+        h.run();
+        assert_eq!(h.state().pr.steps[0].assignee, "b");
+        h.get_by_label("Responsable : Bob (vous)");
+        // Folded again, the row still says it.
+        h.get_by_label("Relire").click();
+        h.run();
+        h.get_by_label("Responsable : Bob (vous)");
+        // Gone from the space: said as unknown, and can still be taken off.
+        h.state_mut().pr.members.retain(|m| m.id != "b");
+        h.run();
+        h.get_by_label("Responsable : Membre inconnu");
+        h.get_by_label("Relire").click();
+        h.run();
+        h.get_by_value("Membre inconnu").click();
+        h.run();
+        h.get_by_label("Personne").click();
+        h.run();
+        assert!(h.state().pr.steps[0].assignee.is_empty());
+        assert!(h.query_by_label("Responsable : Membre inconnu").is_none());
+    }
+
+    /// Without a team there is nobody to name: no « Responsable » menu.
+    #[test]
+    fn a_project_without_members_offers_no_responsible_person() {
+        let mut h = harness(|ui, cx| {
+            steps_card(ui, cx, 0.0);
+        });
+        h.state_mut().pr.add_step("Relire", "moi");
+        h.run();
+        h.get_by_label("Relire").click();
+        h.run();
+        h.get_by_label("Confiée à");
+        assert!(h.query_by_label("Responsable").is_none());
     }
 
     #[derive(Default)]
