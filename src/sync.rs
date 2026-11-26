@@ -1783,6 +1783,19 @@ mod tests {
     }
 
     #[test]
+    fn orchestras_own_prompts_are_kept_out_of_the_session_lists() {
+        use crate::sessions::is_internal_prompt;
+        assert!(is_internal_prompt(&prompt("/tmp/x")));
+        for code in [true, false] {
+            assert!(is_internal_prompt(&review_prompt("/tmp/x", code)));
+            assert!(is_internal_prompt(&fill_prompt("/tmp/x", code)));
+            // The person's own question stays listed, to be carried on.
+            assert!(!is_internal_prompt(&question_prompt("/tmp/x", "Et la suite ?", code)));
+            assert!(!is_internal_prompt(&framing_prompt("/tmp/x", "Une idée", code)));
+        }
+    }
+
+    #[test]
     fn framing_gives_an_opinion_and_questions_but_no_step() {
         let long = "é".repeat(QUESTION_MAX + 500);
         for code in [true, false] {

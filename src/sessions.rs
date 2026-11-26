@@ -68,6 +68,47 @@ pub struct SessionInfo {
     pub agent_messages: u32,
     pub tokens: Tokens,
     pub path: PathBuf,
+    /// One of Orchestra's own headless calls (see `is_internal_prompt`): left out of the
+    /// session lists, still counted in what was consumed.
+    pub internal: bool,
+}
+
+/// How the prompts of Orchestra's own calls start, in both languages: the project card, the
+/// outside view, proposed steps, a text turned into tasks, commit and release texts, the
+/// responder and the cross review. Orchestra reads their answer itself, nobody resumes them.
+/// Quick questions are not here: the person asked them and may carry them on.
+const INTERNAL_PROMPTS: [&str; 16] = [
+    "Tu es connecté au tableau de bord « orchestra » par MCP.",
+    "You are connected to the « orchestra » dashboard through MCP.",
+    "Remplis la fiche du projet du dossier « ",
+    "Fill in the card of the project in the folder « ",
+    "Donne un regard extérieur sur le projet du dossier « ",
+    "Give an outside view of the project in the folder « ",
+    "Tu prépares le travail d'une IA qui va avancer SEULE sur le projet",
+    "You are preparing the work of an AI that will move the project",
+    "Transforme ce texte en tâches claires et actionnables pour un projet",
+    "Turn this text into clear, actionable tasks for a project",
+    "Écris le message de commit de ces changements.",
+    "Write the commit message for these changes.",
+    "Prépare la prochaine version du projet. Dernière version : ",
+    "Prepare the project's next version. Last version: ",
+    // These two are only written in French.
+    "Tu es le répondeur d'Orchestra.",
+    "Tu es relecteur pour Orchestra.",
+];
+
+/// Whether a first request is one Orchestra wrote for itself.
+pub fn is_internal_prompt(text: &str) -> bool {
+    let t = text.trim_start();
+    INTERNAL_PROMPTS.iter().any(|p| t.starts_with(p))
+}
+
+/// Mark the session from its first request. Called before the message is counted; the second
+/// one is looked at too, as Codex may send the folder's instructions first.
+fn mark_internal(info: &mut SessionInfo, text: &str) {
+    if info.user_messages <= 1 && is_internal_prompt(text) {
+        info.internal = true;
+    }
 }
 
 impl SessionInfo {
@@ -96,6 +137,7 @@ impl SessionInfo {
             agent_messages: 0,
             tokens: Tokens::default(),
             path: path.to_path_buf(),
+            internal: false,
         }
     }
 
@@ -465,6 +507,7 @@ fn claude_line(info: &mut SessionInfo, seen: &mut HashSet<String>, v: &Value) {
         if v.get("isMeta").and_then(Value::as_bool) == Some(true) || !is_human_text(&text) {
             return;
         }
+        mark_internal(info, &text);
         info.user_messages += 1;
         if info.title.is_empty() {
             info.title = short(&text, 120);
@@ -545,6 +588,7 @@ fn codex_line(info: &mut SessionInfo, v: &Value) {
             let text = content_text(p.get("content").unwrap_or(&Value::Null));
             match p.get("role").and_then(Value::as_str) {
                 Some("user") if is_human_text(&text) => {
+                    mark_internal(info, &text);
                     info.user_messages += 1;
                     if info.title.is_empty() {
                         info.title = short(&text, 120);
@@ -947,6 +991,7 @@ mod tests {
             agent_messages: 0,
             tokens: Tokens { billed, cached, cost_micro: 0 },
             path: PathBuf::new(),
+            internal: false,
         };
         let all = vec![
             mk(Tool::ClaudeCode, "/w/copy", 100, 10, 1000),
@@ -959,6 +1004,36 @@ mod tests {
             consumption(&all, Tool::ClaudeCode, Path::new("/w/copy"), 50),
             Tokens { billed: 15, cached: 1050, cost_micro: 0 }
         );
+    }
+
+    #[test]
+    fn orchestras_own_calls_are_marked() {
+        let root = tmp("internal");
+        let dir = root.join("-w");
+        std::fs::create_dir_all(&dir).unwrap();
+        let write = |name: &str, asked: &[&str]| {
+            let lines: String = asked
+                .iter()
+                .map(|t| {
+                    let v = serde_json::json!({"type": "user", "sessionId": name, "cwd": "/w",
+                        "timestamp": "2026-11-18T07:00:00Z", "message": {"content": t}});
+                    format!("{v}\n")
+                })
+                .collect();
+            std::fs::write(dir.join(format!("{name}.jsonl")), lines).unwrap();
+        };
+        write("review", &["Donne un regard extérieur sur le projet du dossier « /w ». Lis-le."]);
+        write("after-instructions", &["# AGENTS.md instructions", "Tu es relecteur pour Orchestra. …"]);
+        write("person", &["Corrige le regard extérieur"]);
+        // A person quoting such a prompt later in their conversation keeps their session.
+        write("quoted", &["Bonjour", "Regarde ça", "Tu es le répondeur d'Orchestra. …"]);
+        let mut sc = Scanner::new(vec![(Tool::ClaudeCode, root.clone())]);
+        sc.scan();
+        let mut internal: Vec<String> =
+            sc.sessions().into_iter().filter(|s| s.internal).map(|s| s.id).collect();
+        internal.sort();
+        assert_eq!(internal, ["after-instructions", "review"]);
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]

@@ -92,7 +92,7 @@ impl LiveIndex {
         }
         self.by_project.clear();
         let mut loose: Vec<(String, Vec<SessionInfo>)> = vec![];
-        for s in live.iter() {
+        for s in live.iter().filter(|s| !s.internal) {
             match ws.project_for_path(std::path::Path::new(&s.cwd)) {
                 Some(p) => {
                     // Hidden by "Effacer l'historique" until it is used again.
@@ -3646,7 +3646,7 @@ impl NotesApp {
     pub(super) fn sync_candidates(&self) -> Vec<SyncCandidate> {
         use crate::sessions::Tool;
         let mut out: Vec<SyncCandidate> = vec![];
-        for s in self.agents.all().iter() {
+        for s in self.agents.all().iter().filter(|s| !s.internal) {
             let root = crate::sync::repo_root(&s.cwd);
             match out.iter_mut().find(|c| c.folder == root) {
                 Some(c) => {

@@ -336,6 +336,7 @@ mod tests {
             agent_messages: 1,
             tokens: Tokens { billed, cached: 0, cost_micro: 0 },
             path: conv.clone(),
+            internal: false,
         };
         let sessions = [
             session(Tool::ClaudeCode, &folder, 680),
