@@ -9,8 +9,10 @@
 //! It uses the person's own Claude / Codex subscription, as if they had typed the request.
 //!
 //! Every other question the app asks an AI without a window is here too. They all go through
-//! the `Provider` trait (`provider`), which Claude Code and Codex implement below.
+//! the `Provider` trait (`provider`), which Claude Code and Codex implement below, and
+//! `openai` for a model behind an OpenAI-compatible address.
 
+pub mod openai;
 pub mod provider;
 
 use crate::LockOrRecover;
