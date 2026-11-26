@@ -779,10 +779,10 @@ impl NotesApp {
             .iter()
             .map(|c| c.id.clone())
             .collect();
-        // In a project in "lecture seule", nothing can be added, and empty pages can't be
-        // unfolded (there is nothing inside to show).
+        // In a project in "lecture seule", nothing can be added.
         let locked = self.ws.is_locked(id);
-        let foldable = !(locked && kids.is_empty());
+        // A page with nothing inside has no arrow: there would be nothing to show.
+        let foldable = !kids.is_empty();
         let open = self.expanded.contains(id) && foldable;
         let selected = self.current.as_deref() == Some(id) && self.view == View::Page;
         let indent = depth as f32 * 12.0;
@@ -882,7 +882,7 @@ impl NotesApp {
                 .clicked()
         {
             actions.push(Action::NewPage(Some(id.to_string())));
-        } else if row.clicked() {
+        } else if row.clicked() || (!foldable && arrow.clicked()) {
             actions.push(Action::Open(id.to_string()));
         }
         if locked {
@@ -922,17 +922,6 @@ impl NotesApp {
             });
         }
         if open {
-            if kids.is_empty() {
-                let w = ui.available_width();
-                let (r, _) = ui.allocate_exact_size(egui::vec2(w, 26.0), egui::Sense::hover());
-                ui.painter().text(
-                    egui::pos2(r.left() + 36.0 + indent + 12.0, r.center().y),
-                    egui::Align2::LEFT_CENTER,
-                    crate::tr!("Aucune page à l'intérieur", "No pages inside"),
-                    FontId::proportional(13.0),
-                    t.tertiary,
-                );
-            }
             // README and Documentation sit under one « Docs » item, where the first one was.
             let docs = crate::docs::docs_group(&self.ws, id);
             for k in &kids {
