@@ -1527,6 +1527,11 @@ pub(super) fn project_panel(ui: &mut egui::Ui, cx: &mut Cx) -> Option<super::not
                                 )
                                 .wrap(),
                             );
+                            // A model chosen in the settings: say who gets the project's summary.
+                            if let Some(service) = crate::sync::openai::Service::from_id(&cx.ai.text_model.service) {
+                                ui.add_space(2.0);
+                                ui.add(egui::Label::new(RichText::new(crate::trf!("Par {} : son serveur reçoit un résumé du dossier (Paramètres › IA).", "By {}: its server gets a summary of the folder (Settings › AI).", service.label())).size(12.5).color(t.secondary)).wrap());
+                            }
                             ui.add_space(6.0);
                             ui.horizontal(|ui| {
                                 if ui.button(if has { crate::tr!("Remplacer", "Replace") } else { crate::tr!("Remplir", "Fill in") }).clicked() {
@@ -3968,8 +3973,12 @@ fn ai_steps(
     ui.horizontal_wrapped(|ui| {
         ui.spacing_mut().item_spacing.x = 8.0;
         let r = ui.add_enabled_ui(folder_ok, |ui| action_link(ui, crate::tr!("Suggérer des étapes", "Suggest steps"))).inner;
+        let how = match crate::sync::openai::Service::from_id(&ai.text_model.service) {
+            Some(service) => crate::trf!("{} reçoit un résumé du dossier (Paramètres › IA) et propose des étapes ; vous choisissez celles à garder.", "{} gets a summary of the folder (Settings › AI) and proposes steps; you choose which to keep.", service.label()),
+            None => crate::tr!("L'IA lit le code sans rien modifier et propose des étapes précises (fonctionnalité, technique, sécurité), faites pour être menées par une IA en autonomie ; vous choisissez celles à garder.", "The AI reads the code without changing anything and proposes precise steps (feature, technical, security), made to be carried out by an AI on its own; you choose which to keep.").to_string(),
+        };
         let r = r
-            .on_hover_text(crate::tr!("L'IA lit le code sans rien modifier et propose des étapes précises (fonctionnalité, technique, sécurité), faites pour être menées par une IA en autonomie ; vous choisissez celles à garder.", "The AI reads the code without changing anything and proposes precise steps (feature, technical, security), made to be carried out by an AI on its own; you choose which to keep."))
+            .on_hover_text(how)
             .on_disabled_hover_text(crate::tr!("Indiquez d'abord le dossier du projet", "Set the project's folder first"));
         if r.clicked() && folder_ok {
             super::ai_fill::request(ui.ctx(), super::ai_fill::AiReq::Tasks { page_id: page_id.to_string(), folder: folder.clone(), existing: existing.clone(), prefer, text: None, images: vec![] });

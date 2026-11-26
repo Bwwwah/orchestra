@@ -519,6 +519,9 @@ pub struct Settings {
     /// subscription, the default; the key itself is in the Keychain (secret.rs).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub ai_api: Vec<String>,
+    /// Who fills projects in and suggests their steps.
+    #[serde(default, skip_serializing_if = "TextModel::is_unset")]
+    pub text_model: TextModel,
     #[serde(default)]
     pub orch: OrchSettings,
     /// Repository the updates come from (owner/name); empty: the one built in.
@@ -542,6 +545,26 @@ impl Settings {
         if on {
             self.ai_api.push(ai_key.to_string());
         }
+    }
+}
+
+/// The model the person chose for « Fill in with the AI » and « Suggest steps », behind an
+/// OpenAI-compatible address (`sync::openai`); its key, if any, is in the Keychain.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Default)]
+pub struct TextModel {
+    /// `openai::Service::id`; "": Claude Code or Codex do this work, the default.
+    #[serde(default)]
+    pub service: String,
+    /// "": the service's usual address.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub url: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub model: String,
+}
+
+impl TextModel {
+    pub fn is_unset(&self) -> bool {
+        self.service.is_empty()
     }
 }
 

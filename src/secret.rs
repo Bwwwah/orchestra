@@ -129,9 +129,31 @@ pub fn api_key(var: &str) -> String {
 }
 
 /// Keep `key` as the API key for `var` (never empty; Keychain, or a 0600 file elsewhere).
-#[allow(dead_code)]
 pub fn set_api_key(var: &str, key: &str) -> Result<(), String> {
     set(&key_account(var), key)
+}
+
+/// Forget the API key kept for `var` (nothing to do when there is none).
+pub fn remove_api_key(var: &str) -> Result<(), String> {
+    let account = key_account(var);
+    if get(&account).is_empty() {
+        return Ok(());
+    }
+    if use_keychain() {
+        let o = security()
+            .args(["delete-generic-password", "-s", SERVICE, "-a", &account])
+            .stdout(std::process::Stdio::null())
+            .output()
+            .map_err(|e| e.to_string())?;
+        if !o.status.success() {
+            return Err(String::from_utf8_lossy(&o.stderr).trim().to_string());
+        }
+    } else {
+        std::fs::remove_file(file(&account)).map_err(|e| e.to_string())?;
+    }
+    let mut c = CACHE.lock().unwrap_or_else(|e| e.into_inner());
+    c.retain(|(a, _)| a != &account);
+    Ok(())
 }
 
 #[cfg(test)]

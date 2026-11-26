@@ -3,16 +3,14 @@
 //! computer (LM Studio, llama.cpp, vLLM…), or Mistral's own service.
 //!
 //! The model gets the prompt and the images, nothing else: it has no tool, so it can't read
-//! the project's folder (what it must know has to be in the prompt), and it keeps no
-//! conversation to carry on.
+//! the project's folder (what it must know has to be in the prompt, see `brief`), and it
+//! keeps no conversation to carry on.
 //!
 //! The call goes through `curl`, everything handed over on its standard input: neither the
 //! key nor the prompt shows on a command line or lands in a temporary file.
 
-// Nothing in the app builds one yet: choosing a provider comes next.
-#![cfg_attr(not(test), allow(dead_code))]
-
 use super::provider::{Provider, Reply, Request};
+use crate::model::TextModel;
 use base64::Engine;
 use serde_json::{Value, json};
 use std::io::{Read, Write};
@@ -35,7 +33,46 @@ pub enum Service {
     Other,
 }
 
+/// How much of a project a model on this computer is told (characters): servers such as
+/// Ollama often give a model a window of 4096 tokens, answer included, and cut what is over
+/// without saying so.
+const LOCAL_BRIEF: usize = 8_000;
+/// The same for a model on a server elsewhere, whose window is far larger.
+const REMOTE_BRIEF: usize = 60_000;
+
 impl Service {
+    pub const ALL: [Service; 3] = [Service::Ollama, Service::Mistral, Service::Other];
+
+    /// The name it is saved under in the settings, and its provider id.
+    pub fn id(self) -> &'static str {
+        match self {
+            Service::Ollama => "ollama",
+            Service::Mistral => "mistral",
+            Service::Other => "openai-compatible",
+        }
+    }
+
+    pub fn from_id(id: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|s| s.id() == id)
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Service::Ollama => "Ollama",
+            Service::Mistral => "Mistral",
+            Service::Other => crate::tr!("Modèle compatible OpenAI", "OpenAI-compatible model"),
+        }
+    }
+
+    /// The address a request goes to, from the one the person typed ("": the usual one).
+    /// Mistral's is always its own, so that its key never goes anywhere else.
+    fn address(self, typed: &str) -> &str {
+        match typed.trim() {
+            u if !u.is_empty() && self != Service::Mistral => u,
+            _ => self.default_url(),
+        }
+    }
+
     /// The usual address ("": the person has to give it).
     pub fn default_url(self) -> &'static str {
         match self {
@@ -77,21 +114,30 @@ impl OpenAi {
         Self::with_key(service, url, model, &key)
     }
 
+    /// The model the settings name; None when they leave the work to Claude Code or Codex.
+    pub fn chosen(choice: &TextModel) -> Option<Self> {
+        Service::from_id(&choice.service).map(|s| Self::new(s, &choice.url, &choice.model))
+    }
+
     fn with_key(service: Service, url: &str, model: &str, key: &str) -> Self {
-        let url = match url.trim() {
-            "" => service.default_url(),
-            u => u,
-        };
         OpenAi {
             service,
-            url: url.trim_end_matches('/').to_string(),
+            url: service.address(url).trim_end_matches('/').to_string(),
             model: model.trim().to_string(),
             key: key.trim().to_string(),
         }
     }
 
+    /// How much of a project to put in a question (characters), see `brief`.
+    pub fn brief_budget(&self) -> usize {
+        match crate::proxy::upstream(&self.url) {
+            Some(u) if is_this_computer(&u.1) => LOCAL_BRIEF,
+            _ => REMOTE_BRIEF,
+        }
+    }
+
     /// What stops a request before anything is sent.
-    fn check(&self) -> Result<(), String> {
+    pub fn check(&self) -> Result<(), String> {
         let invalid = || {
             crate::trf!(
                 "Adresse du modèle invalide : « {} » (attendu : http://… ou https://…).",
@@ -282,19 +328,11 @@ fn read_answer(status: u16, body: &str) -> Result<(String, bool), String> {
 
 impl Provider for OpenAi {
     fn id(&self) -> &str {
-        match self.service {
-            Service::Ollama => "ollama",
-            Service::Mistral => "mistral",
-            Service::Other => "openai-compatible",
-        }
+        self.service.id()
     }
 
     fn label(&self) -> &str {
-        match self.service {
-            Service::Ollama => "Ollama",
-            Service::Mistral => "Mistral",
-            Service::Other => crate::tr!("Modèle compatible OpenAI", "OpenAI-compatible model"),
-        }
+        self.service.label()
     }
 
     fn run(&self, request: &Request, cancel: &AtomicBool) -> Result<Reply, String> {
@@ -384,7 +422,7 @@ impl Provider for OpenAi {
 }
 
 #[cfg(test)]
-mod tests {
+pub(super) mod tests {
     use super::*;
     use std::net::TcpListener;
 
@@ -394,7 +432,7 @@ mod tests {
 
     /// A server that takes one request, gives it back through the channel and answers
     /// `status` with `answer`. Returns its address.
-    fn server(
+    pub(in crate::sync) fn server(
         status: &'static str,
         answer: &'static str,
     ) -> (String, std::sync::mpsc::Receiver<(String, String)>) {
@@ -542,6 +580,31 @@ mod tests {
             ..Request::new("/tmp", "?")
         };
         assert!(ask(&provider, &request).is_err());
+    }
+
+    #[test]
+    fn the_settings_name_the_model_and_its_address() {
+        let choice = |service: &str, url: &str| TextModel {
+            service: service.into(),
+            url: url.into(),
+            model: "m".into(),
+        };
+        // Nothing chosen, or a service this version doesn't know: Claude Code or Codex.
+        assert!(OpenAi::chosen(&TextModel::default()).is_none());
+        assert!(OpenAi::chosen(&choice("autre-chose", "")).is_none());
+        for service in Service::ALL {
+            assert_eq!(Service::from_id(service.id()), Some(service));
+        }
+        // Mistral's key only goes to Mistral, whatever address was left in the settings.
+        let mistral = OpenAi::with_key(Service::Mistral, "https://ailleurs.example/v1", "m", "k");
+        assert_eq!(mistral.url, Service::Mistral.default_url());
+        assert_eq!(mistral.brief_budget(), REMOTE_BRIEF);
+        let local = OpenAi::chosen(&choice("ollama", "")).unwrap();
+        assert_eq!(local.url, Service::Ollama.default_url());
+        assert_eq!(local.brief_budget(), LOCAL_BRIEF);
+        let other = OpenAi::with_key(Service::Other, " http://127.0.0.1:1234/v1/ ", "m", "");
+        assert_eq!(other.url, "http://127.0.0.1:1234/v1");
+        assert_eq!(other.brief_budget(), LOCAL_BRIEF);
     }
 
     #[test]

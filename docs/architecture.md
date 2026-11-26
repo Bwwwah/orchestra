@@ -58,6 +58,7 @@ relève le résultat à chaque image dans une fonction `…_tick`.
 | `mcp.rs` | le serveur MCP : outils pages, bases, projets, étapes, `ask_human` |
 | `setup.rs` | branchement automatique aux IA trouvées sur la machine |
 | `sync.rs` | appels « sans tête » à Claude Code / Codex, en lecture seule : état des lieux, étapes proposées, regard extérieur |
+| `sync/openai.rs`, `sync/brief.rs` | un modèle compatible OpenAI (Ollama, Mistral…) et le résumé du projet qu'il reçoit, faute d'outils |
 | `auto.rs` | le mode autonome (voir [mode-autonome.md](mode-autonome.md)) |
 | `sessions.rs` | lecture en direct des fichiers de session de Claude Code et Codex |
 | `usage.rs` | utilisation de l'abonnement Claude, via la ligne d'état |

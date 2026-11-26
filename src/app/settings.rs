@@ -1419,6 +1419,184 @@ impl NotesApp {
         );
     }
 
+    /// Who fills projects in and suggests their steps: Claude Code or Codex, else a model
+    /// behind an OpenAI-compatible address, with its name, address and key.
+    fn text_model_settings(&mut self, ui: &mut egui::Ui, t: &Tone, l: &Look) {
+        use crate::sync::openai::{OpenAi, Service};
+        section(
+            ui,
+            crate::tr!("Remplir et suggérer des étapes", "Filling in and suggesting steps"),
+            t,
+            l,
+        );
+        let before = self.ws.settings.text_model.clone();
+        let mut choice = before.clone();
+        let service = Service::from_id(&choice.service);
+        let mut choices = vec![crate::tr!("Claude Code ou Codex", "Claude Code or Codex")];
+        choices.extend(Service::ALL.map(|s| match s {
+            Service::Ollama => crate::tr!("Ollama (modèle local)", "Ollama (local model)"),
+            Service::Mistral => crate::tr!("Mistral (clé API)", "Mistral (API key)"),
+            Service::Other => crate::tr!("Autre serveur compatible OpenAI", "Other OpenAI-compatible server"),
+        }));
+        let current = service
+            .and_then(|s| Service::ALL.iter().position(|x| *x == s))
+            .map_or(0, |i| i + 1);
+        row(
+            ui,
+            crate::tr!("IA utilisée", "AI used"),
+            crate::tr!(
+                "Pour « Remplir avec l'IA » (aussi à l'ajout d'un projet) et « Suggérer des étapes ». Claude Code et Codex lisent le dossier. Un autre modèle ne le peut pas : Orchestra envoie à son serveur le titre et les étapes du projet, les noms des fichiers, l'état de git, le début du README et de quelques fichiers (jamais les fichiers cachés), ou le texte et les images que vous donnez.",
+                "For « Fill in with the AI » (also when a project is added) and « Suggest steps ». Claude Code and Codex read the folder. Another model can't: Orchestra sends its server the project's title and steps, the file names, the git state, the beginning of the README and of a few files (never hidden ones), or the text and images you give."
+            ),
+            t,
+            |ui| {
+                if let Some(i) = dropdown(ui, "text-model", &choices, current, t, l)
+                    && i != current
+                {
+                    // The model and address typed were the other service's.
+                    choice = crate::model::TextModel {
+                        service: i
+                            .checked_sub(1)
+                            .map(|i| Service::ALL[i].id().to_string())
+                            .unwrap_or_default(),
+                        ..Default::default()
+                    };
+                }
+            },
+        );
+        if let Some(service) = service.filter(|_| choice.service == before.service) {
+            row(
+                ui,
+                crate::tr!("Modèle", "Model"),
+                match service {
+                    Service::Ollama => crate::tr!(
+                        "Son nom, tel que « ollama list » l'affiche. Pour une image jointe, il doit savoir les lire. Sa fenêtre de contexte est souvent petite : Orchestra ne lui envoie qu'un court résumé du projet.",
+                        "Its name, as « ollama list » shows it. For a joined image, it has to be able to read them. Its context window is often small: Orchestra only sends it a short summary of the project."
+                    ),
+                    _ => crate::tr!(
+                        "Son nom, tel que le serveur l'attend.",
+                        "Its name, as the server expects it."
+                    ),
+                },
+                t,
+                |ui| {
+                    let hint = match service {
+                        Service::Ollama => "qwen3",
+                        Service::Mistral => "mistral-small-latest",
+                        Service::Other => "",
+                    };
+                    ui.add(field(&mut choice.model, hint, 240.0, t, l));
+                },
+            );
+            if service != Service::Mistral {
+                row(
+                    ui,
+                    crate::tr!("Adresse", "Address"),
+                    match service {
+                        Service::Ollama => crate::tr!(
+                            "Vide : Ollama sur cet ordinateur.",
+                            "Empty: Ollama on this computer."
+                        ),
+                        _ => crate::tr!(
+                            "L'adresse qui précède « /chat/completions ».",
+                            "The address that comes before « /chat/completions »."
+                        ),
+                    },
+                    t,
+                    |ui| {
+                        let hint = match service.default_url() {
+                            "" => "http://localhost:1234/v1",
+                            url => url,
+                        };
+                        ui.add(field(&mut choice.url, hint, 240.0, t, l));
+                    },
+                );
+            }
+            if let Some(var) = service.key_var() {
+                self.model_key_row(ui, var, service, t, l);
+            }
+            // What would stop a request, said here rather than at the first one.
+            if let Some(model) = OpenAi::chosen(&choice)
+                && let Err(why) = model.check()
+            {
+                ui.label(RichText::new(why).size(13.0).color(super::style::ORANGE));
+            }
+        }
+        if choice != before {
+            self.ws.settings.text_model = choice;
+            self.dirty_since.get_or_insert_with(Instant::now);
+        }
+    }
+
+    /// The API key of a model's service: typed once, then kept out of sight in the Keychain.
+    fn model_key_row(
+        &mut self,
+        ui: &mut egui::Ui,
+        var: &str,
+        service: crate::sync::openai::Service,
+        t: &Tone,
+        l: &Look,
+    ) {
+        use crate::sync::openai::Service;
+        let kept = !crate::secret::api_key(var).is_empty();
+        let desc = match (service, kept) {
+            (_, false) if service == Service::Mistral => crate::tr!(
+                "Gardée dans le trousseau, jamais dans vos données.",
+                "Kept in the Keychain, never in your data."
+            ),
+            (_, false) => crate::tr!(
+                "Seulement si le serveur en demande une. Gardée dans le trousseau.",
+                "Only if the server asks for one. Kept in the Keychain."
+            ),
+            (Service::Mistral, true) => crate::tr!(
+                "Une clé est enregistrée. Elle n'est envoyée qu'à Mistral.",
+                "A key is saved. It is only sent to Mistral."
+            ),
+            (_, true) => crate::tr!(
+                "Une clé est enregistrée. Elle est envoyée à l'adresse ci-dessus.",
+                "A key is saved. It is sent to the address above."
+            ),
+        };
+        let id = egui::Id::unique(("model-key", var));
+        let mut typed: String = ui.ctx().data(|d| d.get_temp(id)).unwrap_or_default();
+        let mut done = None;
+        row(ui, crate::tr!("Clé API", "API key"), desc, t, |ui| {
+            if kept {
+                if button(ui, crate::tr!("Retirer la clé", "Remove the key"), t, l).clicked() {
+                    done = Some(crate::secret::remove_api_key(var));
+                }
+            } else {
+                // In a narrow window the row runs left to right: the field stays first.
+                let save = |ui: &mut egui::Ui| {
+                    button(ui, crate::tr!("Enregistrer", "Save"), t, l).clicked()
+                };
+                let input = |ui: &mut egui::Ui, typed: &mut String| {
+                    ui.add(field(typed, "", 200.0, t, l).password(true));
+                };
+                let clicked = if ui.layout().main_dir() == egui::Direction::RightToLeft {
+                    let clicked = save(ui);
+                    input(ui, &mut typed);
+                    clicked
+                } else {
+                    input(ui, &mut typed);
+                    save(ui)
+                };
+                if clicked && !typed.trim().is_empty() {
+                    done = Some(crate::secret::set_api_key(var, &typed));
+                }
+            }
+        });
+        match done {
+            Some(Ok(())) => typed.clear(),
+            Some(Err(e)) => self.fail(crate::trf!(
+                "Clé API non enregistrée dans le trousseau : {e}",
+                "The API key couldn't be changed in the Keychain: {e}"
+            )),
+            None => {}
+        }
+        ui.ctx().data_mut(|d| d.insert_temp(id, typed));
+    }
+
     /// One row per known AI: where it stands, and the button that plugs it in.
     fn ai_list(&mut self, ui: &mut egui::Ui, t: &Tone, l: &Look) {
         use crate::setup::Ai;
@@ -1574,6 +1752,7 @@ impl NotesApp {
                 }
             },
         );
+        self.text_model_settings(ui, t, l);
         self.session_settings(ui, t, l);
         // Subscription or API key, for each AI that bills by key.
         section(ui, crate::tr!("Abonnement ou clé API", "Subscription or API key"), t, l);

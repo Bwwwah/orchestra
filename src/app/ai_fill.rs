@@ -3,8 +3,10 @@
 //! from a text the person pastes. Proposals wait for the person's choice.
 
 use super::*;
+use crate::model::TextModel;
 use crate::sessions::Tool;
 use crate::sync::Fill;
+use crate::sync::openai::OpenAi;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
@@ -71,8 +73,8 @@ pub fn request(ctx: &egui::Context, r: AiReq) {
     ctx.data_mut(|d| d.get_temp_mut_or_default::<Vec<AiReq>>(req_key()).push(r));
 }
 
-/// A page filled by an AI, and which one, once done.
-type FillSlot = Slot<Result<(Fill, Tool), String>>;
+/// A page filled by an AI, and who did it, once done.
+type FillSlot = Slot<Result<(Fill, String), String>>;
 /// A quick question: the answer, the AI that gave it and its conversation, once done.
 type AnswerSlot = Slot<Result<crate::sync::QuestionReply, String>>;
 
@@ -93,6 +95,9 @@ pub struct AiJobs {
     carried: HashMap<String, QuickAnswer>,
     /// Projects whose reply being sent asks for the validated plan.
     plan_asked: std::collections::HashSet<String>,
+    /// The settings' choice of who fills in and suggests steps, copied at each tick for the
+    /// cards to say it (they can't reach the settings).
+    pub text_model: TextModel,
 }
 
 impl AiJobs {
@@ -127,6 +132,24 @@ fn spawn<T: Send + 'static>(
         c.request_repaint();
     });
     slot
+}
+
+/// What the dashboard holds of a project, for a model that can't ask for it: its title and
+/// steps. The state of play is left out: filling in writes a new one.
+fn known(title: &str, steps: &[crate::project::Step]) -> String {
+    let mut out = title.trim().to_string();
+    // The open ones first: a long list is cut short at the end.
+    let (done, open): (Vec<_>, Vec<_>) = steps
+        .iter()
+        .partition(|s| s.status == crate::project::StepStatus::Done);
+    for s in open.iter().chain(done.iter().rev()) {
+        let mark = match s.status {
+            crate::project::StepStatus::Done => "x",
+            _ => " ",
+        };
+        out.push_str(&format!("\n- [{mark}] {}", s.title));
+    }
+    out
 }
 
 /// Add `steps` to a project's proposals (ticked), less those already proposed or already in
@@ -217,7 +240,15 @@ impl NotesApp {
         }
     }
 
+    fn known_of(&self, page_id: &str) -> String {
+        self.ws
+            .page(page_id)
+            .and_then(|p| p.project.as_ref().map(|pr| known(&p.title, &pr.steps)))
+            .unwrap_or_default()
+    }
+
     pub(super) fn ai_tick(&mut self, ctx: &egui::Context) {
+        self.ai.text_model.clone_from(&self.ws.settings.text_model);
         let reqs: Vec<AiReq> = ctx
             .data_mut(|d| d.remove_temp::<Vec<AiReq>>(req_key()))
             .unwrap_or_default();
@@ -240,9 +271,20 @@ impl NotesApp {
                     if self.ai.tasks.contains_key(&page_id) {
                         continue;
                     }
-                    let slot = spawn(ctx, move || match text {
-                        Some(t) => crate::sync::text_to_tasks(&folder, &t, &images, prefer),
-                        None => crate::sync::ask_tasks(&folder, &existing, prefer),
+                    let choice = self.ws.settings.text_model.clone();
+                    let known = self.known_of(&page_id);
+                    let slot = spawn(ctx, move || {
+                        // Made here: reading its key may take a moment.
+                        let model = OpenAi::chosen(&choice);
+                        let model = model.as_ref();
+                        match text {
+                            Some(t) => {
+                                crate::sync::text_to_tasks(&folder, &t, &images, prefer, model)
+                            }
+                            None => {
+                                crate::sync::ask_tasks(&folder, &existing, prefer, model, &known)
+                            }
+                        }
                     });
                     self.ai.tasks.insert(page_id, slot);
                 }
@@ -427,15 +469,15 @@ impl NotesApp {
                 .take()
                 .unwrap();
             match res {
-                Ok((f, tool)) => {
+                Ok((f, by)) => {
                     if let Some(pr) = self.ws.page_mut(&id).and_then(|p| p.project.as_mut()) {
-                        apply_fill(pr, &f, tool.label());
+                        apply_fill(pr, &f, &by);
                     }
                     self.detect_changes();
                     self.info(crate::trf!(
                         "{} a rempli le projet.",
                         "{} filled in the project.",
-                        tool.label()
+                        by
                     ));
                 }
                 Err(e) => self.fail(crate::trf!(
@@ -499,7 +541,12 @@ impl NotesApp {
             .display()
             .to_string();
         let code = self.code_forced(&page_id);
-        let slot = spawn(ctx, move || crate::sync::ask_fill(&f, code, prefer));
+        let choice = self.ws.settings.text_model.clone();
+        let known = self.known_of(&page_id);
+        let slot = spawn(ctx, move || {
+            let model = OpenAi::chosen(&choice);
+            crate::sync::ask_fill(&f, code, prefer, model.as_ref(), &known)
+        });
         self.ai.fills.insert(page_id, slot);
     }
 

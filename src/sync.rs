@@ -12,6 +12,7 @@
 //! the `Provider` trait (`provider`), which Claude Code and Codex implement below, and
 //! `openai` for a model behind an OpenAI-compatible address.
 
+mod brief;
 pub mod openai;
 pub mod provider;
 
@@ -628,21 +629,59 @@ pub fn parse_fill(answer: &str) -> Result<Fill, String> {
     })
 }
 
-/// Ask an agent to fill in a project's cards (read-only, web search allowed).
-/// `code`: the project kind forced by the person (None: detected).
+/// A question about the project in `folder`: to `model` when the person chose one, else to
+/// an agent as in `ask`. An agent reads the folder itself; a model gets in the question what
+/// `brief` can tell of it, `known` (what the dashboard holds of the project) included. A
+/// chosen model that fails is never replaced by an agent: nothing goes where the person
+/// didn't choose. Returns the answer and who gave it, as shown to the person.
+fn ask_about(
+    folder: &str,
+    prompt: String,
+    claude_tools: &str,
+    max_turns: u32,
+    prefer: Option<Tool>,
+    model: Option<&openai::OpenAi>,
+    known: &str,
+) -> Result<(String, String), String> {
+    let Some(model) = model else {
+        return ask(folder, prompt, claude_tools, max_turns, prefer)
+            .map(|(answer, tool)| (answer, tool.label().to_string()));
+    };
+    if !crate::project::normalize_folder(folder).is_dir() {
+        return Err(crate::tr!("dossier introuvable", "folder not found").into());
+    }
+    model.check()?;
+    let prompt = brief::with_project(folder, known, model.brief_budget(), &prompt);
+    ask_model(model, &Request::new(folder, &prompt))
+}
+
+/// One question to the chosen model: its answer and its name.
+fn ask_model(model: &openai::OpenAi, request: &Request) -> Result<(String, String), String> {
+    provider::send(model, request, &AtomicBool::new(false))
+        .and_then(provider::answered)
+        .map(|reply| (reply.text, model.label().to_string()))
+}
+
+/// Ask an AI to fill in a project's cards (read-only; an agent may search the web).
+/// `code`: the project kind forced by the person (None: detected). `model` and `known`: see
+/// `ask_about`.
 pub fn ask_fill(
     folder: &str,
     code: Option<bool>,
     prefer: Option<Tool>,
-) -> Result<(Fill, Tool), String> {
-    let (answer, tool) = ask(
+    model: Option<&openai::OpenAi>,
+    known: &str,
+) -> Result<(Fill, String), String> {
+    let (answer, by) = ask_about(
         folder,
         fill_prompt(folder, crate::project::code_kind(folder, code)),
         "Read,Glob,Grep,Bash(git log:*),Bash(git status:*),Bash(ls:*),WebSearch,WebFetch",
         30,
         prefer,
+        model,
+        known,
     )?;
-    Ok((parse_fill(&answer)?, tool))
+    Ok((parse_fill(&answer)?, by))
 }
 
 /// Task titles from an answer: one per "- " / "* " / "1. " line.
@@ -696,6 +735,8 @@ pub fn ask_tasks(
     folder: &str,
     existing: &[String],
     prefer: Option<Tool>,
+    model: Option<&openai::OpenAi>,
+    known: &str,
 ) -> Result<Vec<String>, String> {
     let have = if existing.is_empty() {
         crate::tr!("(aucune)", "(none)").to_string()
@@ -740,12 +781,14 @@ pub fn ask_tasks(
          « - Area: action (file or module) », 140 characters at most. \
          Example: « - Security: escape the folder name passed to the git command (src/git.rs) »."
     );
-    let (answer, _) = ask(
+    let (answer, _) = ask_about(
         folder,
         prompt,
         "Read,Glob,Grep,Bash(git log:*),Bash(git status:*),Bash(ls:*)",
         40,
         prefer,
+        model,
+        known,
     )?;
     let tasks = ai_steps_only(parse_tasks(&answer));
     if tasks.is_empty() {
@@ -906,6 +949,7 @@ pub fn text_to_tasks(
     text: &str,
     images: &[String],
     prefer: Option<Tool>,
+    model: Option<&openai::OpenAi>,
 ) -> Result<Vec<String>, String> {
     let text = if text.trim().is_empty() {
         crate::tr!(
@@ -916,7 +960,18 @@ pub fn text_to_tasks(
     } else {
         text.to_string()
     };
-    let tools_rule = if images.is_empty() {
+    // A chosen model gets the images with the question; an agent reads them itself.
+    let tools_rule = if model.is_some() {
+        if images.is_empty() {
+            String::new()
+        } else {
+            crate::tr!(
+                "Des images sont jointes (captures d'écran, photos…) : tiens-en compte autant que du texte.",
+                "Images are joined (screenshots, photos…): take them into account as much as the text."
+            )
+            .to_string()
+        }
+    } else if images.is_empty() {
         crate::tr!("N'utilise aucun outil.", "Don't use any tool.").to_string()
     } else {
         let list = images
@@ -946,15 +1001,25 @@ pub fn text_to_tasks(
     } else {
         dirs::home_dir().unwrap_or_default().display().to_string()
     };
-    let (answer, _) = ask_with_images(
-        &dir,
-        prompt,
-        "Read",
-        3 + images.len() as u32,
-        prefer,
-        images,
-        Weight::Light,
-    )?;
+    let (answer, _) = match model {
+        Some(model) => ask_model(
+            model,
+            &Request {
+                images,
+                ..Request::new(&dir, &prompt)
+            },
+        )?,
+        None => ask_with_images(
+            &dir,
+            prompt,
+            "Read",
+            3 + images.len() as u32,
+            prefer,
+            images,
+            Weight::Light,
+        )
+        .map(|(answer, tool)| (answer, tool.label().to_string()))?,
+    };
     let tasks = ai_steps_only(parse_tasks(&answer));
     if tasks.is_empty() {
         return Err(crate::tr!(
@@ -1501,6 +1566,67 @@ impl SyncRun {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_chosen_model_fills_a_project_in_and_suggests_its_steps() {
+        let dir = std::env::temp_dir().join(format!("orchestra-model-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("README.md"), "Un jeu de cartes en ligne").unwrap();
+        let folder = dir.display().to_string();
+        let chosen = |url: String| {
+            openai::OpenAi::chosen(&crate::model::TextModel {
+                service: "ollama".into(),
+                url,
+                model: "qwen3".into(),
+            })
+            .unwrap()
+        };
+        // What the server gets: the question's text.
+        let asked = |rx: std::sync::mpsc::Receiver<(String, String)>| {
+            let (_, body) = rx.recv().unwrap();
+            let sent: serde_json::Value = serde_json::from_str(&body).unwrap();
+            sent["messages"][0]["content"].as_str().unwrap().to_string()
+        };
+
+        let (url, rx) = openai::tests::server(
+            "200 OK",
+            r#"{"choices":[{"message":{"content":"```json\n{\"status\":\"active\",\"done\":[\"Le paquet est prêt\"]}\n```"}}]}"#,
+        );
+        let (fill, by) =
+            ask_fill(&folder, Some(false), None, Some(&chosen(url)), "Cartes\n- [ ] Jeu : distribuer")
+                .unwrap();
+        assert_eq!(by, "Ollama");
+        assert_eq!(fill.done, ["Le paquet est prêt"]);
+        let prompt = asked(rx);
+        assert!(prompt.contains("Un jeu de cartes en ligne"), "{prompt}");
+        assert!(prompt.contains("Jeu : distribuer") && prompt.contains("JSON"), "{prompt}");
+
+        let (url, rx) = openai::tests::server(
+            "200 OK",
+            r#"{"choices":[{"message":{"content":"- Jeu : ajouter les scores (README.md)"}}]}"#,
+        );
+        let steps = ask_tasks(&folder, &[], None, Some(&chosen(url)), "").unwrap();
+        assert_eq!(steps, ["Jeu : ajouter les scores (README.md)"]);
+        assert!(asked(rx).contains("Un jeu de cartes en ligne"));
+
+        // From a pasted text: that text alone, nothing of the folder.
+        let (url, rx) = openai::tests::server(
+            "200 OK",
+            r#"{"choices":[{"message":{"content":"- Salle : réserver le gymnase"}}]}"#,
+        );
+        let steps =
+            text_to_tasks(&folder, "penser au gymnase", &[], None, Some(&chosen(url))).unwrap();
+        assert_eq!(steps, ["Salle : réserver le gymnase"]);
+        let prompt = asked(rx);
+        assert!(prompt.contains("penser au gymnase"), "{prompt}");
+        assert!(!prompt.contains("cartes") && !prompt.contains("<projet>"), "{prompt}");
+
+        // The model failing is said, and no agent answers in its place.
+        let (url, _rx) = openai::tests::server("500 Internal Server Error", r#"{"error":"panne"}"#);
+        let error = ask_tasks(&folder, &[], None, Some(&chosen(url)), "").unwrap_err();
+        assert!(error.contains("panne"), "{error}");
+        let _ = std::fs::remove_dir_all(dir);
+    }
 
     /// The command line of a question, from its parts.
     fn ask_args(

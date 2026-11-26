@@ -39,6 +39,15 @@ Habitude conseillée à une IA : `get_project_state` (avec `folder` = son dossie
   « Suggérer des étapes », regard extérieur, `src/sync.rs`) sont **en lecture seule** :
   Claude Code n'a que `Read`, `Glob`, `Grep`, `git log`, `git status` et `ls` ; Codex tourne
   avec `--sandbox read-only`.
+- Dans Réglages → IA (MCP), « Remplir avec l'IA » et « Suggérer des étapes » peuvent être
+  confiés à un modèle (Ollama, Mistral ou un autre serveur compatible OpenAI). Il n'a aucun
+  outil : Orchestra met dans la demande un résumé du projet (`src/sync/brief.rs`) — titre et
+  étapes, noms des fichiers, état de git, début du README, des manifestes, des documents
+  texte et des points d'entrée habituels, jamais les fichiers cachés, ceux dont le nom
+  évoque un secret ni ceux qu'un lien sort du dossier. Le résumé est court pour un modèle
+  sur cet ordinateur. « Depuis un texte » n'envoie que le texte et les images. Si le modèle
+  échoue, aucune autre IA ne répond à sa place. Les autres demandes (question rapide,
+  regard extérieur…) restent à Claude Code ou Codex.
 - L'état des lieux peut être écrit par une IA ; les **étapes** sont à vous : une IA les
   propose, vous choisissez.
 - En mode autonome, l'IA travaille dans une copie du dépôt et ne pousse jamais (voir
