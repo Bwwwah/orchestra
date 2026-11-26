@@ -1355,21 +1355,35 @@ impl Comment {
         c
     }
 
-    #[allow(dead_code)] // Until the page shows the comments.
     fn change(&mut self) {
         self.updated = now_ms().max(self.updated + 1);
+    }
+
+    /// The name to show, as for a message of the discussion (`ChatMsg::author_name`).
+    pub fn author_name<'a>(&'a self, members: &'a [crate::project::ProjectMember]) -> &'a str {
+        members
+            .iter()
+            .find(|m| !self.author_id.is_empty() && m.id == self.author_id && m.ai.is_empty())
+            .map_or(&self.author, |m| &m.name)
+    }
+
+    /// Written by this person: by id when both are known, else by name.
+    pub fn is_by(&self, my_id: &str, my_name: &str) -> bool {
+        if self.author_id.is_empty() || my_id.is_empty() {
+            self.author == my_name
+        } else {
+            self.author_id == my_id
+        }
     }
 }
 
 /// A thread as it is shown: its first comment and the replies, oldest first.
 #[derive(Debug)]
-#[allow(dead_code)] // Until the page shows the comments.
 pub struct CommentThread<'a> {
     pub first: &'a Comment,
     pub replies: Vec<&'a Comment>,
 }
 
-#[allow(dead_code)] // Until the page shows the comments.
 impl Page {
     /// The comment threads of the page, oldest first, without what was deleted. Those of a
     /// block that is gone are there too (`first.block` names no block of the page).
@@ -1435,6 +1449,7 @@ impl Page {
     }
 
     /// Change a comment's text. Returns true when it changed.
+    #[allow(dead_code)] // The page doesn't offer to edit a comment yet.
     pub fn edit_comment(&mut self, id: &str, text: &str) -> bool {
         let text = text.trim();
         let Some(c) = self.comments.get_mut(id) else {

@@ -753,6 +753,8 @@ pub(super) fn quiet_link(ui: &mut egui::Ui, text: &str, t: &Tone) -> egui::Respo
             egui::Stroke::new(1.0, color.gamma_multiply(a)),
         );
     }
+    // Screen readers (and the tests) find it by its text, like a button.
+    resp.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, text));
     resp.on_hover_cursor(egui::CursorIcon::PointingHand)
 }
 

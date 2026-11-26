@@ -1119,6 +1119,7 @@ impl NotesApp {
             vec![]
         };
         let mut answered: Option<(String, String)> = None;
+        let who = self.comment_author(ui.ctx(), &cur);
         let focus = self.focus.take();
         let mut new_focus: Option<(String, Option<usize>)> = None;
         let mut focus_used = false;
@@ -1140,6 +1141,21 @@ impl NotesApp {
                     (708.0 + gutter).min(avail - 20.0).max(240.0)
                 };
                 let margin = ((avail - width - gutter) / 2.0).max(10.0);
+                // A page with comments leaves them room on the right when it can.
+                let commented = self
+                    .ws
+                    .page(&cur)
+                    .is_some_and(|p| comments_ui::wants_margin(ui.ctx(), p, &who));
+                let (margin, width, comment_margin) = if commented {
+                    let min = if project_page {
+                        comments_ui::MIN_PROJECT
+                    } else {
+                        comments_ui::MIN_TEXT
+                    };
+                    comments_ui::place(avail, margin, width, min + gutter)
+                } else {
+                    (margin, width, false)
+                };
                 ui.horizontal_top(|ui| {
                     ui.add_space(margin);
                     ui.vertical(|ui| {
@@ -1354,6 +1370,7 @@ impl NotesApp {
                                 });
                             ui.add_space(16.0);
                         }
+                        comments_ui::resolved_link(ui, page, gutter, &t);
                         // Lecture seule: the text is shown as usual but can't be changed.
                         let (nf, used) = ui
                             .scope(|ui| {
@@ -1385,6 +1402,9 @@ impl NotesApp {
                             }
                             new_focus = page.blocks.last().map(|b| (b.id.clone(), None));
                         }
+                        // Outside « Lecture seule »: a locked page is still commented.
+                        let column = ui.max_rect().x_range();
+                        comments_ui::show(ui, page, &who, column, comment_margin, &t);
                     });
                 });
             });
@@ -1396,6 +1416,38 @@ impl NotesApp {
         } else if !focus_used {
             // The target wasn't drawn yet (a new page appears next frame): keep asking.
             self.focus = focus;
+        }
+    }
+
+    /// Who this person is for the comments of page `id`, as for the discussion.
+    fn comment_author(&self, ctx: &egui::Context, id: &str) -> comments_ui::Who {
+        let name = self.my_name();
+        let members = self
+            .ws
+            .project_of(id)
+            .and_then(|p| p.project.as_ref())
+            .map(|pr| pr.members.clone())
+            .unwrap_or_default();
+        // Only a team space knows its members by id.
+        if !self.ws.whole_shared {
+            return comments_ui::Who {
+                name,
+                id: String::new(),
+                members,
+                can_write: true,
+            };
+        }
+        let my_id = members_ui::team_cx(ctx, false).me;
+        let name = members
+            .iter()
+            .find(|m| !my_id.is_empty() && m.id == my_id)
+            .map_or(name, |m| m.name.clone());
+        comments_ui::Who {
+            name,
+            id: my_id,
+            members,
+            can_write: crate::team::Role::from_key(&crate::space::current().role)
+                != Some(crate::team::Role::Reader),
         }
     }
 
@@ -2337,6 +2389,10 @@ fn blocks_view(
                     }
                 }
                 ui.separator();
+                if ui.button(crate::tr!("Commenter", "Comment")).clicked() {
+                    comments_ui::start(ui.ctx(), &page_id, &b.id);
+                    ui.close();
+                }
                 if ui.button(crate::tr!("Dupliquer", "Duplicate")).clicked() {
                     let mut c = b.clone();
                     c.id = new_id();
@@ -3120,6 +3176,7 @@ pub(crate) use crate::LockOrRecover;
 mod ai_fill;
 mod ai_ui;
 mod chrome;
+mod comments_ui;
 mod conductor;
 mod first_run;
 mod live_ui;
