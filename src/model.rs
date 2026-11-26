@@ -674,7 +674,7 @@ pub struct Workspace {
 pub struct InboxMsg {
     pub id: String,
     pub at: u64,
-    /// "question", "fin", "rapport", "info", "erreur".
+    /// "question", "fin", "rapport", "info", "erreur", "mention" (mentions.rs).
     pub kind: String,
     /// Project page id, when it is about one.
     #[serde(default)]
@@ -1126,7 +1126,7 @@ impl Workspace {
         text: &str,
         page: Option<String>,
     ) {
-        self.inbox.push(InboxMsg {
+        self.push_inbox(InboxMsg {
             id: new_id(),
             at: now_ms(),
             kind: kind.into(),
@@ -1137,6 +1137,10 @@ impl Workspace {
             read: false,
             ..Default::default()
         });
+    }
+
+    pub(crate) fn push_inbox(&mut self, msg: InboxMsg) {
+        self.inbox.push(msg);
         // Keep the inbox to a sane size.
         if self.inbox.len() > 500 {
             let cut = self.inbox.len() - 500;

@@ -24,6 +24,7 @@ mod git;
 mod identity;
 mod live;
 mod mcp;
+mod mentions;
 mod model;
 mod opener;
 mod proc;

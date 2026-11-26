@@ -271,8 +271,17 @@ impl NotesApp {
                 LiveMsg::Chat { msgs } => {
                     // Not echoed back; only those of projects shared here come in.
                     self.chat_sent.extend(msgs.iter().map(|m| m.id.clone()));
+                    let new: Vec<String> = msgs
+                        .iter()
+                        .filter(|m| !self.ws.chat.contains_key(&m.id))
+                        .map(|m| m.id.clone())
+                        .collect();
                     if self.ws.accept_chat(msgs) > 0 {
                         merged_any = true;
+                        if let Some(me) = self.mention_me() {
+                            self.ws
+                                .notify_chat_mentions(&new, &me, &self.inbox_removed);
+                        }
                     }
                 }
             }
@@ -431,9 +440,27 @@ impl NotesApp {
         self.ctx.request_repaint_after(Duration::from_millis(250));
     }
 
+    /// Whose « @ » mentions are looked for in what arrives: in a team space, the member
+    /// this computer's key makes them (None while its server hasn't named them); elsewhere,
+    /// the name they collaborate under.
+    fn mention_me(&self) -> Option<crate::mentions::Me> {
+        if self.ws.whole_shared {
+            let id = super::members_ui::team_cx(&self.ctx, false).me;
+            crate::mentions::Me::member(&id, &self.ws.space_members)
+        } else {
+            Some(crate::mentions::Me {
+                name: self.my_name(),
+                ..Default::default()
+            })
+        }
+    }
+
     /// Merge pages from another person. Returns true when something changed here.
     fn merge_remote(&mut self, pages: Vec<Page>, deleted: BTreeMap<String, u64>) -> bool {
         let mut changed = false;
+        let me = self.mention_me();
+        // Each page received, with what mentioned the person in it before.
+        let mut received = vec![];
         // Only pages of shared projects come in: never one of our private pages, nor a page
         // slipped under one.
         let pages = self.ws.accept_remote(pages);
@@ -459,6 +486,14 @@ impl NotesApp {
                 continue;
             }
             let incoming_json = serde_json::to_string(&incoming).unwrap_or_default();
+            if let Some(me) = &me {
+                let before = self
+                    .ws
+                    .page(&incoming.id)
+                    .map(|p| crate::mentions::in_page(p, me))
+                    .unwrap_or_default();
+                received.push((incoming.id.clone(), before));
+            }
             match self.ws.pages.iter_mut().find(|p| p.id == incoming.id) {
                 Some(ours) => {
                     if collab::merge_page(ours, &incoming) {
@@ -478,6 +513,13 @@ impl NotesApp {
                     self.ws.pages.push(collab::received_new(incoming));
                     changed = true;
                 }
+            }
+        }
+        // Once all are in: a new page's project may have come after it.
+        if let Some(me) = &me {
+            for (id, before) in received {
+                self.ws
+                    .notify_page_mentions(&id, &before, me, &self.inbox_removed);
             }
         }
         if let Some(c) = &self.current
