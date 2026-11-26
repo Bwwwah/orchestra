@@ -580,6 +580,7 @@ mod server_tests {
                     id: txt.into(),
                     project: pid.clone(),
                     author: "moi".into(),
+                    author_id: String::new(),
                     text: txt.into(),
                     at: 1,
                 },
@@ -628,6 +629,7 @@ mod server_tests {
             id: "m1".into(),
             project: p.clone(),
             author: "a".into(),
+            author_id: String::new(),
             text: "salut".into(),
             at: 1,
         };

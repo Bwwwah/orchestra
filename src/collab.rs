@@ -437,6 +437,7 @@ mod tests {
                     id: id.into(),
                     project: pid.clone(),
                     author: "eux".into(),
+                    author_id: String::new(),
                     text: id.into(),
                     at: 1,
                 },

@@ -213,12 +213,13 @@ impl Step {
 /// Longest title of a step received from another computer.
 pub const RECEIVED_STEP_MAX: usize = 300;
 
-/// Longest id of a step's responsible person received from another computer.
-const RECEIVED_ASSIGNEE_MAX: usize = 200;
+/// Longest id of a person (a step's responsible, a message's author) received from another
+/// computer.
+const RECEIVED_PERSON_MAX: usize = 200;
 
-/// A responsible person's id as received: dropped unless it could be a person's.
-fn received_assignee(id: &str) -> String {
-    let ok = id.len() <= RECEIVED_ASSIGNEE_MAX
+/// A person's id as received: dropped unless it could be a person's.
+fn received_person(id: &str) -> String {
+    let ok = id.len() <= RECEIVED_PERSON_MAX
         && !id.chars().any(char::is_control)
         && !id.starts_with(crate::space::AI_MEMBER_PREFIX);
     if ok { id.to_string() } else { String::new() }
@@ -520,7 +521,7 @@ impl Project {
                     s.updated = ts.updated;
                     s.held_by = ts.held_by.clone();
                     s.held_at = ts.held_at;
-                    s.assignee = received_assignee(&ts.assignee);
+                    s.assignee = received_person(&ts.assignee);
                     changed = true;
                 }
                 Some(_) => {}
@@ -528,7 +529,7 @@ impl Project {
                     let mut s = ts.clone();
                     s.title = clean(ts);
                     s.received = true;
-                    s.assignee = received_assignee(&ts.assignee);
+                    s.assignee = received_person(&ts.assignee);
                     // Decided on each computer: another's AIs and models aren't ours.
                     s.model.clear();
                     s.agent = None;
@@ -1147,6 +1148,7 @@ impl Workspace {
                 m.text = m.text.chars().take(RECEIVED_CHAT_MAX).collect::<String>() + "…";
             }
             m.author = crate::richtext::one_line(&m.author, RECEIVED_AUTHOR_MAX);
+            m.author_id = received_person(&m.author_id);
             self.chat.insert(m.id.clone(), m);
             n += 1;
         }
@@ -2106,6 +2108,7 @@ mod tests {
                     id: txt.into(),
                     project: pid.clone(),
                     author: "moi".into(),
+                    author_id: String::new(),
                     text: txt.into(),
                     at: 1,
                 },
@@ -2204,6 +2207,7 @@ mod tests {
             id: id.into(),
             project: project.into(),
             author: "Camille\nseconde ligne".into(),
+            author_id: "ia:Maison".into(),
             text,
             at: 1,
         };
@@ -2218,6 +2222,7 @@ mod tests {
         assert!(ws.chat.contains_key("a") && ws.chat.contains_key("d"));
         assert!(!ws.chat.contains_key("b") && !ws.chat.contains_key("c"));
         assert_eq!(ws.chat["a"].author, "Camille");
+        assert!(ws.chat["a"].author_id.is_empty(), "an AI doesn't write here");
         assert_eq!(ws.chat["d"].text.chars().count(), RECEIVED_CHAT_MAX + 1);
         // Already known: not taken again, not replaced.
         assert_eq!(ws.accept_chat(vec![msg("a", &shared, "changé".into())]), 0);

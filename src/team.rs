@@ -1134,6 +1134,17 @@ struct Conn {
 
 type Conns = Arc<Mutex<Vec<Conn>>>;
 
+/// Messages as a member sends them: none keeps another member's id (only its name is left,
+/// as on a message written before ids).
+fn signed_by(mut msgs: Vec<ChatMsg>, key: &str) -> Vec<ChatMsg> {
+    for m in &mut msgs {
+        if m.author_id != key {
+            m.author_id.clear();
+        }
+    }
+    msgs
+}
+
 /// Queue `texts` for every connection but `from`, in order.
 fn pass_on(conns: &Conns, from: u64, texts: &[String]) {
     if let Ok(list) = conns.lock() {
@@ -1392,7 +1403,7 @@ fn serve_one(id: u64, stream: Replay, db: &Arc<Mutex<Db>>, conns: &Conns) -> Res
                 LiveMsg::Chat { msgs } => {
                     let Ok(d) = db.lock() else { return };
                     if role != Role::Reader {
-                        let msgs = d.absorb_chat(msgs);
+                        let msgs = d.absorb_chat(signed_by(msgs, &key));
                         if !msgs.is_empty() {
                             let mark = json(&Greeting::Seq {
                                 n: d.seq(),
@@ -2230,6 +2241,22 @@ mod tests {
     }
 
     #[test]
+    fn a_member_cannot_sign_a_message_with_anothers_id() {
+        let msg = |id: &str| ChatMsg {
+            id: "m".into(),
+            project: "p".into(),
+            author: "Ana".into(),
+            author_id: id.into(),
+            text: "salut".into(),
+            at: 1,
+        };
+        let out = signed_by(vec![msg("ana"), msg("bob"), msg("")], "ana");
+        let ids: Vec<&str> = out.iter().map(|m| m.author_id.as_str()).collect();
+        assert_eq!(ids, ["ana", "", ""]);
+        assert!(out.iter().all(|m| m.author == "Ana"));
+    }
+
+    #[test]
     fn a_member_coming_back_gets_only_what_came_after() {
         let d = db();
         let page = |t: &str, at: u64| {
@@ -2245,6 +2272,7 @@ mod tests {
             id: "m1".into(),
             project: "p".into(),
             author: "Ana".into(),
+            author_id: String::new(),
             text: "salut".into(),
             at: 4,
         };

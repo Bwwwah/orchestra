@@ -1274,9 +1274,41 @@ pub struct ChatMsg {
     pub id: String,
     /// The project page it belongs to.
     pub project: String,
+    /// The author's name when the message was written: shown when `author_id` names nobody.
+    /// Copies made before `author_id` read it alone.
     pub author: String,
+    /// The author's member id (`ProjectMember::id`) in a team space; empty elsewhere and on
+    /// messages written before.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub author_id: String,
     pub text: String,
     pub at: u64,
+}
+
+impl ChatMsg {
+    /// The name to show: the member's current one, else the one written on the message
+    /// (an old message, a member gone from the space or not received yet).
+    pub fn author_name<'a>(&'a self, members: &'a [crate::project::ProjectMember]) -> &'a str {
+        members
+            .iter()
+            .find(|m| !self.author_id.is_empty() && m.id == self.author_id && m.ai.is_empty())
+            .map_or(&self.author, |m| &m.name)
+    }
+
+    /// Written by this person: by id when both are known, else by name.
+    pub fn is_by(&self, my_id: &str, my_name: &str) -> bool {
+        if self.author_id.is_empty() || my_id.is_empty() {
+            self.author == my_name
+        } else {
+            self.author_id == my_id
+        }
+    }
+
+    /// Both written by the same person (two members may bear the same name).
+    pub fn same_author(&self, other: &ChatMsg) -> bool {
+        self.author_id == other.author_id
+            && (!self.author_id.is_empty() || self.author == other.author)
+    }
 }
 
 impl Workspace {

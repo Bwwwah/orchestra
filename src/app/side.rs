@@ -385,6 +385,12 @@ impl NotesApp {
         ui.add(egui::Label::new(RichText::new(status).size(12.0).color(color)).wrap());
         ui.add_space(6.0);
         let me = self.my_name();
+        // Only a team space knows its members by id.
+        let my_id = if self.ws.whole_shared {
+            super::members_ui::team_cx(ui.ctx(), false).me
+        } else {
+            String::new()
+        };
         let mut msgs: Vec<&ChatMsg> = self.ws.chat.values().filter(|m| m.project == pid).collect();
         msgs.sort_by_key(|m| m.at);
         let composer_h = 86.0;
@@ -403,17 +409,18 @@ impl NotesApp {
                         );
                     });
                 }
-                let mut last_author = String::new();
-                let mut last_at = 0u64;
+                let mut last: Option<&ChatMsg> = None;
                 for m in msgs {
                     // Messages from the same person within 5 minutes are grouped.
-                    let grouped =
-                        m.author == last_author && m.at.saturating_sub(last_at) < 5 * 60_000;
+                    let grouped = last.is_some_and(|l| {
+                        m.same_author(l) && m.at.saturating_sub(l.at) < 5 * 60_000
+                    });
+                    let name = m.author_name(&pr.members);
                     ui.horizontal_top(|ui| {
                         if grouped {
                             ui.add_space(34.0);
                         } else {
-                            face(ui, &m.author);
+                            face(ui, name);
                             ui.add_space(4.0);
                         }
                         let w = ui.available_width();
@@ -421,10 +428,10 @@ impl NotesApp {
                             ui.set_max_width(w);
                             if !grouped {
                                 ui.horizontal(|ui| {
-                                    let who = if m.author == me {
-                                        format!("{} (vous)", m.author)
+                                    let who = if m.is_by(&my_id, &me) {
+                                        crate::trf!("{} (vous)", "{} (you)", name)
                                     } else {
-                                        m.author.clone()
+                                        name.to_string()
                                     };
                                     ui.label(RichText::new(who).font(semibold(13.0)).color(t.text));
                                     ui.label(
@@ -438,8 +445,7 @@ impl NotesApp {
                         });
                     });
                     ui.add_space(if grouped { 2.0 } else { 8.0 });
-                    last_author = m.author.clone();
-                    last_at = m.at;
+                    last = Some(m);
                 }
             });
         ui.add_space(6.0);
@@ -452,10 +458,18 @@ impl NotesApp {
             ),
             true,
         ) {
+            // Under the member's name when the space knows this person, so that copies made
+            // before ids show the same one.
+            let author = pr
+                .members
+                .iter()
+                .find(|m| !my_id.is_empty() && m.id == my_id)
+                .map_or(me, |m| m.name.clone());
             let m = ChatMsg {
                 id: crate::model::new_id(),
                 project: pid.to_string(),
-                author: me,
+                author,
+                author_id: my_id,
                 text,
                 at: crate::model::now_ms(),
             };
@@ -862,7 +876,46 @@ impl NotesApp {
 
 #[cfg(test)]
 mod tests {
-    use super::{CONVERSATION_WAIT_S as W, Waiting, waiting};
+    use super::{CONVERSATION_WAIT_S as W, ChatMsg, Waiting, waiting};
+    use crate::project::ProjectMember;
+
+    #[test]
+    fn a_message_follows_its_member_and_falls_back_on_its_name() {
+        let msg = |author_id: &str, author: &str| ChatMsg {
+            id: "m".into(),
+            project: "p".into(),
+            author: author.into(),
+            author_id: author_id.into(),
+            text: "salut".into(),
+            at: 1,
+        };
+        let members = [ProjectMember {
+            id: "k1".into(),
+            name: "Ana Martin".into(),
+            role: Default::default(),
+            ai: String::new(),
+        }];
+        // The member's current name, whatever the message was signed with.
+        assert_eq!(msg("k1", "ana").author_name(&members), "Ana Martin");
+        // Written before ids, or by someone gone: the name written then.
+        assert_eq!(msg("", "ana").author_name(&members), "ana");
+        assert_eq!(msg("k2", "Bob").author_name(&members), "Bob");
+        // Mine by id even after a rename; a namesake with another id isn't me.
+        assert!(msg("k1", "ana").is_by("k1", "Ana"));
+        assert!(!msg("k2", "Ana").is_by("k1", "Ana"));
+        assert!(msg("", "Ana").is_by("k1", "Ana"));
+        assert!(msg("k1", "Ana").is_by("", "Ana"));
+        assert!(msg("k1", "ana").same_author(&msg("k1", "Ana")));
+        assert!(!msg("k1", "Ana").same_author(&msg("k2", "Ana")));
+        assert!(!msg("k1", "Ana").same_author(&msg("", "Ana")));
+        assert!(msg("", "Ana").same_author(&msg("", "Ana")));
+        assert!(!msg("", "Ana").same_author(&msg("", "Bob")));
+        // A message kept before ids still reads, and writes nothing new.
+        let old = r#"{"id":"m","project":"p","author":"Ana","text":"salut","at":1}"#;
+        let read: ChatMsg = serde_json::from_str(old).unwrap();
+        assert_eq!(read, msg("", "Ana"));
+        assert!(!serde_json::to_string(&read).unwrap().contains("author_id"));
+    }
 
     #[test]
     fn a_carried_on_conversation_waits_for_its_session_then_falls_back() {
