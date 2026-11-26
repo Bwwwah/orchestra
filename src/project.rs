@@ -408,7 +408,6 @@ pub enum Module {
     Versions,
 }
 
-#[allow(dead_code)] // Read by the project view in the next « Modules » steps.
 impl Module {
     pub const ALL: [Module; 5] = [
         Module::Git,
@@ -430,7 +429,6 @@ impl Module {
     }
 }
 
-#[allow(dead_code)] // Same.
 impl Project {
     /// Whether `module` is on: the choice made for this project, else on.
     pub fn has_module(&self, module: Module) -> bool {
@@ -446,6 +444,7 @@ impl Project {
     }
 
     /// Turn `module` on or off for this project (None: its default again).
+    #[allow(dead_code)] // Called by the project's settings in a next « Modules » step.
     pub fn set_module(&mut self, module: Module, on: Option<bool>) {
         let before = self.module_choices.get(module.key()).copied();
         if before == on {

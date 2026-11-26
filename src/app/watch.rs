@@ -218,6 +218,8 @@ pub(super) fn watch_card(
     project: &str,
     folder: &str,
     auto: &mut bool,
+    // The autonomous module: without it, no fix session, by button or by itself.
+    autonomous: bool,
     t: &Tone,
     extra: f32,
 ) -> f32 {
@@ -300,7 +302,7 @@ pub(super) fn watch_card(
                     );
                 }
                 let urgent = important(&found);
-                if !urgent.is_empty() {
+                if autonomous && !urgent.is_empty() {
                     ui.add_space(4.0);
                     let r = ui.add(egui::Button::new(
                         RichText::new(crate::tr!(
@@ -359,6 +361,9 @@ pub(super) fn watch_card(
                 });
             }
         });
+        if !autonomous {
+            return;
+        }
         let color = if *auto { RED } else { t.tertiary };
         ui.checkbox(
             auto,

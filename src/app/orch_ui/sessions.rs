@@ -62,7 +62,14 @@ impl NotesApp {
         for page in self.ws.pages.iter_mut().filter(|p| !p.trashed) {
             let Some(pr) = page.project.as_mut() else { continue };
             let folder = pr.folder.trim().to_string();
-            if !pr.cve_watch || folder.is_empty() || super::watch::checking(&folder) {
+            // The watch and its fix sessions stop with their modules, as their switch is
+            // hidden with them.
+            if !pr.cve_watch
+                || !pr.has_module(crate::project::Module::Git)
+                || !pr.has_module(crate::project::Module::Autonomous)
+                || folder.is_empty()
+                || super::watch::checking(&folder)
+            {
                 continue;
             }
             let last = super::watch::last_result(&folder);

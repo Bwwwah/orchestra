@@ -4,7 +4,7 @@
 
 use super::chrome::relative_time;
 use super::*;
-use crate::project::{Project, ProjectMember, ProjectStatus, StepStatus};
+use crate::project::{Module, Project, ProjectMember, ProjectStatus, StepStatus};
 use crate::sessions::{SessionInfo, human_tokens};
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -969,6 +969,7 @@ fn session_row(
     ui: &mut egui::Ui,
     page_id: &str,
     s: &SessionInfo,
+    modules: &[Module],
     t: &Tone,
 ) -> Option<super::notices::Notice> {
     let mut msg = None;
@@ -1028,16 +1029,18 @@ fn session_row(
                     "{n} message{p}",
                     p = crate::i18n::plural(n as usize)
                 );
-                if s.tokens.billed > 0 {
-                    meta.push_str(&crate::trf!(
-                        " · {} tokens",
-                        " · {} tokens",
-                        human_tokens(s.tokens.billed)
-                    ));
-                }
-                let spent = crate::pricing::dollars(s.tokens.cost_micro);
-                if !spent.is_empty() {
-                    meta.push_str(&format!(" · ≈ {spent}"));
+                if modules.contains(&Module::Budget) {
+                    if s.tokens.billed > 0 {
+                        meta.push_str(&crate::trf!(
+                            " · {} tokens",
+                            " · {} tokens",
+                            human_tokens(s.tokens.billed)
+                        ));
+                    }
+                    let spent = crate::pricing::dollars(s.tokens.cost_micro);
+                    if !spent.is_empty() {
+                        meta.push_str(&format!(" · ≈ {spent}"));
+                    }
                 }
                 for x in [&s.git_branch, &s.model] {
                     if !x.is_empty() {
@@ -1073,40 +1076,43 @@ fn session_row(
                         );
                         return;
                     };
-                    if action_link(ui, crate::tr!("Reprendre ici", "Resume here"))
-                        .on_hover_text(crate::tr!(
-                            "Rouvre la session dans le terminal intégré",
-                            "Reopens the session in the built-in terminal"
-                        ))
-                        .clicked()
-                    {
-                        let title = format!(
-                            "{} · {}",
-                            s.tool.label(),
-                            crate::richtext::one_line(&s.display_title(), 24)
-                        );
-                        super::term_ui::request(ui.ctx(), &title, &s.cwd, Some(resume));
-                    }
-                    if action_link(ui, crate::tr!("Terminal macOS", "macOS Terminal"))
-                        .on_hover_text(&cmd)
-                        .clicked()
-                    {
-                        msg = Some(match crate::sessions::open_in_terminal(&cmd) {
-                            Ok(()) => super::notices::Notice::Ack(
-                                crate::tr!(
-                                    "Session rouverte dans le Terminal.",
-                                    "Session reopened in the Terminal."
-                                )
-                                .to_string(),
-                            ),
-                            Err(e) => {
-                                ui.ctx().copy_text(cmd.clone());
-                                super::notices::Notice::Error(crate::trf!(
-                                    "Terminal indisponible ({e}) : commande copiée.",
-                                    "Terminal unavailable ({e}): command copied."
-                                ))
-                            }
-                        });
+                    // Without the terminal module, only the command to copy.
+                    if modules.contains(&Module::Terminal) {
+                        if action_link(ui, crate::tr!("Reprendre ici", "Resume here"))
+                            .on_hover_text(crate::tr!(
+                                "Rouvre la session dans le terminal intégré",
+                                "Reopens the session in the built-in terminal"
+                            ))
+                            .clicked()
+                        {
+                            let title = format!(
+                                "{} · {}",
+                                s.tool.label(),
+                                crate::richtext::one_line(&s.display_title(), 24)
+                            );
+                            super::term_ui::request(ui.ctx(), &title, &s.cwd, Some(resume));
+                        }
+                        if action_link(ui, crate::tr!("Terminal macOS", "macOS Terminal"))
+                            .on_hover_text(&cmd)
+                            .clicked()
+                        {
+                            msg = Some(match crate::sessions::open_in_terminal(&cmd) {
+                                Ok(()) => super::notices::Notice::Ack(
+                                    crate::tr!(
+                                        "Session rouverte dans le Terminal.",
+                                        "Session reopened in the Terminal."
+                                    )
+                                    .to_string(),
+                                ),
+                                Err(e) => {
+                                    ui.ctx().copy_text(cmd.clone());
+                                    super::notices::Notice::Error(crate::trf!(
+                                        "Terminal indisponible ({e}) : commande copiée.",
+                                        "Terminal unavailable ({e}): command copied."
+                                    ))
+                                }
+                            });
+                        }
                     }
                     if action_link(ui, crate::tr!("Copier la commande", "Copy the command"))
                         .on_hover_text(&cmd)
@@ -1290,7 +1296,9 @@ fn draw_card(ui: &mut egui::Ui, cx: &mut Cx, k: CardKind, extra: f32) -> f32 {
         }
         CardKind::Watch => {
             let folder = cx.pr.folder.trim().to_string();
-            super::watch::watch_card(ui, cx.page_id, &folder, &mut cx.pr.cve_watch, cx.t, extra)
+            let autonomous = cx.pr.has_module(Module::Autonomous);
+            let auto = &mut cx.pr.cve_watch;
+            super::watch::watch_card(ui, cx.page_id, &folder, auto, autonomous, cx.t, extra)
         }
         CardKind::Versions => {
             let folder = cx.pr.folder.trim().to_string();
@@ -1419,7 +1427,7 @@ pub(super) fn project_panel(ui: &mut egui::Ui, cx: &mut Cx) -> Option<super::not
                     {
                         follow = true;
                     }
-                } else if !pr.read_only {
+                } else if !pr.read_only && pr.has_module(Module::Autonomous) {
                     let folder_ok = !pr.folder.trim().is_empty();
                     blocked = launch_block(cx_can_launch, folder_ok, pr);
                     let r = ui
@@ -1498,7 +1506,7 @@ pub(super) fn project_panel(ui: &mut egui::Ui, cx: &mut Cx) -> Option<super::not
                     }
                     ui.label(RichText::new(crate::trf!("{done}/{total} étapes", "{done}/{total} steps")).color(t.secondary));
                     ui.label(RichText::new(format!("· {}", relative_time(last))).color(t.tertiary));
-                    if tokens > 0 {
+                    if tokens > 0 && pr.has_module(Module::Budget) {
                         ui.label(RichText::new(crate::trf!("· {} tokens", "· {} tokens", human_tokens(tokens))).color(t.tertiary))
                             .on_hover_text(crate::tr!("Total des sessions Claude Code / Codex de ce projet (hors lectures de cache)", "Total of this project's Claude Code / Codex sessions (cache reads excluded)"));
                     }
@@ -1560,7 +1568,7 @@ pub(super) fn project_panel(ui: &mut egui::Ui, cx: &mut Cx) -> Option<super::not
     // The rest in tabs: the overview (where it stands, what is left, the sessions) is what
     // one comes for; versions, the watch, the pages and the outside view are a click away.
     let code = shows_git(ui.ctx(), cx.pr);
-    let tabs = project_tabs(code, !cx.pr.members.is_empty());
+    let tabs = project_tabs(code, !cx.pr.members.is_empty(), &cx.pr.modules());
     let tab_key = egui::Id::unique(("project-tab", cx.page_id));
     let mut tab: ProjectTab = ui.ctx().data(|d| d.get_temp(tab_key)).unwrap_or_default();
     // A tour pointing at a card shows its tab.
@@ -1604,7 +1612,7 @@ pub(super) fn project_panel(ui: &mut egui::Ui, cx: &mut Cx) -> Option<super::not
             ui.add_space(gap);
             // The activity: starting a session, and those that ran here.
             let mut act = vec![];
-            if !cx.pr.folder.trim().is_empty() {
+            if !cx.pr.folder.trim().is_empty() && cx.pr.has_module(Module::Terminal) {
                 act.push(NewSession);
             }
             act.push(Sessions);
@@ -1832,12 +1840,16 @@ impl ProjectTab {
     }
 }
 
-/// The tabs shown: versions and the vulnerability watch only for code projects, the
-/// members only for a project of a team space.
-pub(super) fn project_tabs(code: bool, team: bool) -> Vec<ProjectTab> {
+/// The tabs shown: versions and the vulnerability watch only for code projects with the
+/// git module (`modules`: those that are on), versions with theirs too; the members only
+/// for a project of a team space.
+pub(super) fn project_tabs(code: bool, team: bool, modules: &[Module]) -> Vec<ProjectTab> {
     let mut v = vec![ProjectTab::Overview];
-    if code {
-        v.extend([ProjectTab::Versions, ProjectTab::Watch]);
+    if code && modules.contains(&Module::Git) {
+        if modules.contains(&Module::Versions) {
+            v.push(ProjectTab::Versions);
+        }
+        v.push(ProjectTab::Watch);
     }
     v.extend([ProjectTab::Pages, ProjectTab::Review]);
     if team {
@@ -2132,6 +2144,7 @@ fn steps_card(ui: &mut egui::Ui, cx: &mut Cx, extra: f32) -> f32 {
     let prefer = cx.live.first().map(|s| s.tool);
     let me = cx.team.me.as_str();
     let (running, can_launch) = (cx.running, cx.can_launch);
+    let autonomous = pr.has_module(Module::Autonomous);
     let actions = &mut *cx.actions;
     let sessions = cx.step_sessions.as_slice();
     // ---- Steps: open ones first, one line each; done ones folded.
@@ -2263,6 +2276,7 @@ fn steps_card(ui: &mut egui::Ui, cx: &mut Cx, extra: f32) -> f32 {
                 // « Lancer »: a session on this step alone, with its AI. Not on the step a
                 // running session is already doing.
                 let offer = !ro
+                    && autonomous
                     && s.agent.is_some()
                     && s.status != StepStatus::Done
                     && !(running && s.status == StepStatus::Doing)
@@ -3278,6 +3292,27 @@ mod new_step_field_tests {
         h.get_by_label("Lancer");
     }
 
+    /// With the autonomous module off, a step entrusted to an AI has no « Lancer ».
+    #[test]
+    fn a_project_without_the_autonomous_module_offers_no_step_launch() {
+        let mut h = harness(|ui, cx| {
+            steps_card(ui, cx, 0.0);
+        });
+        let pr = &mut h.state_mut().pr;
+        pr.folder = "/tmp/projet".into();
+        let id = pr.add_step("Tester", "moi");
+        pr.set_step_agent(&id, Some(crate::auto::Agent::Codex));
+        pr.set_module(crate::project::Module::Autonomous, Some(false));
+        h.run();
+        h.get_by_label("Tester");
+        assert!(h.query_by_label("Lancer").is_none());
+        h.state_mut()
+            .pr
+            .set_module(crate::project::Module::Autonomous, None);
+        h.run();
+        h.get_by_label("Lancer");
+    }
+
     /// Without a team there is nobody to name: no « Responsable » menu.
     #[test]
     fn a_project_without_members_offers_no_responsible_person() {
@@ -3425,7 +3460,7 @@ mod new_step_field_tests {
 
 #[cfg(test)]
 mod card_layout_tests {
-    use super::{ProjectTab, project_tabs, tab_of_mark};
+    use super::{Module, ProjectTab, project_tabs, tab_of_mark};
 
     /// The sessions are grouped by AI provider, in the order each first comes (the live
     /// ones first), so each gets a box of its own.
@@ -3449,9 +3484,13 @@ mod card_layout_tests {
     #[test]
     fn project_tabs_follow_the_kind_of_project() {
         use ProjectTab::*;
-        assert_eq!(project_tabs(true, false), [Overview, Versions, Watch, Pages, Review]);
-        assert_eq!(project_tabs(false, false), [Overview, Pages, Review]);
-        assert_eq!(project_tabs(false, true), [Overview, Pages, Review, Members]);
+        let all = &Module::ALL;
+        assert_eq!(project_tabs(true, false, all), [Overview, Versions, Watch, Pages, Review]);
+        assert_eq!(project_tabs(false, false, all), [Overview, Pages, Review]);
+        assert_eq!(project_tabs(false, true, all), [Overview, Pages, Review, Members]);
+        // A module turned off takes its tabs with it; versions need git too.
+        assert_eq!(project_tabs(true, false, &[Module::Git]), [Overview, Watch, Pages, Review]);
+        assert_eq!(project_tabs(true, false, &[Module::Versions]), [Overview, Pages, Review]);
         assert_eq!(tab_of_mark("card:members"), Some(Members));
         assert_eq!(ProjectTab::default(), Overview);
         assert_eq!(tab_of_mark("card:versions"), Some(Versions));
@@ -3912,6 +3951,7 @@ fn other_session_row(ui: &mut egui::Ui, s: &crate::project::SessionRef, t: &Tone
 
 fn sessions_card(ui: &mut egui::Ui, cx: &mut Cx, extra: f32) -> f32 {
     let (page_id, pr, t, live) = (cx.page_id, &*cx.pr, cx.t, cx.live);
+    let modules = pr.modules();
     // ---- Sessions: live ones read from disk, plus those an AI linked itself.
     let mut msg = None;
     let mut clear = false;
@@ -3952,7 +3992,7 @@ fn sessions_card(ui: &mut egui::Ui, cx: &mut Cx, extra: f32) -> f32 {
         for (label, live_i, other_i) in &groups {
             let mut rows = |ui: &mut egui::Ui| {
                 for &i in live_i.iter().take(if all { usize::MAX } else { 4 }) {
-                    if let Some(m) = session_row(ui, page_id, &live[i], t) {
+                    if let Some(m) = session_row(ui, page_id, &live[i], &modules, t) {
                         msg = Some(m);
                     }
                 }
@@ -5024,6 +5064,7 @@ fn quick_question(ui: &mut egui::Ui, cx: &mut Cx) {
                                 );
                             }
                             if let Some(resume) = &a.resume
+                                && cx.pr.has_module(Module::Terminal)
                                 && quiet_link(
                                     ui,
                                     crate::tr!("Ouvrir dans un terminal", "Open in a terminal"),
