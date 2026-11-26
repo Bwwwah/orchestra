@@ -676,6 +676,30 @@ impl Project {
         moved
     }
 
+    /// Put the steps `ids` in that order, in the places they already take: the other
+    /// steps don't move. False when nothing moved.
+    pub fn reorder_steps(&mut self, ids: &[String]) -> bool {
+        let slots: Vec<usize> = (0..self.steps.len())
+            .filter(|&i| ids.contains(&self.steps[i].id))
+            .collect();
+        let wanted: Vec<Step> = ids
+            .iter()
+            .filter_map(|id| self.steps.iter().find(|s| s.id == *id).cloned())
+            .collect();
+        // An unknown or repeated id: nothing is touched.
+        if wanted.len() != ids.len() || slots.len() != ids.len() {
+            return false;
+        }
+        let moved = slots.iter().zip(&wanted).any(|(&i, s)| self.steps[i].id != s.id);
+        if moved {
+            for (i, s) in slots.into_iter().zip(wanted) {
+                self.steps[i] = s;
+            }
+            self.touch();
+        }
+        moved
+    }
+
     pub fn remove_done_steps(&mut self) -> usize {
         let before = self.steps.len();
         let t = now_ms();
@@ -1678,6 +1702,23 @@ mod tests {
         // The next step follows the new order.
         p.move_step(&ids[1], Some(&ids[0]));
         assert_eq!(p.next_step().unwrap().title, "B");
+    }
+
+    #[test]
+    fn steps_are_reordered_in_their_own_places() {
+        let mut p = Project::new("/tmp/x");
+        let ids: Vec<String> = ["A", "B", "C", "D"]
+            .iter()
+            .map(|t| p.add_step(t, SOURCE_PERSON))
+            .collect();
+        let order = |p: &Project| p.steps.iter().map(|s| s.title.as_str()).collect::<String>();
+        // A and C swap; B and D stay where they are.
+        assert!(p.reorder_steps(&[ids[2].clone(), ids[0].clone()]));
+        assert_eq!(order(&p), "CBAD");
+        assert!(!p.reorder_steps(&[ids[2].clone(), ids[0].clone()]), "already so");
+        assert!(!p.reorder_steps(&[ids[0].clone(), "absent".into()]));
+        assert!(!p.reorder_steps(&[ids[0].clone(), ids[0].clone()]));
+        assert_eq!(order(&p), "CBAD");
     }
 
     #[test]

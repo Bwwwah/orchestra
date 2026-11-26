@@ -789,21 +789,106 @@ fn t_text_fallback() -> Color32 {
     Color32::PLACEHOLDER
 }
 
-/// "Backend : implémenter X" → ("Backend", "implémenter X"): AIs often prefix steps
-/// with an area; it becomes a small tag so the line reads faster.
-fn split_area(title: &str) -> (Option<&str>, &str) {
+/// "Backend : implémenter X" → ("Backend", "implémenter X"): the theme AIs put before a
+/// step (see `AI_STEP_FORMAT`); the Steps card groups the steps under it. A colon with
+/// nothing after it but more text (« https://… », « 10:30 ») starts no theme.
+fn split_theme(title: &str) -> (Option<&str>, &str) {
     if let Some((a, rest)) = title.split_once(':') {
         let a = a.trim();
         if !a.is_empty()
-            && a.chars().count() <= 18
-            && a.split_whitespace().count() <= 2
-            && !a.contains('`')
+            && a.chars().count() <= 40
+            && a.split_whitespace().count() <= 4
+            && !a.contains(['(', ')', '«', '»', '"', '`'])
+            && rest.starts_with(char::is_whitespace)
             && !rest.trim().is_empty()
         {
             return (Some(a), rest.trim());
         }
     }
     (None, title)
+}
+
+/// The steps of one theme (indexes into the project's steps).
+struct StepGroup {
+    /// None: the steps without a theme.
+    theme: Option<String>,
+    open: Vec<usize>,
+    done: Vec<usize>,
+}
+
+impl StepGroup {
+    /// What tells the groups apart: the theme, whatever its case.
+    fn key(&self) -> String {
+        theme_key(self.theme.as_deref())
+    }
+}
+
+fn theme_key(theme: Option<&str>) -> String {
+    theme.unwrap_or_default().to_lowercase()
+}
+
+/// The steps by theme, each theme once. Themes come in the order of their first open
+/// step; those with only finished steps come after.
+fn step_groups(steps: &[crate::project::Step]) -> Vec<StepGroup> {
+    let mut groups: Vec<StepGroup> = vec![];
+    let mut at = std::collections::HashMap::new();
+    for finished in [false, true] {
+        for (i, s) in steps.iter().enumerate() {
+            if (s.status == StepStatus::Done) != finished {
+                continue;
+            }
+            let theme = split_theme(&s.title).0;
+            let g = *at.entry(theme_key(theme)).or_insert_with(|| {
+                groups.push(StepGroup {
+                    theme: theme.map(str::to_string),
+                    open: vec![],
+                    done: vec![],
+                });
+                groups.len() - 1
+            });
+            if finished {
+                groups[g].done.push(i);
+            } else {
+                groups[g].open.push(i);
+            }
+        }
+    }
+    groups
+}
+
+/// A theme's open steps (`ids`, as shown) with `moved` put just before `before`, or at
+/// their end with None.
+fn order_with(ids: &[String], moved: &str, before: Option<&str>) -> Vec<String> {
+    if before == Some(moved) {
+        return ids.to_vec();
+    }
+    let mut out: Vec<String> = ids.iter().filter(|x| *x != moved).cloned().collect();
+    let to = before
+        .and_then(|b| out.iter().position(|x| x == b))
+        .unwrap_or(out.len());
+    out.insert(to, moved.to_string());
+    out
+}
+
+/// The six dots of a drag handle, in a space `height` tall. `shown`: false leaves the
+/// space empty (nothing to reorder).
+fn drag_handle(ui: &mut egui::Ui, height: f32, shown: bool, held: bool, t: &Tone) -> egui::Response {
+    let (r, h) = ui.allocate_exact_size(egui::vec2(10.0, height), egui::Sense::drag());
+    if !shown {
+        return h;
+    }
+    let col = if h.hovered() || h.dragged() || held {
+        t.secondary
+    } else {
+        t.border
+    };
+    for dy in [-5.0, 0.0, 5.0] {
+        for dx in [-2.0, 2.0] {
+            ui.painter()
+                .circle_filled(r.center() + egui::vec2(dx, dy), 1.3, col);
+        }
+    }
+    h.on_hover_cursor(egui::CursorIcon::Grab)
 }
 
 /// Status of a step as a round icon: ○ to do, ◐ in progress, ● done.
@@ -1845,31 +1930,81 @@ fn steps_card(ui: &mut egui::Ui, cx: &mut Cx, extra: f32) -> f32 {
         let mut cycle = None;
         let mut remove = None;
         let show_done = flag(ui, ("done-open", page_id));
-        let rows: Vec<usize> = (0..pr.steps.len())
-            .filter(|&i| pr.steps[i].status != StepStatus::Done)
-            .chain(
-                (0..pr.steps.len())
-                    .filter(|&i| show_done && pr.steps[i].status == StepStatus::Done),
-            )
+        let groups = step_groups(&pr.steps);
+        // A single group without a theme is a plain list: no heading.
+        let headed = groups.iter().any(|g| g.theme.is_some());
+        let open_groups = groups.iter().filter(|g| !g.open.is_empty()).count();
+        // The rows as shown: each theme's open steps, then its finished ones when asked.
+        let rows: Vec<(usize, usize)> = groups
+            .iter()
+            .enumerate()
+            .flat_map(|(g, group)| {
+                let done = group.done.iter().filter(move |_| show_done);
+                group.open.iter().chain(done).map(move |&i| (g, i))
+            })
             .collect();
         if pr.steps.is_empty() {
             ui.label(RichText::new(crate::tr!("Aucune étape. Ajoutez-en une, demandez des suggestions à l'IA, ou collez un texte à transformer en étapes.", "No step. Add one, ask the AI for suggestions, or paste a text to turn into steps.")).color(t.tertiary).italics());
         }
-        // Open steps are put in order by dragging them by their handle (left of the circle).
+        // Open steps are put in order within their theme by dragging them by their handle
+        // (left of the circle); a whole theme moves by the handle of its heading.
         let drag_key = egui::Id::unique(("step-drag", page_id));
-        let mut dragging: Option<String> = ui.ctx().data(|d| d.get_temp(drag_key));
-        let open_count = pr
-            .steps
-            .iter()
-            .filter(|s| s.status != StepStatus::Done)
-            .count();
-        let mut open_rows: Vec<(String, egui::Rect)> = vec![];
+        // (true, theme key) for a theme, (false, step id) for a step.
+        let mut dragging: Option<(bool, String)> = ui.ctx().data(|d| d.get_temp(drag_key));
+        // (group, step id, its row).
+        let mut open_rows: Vec<(usize, String, egui::Rect)> = vec![];
+        // The place each theme with open steps takes, from its heading to its last open row.
+        let mut blocks: Vec<(usize, egui::Rect)> = vec![];
         let mut set_assign: Option<(String, Option<crate::auto::Agent>, String)> = None;
-        for i in rows {
+        let mut last_group = None;
+        for (g, i) in rows {
+            let group = &groups[g];
+            if headed && last_group != Some(g) {
+                if last_group.is_some() {
+                    ui.add_space(6.0);
+                }
+                let held = dragging
+                    .as_ref()
+                    .is_some_and(|(whole, k)| *whole && *k == group.key());
+                let heading = ui.horizontal(|ui| {
+                    if !ro {
+                        let movable = !group.open.is_empty() && open_groups > 1;
+                        let h = drag_handle(ui, 18.0, movable, held, t);
+                        if movable {
+                            if h.drag_started() {
+                                dragging = Some((true, group.key()));
+                            }
+                            h.on_hover_text(crate::tr!(
+                                "Glisser pour déplacer tout le thème",
+                                "Drag to move the whole theme"
+                            ));
+                        }
+                    }
+                    ui.label(
+                        RichText::new(
+                            group
+                                .theme
+                                .as_deref()
+                                .unwrap_or(crate::tr!("Sans thème", "No theme")),
+                        )
+                        .size(13.0)
+                        .strong()
+                        .color(t.secondary),
+                    );
+                });
+                if !group.open.is_empty() {
+                    blocks.push((g, heading.response.rect));
+                }
+                ui.add_space(2.0);
+            }
+            last_group = Some(g);
             let s = &pr.steps[i];
             let open_key = ("step-open", s.id.as_str());
             let open = flag(ui, open_key);
-            let (area, text) = split_area(&s.title);
+            let text = split_theme(&s.title).1;
+            let held = dragging
+                .as_ref()
+                .is_some_and(|(whole, id)| !*whole && *id == s.id);
             let color = if s.status == StepStatus::Done {
                 t.tertiary
             } else {
@@ -1878,37 +2013,20 @@ fn steps_card(ui: &mut egui::Ui, cx: &mut Cx, extra: f32) -> f32 {
             let bg = hover_begin(ui);
             let row = ui.horizontal_top(|ui| {
                 if !ro {
-                    let (hr, h) =
-                        ui.allocate_exact_size(egui::vec2(10.0, 22.0), egui::Sense::drag());
-                    if s.status != StepStatus::Done && open_count > 1 {
-                        let active = h.hovered()
-                            || h.dragged()
-                            || dragging.as_deref() == Some(s.id.as_str());
-                        let col = if active { t.secondary } else { t.border };
-                        for dy in [-5.0, 0.0, 5.0] {
-                            for dx in [-2.0, 2.0] {
-                                ui.painter().circle_filled(
-                                    hr.center() + egui::vec2(dx, dy),
-                                    1.3,
-                                    col,
-                                );
-                            }
-                        }
+                    let movable = s.status != StepStatus::Done && group.open.len() > 1;
+                    let h = drag_handle(ui, 22.0, movable, held, t);
+                    if movable {
                         if h.drag_started() {
-                            dragging = Some(s.id.clone());
+                            dragging = Some((false, s.id.clone()));
                         }
-                        h.on_hover_cursor(egui::CursorIcon::Grab)
-                            .on_hover_text(crate::tr!(
-                                "Glisser pour changer l'ordre",
-                                "Drag to change the order"
-                            ));
+                        h.on_hover_text(crate::tr!(
+                            "Glisser pour changer l'ordre",
+                            "Drag to change the order"
+                        ));
                     }
                 }
                 if step_icon(ui, &s.id, s.status, t).clicked() && !ro {
                     cycle = Some(s.id.clone());
-                }
-                if let Some(a) = area {
-                    chip(ui, a, t.secondary, egui::Sense::hover());
                 }
                 // Entrusted to an AI: said on the row, in that AI's colour.
                 if let Some(ag) = s.agent.filter(|_| s.status != StepStatus::Done) {
@@ -2013,7 +2131,14 @@ fn steps_card(ui: &mut egui::Ui, cx: &mut Cx, extra: f32) -> f32 {
                 egui::Id::unique(("step-row", &s.id)),
                 t,
             );
-            if dragging.as_deref() == Some(s.id.as_str()) {
+            let moving = dragging.as_ref().is_some_and(|(whole, k)| {
+                if *whole {
+                    *k == group.key()
+                } else {
+                    *k == s.id
+                }
+            });
+            if moving {
                 ui.painter().rect_filled(
                     row.response.rect.expand2(egui::vec2(6.0, 2.0)),
                     6.0,
@@ -2021,7 +2146,10 @@ fn steps_card(ui: &mut egui::Ui, cx: &mut Cx, extra: f32) -> f32 {
                 );
             }
             if s.status != StepStatus::Done {
-                open_rows.push((s.id.clone(), row.response.rect));
+                open_rows.push((g, s.id.clone(), row.response.rect));
+                if let Some((_, block)) = blocks.last_mut().filter(|b| b.0 == g) {
+                    *block = block.union(row.response.rect);
+                }
             }
             if row.inner.clicked() {
                 toggle_flag(ui, open_key);
@@ -2029,28 +2157,45 @@ fn steps_card(ui: &mut egui::Ui, cx: &mut Cx, extra: f32) -> f32 {
             ui.add_space(4.0);
         }
         // While dragging: a line where the step would land; it moves there on release.
-        if let Some(d) = dragging.clone() {
+        // A step stays among its theme's rows; a theme goes between the other themes.
+        let mut reorder: Option<Vec<String>> = None;
+        let mut move_theme: Option<(Vec<String>, Option<String>)> = None;
+        if let Some((whole, d)) = dragging.clone() {
             let released = ui.input(|i| i.pointer.any_released() || !i.pointer.primary_down());
-            if let (Some(pos), Some((_, first))) =
-                (ui.ctx().pointer_latest_pos(), open_rows.first())
-            {
-                ui.ctx().set_cursor_icon(egui::CursorIcon::Grabbing);
-                let target = open_rows
+            // The places it can land among: (group or step id, rect).
+            let own = open_rows.iter().find(|r| r.1 == d).map(|r| r.0);
+            let places: Vec<(usize, &str, egui::Rect)> = if whole {
+                blocks.iter().map(|&(g, r)| (g, "", r)).collect()
+            } else {
+                open_rows
                     .iter()
-                    .find(|(_, r)| pos.y < r.center().y)
-                    .map(|(id, r)| (id.clone(), r.top() - 1.0));
-                let y = target
-                    .as_ref()
-                    .map(|(_, y)| *y)
-                    .or_else(|| open_rows.last().map(|(_, r)| r.bottom() + 1.0))
-                    .unwrap_or(first.top());
-                ui.painter().hline(
-                    first.left()..=first.right(),
-                    y,
-                    egui::Stroke::new(2.0, BLUE),
-                );
-                if released {
-                    pr.move_step(&d, target.as_ref().map(|(id, _)| id.as_str()));
+                    .filter(|r| Some(r.0) == own)
+                    .map(|(g, id, r)| (*g, id.as_str(), *r))
+                    .collect()
+            };
+            if let (Some(pos), Some(last)) = (ui.ctx().pointer_latest_pos(), places.last()) {
+                ui.ctx().set_cursor_icon(egui::CursorIcon::Grabbing);
+                let target = places.iter().find(|p| pos.y < p.2.center().y);
+                let y = target.map_or(last.2.bottom() + 1.0, |p| p.2.top() - 1.0);
+                let x = ui.max_rect().x_range();
+                ui.painter().hline(x, y, egui::Stroke::new(2.0, BLUE));
+                if released && whole {
+                    let ids = |g: usize| -> Vec<String> {
+                        groups[g].open.iter().map(|&i| pr.steps[i].id.clone()).collect()
+                    };
+                    let from = blocks.iter().find(|b| groups[b.0].key() == d).map(|b| b.0);
+                    if let Some(from) = from.filter(|&f| target.is_none_or(|p| p.0 != f)) {
+                        // Before the target theme's first open step, as stored.
+                        let before = target.map(|p| ids(p.0).swap_remove(0));
+                        move_theme = Some((ids(from), before));
+                    }
+                } else if let Some(own) = own.filter(|_| released) {
+                    let ids: Vec<String> = groups[own]
+                        .open
+                        .iter()
+                        .map(|&i| pr.steps[i].id.clone())
+                        .collect();
+                    reorder = Some(order_with(&ids, &d, target.map(|p| p.1)));
                 }
             }
             if released {
@@ -2062,8 +2207,16 @@ fn steps_card(ui: &mut egui::Ui, cx: &mut Cx, extra: f32) -> f32 {
             Some(d) => {
                 data.insert_temp(drag_key, d.clone());
             }
-            None => data.remove::<String>(drag_key),
+            None => data.remove::<(bool, String)>(drag_key),
         });
+        if let Some(order) = reorder {
+            pr.reorder_steps(&order);
+        }
+        if let Some((ids, before)) = move_theme {
+            for id in ids {
+                pr.move_step(&id, before.as_deref());
+            }
+        }
         if done > 0 {
             // "Supprimer les terminées": a second click confirms, nothing goes on one slip.
             let confirm_key = ("clear-done", page_id);
@@ -2424,10 +2577,139 @@ mod session_pick_tests {
 }
 
 #[cfg(test)]
+mod step_group_tests {
+    use super::{StepStatus, order_with, split_theme, step_groups};
+    use crate::project::Project;
+
+    #[test]
+    fn a_step_s_theme_is_what_comes_before_its_colon() {
+        assert_eq!(split_theme("Ergonomie : réduire le titre"), (Some("Ergonomie"), "réduire le titre"));
+        assert_eq!(split_theme("Écriture simultanée en équipe: tester"), (Some("Écriture simultanée en équipe"), "tester"));
+        for plain in [
+            "Corriger le bouton",
+            "Voir https://exemple.org/a",
+            "Réunion à 10:30",
+            "Corriger (voir src/a.rs) : le bouton",
+            "Un début de phrase bien trop long : suite",
+            "Vide : ",
+        ] {
+            assert_eq!(split_theme(plain), (None, plain), "{plain}");
+        }
+    }
+
+    /// Each theme once, in the order of its first open step, whatever its case; its
+    /// finished steps with it; the themes all finished come last.
+    #[test]
+    fn steps_are_grouped_by_theme() {
+        let mut p = Project::default();
+        let ids: Vec<String> = [
+            "Vieux : fini",
+            "A : un",
+            "sans thème",
+            "B : deux",
+            "a : trois",
+            "B : quatre",
+        ]
+        .iter()
+        .map(|t| p.add_step(t, "moi"))
+        .collect();
+        p.set_step_status(&ids[0], StepStatus::Done);
+        p.set_step_status(&ids[3], StepStatus::Done);
+        let groups: Vec<_> = step_groups(&p.steps)
+            .into_iter()
+            .map(|g| (g.theme, g.open, g.done))
+            .collect();
+        let name = |s: &str| Some(s.to_string());
+        assert_eq!(
+            groups,
+            [
+                (name("A"), vec![1, 4], vec![]),
+                (None, vec![2], vec![]),
+                (name("B"), vec![5], vec![3]),
+                (name("Vieux"), vec![], vec![0]),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_dragged_step_lands_among_its_theme_s_steps() {
+        let ids: Vec<String> = ["a", "b", "c"].map(String::from).to_vec();
+        assert_eq!(order_with(&ids, "c", Some("a")), ["c", "a", "b"]);
+        assert_eq!(order_with(&ids, "a", None), ["b", "c", "a"]);
+        assert_eq!(order_with(&ids, "b", Some("b")), ids);
+    }
+}
+
+#[cfg(test)]
 mod new_step_field_tests {
     use super::*;
     use egui_kittest::Harness;
     use egui_kittest::kittest::Queryable;
+
+    /// Drags what is left of the text `from` (its handle, `left` points before it) to the
+    /// height of `to`, `dy` points off its middle.
+    fn drag_by_handle(h: &mut Harness<S>, from: egui::Rect, left: f32, to: egui::Rect, dy: f32) {
+        let start = egui::pos2(from.left() - left, from.center().y);
+        let end = egui::pos2(start.x, to.center().y + dy);
+        let button = |pos, pressed| egui::Event::PointerButton {
+            pos,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: Default::default(),
+        };
+        for event in [
+            egui::Event::PointerMoved(start),
+            button(start, true),
+            egui::Event::PointerMoved(start.lerp(end, 0.5)),
+            egui::Event::PointerMoved(end),
+            button(end, false),
+        ] {
+            h.event(event);
+            h.step();
+        }
+        h.run();
+    }
+
+    /// A theme's heading drags all its steps above another theme.
+    #[test]
+    fn dragging_a_heading_moves_the_whole_theme() {
+        let mut h = harness(|ui, cx| {
+            steps_card(ui, cx, 0.0);
+        });
+        for title in ["Membres : lister", "Modules : masquer", "Membres : inviter", "Modules : activer"] {
+            h.state_mut().pr.add_step(title, "moi");
+        }
+        h.run();
+        let (from, to) = (h.get_by_label("Modules").rect(), h.get_by_label("Membres").rect());
+        let gap = h.ctx.global_style().spacing.item_spacing.x;
+        drag_by_handle(&mut h, from, gap + 5.0, to, -4.0);
+        let titles: Vec<&str> = h.state().pr.steps.iter().map(|s| s.title.as_str()).collect();
+        assert_eq!(
+            titles,
+            ["Modules : masquer", "Modules : activer", "Membres : lister", "Membres : inviter"]
+        );
+        assert!(h.get_by_label("Modules").rect().top() < h.get_by_label("Membres").rect().top());
+    }
+
+    /// The theme is a heading over its steps, said once, not repeated on each row.
+    #[test]
+    fn the_steps_card_heads_each_theme_once() {
+        let mut h = harness(|ui, cx| {
+            steps_card(ui, cx, 0.0);
+        });
+        for title in ["Membres : lister", "Modules : masquer", "Membres : inviter"] {
+            h.state_mut().pr.add_step(title, "moi");
+        }
+        h.run();
+        // `get_by_label` fails when two widgets carry the same text.
+        h.get_by_label("Membres");
+        h.get_by_label("Modules");
+        assert!(h.query_by_label("Sans thème").is_none());
+        // A step without a theme, beside themed ones, gets its own heading.
+        h.state_mut().pr.add_step("Relire", "moi");
+        h.run();
+        h.get_by_label("Sans thème");
+    }
 
     #[derive(Default)]
     struct S {
