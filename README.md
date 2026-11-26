@@ -77,6 +77,10 @@ Rien à faire en général : au démarrage, Orchestra s'ajoute comme serveur MCP
 Codex, Antigravity CLI et l'app Claude quand ils sont installés (une copie `.bak` des fichiers de
 réglages est gardée). Réglages → IA (MCP) permet de brancher ou débrancher chacune.
 
+Pas encore de Claude Code ? Au même endroit, « Installer » lance son installation dans le terminal
+intégré, puis ouvre la connexion à votre compte dans le navigateur (`claude auth login`). La ligne
+de Claude Code indique ensuite le compte connecté. Orchestra ne voit ni mot de passe ni jeton.
+
 À la main, pour Claude Code :
 
 ```sh

@@ -5,9 +5,12 @@
 //! A project lives inside its page (`Page::project`), so it is saved, synced, merged and
 //! exported like any page, and the AIs reach it through the MCP tools in mcp.rs.
 
+use crate::LockOrRecover;
 use crate::model::{Page, Workspace, is_zero, new_id, now_ms};
 use serde::{Deserialize, Serialize};
 use std::path::{Component, Path, PathBuf};
+use std::sync::{LazyLock, Mutex};
+use std::time::{Duration, Instant};
 
 /// Longest state of play kept (characters), and longest step title. Step titles are what
 /// the AIs work from, so they are kept whole (the window shows one line, a click shows all).
@@ -237,7 +240,7 @@ pub const RECEIVED_STEP_MAX: usize = 300;
 const RECEIVED_PERSON_MAX: usize = 200;
 
 /// A person's id as received: dropped unless it could be a person's.
-fn received_person(id: &str) -> String {
+pub(crate) fn received_person(id: &str) -> String {
     let ok = id.len() <= RECEIVED_PERSON_MAX
         && !id.chars().any(char::is_control)
         && !id.starts_with(crate::space::AI_MEMBER_PREFIX);
@@ -408,7 +411,6 @@ pub enum Module {
     Versions,
 }
 
-#[allow(dead_code)] // Read by the project view in the next « Modules » steps.
 impl Module {
     pub const ALL: [Module; 5] = [
         Module::Git,
@@ -417,6 +419,12 @@ impl Module {
         Module::Budget,
         Module::Versions,
     ];
+
+    /// A module for code: on by itself only for a code project (a folder in a git
+    /// repository, among others). The others are on for every project.
+    pub fn for_code(self) -> bool {
+        matches!(self, Module::Git | Module::Terminal | Module::Versions)
+    }
 
     /// The name the module is saved under: never to be changed.
     pub fn key(self) -> &'static str {
@@ -430,11 +438,20 @@ impl Module {
     }
 }
 
-#[allow(dead_code)] // Same.
 impl Project {
-    /// Whether `module` is on: the choice made for this project, else on.
+    /// Whether `module` is on: the choice made for this project, else its default (see
+    /// `Module::for_code`). For a code module without a choice, the folder is looked at.
     pub fn has_module(&self, module: Module) -> bool {
-        self.module_choices.get(module.key()).copied().unwrap_or(true)
+        match self.module_choices.get(module.key()) {
+            Some(on) => *on,
+            None => !module.for_code() || self.is_code(),
+        }
+    }
+
+    /// Whether the project is treated as code: what the person forced, else detected from
+    /// the folder (looked at again every few seconds: a `git init` shows by itself).
+    pub fn is_code(&self) -> bool {
+        self.code.unwrap_or_else(|| detected_code(&self.folder))
     }
 
     /// The modules that are on, in the order of `Module::ALL`.
@@ -1088,6 +1105,33 @@ pub fn code_kind(folder: &str, forced: Option<bool>) -> bool {
     forced.unwrap_or_else(|| shows_git_card(folder))
 }
 
+/// `shows_git_card`, remembered for a few seconds per folder: asked at every frame, and it
+/// reads the disk.
+pub fn detected_code(folder: &str) -> bool {
+    type Seen = std::collections::HashMap<String, (Instant, bool)>;
+    static SEEN: LazyLock<Mutex<Seen>> = LazyLock::new(Default::default);
+    let folder = folder.trim();
+    if let Some((at, code)) = SEEN.lock_or_recover().get(folder)
+        && at.elapsed() < Duration::from_secs(5)
+    {
+        return *code;
+    }
+    // Looked at without the lock: a slow disk holds up this folder only.
+    let code = shows_git_card(folder);
+    SEEN.lock_or_recover()
+        .insert(folder.to_string(), (Instant::now(), code));
+    code
+}
+
+/// Whether `dir` is in a git repository: a `.git` in it or above, up to the home folder
+/// (left out: a repository of settings files there doesn't make every folder code). Only
+/// looks for the files, without running git.
+fn in_git_repo(dir: &Path, home: Option<&Path>) -> bool {
+    dir.ancestors()
+        .take_while(|d| Some(*d) != home)
+        .any(|d| d.join(".git").exists())
+}
+
 /// Source file extensions counted when no marker is found.
 const CODE_EXTS: &[&str] = &[
     "rs", "py", "js", "jsx", "ts", "tsx", "go", "java", "kt", "swift", "c", "h", "cpp", "hpp",
@@ -1095,14 +1139,17 @@ const CODE_EXTS: &[&str] = &[
     "zig",
 ];
 
-/// Whether `dir` looks like a code project: a known marker at its root (`.git`, `Cargo.toml`,
-/// `package.json`…), or at least 3 source files in it or one level down (hidden folders and
-/// dependency folders skipped). A missing folder is not code. Reads at most a few hundred entries.
+/// Whether `dir` looks like a code project: in a git repository (`in_git_repo`), a known
+/// marker at its root (`.git`, `Cargo.toml`, `package.json`…), or at least 3 source files in
+/// it or one level down (hidden folders and dependency folders skipped). A missing folder is
+/// not code. Reads at most a few hundred entries.
 pub fn is_code_folder(dir: &Path) -> bool {
     if !dir.is_dir() {
         return false;
     }
-    if CODE_MARKERS.iter().any(|m| dir.join(m).exists()) {
+    if CODE_MARKERS.iter().any(|m| dir.join(m).exists())
+        || in_git_repo(dir, dirs::home_dir().as_deref())
+    {
         return true;
     }
     let is_src = |p: &Path| {
@@ -1464,10 +1511,17 @@ impl Workspace {
                     pr.shared = false;
                 }
             }
+            let mut moved = std::collections::HashMap::new();
             for b in p.blocks.iter_mut() {
-                b.id = new_id();
+                moved.insert(std::mem::replace(&mut b.id, new_id()), b.id.clone());
                 if let Some(n) = map.get(&b.extra) {
                     b.extra = n.clone();
+                }
+            }
+            // The comments follow their blocks.
+            for c in p.comments.values_mut() {
+                if let Some(n) = moved.get(&c.block) {
+                    c.block = n.clone();
                 }
             }
             p.deleted_blocks.clear();
@@ -2103,6 +2157,39 @@ mod tests {
         let newer: Project = serde_json::from_str(r#"{"module_choices":{"later":false}}"#).unwrap();
         assert_eq!(newer.modules(), Module::ALL);
         assert!(serde_json::to_string(&newer).unwrap().contains("\"later\":false"));
+    }
+
+    /// Without a choice, the code modules follow the folder: on in a git repository, off
+    /// for a folder of documents; a choice wins over it.
+    #[test]
+    fn the_code_modules_turn_on_by_themselves_in_a_git_repository() {
+        let base = std::env::temp_dir().join(format!("orchestra-modules-{}", new_id()));
+        for d in ["documents", "depot/.git", "depot/notes"] {
+            std::fs::create_dir_all(base.join(d)).unwrap();
+        }
+        let of = |d: &str| Project::new(base.join(d).display().to_string());
+        let others = [Module::Autonomous, Module::Budget];
+        assert_eq!(of("documents").modules(), others);
+        assert_eq!(of("depot").modules(), Module::ALL);
+        // A folder inside a repository is in it too.
+        assert_eq!(of("depot/notes").modules(), Module::ALL);
+
+        let mut p = of("documents");
+        p.set_module(Module::Terminal, Some(true));
+        assert!(p.has_module(Module::Terminal) && !p.has_module(Module::Git));
+        let mut p = of("depot");
+        p.set_module(Module::Git, Some(false));
+        assert!(!p.has_module(Module::Git) && p.has_module(Module::Versions));
+        // « Sans code », forced by the person, keeps them off in a repository.
+        let mut p = of("depot");
+        p.code = Some(false);
+        assert_eq!(p.modules(), others);
+
+        // A repository in the home folder doesn't count for the folders in it.
+        let notes = base.join("depot/notes");
+        assert!(in_git_repo(&notes, None));
+        assert!(!in_git_repo(&notes, Some(&base.join("depot"))));
+        let _ = std::fs::remove_dir_all(&base);
     }
 
     #[test]

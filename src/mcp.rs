@@ -485,6 +485,32 @@ fn call_tool(name: &str, args: &Value) -> Result<String, ToolError> {
     // From the read to the write: another server's call waits instead of being overwritten.
     let _lock = store::lock_workspace();
     let mut ws = store::load();
+    // The pages as they were, to keep a version of those the AI writes (history.rs).
+    let before = (!reads_only(name)).then(|| ws.pages.clone());
+    let done = run_tool(name, args, &mut ws);
+    if done.is_ok()
+        && let Some(before) = before
+    {
+        crate::history::record_ai_write(&crate::history::dir(), &before, &ws);
+    }
+    done
+}
+
+/// Tools that never change a page's content: nothing to look for after them.
+fn reads_only(name: &str) -> bool {
+    matches!(
+        name,
+        "list_pages"
+            | "search_pages"
+            | "read_page"
+            | "query_database"
+            | "list_projects"
+            | "get_project_state"
+            | "list_members"
+    )
+}
+
+fn run_tool(name: &str, args: &Value, ws: &mut Workspace) -> Result<String, ToolError> {
     match name {
         "list_pages" => {
             let all = args
@@ -915,7 +941,7 @@ fn call_tool(name: &str, args: &Value) -> Result<String, ToolError> {
                 pr.set_summary(&sum, src);
             }
             // README, docs/… become pages under the project.
-            crate::docs::sync_project(&mut ws, &id);
+            crate::docs::sync_project(ws, &id);
             save(&ws)?;
             Ok(format!("created project {id}"))
         }
@@ -939,7 +965,7 @@ fn call_tool(name: &str, args: &Value) -> Result<String, ToolError> {
             }
             pr.touch();
             p.touch();
-            crate::docs::sync_project(&mut ws, &id);
+            crate::docs::sync_project(ws, &id);
             save(&ws)?;
             Ok("project updated".into())
         }
@@ -1346,6 +1372,36 @@ mod tests {
     /// changes and saves the whole file, so without the lock a save would drop the steps
     /// another call added in between. Threads stand in for the servers: the file lock
     /// holds between separate opens, in one process as in several.
+    #[test]
+    fn each_write_by_an_ai_keeps_the_page_before_and_after() {
+        let _g = fresh_workspace();
+        let call = |name: &str, args: Value| {
+            call_tool(name, &args).unwrap_or_else(|_| panic!("{name} failed"))
+        };
+        let made = call("create_page", json!({"title":"Notes","markdown":"un"}));
+        let id = made.rsplit(' ').next().unwrap().to_string();
+        call("replace_page_content", json!({"page":id,"markdown":"deux"}));
+        // What changes no content (a favorite, a read) adds nothing.
+        call("update_page", json!({"page":id,"favorite":true}));
+        call("read_page", json!({"page":id}));
+        let folder = crate::history::dir().join(&id);
+        let mut files: Vec<_> = std::fs::read_dir(&folder)
+            .unwrap()
+            .map(|e| e.unwrap().path())
+            .collect();
+        files.sort();
+        let texts: Vec<String> = files
+            .iter()
+            .map(|f| {
+                let s: crate::history::Snapshot =
+                    serde_json::from_str(&std::fs::read_to_string(f).unwrap()).unwrap();
+                assert_eq!(s.by, crate::history::By::Ai);
+                s.content.blocks[0].text.clone()
+            })
+            .collect();
+        assert_eq!(texts, ["un", "deux"]);
+    }
+
     #[test]
     fn calls_at_the_same_time_lose_nothing() {
         let _g = fresh_workspace();

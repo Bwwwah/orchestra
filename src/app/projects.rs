@@ -4,8 +4,9 @@
 
 use super::chrome::relative_time;
 use super::*;
-use crate::project::{Project, ProjectMember, ProjectStatus, StepStatus};
+use crate::project::{Module, Project, ProjectMember, ProjectStatus, StepStatus};
 use crate::sessions::{SessionInfo, human_tokens};
+use crate::templates::Template;
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -219,6 +220,51 @@ pub fn mcp_command() -> String {
     format!("claude mcp add --scope user orchestra -- \"{exe}\" mcp")
 }
 
+/// What the « Nouveau projet » form holds.
+#[derive(Default)]
+pub(super) struct NewProject {
+    pub title: String,
+    pub folder: String,
+    /// None: a bare project, whose kind and modules are guessed from its folder.
+    pub template: Option<Template>,
+}
+
+impl NewProject {
+    /// Create the project in `ws` and return its page id.
+    pub fn create_in(&self, ws: &mut Workspace) -> String {
+        match self.template {
+            Some(template) => ws.create_project_from(template, &self.title, &self.folder),
+            None => ws.create_project(&self.title, &self.folder),
+        }
+    }
+}
+
+/// The choice of a template in the « Nouveau projet » form, and what the choice gives.
+fn template_picker(ui: &mut egui::Ui, chosen: &mut Option<Template>, t: &Tone) {
+    ui.horizontal_wrapped(|ui| {
+        ui.label(crate::tr!("Modèle", "Template"));
+        ui.selectable_value(chosen, None, crate::tr!("Aucun", "None"));
+        for template in Template::ALL {
+            let text = format!("{} {}", template.icon(), template.label());
+            ui.selectable_value(chosen, Some(template), text);
+        }
+    });
+    let about = match *chosen {
+        Some(template) => {
+            let pages: Vec<&str> = template.pages().iter().map(|p| p.title).collect();
+            let pages = pages.join(", ");
+            let description = template.description();
+            crate::trf!("{description} Pages : {pages}.", "{description} Pages: {pages}.")
+        }
+        None => crate::tr!(
+            "Un projet vide : ses modules suivent le contenu de son dossier.",
+            "An empty project: its modules follow what its folder holds."
+        )
+        .to_string(),
+    };
+    ui.label(RichText::new(about).size(12.5).color(t.tertiary));
+}
+
 impl NotesApp {
     /// "Projets": every AI project as a card, most recent activity first.
     pub(super) fn projects_view(&mut self, ui: &mut egui::Ui, actions: &mut Vec<Action>) {
@@ -237,7 +283,7 @@ impl NotesApp {
                             let r = super::style::primary(ui, crate::tr!("+ Nouveau projet", "+ New project"));
                             super::tutorial::mark(ui, "projects:new", r.rect);
                             if r.clicked() {
-                                self.new_project = Some((String::new(), String::new()));
+                                self.new_project = Some(NewProject::default());
                             }
                         }
                         let busy = self.sync_dialog.is_some() || self.sync_run.is_some();
@@ -261,13 +307,15 @@ impl NotesApp {
                 let dropped: Option<std::path::PathBuf> = ui.ctx().input(|i| i.raw.dropped_files.iter().map(|f| f.path().to_path_buf()).find(|p| p.is_dir()));
                 if let Some(dir) = dropped {
                     let name = dir.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
-                    self.new_project = Some((name, dir.display().to_string()));
+                    // A template already picked in the open form stays picked.
+                    let template = self.new_project.as_ref().and_then(|f| f.template);
+                    self.new_project = Some(NewProject { title: name, folder: dir.display().to_string(), template });
                 }
 
                 // New project form: a name, the folder, and whether an AI should analyse it.
                 let mut create = None;
                 let mut cancel = false;
-                if let Some((title, folder)) = self.new_project.as_mut() {
+                if let Some(NewProject { title, folder, template }) = self.new_project.as_mut() {
                     egui::Frame::new().fill(t.card).stroke(egui::Stroke::new(1.0, t.border)).corner_radius(12.0).inner_margin(egui::Margin::symmetric(18, 16)).show(ui, |ui| {
                         ui.set_width(width - 38.0);
                         ui.label(RichText::new(crate::tr!("Nouveau projet", "New project")).font(semibold(16.0)).color(t.text));
@@ -303,6 +351,8 @@ impl NotesApp {
                             ui.add(egui::TextEdit::singleline(title).hint_text(if auto.is_empty() { crate::tr!("Mon projet", "My project").to_string() } else { auto }).desired_width(f32::INFINITY));
                             ui.end_row();
                         });
+                        ui.add_space(8.0);
+                        template_picker(ui, template, &t);
                         let analyse_key = egui::Id::unique("new-project-analyse");
                         let mut analyse = ui.ctx().data(|d| d.get_temp::<bool>(analyse_key)).unwrap_or(true);
                         let folder_ok = crate::project::normalize_folder(folder.trim()).is_dir();
@@ -315,7 +365,8 @@ impl NotesApp {
                         if !folder.trim().is_empty() && !folder_ok {
                             ui.label(RichText::new(crate::tr!("Ce dossier n'existe pas sur cette machine.", "This folder doesn't exist on this computer.")).size(12.5).color(ORANGE));
                         }
-                        if folder_ok {
+                        // A template says the kind of project itself.
+                        if folder_ok && template.is_none() {
                             // Detected once per folder typed, not on every frame.
                             let kind_key = egui::Id::unique(("new-project-code", folder.trim().to_string()));
                             let code = ui.ctx().data(|d| d.get_temp::<bool>(kind_key)).unwrap_or_else(|| {
@@ -337,7 +388,8 @@ impl NotesApp {
                             let enter = ui.input(|i| i.key_pressed(Key::Enter));
                             let label = if analyse && folder_ok { crate::tr!("Créer et analyser", "Create and analyse") } else { crate::tr!("Créer", "Create") };
                             if ui.add_enabled(ok, egui::Button::new(label)).clicked() || (ok && enter) {
-                                create = Some((name, folder.trim().to_string(), analyse && folder_ok));
+                                let new = NewProject { title: name, folder: folder.trim().to_string(), template: *template };
+                                create = Some((new, analyse && folder_ok));
                             }
                             if ui.button(crate::tr!("Annuler", "Cancel")).clicked() || ui.input(|i| i.key_pressed(Key::Escape)) {
                                 cancel = true;
@@ -346,8 +398,9 @@ impl NotesApp {
                     });
                     ui.add_space(16.0);
                 }
-                if let Some((title, folder, analyse)) = create {
-                    actions.push(Action::NewProject(title, folder.clone()));
+                if let Some((new, analyse)) = create {
+                    let folder = new.folder.clone();
+                    actions.push(Action::NewProject(new));
                     self.new_project = None;
                     if analyse {
                         super::ai_fill::request(ui.ctx(), super::ai_fill::AiReq::FillFolder { folder });
@@ -501,7 +554,7 @@ impl NotesApp {
                         self.sync_dialog = Some(self.sync_candidates());
                     }
                     if super::style::secondary(ui, crate::tr!("+ Nouveau projet", "+ New project")).on_hover_text(crate::tr!("À partir d'un dossier ; astuce : glissez-le sur la fenêtre", "From a folder; tip: drop it on the window")).clicked() {
-                        self.new_project = Some((String::new(), String::new()));
+                        self.new_project = Some(NewProject::default());
                     }
                 });
             });
@@ -700,6 +753,8 @@ pub(super) fn quiet_link(ui: &mut egui::Ui, text: &str, t: &Tone) -> egui::Respo
             egui::Stroke::new(1.0, color.gamma_multiply(a)),
         );
     }
+    // Screen readers (and the tests) find it by its text, like a button.
+    resp.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, text));
     resp.on_hover_cursor(egui::CursorIcon::PointingHand)
 }
 
@@ -969,6 +1024,7 @@ fn session_row(
     ui: &mut egui::Ui,
     page_id: &str,
     s: &SessionInfo,
+    modules: &[Module],
     t: &Tone,
 ) -> Option<super::notices::Notice> {
     let mut msg = None;
@@ -1028,16 +1084,18 @@ fn session_row(
                     "{n} message{p}",
                     p = crate::i18n::plural(n as usize)
                 );
-                if s.tokens.billed > 0 {
-                    meta.push_str(&crate::trf!(
-                        " · {} tokens",
-                        " · {} tokens",
-                        human_tokens(s.tokens.billed)
-                    ));
-                }
-                let spent = crate::pricing::dollars(s.tokens.cost_micro);
-                if !spent.is_empty() {
-                    meta.push_str(&format!(" · ≈ {spent}"));
+                if modules.contains(&Module::Budget) {
+                    if s.tokens.billed > 0 {
+                        meta.push_str(&crate::trf!(
+                            " · {} tokens",
+                            " · {} tokens",
+                            human_tokens(s.tokens.billed)
+                        ));
+                    }
+                    let spent = crate::pricing::dollars(s.tokens.cost_micro);
+                    if !spent.is_empty() {
+                        meta.push_str(&format!(" · ≈ {spent}"));
+                    }
                 }
                 for x in [&s.git_branch, &s.model] {
                     if !x.is_empty() {
@@ -1073,40 +1131,43 @@ fn session_row(
                         );
                         return;
                     };
-                    if action_link(ui, crate::tr!("Reprendre ici", "Resume here"))
-                        .on_hover_text(crate::tr!(
-                            "Rouvre la session dans le terminal intégré",
-                            "Reopens the session in the built-in terminal"
-                        ))
-                        .clicked()
-                    {
-                        let title = format!(
-                            "{} · {}",
-                            s.tool.label(),
-                            crate::richtext::one_line(&s.display_title(), 24)
-                        );
-                        super::term_ui::request(ui.ctx(), &title, &s.cwd, Some(resume));
-                    }
-                    if action_link(ui, crate::tr!("Terminal macOS", "macOS Terminal"))
-                        .on_hover_text(&cmd)
-                        .clicked()
-                    {
-                        msg = Some(match crate::sessions::open_in_terminal(&cmd) {
-                            Ok(()) => super::notices::Notice::Ack(
-                                crate::tr!(
-                                    "Session rouverte dans le Terminal.",
-                                    "Session reopened in the Terminal."
-                                )
-                                .to_string(),
-                            ),
-                            Err(e) => {
-                                ui.ctx().copy_text(cmd.clone());
-                                super::notices::Notice::Error(crate::trf!(
-                                    "Terminal indisponible ({e}) : commande copiée.",
-                                    "Terminal unavailable ({e}): command copied."
-                                ))
-                            }
-                        });
+                    // Without the terminal module, only the command to copy.
+                    if modules.contains(&Module::Terminal) {
+                        if action_link(ui, crate::tr!("Reprendre ici", "Resume here"))
+                            .on_hover_text(crate::tr!(
+                                "Rouvre la session dans le terminal intégré",
+                                "Reopens the session in the built-in terminal"
+                            ))
+                            .clicked()
+                        {
+                            let title = format!(
+                                "{} · {}",
+                                s.tool.label(),
+                                crate::richtext::one_line(&s.display_title(), 24)
+                            );
+                            super::term_ui::request(ui.ctx(), &title, &s.cwd, Some(resume));
+                        }
+                        if action_link(ui, crate::tr!("Terminal macOS", "macOS Terminal"))
+                            .on_hover_text(&cmd)
+                            .clicked()
+                        {
+                            msg = Some(match crate::sessions::open_in_terminal(&cmd) {
+                                Ok(()) => super::notices::Notice::Ack(
+                                    crate::tr!(
+                                        "Session rouverte dans le Terminal.",
+                                        "Session reopened in the Terminal."
+                                    )
+                                    .to_string(),
+                                ),
+                                Err(e) => {
+                                    ui.ctx().copy_text(cmd.clone());
+                                    super::notices::Notice::Error(crate::trf!(
+                                        "Terminal indisponible ({e}) : commande copiée.",
+                                        "Terminal unavailable ({e}): command copied."
+                                    ))
+                                }
+                            });
+                        }
                     }
                     if action_link(ui, crate::tr!("Copier la commande", "Copy the command"))
                         .on_hover_text(&cmd)
@@ -1290,7 +1351,9 @@ fn draw_card(ui: &mut egui::Ui, cx: &mut Cx, k: CardKind, extra: f32) -> f32 {
         }
         CardKind::Watch => {
             let folder = cx.pr.folder.trim().to_string();
-            super::watch::watch_card(ui, cx.page_id, &folder, &mut cx.pr.cve_watch, cx.t, extra)
+            let autonomous = cx.pr.has_module(Module::Autonomous);
+            let auto = &mut cx.pr.cve_watch;
+            super::watch::watch_card(ui, cx.page_id, &folder, auto, autonomous, cx.t, extra)
         }
         CardKind::Versions => {
             let folder = cx.pr.folder.trim().to_string();
@@ -1419,7 +1482,7 @@ pub(super) fn project_panel(ui: &mut egui::Ui, cx: &mut Cx) -> Option<super::not
                     {
                         follow = true;
                     }
-                } else if !pr.read_only {
+                } else if !pr.read_only && pr.has_module(Module::Autonomous) {
                     let folder_ok = !pr.folder.trim().is_empty();
                     blocked = launch_block(cx_can_launch, folder_ok, pr);
                     let r = ui
@@ -1466,6 +1529,11 @@ pub(super) fn project_panel(ui: &mut egui::Ui, cx: &mut Cx) -> Option<super::not
                                 )
                                 .wrap(),
                             );
+                            // A model chosen in the settings: say who gets the project's summary.
+                            if let Some(service) = crate::sync::openai::Service::from_id(&cx.ai.text_model.service) {
+                                ui.add_space(2.0);
+                                ui.add(egui::Label::new(RichText::new(crate::trf!("Par {} : son serveur reçoit un résumé du dossier (Paramètres › IA).", "By {}: its server gets a summary of the folder (Settings › AI).", service.label())).size(12.5).color(t.secondary)).wrap());
+                            }
                             ui.add_space(6.0);
                             ui.horizontal(|ui| {
                                 if ui.button(if has { crate::tr!("Remplacer", "Replace") } else { crate::tr!("Remplir", "Fill in") }).clicked() {
@@ -1498,7 +1566,7 @@ pub(super) fn project_panel(ui: &mut egui::Ui, cx: &mut Cx) -> Option<super::not
                     }
                     ui.label(RichText::new(crate::trf!("{done}/{total} étapes", "{done}/{total} steps")).color(t.secondary));
                     ui.label(RichText::new(format!("· {}", relative_time(last))).color(t.tertiary));
-                    if tokens > 0 {
+                    if tokens > 0 && pr.has_module(Module::Budget) {
                         ui.label(RichText::new(crate::trf!("· {} tokens", "· {} tokens", human_tokens(tokens))).color(t.tertiary))
                             .on_hover_text(crate::tr!("Total des sessions Claude Code / Codex de ce projet (hors lectures de cache)", "Total of this project's Claude Code / Codex sessions (cache reads excluded)"));
                     }
@@ -1559,8 +1627,7 @@ pub(super) fn project_panel(ui: &mut egui::Ui, cx: &mut Cx) -> Option<super::not
     ui.add_space(14.0);
     // The rest in tabs: the overview (where it stands, what is left, the sessions) is what
     // one comes for; versions, the watch, the pages and the outside view are a click away.
-    let code = shows_git(ui.ctx(), cx.pr);
-    let tabs = project_tabs(code, !cx.pr.members.is_empty());
+    let tabs = project_tabs(!cx.pr.members.is_empty(), &cx.pr.modules());
     let tab_key = egui::Id::unique(("project-tab", cx.page_id));
     let mut tab: ProjectTab = ui.ctx().data(|d| d.get_temp(tab_key)).unwrap_or_default();
     // A tour pointing at a card shows its tab.
@@ -1604,7 +1671,7 @@ pub(super) fn project_panel(ui: &mut egui::Ui, cx: &mut Cx) -> Option<super::not
             ui.add_space(gap);
             // The activity: starting a session, and those that ran here.
             let mut act = vec![];
-            if !cx.pr.folder.trim().is_empty() {
+            if !cx.pr.folder.trim().is_empty() && cx.pr.has_module(Module::Terminal) {
                 act.push(NewSession);
             }
             act.push(Sessions);
@@ -1724,8 +1791,97 @@ fn open_new_step(ctx: &egui::Context, page_id: &str) {
     });
 }
 
-/// A project's settings in its page's « … » menu: Lecture seule, code or not, Privé or
-/// Partagé. Sharing has effects beyond the project (sending, notice): the choice made is
+/// A module's name and what it shows, in the « Modules » menu.
+fn module_texts(module: Module) -> (&'static str, &'static str) {
+    match module {
+        Module::Git => (
+            crate::tr!("Git", "Git"),
+            crate::tr!(
+                "Les onglets Versions et Veille CVE, et la veille automatique.",
+                "The Versions and CVE watch tabs, and the automatic watch."
+            ),
+        ),
+        Module::Terminal => (
+            crate::tr!("Terminal", "Terminal"),
+            crate::tr!(
+                "La carte pour ouvrir une session dans le terminal, et la reprise d'une session.",
+                "The card to open a session in the terminal, and resuming a session."
+            ),
+        ),
+        Module::Autonomous => (
+            crate::tr!("Sessions autonomes", "Autonomous sessions"),
+            crate::tr!(
+                "Lancer une IA qui travaille seule, sur le projet ou sur une étape, et la veille automatique.",
+                "Starting an AI that works on its own, on the project or on a step, and the automatic watch."
+            ),
+        ),
+        Module::Budget => (
+            crate::tr!("Budget", "Budget"),
+            crate::tr!(
+                "Les tokens et le coût estimé du projet et de ses sessions.",
+                "The tokens and estimated cost of the project and its sessions."
+            ),
+        ),
+        Module::Versions => (
+            crate::tr!("Versions", "Versions"),
+            crate::tr!("L'onglet Versions.", "The Versions tab."),
+        ),
+    }
+}
+
+/// « Modules », in a project's settings: one box per module, and the way back to the
+/// defaults once a choice was made. Stays open on a click inside, to set several in a row.
+fn modules_menu(ui: &mut egui::Ui, pr: &mut Project) {
+    egui::containers::menu::SubMenuButton::new(crate::tr!("Modules", "Modules"))
+        .config(
+            egui::containers::menu::MenuConfig::new()
+                .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside),
+        )
+        .ui(ui, |ui| {
+            ui.set_min_width(220.0);
+            // Read once per frame: for a code module without a choice, the folder is looked at.
+            let git = pr.has_module(Module::Git);
+            for module in Module::ALL {
+                let (name, what) = module_texts(module);
+                // The Versions tab only comes with Git (`project_tabs`): off without it.
+                let needs_git = module == Module::Versions && !git;
+                let mut on = !needs_git && pr.has_module(module);
+                if ui
+                    .add_enabled(!needs_git, egui::Checkbox::new(&mut on, name))
+                    .on_hover_text(what)
+                    .on_disabled_hover_text(crate::tr!(
+                        "Demande le module Git.",
+                        "Needs the Git module."
+                    ))
+                    .changed()
+                {
+                    pr.set_module(module, Some(on));
+                }
+            }
+            // Only our own modules: the choice for one of a newer version is kept.
+            let chosen = Module::ALL
+                .iter()
+                .any(|m| pr.module_choices.contains_key(m.key()));
+            if chosen {
+                ui.separator();
+                if ui
+                    .button(crate::tr!("Revenir à l'automatique", "Back to automatic"))
+                    .on_hover_text(crate::tr!(
+                        "Git, Terminal et Versions suivent le type du projet ; les autres sont activés.",
+                        "Git, Terminal and Versions follow the project's type; the others are on."
+                    ))
+                    .clicked()
+                {
+                    for module in Module::ALL {
+                        pr.set_module(module, None);
+                    }
+                }
+            }
+        });
+}
+
+/// A project's settings in its page's « … » menu: Lecture seule, code or not, its modules,
+/// Privé or Partagé. Sharing has effects beyond the project (sending, notice): the choice made is
 /// returned in `share` for the caller to apply; so is a local copy, in `copy`.
 pub(super) fn project_menu(
     ui: &mut egui::Ui,
@@ -1742,7 +1898,7 @@ pub(super) fn project_menu(
         pr.read_only = ro;
     }
     // Code or not: detected from the folder, or forced here (the detection can be wrong).
-    let detected = detected_code(ui.ctx(), &pr.folder);
+    let detected = crate::project::detected_code(&pr.folder);
     let kind = if pr.code.unwrap_or(detected) {
         crate::tr!("Code", "Code")
     } else {
@@ -1778,9 +1934,10 @@ pub(super) fn project_menu(
         })
         .response
         .on_hover_text(crate::tr!(
-            "Projet de code ou non : décide de la carte Versions (git) et de ce que l'IA regarde et répond. Détecté d'après le dossier ; choisissez ici si la détection se trompe.",
-            "Code project or not: decides the Versions (git) card and what the AI looks at and answers. Detected from the folder; choose here if the detection is wrong."
+            "Projet de code ou non : décide des modules code (Versions, veille, terminal) et de ce que l'IA regarde et répond. Détecté d'après le dossier (un dépôt Git compte comme du code) ; choisissez ici si la détection se trompe.",
+            "Code project or not: decides the code modules (Versions, watch, terminal) and what the AI looks at and answers. Detected from the folder (a git repository counts as code); choose here if the detection is wrong."
         ));
+        modules_menu(ui, pr);
     });
     let label = if pr.shared {
         crate::tr!("Visibilité : Partagé", "Visibility: Shared")
@@ -1832,12 +1989,16 @@ impl ProjectTab {
     }
 }
 
-/// The tabs shown: versions and the vulnerability watch only for code projects, the
-/// members only for a project of a team space.
-pub(super) fn project_tabs(code: bool, team: bool) -> Vec<ProjectTab> {
+/// The tabs shown: versions and the vulnerability watch only with the git module
+/// (`modules`: those that are on, by default for code projects), versions with theirs too;
+/// the members only for a project of a team space.
+pub(super) fn project_tabs(team: bool, modules: &[Module]) -> Vec<ProjectTab> {
     let mut v = vec![ProjectTab::Overview];
-    if code {
-        v.extend([ProjectTab::Versions, ProjectTab::Watch]);
+    if modules.contains(&Module::Git) {
+        if modules.contains(&Module::Versions) {
+            v.push(ProjectTab::Versions);
+        }
+        v.push(ProjectTab::Watch);
     }
     v.extend([ProjectTab::Pages, ProjectTab::Review]);
     if team {
@@ -1914,26 +2075,6 @@ fn tab_bar(
         egui::Stroke::new(1.0, t.border),
     );
     picked
-}
-
-/// Whether the project page shows the git card, re-detected every few seconds per folder
-/// (a `git init` or new source files show it without reopening the page).
-/// The person's forced choice (code / non-code) wins.
-pub(super) fn shows_git(ctx: &egui::Context, pr: &Project) -> bool {
-    pr.code.unwrap_or_else(|| detected_code(ctx, &pr.folder))
-}
-
-fn detected_code(ctx: &egui::Context, folder: &str) -> bool {
-    let key = egui::Id::unique(("shows-git", folder.trim().to_string()));
-    let now_t = ctx.input(|i| i.time);
-    if let Some((at, v)) = ctx.data(|d| d.get_temp::<(f64, bool)>(key))
-        && now_t - at < 5.0
-    {
-        return v;
-    }
-    let v = crate::project::shows_git_card(folder);
-    ctx.data_mut(|d| d.insert_temp(key, (now_t, v)));
-    v
 }
 
 /// The questions the AIs asked about this project (ask_human) and the person's answers:
@@ -2132,6 +2273,7 @@ fn steps_card(ui: &mut egui::Ui, cx: &mut Cx, extra: f32) -> f32 {
     let prefer = cx.live.first().map(|s| s.tool);
     let me = cx.team.me.as_str();
     let (running, can_launch) = (cx.running, cx.can_launch);
+    let autonomous = pr.has_module(Module::Autonomous);
     let actions = &mut *cx.actions;
     let sessions = cx.step_sessions.as_slice();
     // ---- Steps: open ones first, one line each; done ones folded.
@@ -2263,6 +2405,7 @@ fn steps_card(ui: &mut egui::Ui, cx: &mut Cx, extra: f32) -> f32 {
                 // « Lancer »: a session on this step alone, with its AI. Not on the step a
                 // running session is already doing.
                 let offer = !ro
+                    && autonomous
                     && s.agent.is_some()
                     && s.status != StepStatus::Done
                     && !(running && s.status == StepStatus::Doing)
@@ -3278,6 +3421,100 @@ mod new_step_field_tests {
         h.get_by_label("Lancer");
     }
 
+    /// The « Nouveau projet » form offers every template, or none, and the project it
+    /// creates is the one of the choice.
+    #[test]
+    fn the_new_project_form_offers_the_templates() {
+        let mut h = Harness::builder().with_size([700.0, 200.0]).build_ui_state(
+            |ui, form: &mut NewProject| {
+                // The emojis come from the system's fonts, which the tests don't load.
+                ui.ctx()
+                    .set_missing_glyph_policy(egui::epaint::text::MissingGlyphPolicy::Tofu);
+                template_picker(ui, &mut form.template, &tone(true));
+            },
+            NewProject::default(),
+        );
+        h.run();
+        assert_eq!(h.state().template, None);
+        for template in Template::ALL {
+            h.get_by_label(&format!("{} {}", template.icon(), template.label()))
+                .click();
+            h.run();
+            assert_eq!(h.state().template, Some(template));
+            // What the choice gives is said under it.
+            h.get_by_label_contains(template.description());
+        }
+        let mut ws = Workspace::default();
+        let event = h.state().create_in(&mut ws);
+        let pages = ws.pages.iter().filter(|p| p.parent.as_ref() == Some(&event));
+        assert_eq!(pages.count(), Template::Event.pages().len());
+
+        h.get_by_label(crate::tr!("Aucun", "None")).click();
+        h.run();
+        assert_eq!(h.state().template, None);
+        let bare = h.state().create_in(&mut ws);
+        assert!(ws.pages.iter().all(|p| p.parent.as_ref() != Some(&bare)));
+        assert_eq!(ws.page(&bare).unwrap().project.as_ref().unwrap().code, None);
+    }
+
+    /// The project's settings turn modules off and on, several in a row from the « … » menu,
+    /// and give them back to their defaults.
+    #[test]
+    fn the_project_settings_turn_modules_on_and_off() {
+        let mut pr = Project::new("");
+        pr.code = Some(true);
+        let mut h = Harness::builder().with_size([700.0, 700.0]).build_ui_state(
+            |ui, pr: &mut Project| {
+                let open = ui.button("…");
+                egui::Popup::menu(&open).show(|ui| {
+                    super::project_menu(ui, pr, &mut None, &mut false);
+                });
+            },
+            pr,
+        );
+        h.get_by_label("…").click();
+        h.run();
+        h.get_by_label_contains("Modules").click();
+        h.run();
+        assert!(h.query_by_label("Revenir à l'automatique").is_none());
+        h.get_by_label("Terminal").click();
+        h.run();
+        assert!(!h.state().has_module(Module::Terminal));
+        // The menu stayed open: another box, without opening it again.
+        h.get_by_label("Git").click();
+        h.run();
+        assert!(!h.state().has_module(Module::Git));
+        // Versions can't be ticked without Git, and its own choice is left alone.
+        h.get_by_label("Versions").click();
+        h.run();
+        assert!(h.state().has_module(Module::Versions));
+        h.get_by_label("Revenir à l'automatique").click();
+        h.run();
+        assert_eq!(h.state().modules(), Module::ALL);
+        assert!(h.state().module_choices.is_empty());
+    }
+
+    /// With the autonomous module off, a step entrusted to an AI has no « Lancer ».
+    #[test]
+    fn a_project_without_the_autonomous_module_offers_no_step_launch() {
+        let mut h = harness(|ui, cx| {
+            steps_card(ui, cx, 0.0);
+        });
+        let pr = &mut h.state_mut().pr;
+        pr.folder = "/tmp/projet".into();
+        let id = pr.add_step("Tester", "moi");
+        pr.set_step_agent(&id, Some(crate::auto::Agent::Codex));
+        pr.set_module(crate::project::Module::Autonomous, Some(false));
+        h.run();
+        h.get_by_label("Tester");
+        assert!(h.query_by_label("Lancer").is_none());
+        h.state_mut()
+            .pr
+            .set_module(crate::project::Module::Autonomous, None);
+        h.run();
+        h.get_by_label("Lancer");
+    }
+
     /// Without a team there is nobody to name: no « Responsable » menu.
     #[test]
     fn a_project_without_members_offers_no_responsible_person() {
@@ -3425,7 +3662,7 @@ mod new_step_field_tests {
 
 #[cfg(test)]
 mod card_layout_tests {
-    use super::{ProjectTab, project_tabs, tab_of_mark};
+    use super::{Module, ProjectTab, project_tabs, tab_of_mark};
 
     /// The sessions are grouped by AI provider, in the order each first comes (the live
     /// ones first), so each gets a box of its own.
@@ -3444,14 +3681,21 @@ mod card_layout_tests {
         assert!(provider_groups(&[], &[]).is_empty());
     }
 
-    /// The page opens on the overview; versions and the watch only for code projects; a
-    /// tour pointing at a card finds it in its tab.
+    /// The page opens on the overview; versions and the watch only with their modules (a
+    /// project without code has none by itself); a tour pointing at a card finds it in its
+    /// tab.
     #[test]
     fn project_tabs_follow_the_kind_of_project() {
         use ProjectTab::*;
-        assert_eq!(project_tabs(true, false), [Overview, Versions, Watch, Pages, Review]);
-        assert_eq!(project_tabs(false, false), [Overview, Pages, Review]);
-        assert_eq!(project_tabs(false, true), [Overview, Pages, Review, Members]);
+        let mut pr = crate::project::Project::new("");
+        pr.code = Some(true);
+        assert_eq!(project_tabs(false, &pr.modules()), [Overview, Versions, Watch, Pages, Review]);
+        pr.code = Some(false);
+        assert_eq!(project_tabs(false, &pr.modules()), [Overview, Pages, Review]);
+        assert_eq!(project_tabs(true, &pr.modules()), [Overview, Pages, Review, Members]);
+        // A module turned off takes its tabs with it; versions need git too.
+        assert_eq!(project_tabs(false, &[Module::Git]), [Overview, Watch, Pages, Review]);
+        assert_eq!(project_tabs(false, &[Module::Versions]), [Overview, Pages, Review]);
         assert_eq!(tab_of_mark("card:members"), Some(Members));
         assert_eq!(ProjectTab::default(), Overview);
         assert_eq!(tab_of_mark("card:versions"), Some(Versions));
@@ -3731,8 +3975,12 @@ fn ai_steps(
     ui.horizontal_wrapped(|ui| {
         ui.spacing_mut().item_spacing.x = 8.0;
         let r = ui.add_enabled_ui(folder_ok, |ui| action_link(ui, crate::tr!("Suggérer des étapes", "Suggest steps"))).inner;
+        let how = match crate::sync::openai::Service::from_id(&ai.text_model.service) {
+            Some(service) => crate::trf!("{} reçoit un résumé du dossier (Paramètres › IA) et propose des étapes ; vous choisissez celles à garder.", "{} gets a summary of the folder (Settings › AI) and proposes steps; you choose which to keep.", service.label()),
+            None => crate::tr!("L'IA lit le code sans rien modifier et propose des étapes précises (fonctionnalité, technique, sécurité), faites pour être menées par une IA en autonomie ; vous choisissez celles à garder.", "The AI reads the code without changing anything and proposes precise steps (feature, technical, security), made to be carried out by an AI on its own; you choose which to keep.").to_string(),
+        };
         let r = r
-            .on_hover_text(crate::tr!("L'IA lit le code sans rien modifier et propose des étapes précises (fonctionnalité, technique, sécurité), faites pour être menées par une IA en autonomie ; vous choisissez celles à garder.", "The AI reads the code without changing anything and proposes precise steps (feature, technical, security), made to be carried out by an AI on its own; you choose which to keep."))
+            .on_hover_text(how)
             .on_disabled_hover_text(crate::tr!("Indiquez d'abord le dossier du projet", "Set the project's folder first"));
         if r.clicked() && folder_ok {
             super::ai_fill::request(ui.ctx(), super::ai_fill::AiReq::Tasks { page_id: page_id.to_string(), folder: folder.clone(), existing: existing.clone(), prefer, text: None, images: vec![] });
@@ -3912,6 +4160,7 @@ fn other_session_row(ui: &mut egui::Ui, s: &crate::project::SessionRef, t: &Tone
 
 fn sessions_card(ui: &mut egui::Ui, cx: &mut Cx, extra: f32) -> f32 {
     let (page_id, pr, t, live) = (cx.page_id, &*cx.pr, cx.t, cx.live);
+    let modules = pr.modules();
     // ---- Sessions: live ones read from disk, plus those an AI linked itself.
     let mut msg = None;
     let mut clear = false;
@@ -3952,7 +4201,7 @@ fn sessions_card(ui: &mut egui::Ui, cx: &mut Cx, extra: f32) -> f32 {
         for (label, live_i, other_i) in &groups {
             let mut rows = |ui: &mut egui::Ui| {
                 for &i in live_i.iter().take(if all { usize::MAX } else { 4 }) {
-                    if let Some(m) = session_row(ui, page_id, &live[i], t) {
+                    if let Some(m) = session_row(ui, page_id, &live[i], &modules, t) {
                         msg = Some(m);
                     }
                 }
@@ -4833,7 +5082,7 @@ fn quick_question(ui: &mut egui::Ui, cx: &mut Cx) {
     let text_key = egui::Id::unique(("quick-question", page_id));
     let mut text: String = ui.ctx().data(|d| d.get_temp(text_key)).unwrap_or_default();
     let asking = cx.ai.asking(page_id).map(String::from);
-    let hint = if shows_git(ui.ctx(), cx.pr) {
+    let hint = if cx.pr.is_code() {
         crate::tr!(
             "Question rapide à l'IA, ex. « telle fonctionnalité serait-elle intéressante ? »",
             "Quick question to the AI, e.g. « would this feature be worth it? »"
@@ -5024,6 +5273,7 @@ fn quick_question(ui: &mut egui::Ui, cx: &mut Cx) {
                                 );
                             }
                             if let Some(resume) = &a.resume
+                                && cx.pr.has_module(Module::Terminal)
                                 && quiet_link(
                                     ui,
                                     crate::tr!("Ouvrir dans un terminal", "Open in a terminal"),
@@ -5069,7 +5319,7 @@ fn review_card(ui: &mut egui::Ui, cx: &mut Cx) {
     let pr = &*cx.pr;
     let prefer = cx.live.first().map(|s| s.tool);
     let reviewing = cx.reviewing || cx.ai.filling(page_id);
-    let code = shows_git(ui.ctx(), pr);
+    let code = pr.is_code();
     card(ui, t, 0.0, |ui| {
         let by = pr
             .review

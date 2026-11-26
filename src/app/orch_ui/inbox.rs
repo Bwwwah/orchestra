@@ -123,7 +123,7 @@ impl NotesApp {
                         }
                     });
                 });
-                ui.label(RichText::new(crate::tr!("Questions des IA, fins de session, rapports et messages de l'application.", "AI questions, session ends, reports and the app's messages.")).color(t.secondary));
+                ui.label(RichText::new(crate::tr!("Questions des IA, mentions, fins de session, rapports et messages de l'application.", "AI questions, mentions, session ends, reports and the app's messages.")).color(t.secondary));
                 ui.add_space(14.0);
                 // Filters: everything, the questions still waiting for an answer, the unread.
                 let filter_id = inbox_filter_id();
@@ -188,6 +188,7 @@ impl NotesApp {
                         "fin" => (super::projects::GREEN, crate::tr!("Session", "Session")),
                         "rapport" => (super::projects::BLUE, crate::tr!("Rapport", "Report")),
                         "erreur" => (super::style::RED, crate::tr!("Erreur", "Error")),
+                        crate::mentions::KIND => (super::projects::ORANGE, "Mention"),
                         _ => (t.tertiary, crate::tr!("Info", "Info")),
                     };
                     let project = (!m.project.is_empty()).then(|| self.ws.page(&m.project).map(|p| p.display_title())).flatten();

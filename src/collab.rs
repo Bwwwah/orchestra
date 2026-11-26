@@ -44,6 +44,8 @@ pub fn received_new(mut p: Page) -> Page {
     if let Some(x) = p.project.as_mut() {
         x.keep_local(None);
     }
+    let comments = std::mem::take(&mut p.comments);
+    p.merge_comments(&comments);
     p
 }
 
@@ -93,8 +95,8 @@ pub fn merge(ours: &mut Workspace, theirs: &Workspace) -> usize {
 /// Merge another copy of a page into ours, block by block. The page's own settings (title, icon,
 /// place, database…) come from the copy edited last; each block keeps its most recent edit; blocks
 /// deleted on either side stay deleted; blocks added on either side are kept, in the order of the
-/// copy edited last, with the other side's new blocks after the block they followed.
-/// Returns true when ours changed.
+/// copy edited last, with the other side's new blocks after the block they followed. The
+/// comments of both copies are joined (`Page::merge_comments`). Returns true when ours changed.
 pub fn merge_page(ours: &mut Page, theirs: &Page) -> bool {
     use std::collections::{BTreeMap, HashMap};
     let before = serde_json::to_string(&ours).unwrap_or_default();
@@ -163,6 +165,8 @@ pub fn merge_page(ours: &mut Page, theirs: &Page) -> bool {
     }
     merged.blocks = blocks;
     merged.deleted_blocks = tomb;
+    merged.comments = ours.comments.clone();
+    merged.merge_comments(&theirs.comments);
     if let Some((_, crdt)) = order {
         merged.order_crdt = crdt;
     }

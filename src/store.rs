@@ -238,7 +238,7 @@ fn load_from(path: &Path) -> Workspace {
 }
 
 /// Icons from older versions that the fonts can't draw (they showed as a box of bars).
-fn fix_icons(ws: &mut Workspace) {
+pub(crate) fn fix_icons(ws: &mut Workspace) {
     for p in &mut ws.pages {
         let new = match p.icon.trim_end_matches('\u{fe0f}') {
             "🤖" => "💬",

@@ -44,7 +44,7 @@ enum Action {
         view: DbView,
     },
     Export(String),
-    NewProject(String, String),
+    NewProject(projects::NewProject),
     RevertDoc(String),
     LocalCopy(String),
     /// « Lancer une IA » on a project's page: an autonomous session with its kept choices.
@@ -76,6 +76,10 @@ pub struct NotesApp {
     toasts: Vec<notices::Toast>,
     /// The tutorial in progress (see tutorial.rs).
     tour: Option<tutorial::Tour>,
+    /// The first use's question about the AI to use, while it is on screen (first_run.rs).
+    first_run: Option<first_run::Choice>,
+    /// That question is answered: the tutorial starts as soon as the terminal is done.
+    tour_waits: bool,
     /// Messages raised while the workspace is borrowed, shown at the end of the frame.
     said: Vec<notices::Notice>,
     toast_seq: u64,
@@ -83,6 +87,8 @@ pub struct NotesApp {
     settings_snapshot: String,
     dirty_since: Option<Instant>,
     known_mtime: Option<SystemTime>,
+    /// Pages edited here, waiting for their next version (history.rs).
+    history: crate::history::Pending,
     /// Inbox messages deleted here: a merge with the file on disk must not bring them back.
     inbox_removed: HashSet<String>,
     last_poll: Instant,
@@ -112,8 +118,8 @@ pub struct NotesApp {
     tabs: Vec<Tab>,
     active_tab: usize,
     closed_tabs: Vec<Tab>,
-    /// "Nouveau projet" form: (name, folder).
-    new_project: Option<(String, String)>,
+    /// The « Nouveau projet » form, when open.
+    new_project: Option<projects::NewProject>,
     /// The project whose « Réglages de lancement » window is open.
     launch_settings: Option<String>,
     /// Text of the "add a step" field on a project page.
@@ -155,6 +161,8 @@ pub struct NotesApp {
     /// The project whose quick-question thread the side panel shows (kept when it is closed).
     thread_pid: Option<String>,
     ai_session: Option<String>,
+    /// The conversations projects without code have with an AI in the side panel.
+    talks: side_chat::Talks,
     transcripts: HashMap<String, (u64, std::sync::Arc<Vec<crate::sessions::Turn>>)>,
     /// Space taken this frame by the side panel (right) and the terminal dock (bottom).
     side_w: f32,
@@ -218,12 +226,15 @@ impl NotesApp {
             search_sel: 0,
             toasts: vec![],
             tour: None,
+            first_run: None,
+            tour_waits: false,
             said: vec![],
             toast_seq: 0,
             snapshot: HashMap::new(),
             settings_snapshot: String::new(),
             dirty_since: None,
             known_mtime: None,
+            history: Default::default(),
             inbox_removed: HashSet::new(),
             last_poll: Instant::now(),
             export_dir,
@@ -276,6 +287,7 @@ impl NotesApp {
             thread_draft: String::new(),
             thread_pid: None,
             ai_session: None,
+            talks: side_chat::Talks::default(),
             transcripts: HashMap::new(),
             side_w: 0.0,
             dock_h: 0.0,
@@ -328,19 +340,23 @@ impl NotesApp {
         if let Some(id) = open.filter(|id| alive(id)) {
             app.navigate(id);
         }
-        // First use: the tutorial starts by itself, once.
-        if !app.ws.settings.tutorial_seen
-            && std::env::var_os("ORCHESTRA_DEMO").is_none()
-            && std::env::var_os("ORCHESTRA_NO_SESSIONS").is_none()
-            && app.shot.is_none()
-        {
+        // First use: Orchestra asks which AI to use, then the tutorial starts by itself, once.
+        let unattended = std::env::var_os("ORCHESTRA_DEMO").is_some()
+            || std::env::var_os("ORCHESTRA_NO_SESSIONS").is_some()
+            || app.shot.is_some();
+        if !app.ws.settings.tutorial_seen && !unattended {
             app.ws.settings.tutorial_seen = true;
+            app.ws.settings.ai_choice_pending = true;
             app.dirty_since = Some(Instant::now());
-            app.start_tour();
         }
-        // Developer aid for screenshots: ORCHESTRA_DEMO=settings | ai | collab | slash[:text].
+        if app.ws.settings.ai_choice_pending && !unattended {
+            app.first_run = Some(Default::default());
+        }
+        // Developer aid for screenshots:
+        // ORCHESTRA_DEMO=first-run | settings | ai | collab | slash[:text].
         if let Ok(demo) = std::env::var("ORCHESTRA_DEMO") {
             match demo.split(':').next().unwrap_or("") {
+                "first-run" => app.first_run = Some(Default::default()),
                 "settings" => app.settings_tab = Some(SettingsTab::Preferences),
                 "sidebar-settings" => app.settings_tab = Some(SettingsTab::Sidebar),
                 "ai" => app.settings_tab = Some(SettingsTab::Ai),
@@ -471,6 +487,7 @@ impl NotesApp {
     fn detect_changes(&mut self) {
         let mut changed = false;
         let t = now_ms();
+        let history_dir = crate::history::dir();
         let ids: HashSet<&String> = self.ws.pages.iter().map(|p| &p.id).collect();
         if ids.len() != self.snapshot.len() || self.snapshot.keys().any(|k| !ids.contains(k)) {
             changed = true;
@@ -503,6 +520,8 @@ impl NotesApp {
                         for id in gone {
                             p.deleted_blocks.insert(id, t);
                         }
+                        self.history
+                            .edited(&history_dir, &oldp, p, Instant::now());
                     }
                     p.updated = t.max(p.updated);
                     changed = true;
@@ -904,7 +923,13 @@ impl NotesApp {
                     self.ack(crate::tr!("Page restaurée.", "Page restored."));
                 }
                 Action::DeleteForever(id) => {
+                    let mut gone = self.ws.descendants(&id);
+                    gone.push(id.clone());
                     self.ws.delete_forever(&id);
+                    let dir = crate::history::dir();
+                    for page in gone {
+                        crate::history::forget(&dir, &page);
+                    }
                 }
                 Action::Duplicate(id) => {
                     if let Some(n) = self.ws.duplicate(&id) {
@@ -989,8 +1014,8 @@ impl NotesApp {
                         "Couldn't read the file again: {e}"
                     )),
                 },
-                Action::NewProject(title, folder) => {
-                    let id = self.ws.create_project(&title, &folder);
+                Action::NewProject(new) => {
+                    let id = new.create_in(&mut self.ws);
                     crate::docs::sync_project(&mut self.ws, &id);
                     self.navigate(id);
                     self.view = View::Page;
@@ -1106,6 +1131,7 @@ impl NotesApp {
             vec![]
         };
         let mut answered: Option<(String, String)> = None;
+        let who = self.comment_author(ui.ctx(), &cur);
         let focus = self.focus.take();
         let mut new_focus: Option<(String, Option<usize>)> = None;
         let mut focus_used = false;
@@ -1127,6 +1153,21 @@ impl NotesApp {
                     (708.0 + gutter).min(avail - 20.0).max(240.0)
                 };
                 let margin = ((avail - width - gutter) / 2.0).max(10.0);
+                // A page with comments leaves them room on the right when it can.
+                let commented = self
+                    .ws
+                    .page(&cur)
+                    .is_some_and(|p| comments_ui::wants_margin(ui.ctx(), p, &who));
+                let (margin, width, comment_margin) = if commented {
+                    let min = if project_page {
+                        comments_ui::MIN_PROJECT
+                    } else {
+                        comments_ui::MIN_TEXT
+                    };
+                    comments_ui::place(avail, margin, width, min + gutter)
+                } else {
+                    (margin, width, false)
+                };
                 ui.horizontal_top(|ui| {
                     ui.add_space(margin);
                     ui.vertical(|ui| {
@@ -1341,6 +1382,7 @@ impl NotesApp {
                                 });
                             ui.add_space(16.0);
                         }
+                        comments_ui::resolved_link(ui, page, gutter, &t);
                         // Lecture seule: the text is shown as usual but can't be changed.
                         let (nf, used) = ui
                             .scope(|ui| {
@@ -1372,6 +1414,9 @@ impl NotesApp {
                             }
                             new_focus = page.blocks.last().map(|b| (b.id.clone(), None));
                         }
+                        // Outside « Lecture seule »: a locked page is still commented.
+                        let column = ui.max_rect().x_range();
+                        comments_ui::show(ui, page, &who, column, comment_margin, &t);
                     });
                 });
             });
@@ -1383,6 +1428,38 @@ impl NotesApp {
         } else if !focus_used {
             // The target wasn't drawn yet (a new page appears next frame): keep asking.
             self.focus = focus;
+        }
+    }
+
+    /// Who this person is for the comments of page `id`, as for the discussion.
+    fn comment_author(&self, ctx: &egui::Context, id: &str) -> comments_ui::Who {
+        let name = self.my_name();
+        let members = self
+            .ws
+            .project_of(id)
+            .and_then(|p| p.project.as_ref())
+            .map(|pr| pr.members.clone())
+            .unwrap_or_default();
+        // Only a team space knows its members by id.
+        if !self.ws.whole_shared {
+            return comments_ui::Who {
+                name,
+                id: String::new(),
+                members,
+                can_write: true,
+            };
+        }
+        let my_id = members_ui::team_cx(ctx, false).me;
+        let name = members
+            .iter()
+            .find(|m| !my_id.is_empty() && m.id == my_id)
+            .map_or(name, |m| m.name.clone());
+        comments_ui::Who {
+            name,
+            id: my_id,
+            members,
+            can_write: crate::team::Role::from_key(&crate::space::current().role)
+                != Some(crate::team::Role::Reader),
         }
     }
 
@@ -1614,9 +1691,11 @@ impl eframe::App for NotesApp {
         self.take_conversation_request(&ctx);
         self.review_tick(&ctx);
         self.ai_tick(&ctx);
+        self.talk_tick(&ctx);
         self.ais_tick();
         self.orch_tick(&ctx, true);
         self.install_tick(&ctx);
+        self.sign_in_tick(&ctx);
         self.update_tick(&ctx);
         self.versions.tick(&ctx);
         if let Some(m) = self.versions.status.take() {
@@ -1765,6 +1844,7 @@ impl eframe::App for NotesApp {
             self.notice(m);
         }
         self.toasts_ui(&ctx, fab);
+        self.first_run_ui(&ctx);
         self.tutorial_ui(&ctx);
         self.search_window(&ctx, &mut actions);
         self.settings_window(&ctx, &mut actions);
@@ -1821,6 +1901,7 @@ impl eframe::App for NotesApp {
             self.detect_changes();
         }
         self.live_tick();
+        self.history_tick();
         if let Some(t) = self.dirty_since
             && t.elapsed() > Duration::from_millis(400)
         {
@@ -1882,6 +1963,7 @@ impl NotesApp {
     fn conductor_tick(&mut self, ctx: &egui::Context) {
         self.poll_file();
         self.orch_tick(ctx, false);
+        self.history_tick();
         if let Some(t) = self.dirty_since
             && t.elapsed() > Duration::from_millis(400)
         {
@@ -1903,9 +1985,16 @@ impl NotesApp {
 
     fn save_on_exit(&mut self) {
         self.detect_changes();
+        self.history.flush(&crate::history::dir(), &self.ws);
         if self.dirty_since.is_some() {
             self.save_now();
         }
+    }
+
+    /// Keep a version of the pages edited for ten minutes.
+    fn history_tick(&mut self) {
+        self.history
+            .tick(&crate::history::dir(), &self.ws, Instant::now());
     }
 }
 
@@ -2321,6 +2410,10 @@ fn blocks_view(
                     }
                 }
                 ui.separator();
+                if ui.button(crate::tr!("Commenter", "Comment")).clicked() {
+                    comments_ui::start(ui.ctx(), &page_id, &b.id);
+                    ui.close();
+                }
                 if ui.button(crate::tr!("Dupliquer", "Duplicate")).clicked() {
                     let mut c = b.clone();
                     c.id = new_id();
@@ -3104,7 +3197,9 @@ pub(crate) use crate::LockOrRecover;
 mod ai_fill;
 mod ai_ui;
 mod chrome;
+mod comments_ui;
 mod conductor;
+mod first_run;
 mod live_ui;
 mod members_ui;
 mod notices;
@@ -3114,6 +3209,7 @@ mod rich;
 mod search;
 mod settings;
 mod side;
+mod side_chat;
 mod slash;
 mod spaces_ui;
 mod style;

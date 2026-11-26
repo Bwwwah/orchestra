@@ -3,6 +3,7 @@
 //! of the Claude subscription.
 
 use super::*;
+use crate::claude_account::Account;
 use crate::setup::{Ai, AiState};
 use std::sync::{Arc, Mutex};
 
@@ -28,6 +29,42 @@ pub struct Ais {
     /// An install started from the settings (built-in terminal): the AI, when it started,
     /// and the last check of whether it is there yet. Plugged in as soon as it is.
     pub installing: Option<(Ai, Instant, Instant)>,
+    /// A sign-in to Claude Code under way (built-in terminal, then the browser).
+    pub signing_in: Option<SignIn>,
+}
+
+/// A sign-in being waited for: the account before it, when it started, and the last check.
+pub struct SignIn {
+    before: Option<Account>,
+    started: Instant,
+    last: Instant,
+}
+
+/// The account a sign-in just brought: one signed in that wasn't there before it.
+fn newly_signed_in<'a>(before: Option<&Account>, now: Option<&'a Account>) -> Option<&'a Account> {
+    now.filter(|a| a.signed_in() && Some(*a) != before)
+}
+
+#[cfg(test)]
+mod sign_in_tests {
+    use super::{Account, newly_signed_in};
+
+    #[test]
+    fn a_sign_in_ends_when_a_new_account_shows() {
+        let who = |email: &str| Account::SignedIn {
+            method: None,
+            email: Some(email.into()),
+            plan: None,
+        };
+        let (ada, bob, out) = (who("ada"), who("bob"), Account::SignedOut);
+        assert_eq!(newly_signed_in(Some(&out), Some(&ada)), Some(&ada));
+        assert_eq!(newly_signed_in(Some(&ada), Some(&bob)), Some(&bob));
+        // Still waiting: nobody yet, the same account as before, or no answer.
+        assert_eq!(newly_signed_in(Some(&out), Some(&out)), None);
+        assert_eq!(newly_signed_in(Some(&ada), Some(&ada)), None);
+        assert_eq!(newly_signed_in(Some(&ada), Some(&out)), None);
+        assert_eq!(newly_signed_in(Some(&out), None), None);
+    }
 }
 
 impl Ais {
@@ -37,6 +74,14 @@ impl Ais {
             .lock_or_recover()
             .as_ref()
             .is_some_and(|s| !s.iter().any(|x| x.plugged))
+    }
+
+    /// Claude Code's account at the last check, when it told it.
+    fn claude_account(&self) -> Option<Account> {
+        self.states
+            .lock_or_recover()
+            .as_ref()
+            .and_then(|s| s.iter().find(|x| x.ai == Ai::ClaudeCode)?.account.clone())
     }
 
     pub fn plugged(&self) -> Vec<Ai> {
@@ -116,7 +161,7 @@ mod launcher_tests {
 
     #[test]
     fn only_the_installed_ais_that_open_in_a_terminal_are_offered() {
-        let st = |ai, installed, plugged| AiState { ai, installed, plugged, install: None };
+        let st = |ai, installed, plugged| AiState { ai, installed, plugged, install: None, account: None };
         let states = [
             st(Ai::Vibe, true, false),
             st(Ai::Antigravity, false, false),
@@ -188,6 +233,24 @@ impl NotesApp {
                 "{} is installed and plugged into Orchestra.",
                 ai.label()
             ));
+            // A new Claude Code has no account yet: sign in right away.
+            if ai == Ai::ClaudeCode && self.ais.claude_account() == Some(Account::SignedOut) {
+                let home = dirs::home_dir()
+                    .map(|h| h.display().to_string())
+                    .unwrap_or_default();
+                super::term_ui::request(
+                    ctx,
+                    crate::tr!("Connexion · Claude Code", "Sign in · Claude Code"),
+                    &home,
+                    Some(crate::claude_account::LOGIN_COMMAND.into()),
+                );
+                self.watch_sign_in();
+                self.info(crate::tr!(
+                    "Claude Code est installée. Connectez maintenant votre compte dans la page ouverte par votre navigateur.",
+                    "Claude Code is installed. Now sign in to your account on the page your browser opens."
+                ));
+                ctx.request_repaint();
+            }
             return;
         }
         if started.elapsed() > GIVE_UP {
@@ -198,6 +261,56 @@ impl NotesApp {
         if last.elapsed() >= EVERY && there.is_some() {
             self.ais.installing = Some((ai, started, Instant::now()));
             self.refresh_ais(ctx, false);
+        }
+        ctx.request_repaint_after(EVERY);
+    }
+
+    /// A sign-in to Claude Code was started: from now on its account is read every few
+    /// seconds, to say who is signed in as soon as it is done.
+    pub(super) fn watch_sign_in(&mut self) {
+        let now = Instant::now();
+        self.ais.signing_in = Some(SignIn {
+            before: self.ais.claude_account(),
+            started: now,
+            last: now,
+        });
+    }
+
+    /// While a sign-in runs. Gives up after a while (browser closed, sign-in abandoned).
+    pub(super) fn sign_in_tick(&mut self, ctx: &egui::Context) {
+        use std::time::Duration;
+        const EVERY: Duration = Duration::from_secs(5);
+        const GIVE_UP: Duration = Duration::from_secs(10 * 60);
+        let account = self.ais.claude_account();
+        let Some(s) = &mut self.ais.signing_in else {
+            return;
+        };
+        if let Some(a) = newly_signed_in(s.before.as_ref(), account.as_ref()) {
+            let who = a.describe();
+            self.ais.signing_in = None;
+            self.info(crate::trf!("Claude Code est {who}.", "Claude Code is {who}."));
+            return;
+        }
+        if s.started.elapsed() > GIVE_UP {
+            self.ais.signing_in = None;
+            return;
+        }
+        if s.last.elapsed() >= EVERY {
+            s.last = Instant::now();
+            let states = self.ais.states.clone();
+            let ctx = ctx.clone();
+            // Only the account: checking every AI again would start all their programs.
+            std::thread::spawn(move || {
+                let Some(account) = crate::setup::claude_account_now() else {
+                    return;
+                };
+                if let Some(s) = states.lock_or_recover().as_mut()
+                    && let Some(claude) = s.iter_mut().find(|x| x.ai == Ai::ClaudeCode)
+                {
+                    claude.account = Some(account);
+                }
+                ctx.request_repaint();
+            });
         }
         ctx.request_repaint_after(EVERY);
     }

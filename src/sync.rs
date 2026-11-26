@@ -7,8 +7,18 @@
 //! through the MCP tools (get_project_state, create_project / update_project, add_steps).
 //! Runs go one after the other, so two agents never write the workspace at the same time.
 //! It uses the person's own Claude / Codex subscription, as if they had typed the request.
+//!
+//! Every other question the app asks an AI without a window is here too. They all go through
+//! the `Provider` trait (`provider`), which Claude Code and Codex implement below, and
+//! `openai` for a model behind an OpenAI-compatible address.
+
+mod brief;
+pub mod openai;
+pub mod provider;
+pub mod talk;
 
 use crate::LockOrRecover;
+use provider::{Provider, Reply, Request};
 use crate::sessions::Tool;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
@@ -234,29 +244,15 @@ pub fn prompt(folder: &str) -> String {
     )
 }
 
-fn agent_args(tool: Tool, prompt: &str) -> Vec<String> {
-    match tool {
-        Tool::ClaudeCode => vec![
-            "-p".into(),
-            prompt.into(),
-            "--output-format".into(),
-            "json".into(),
-            "--max-turns".into(),
-            "40".into(),
-            // Read-only: reading tools, two git commands, and the dashboard's MCP tools.
-            "--allowedTools".into(),
-            "mcp__orchestra,Read,Glob,Grep,Bash(git log:*),Bash(git status:*),Bash(ls:*)".into(),
-            // The steps are the person's: the AI proposes them only when asked.
-            "--disallowedTools".into(),
-            "mcp__orchestra__add_steps".into(),
-        ],
-        Tool::Codex => vec![
-            "exec".into(),
-            "--sandbox".into(),
-            "read-only".into(),
-            "--skip-git-repo-check".into(),
-            prompt.into(),
-        ],
+/// The request that synchronises one folder.
+fn sync_request<'a>(folder: &'a str, prompt: &'a str) -> Request<'a> {
+    Request {
+        // Read-only: reading tools, two git commands, and the dashboard's MCP tools.
+        tools: "mcp__orchestra,Read,Glob,Grep,Bash(git log:*),Bash(git status:*),Bash(ls:*)",
+        // The steps are the person's: the AI proposes them only when asked.
+        denied_tools: "mcp__orchestra__add_steps",
+        max_turns: 40,
+        ..Request::new(folder, prompt)
     }
 }
 
@@ -268,9 +264,40 @@ fn last_line(s: &str) -> Option<String> {
         .map(|l| crate::richtext::one_line(l, 160))
 }
 
-/// Run one agent in one folder; stops it after `PER_PROJECT` or when `cancel` is set.
-/// Run an agent headless in `folder` with these arguments. Returns its final answer and a
-/// short report ("terminé en 42 s"), or an error people can act on.
+/// Claude Code and Codex answer through their command line, run headless in the folder.
+impl Provider for Agent {
+    fn id(&self) -> &str {
+        self.tool.name()
+    }
+
+    fn label(&self) -> &str {
+        self.tool.label()
+    }
+
+    fn run(&self, request: &Request, cancel: &AtomicBool) -> Result<Reply, String> {
+        let model = weight_model(self.tool, request.weight);
+        let args = cli_args(self.tool, request, model.as_deref()).ok_or(cannot_resume())?;
+        run_agent(
+            self,
+            request.folder,
+            args,
+            &shell_path(),
+            cancel,
+            request.limit,
+        )
+    }
+}
+
+fn cannot_resume() -> &'static str {
+    crate::tr!(
+        "Cette IA ne peut pas encore poursuivre la conversation ici.",
+        "This AI can't carry the conversation on here yet."
+    )
+}
+
+/// Run an agent headless in `folder` with these arguments; stops it after `limit` or when
+/// `cancel` is set. Returns its answer, or an error people can act on. Only for
+/// `Provider::run` above, so that the space's AI rule is kept (`provider::send`).
 fn run_agent(
     agent: &Agent,
     folder: &str,
@@ -278,11 +305,7 @@ fn run_agent(
     path: &str,
     cancel: &AtomicBool,
     limit: Duration,
-) -> Result<(String, String, Option<String>), String> {
-    // Every AI run without a window goes through here: the space's AI rule is kept.
-    if let Some(why) = crate::space::refusal(agent.tool.name(), agent.tool.label()) {
-        return Err(why);
-    }
+) -> Result<Reply, String> {
     let dir = crate::project::normalize_folder(folder);
     if !dir.is_dir() {
         return Err(crate::tr!("dossier introuvable", "folder not found").into());
@@ -378,15 +401,15 @@ fn run_agent(
             .and_then(|x| x.as_str())
             .filter(|s| is_session_id(s))
             .map(String::from);
-        return Ok((
-            result,
-            crate::trf!(
+        return Ok(Reply {
+            text: result,
+            report: crate::trf!(
                 "terminé en {} s, {turns} échanges",
                 "done in {} s, {turns} exchanges",
                 start.elapsed().as_secs()
             ),
             session,
-        ));
+        });
     }
     if status.success() {
         let session = if agent.tool == Tool::Codex {
@@ -394,11 +417,11 @@ fn run_agent(
         } else {
             None
         };
-        Ok((
-            out.trim().to_string(),
-            crate::trf!("terminé en {} s", "done in {} s", start.elapsed().as_secs()),
+        Ok(Reply {
+            text: out.trim().to_string(),
+            report: crate::trf!("terminé en {} s", "done in {} s", start.elapsed().as_secs()),
             session,
-        ))
+        })
     } else {
         Err(last_line(&err)
             .or_else(|| last_line(&out))
@@ -433,16 +456,8 @@ fn is_auth_error(low: &str) -> bool {
 }
 
 /// Synchronise one folder (see `prompt`).
-fn run_one(agent: &Agent, folder: &str, path: &str, cancel: &AtomicBool) -> Result<String, String> {
-    run_agent(
-        agent,
-        folder,
-        agent_args(agent.tool, &prompt(folder)),
-        path,
-        cancel,
-        PER_PROJECT,
-    )
-    .map(|(_, report, _)| report)
+fn run_one(agent: &Agent, folder: &str, cancel: &AtomicBool) -> Result<String, String> {
+    provider::send(agent, &sync_request(folder, &prompt(folder)), cancel).map(|r| r.report)
 }
 
 /// A conversation id an agent gave back, safe to put on a command line: letters, digits
@@ -615,21 +630,59 @@ pub fn parse_fill(answer: &str) -> Result<Fill, String> {
     })
 }
 
-/// Ask an agent to fill in a project's cards (read-only, web search allowed).
-/// `code`: the project kind forced by the person (None: detected).
+/// A question about the project in `folder`: to `model` when the person chose one, else to
+/// an agent as in `ask`. An agent reads the folder itself; a model gets in the question what
+/// `brief` can tell of it, `known` (what the dashboard holds of the project) included. A
+/// chosen model that fails is never replaced by an agent: nothing goes where the person
+/// didn't choose. Returns the answer and who gave it, as shown to the person.
+fn ask_about(
+    folder: &str,
+    prompt: String,
+    claude_tools: &str,
+    max_turns: u32,
+    prefer: Option<Tool>,
+    model: Option<&openai::OpenAi>,
+    known: &str,
+) -> Result<(String, String), String> {
+    let Some(model) = model else {
+        return ask(folder, prompt, claude_tools, max_turns, prefer)
+            .map(|(answer, tool)| (answer, tool.label().to_string()));
+    };
+    if !crate::project::normalize_folder(folder).is_dir() {
+        return Err(crate::tr!("dossier introuvable", "folder not found").into());
+    }
+    model.check()?;
+    let prompt = brief::with_project(folder, known, model.brief_budget(), &prompt);
+    ask_model(model, &Request::new(folder, &prompt))
+}
+
+/// One question to the chosen model: its answer and its name.
+fn ask_model(model: &openai::OpenAi, request: &Request) -> Result<(String, String), String> {
+    provider::send(model, request, &AtomicBool::new(false))
+        .and_then(provider::answered)
+        .map(|reply| (reply.text, model.label().to_string()))
+}
+
+/// Ask an AI to fill in a project's cards (read-only; an agent may search the web).
+/// `code`: the project kind forced by the person (None: detected). `model` and `known`: see
+/// `ask_about`.
 pub fn ask_fill(
     folder: &str,
     code: Option<bool>,
     prefer: Option<Tool>,
-) -> Result<(Fill, Tool), String> {
-    let (answer, tool) = ask(
+    model: Option<&openai::OpenAi>,
+    known: &str,
+) -> Result<(Fill, String), String> {
+    let (answer, by) = ask_about(
         folder,
         fill_prompt(folder, crate::project::code_kind(folder, code)),
         "Read,Glob,Grep,Bash(git log:*),Bash(git status:*),Bash(ls:*),WebSearch,WebFetch",
         30,
         prefer,
+        model,
+        known,
     )?;
-    Ok((parse_fill(&answer)?, tool))
+    Ok((parse_fill(&answer)?, by))
 }
 
 /// Task titles from an answer: one per "- " / "* " / "1. " line.
@@ -683,6 +736,8 @@ pub fn ask_tasks(
     folder: &str,
     existing: &[String],
     prefer: Option<Tool>,
+    model: Option<&openai::OpenAi>,
+    known: &str,
 ) -> Result<Vec<String>, String> {
     let have = if existing.is_empty() {
         crate::tr!("(aucune)", "(none)").to_string()
@@ -727,12 +782,14 @@ pub fn ask_tasks(
          « - Area: action (file or module) », 140 characters at most. \
          Example: « - Security: escape the folder name passed to the git command (src/git.rs) »."
     );
-    let (answer, _) = ask(
+    let (answer, _) = ask_about(
         folder,
         prompt,
         "Read,Glob,Grep,Bash(git log:*),Bash(git status:*),Bash(ls:*)",
         40,
         prefer,
+        model,
+        known,
     )?;
     let tasks = ai_steps_only(parse_tasks(&answer));
     if tasks.is_empty() {
@@ -759,35 +816,48 @@ pub enum Weight {
     Strong,
 }
 
-/// The command line for one question to an agent. Images: Codex takes them with `--image`;
+/// The command line for one request to an agent. Images: Codex takes them with `--image`;
 /// Claude Code reads them itself, from their folders added with `--add-dir`. A light
 /// or strong question runs on `model` (chosen by the catalog, see `weight_model`),
 /// with low (light) or high (strong) reasoning effort on Codex; without one the agent keeps
-/// its default.
-fn ask_args(
-    tool: Tool,
-    prompt: String,
-    claude_tools: &str,
-    max_turns: u32,
-    images: &[String],
-    weight: Weight,
-    model: Option<&str>,
-) -> Vec<String> {
+/// its default. A conversation is carried on with `claude -p <reply> --resume <id>` or
+/// `codex exec resume <id> <reply>`. None for a conversation id unsafe on a command line.
+fn cli_args(tool: Tool, request: &Request, model: Option<&str>) -> Option<Vec<String>> {
+    let Request {
+        prompt,
+        resume,
+        tools,
+        denied_tools,
+        max_turns,
+        images,
+        weight,
+        ..
+    } = *request;
+    if resume.is_some_and(|id| !is_session_id(id)) {
+        return None;
+    }
     let model = model
         .filter(|_| weight != Weight::Full)
         .and_then(crate::auto::model_arg);
-    match tool {
+    Some(match tool {
         Tool::ClaudeCode => {
-            let mut a: Vec<String> = vec![
-                "-p".into(),
-                prompt,
+            let mut a: Vec<String> = vec!["-p".into(), prompt.into()];
+            if let Some(id) = resume {
+                a.push("--resume".into());
+                a.push(id.into());
+            }
+            a.extend([
                 "--output-format".into(),
                 "json".into(),
                 "--max-turns".into(),
                 max_turns.to_string(),
                 "--allowedTools".into(),
-                claude_tools.into(),
-            ];
+                tools.into(),
+            ]);
+            if !denied_tools.is_empty() {
+                a.push("--disallowedTools".into());
+                a.push(denied_tools.into());
+            }
             if let Some(m) = model {
                 a.push("--model".into());
                 a.push(m.into());
@@ -832,11 +902,17 @@ fn ask_args(
             for i in images {
                 a.push(format!("--image={i}"));
             }
+            // The read-only sandbox is set before the subcommand, so it applies whatever
+            // `resume` accepts.
+            if let Some(id) = resume {
+                a.push("resume".into());
+                a.push(id.into());
+            }
             a.push("--".into());
-            a.push(prompt);
+            a.push(prompt.into());
             a
         }
-    }
+    })
 }
 
 /// The model a question of `weight` runs on, chosen by the catalog: a light one the cheapest
@@ -874,6 +950,7 @@ pub fn text_to_tasks(
     text: &str,
     images: &[String],
     prefer: Option<Tool>,
+    model: Option<&openai::OpenAi>,
 ) -> Result<Vec<String>, String> {
     let text = if text.trim().is_empty() {
         crate::tr!(
@@ -884,7 +961,18 @@ pub fn text_to_tasks(
     } else {
         text.to_string()
     };
-    let tools_rule = if images.is_empty() {
+    // A chosen model gets the images with the question; an agent reads them itself.
+    let tools_rule = if model.is_some() {
+        if images.is_empty() {
+            String::new()
+        } else {
+            crate::tr!(
+                "Des images sont jointes (captures d'écran, photos…) : tiens-en compte autant que du texte.",
+                "Images are joined (screenshots, photos…): take them into account as much as the text."
+            )
+            .to_string()
+        }
+    } else if images.is_empty() {
         crate::tr!("N'utilise aucun outil.", "Don't use any tool.").to_string()
     } else {
         let list = images
@@ -914,15 +1002,25 @@ pub fn text_to_tasks(
     } else {
         dirs::home_dir().unwrap_or_default().display().to_string()
     };
-    let (answer, _) = ask_with_images(
-        &dir,
-        prompt,
-        "Read",
-        3 + images.len() as u32,
-        prefer,
-        images,
-        Weight::Light,
-    )?;
+    let (answer, _) = match model {
+        Some(model) => ask_model(
+            model,
+            &Request {
+                images,
+                ..Request::new(&dir, &prompt)
+            },
+        )?,
+        None => ask_with_images(
+            &dir,
+            prompt,
+            "Read",
+            3 + images.len() as u32,
+            prefer,
+            images,
+            Weight::Light,
+        )
+        .map(|(answer, tool)| (answer, tool.label().to_string()))?,
+    };
     let tasks = ai_steps_only(parse_tasks(&answer));
     if tasks.is_empty() {
         return Err(crate::tr!(
@@ -998,66 +1096,16 @@ fn ask_full(
     images: &[String],
     weight: Weight,
 ) -> Result<(String, Tool, Option<String>), String> {
-    let path = shell_path();
-    let mut agents = detect(&path);
-    // Only the AIs the space allows; none: say why.
-    let refused = agents
-        .iter()
-        .find_map(|a| crate::space::refusal(a.tool.name(), a.tool.label()));
-    agents.retain(|a| crate::space::refusal(a.tool.name(), a.tool.label()).is_none());
-    if agents.is_empty()
-        && let Some(why) = refused
-    {
-        return Err(why);
-    }
-    let agent = agents
-        .iter()
-        .find(|a| Some(a.tool) == prefer)
-        .or_else(|| agents.first())
-        .ok_or(crate::tr!(
-            "Ni Claude Code ni Codex n'ont été trouvés sur cette machine.",
-            "Neither Claude Code nor Codex was found on this computer."
-        ))?;
-    let prompt_copy = prompt.clone();
-    let light = weight_model(agent.tool, weight);
-    let args = ask_args(
-        agent.tool,
-        prompt,
-        claude_tools,
+    let agents = detect(&shell_path());
+    let request = Request {
+        tools: claude_tools,
         max_turns,
         images,
         weight,
-        light.as_deref(),
-    );
-    let res = run_agent(
-        agent,
-        folder,
-        args,
-        &path,
-        &AtomicBool::new(false),
-        PER_PROJECT,
-    );
-    // Claude Code can't renew its sign-in headless: Codex answers instead, when installed.
-    if matches!(&res, Err(e) if e == AUTH_ERROR)
-        && prefer != Some(Tool::Codex)
-        && agents.iter().any(|a| a.tool == Tool::Codex)
-        && let Ok(r) = ask_full(
-            folder,
-            prompt_copy,
-            claude_tools,
-            max_turns,
-            Some(Tool::Codex),
-            images,
-            weight,
-        )
-    {
-        return Ok(r);
-    }
-    let (answer, _, session) = res?;
-    if answer.trim().is_empty() {
-        return Err(crate::tr!("l'IA n'a rien répondu", "the AI answered nothing").into());
-    }
-    Ok((answer, agent.tool, session))
+        ..Request::new(folder, &prompt)
+    };
+    provider::ask_first(&agents, prefer.map(Tool::name), &request)
+        .map(|(reply, agent)| (reply.text, agent.tool, reply.session))
 }
 
 /// The longest quick question sent to an agent (characters).
@@ -1282,8 +1330,8 @@ pub fn ask_question(
         } else {
             question_prompt(&dir, question, code)
         },
-        "Read,Glob,Grep,Bash(git log:*),Bash(ls:*)",
-        12,
+        QUESTION_TOOLS,
+        QUESTION_TURNS,
         prefer,
         &[],
         Weight::Full,
@@ -1301,44 +1349,17 @@ pub fn ask_question(
     })
 }
 
-/// The arguments that send a reply on a Claude Code conversation, headless and read-only
-/// (`claude -p <reply> --resume <id>`) or on a Codex one (`codex exec resume <id> <reply>`).
-/// None for an id unsafe on a command line.
-fn followup_args(tool: Tool, session: &str, reply: &str) -> Option<Vec<String>> {
-    if !is_session_id(session) {
-        return None;
-    }
-    match tool {
-        Tool::ClaudeCode => {
-            let r: String = reply.trim().chars().take(QUESTION_MAX).collect();
-            Some(vec![
-                "-p".into(),
-                r,
-                "--resume".into(),
-                session.into(),
-                "--output-format".into(),
-                "json".into(),
-                "--max-turns".into(),
-                "12".into(),
-                "--allowedTools".into(),
-                "Read,Glob,Grep,Bash(git log:*),Bash(ls:*)".into(),
-            ])
-        }
-        // `codex exec resume <id> <reply>`: the read-only sandbox is set before the
-        // subcommand, so it applies whatever `resume` accepts.
-        Tool::Codex => {
-            let r: String = reply.trim().chars().take(QUESTION_MAX).collect();
-            Some(vec![
-                "exec".into(),
-                "--sandbox".into(),
-                "read-only".into(),
-                "--skip-git-repo-check".into(),
-                "resume".into(),
-                session.into(),
-                "--".into(),
-                r,
-            ])
-        }
+/// What a quick question's AI may use, on the first question and on the replies.
+const QUESTION_TOOLS: &str = "Read,Glob,Grep,Bash(git log:*),Bash(ls:*)";
+const QUESTION_TURNS: u32 = 12;
+
+/// The request that sends a reply on a quick question's conversation, read-only.
+fn followup_request<'a>(folder: &'a str, session: &'a str, reply: &'a str) -> Request<'a> {
+    Request {
+        resume: Some(session),
+        tools: QUESTION_TOOLS,
+        max_turns: QUESTION_TURNS,
+        ..Request::new(folder, reply)
     }
 }
 
@@ -1349,33 +1370,24 @@ pub fn ask_followup(resume: &Resume, tool: Tool, reply: &str) -> Result<Question
     if reply.trim().is_empty() {
         return Err(crate::tr!("réponse vide", "empty reply").into());
     }
-    let args = followup_args(tool, &resume.session, reply).ok_or(crate::tr!(
-        "Cette IA ne peut pas encore poursuivre la conversation ici.",
-        "This AI can't carry the conversation on here yet."
-    ))?;
-    let path = shell_path();
-    let agent = detect(&path)
+    if !is_session_id(&resume.session) {
+        return Err(cannot_resume().into());
+    }
+    let agent = detect(&shell_path())
         .into_iter()
         .find(|a| a.tool == tool)
         .ok_or(crate::tr!(
             "L'IA de cette conversation n'est plus installée.",
             "The AI of this conversation is no longer installed."
         ))?;
-    let (answer, _, session) = run_agent(
-        &agent,
-        &resume.cwd,
-        args,
-        &path,
-        &AtomicBool::new(false),
-        PER_PROJECT,
-    )?;
-    if answer.trim().is_empty() {
-        return Err(crate::tr!("l'IA n'a rien répondu", "the AI answered nothing").into());
-    }
+    let text: String = reply.trim().chars().take(QUESTION_MAX).collect();
+    let request = followup_request(&resume.cwd, &resume.session, &text);
+    let got = provider::send(&agent, &request, &AtomicBool::new(false))
+        .and_then(provider::answered)?;
     Ok(QuestionReply {
-        answer: answer.trim().to_string(),
+        answer: got.text.trim().to_string(),
         tool,
-        resume: next_resume(tool, resume, session),
+        resume: next_resume(tool, resume, got.session),
     })
 }
 
@@ -1522,7 +1534,7 @@ impl SyncRun {
                             jobs[i].tool = a.tool;
                         }
                         on_change();
-                        run_one(a, &folder, &path, &r.cancel)
+                        run_one(a, &folder, &r.cancel)
                     }
                 };
                 r.jobs.lock_or_recover()[i].state = match result {
@@ -1555,6 +1567,92 @@ impl SyncRun {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_chosen_model_fills_a_project_in_and_suggests_its_steps() {
+        let dir = std::env::temp_dir().join(format!("orchestra-model-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("README.md"), "Un jeu de cartes en ligne").unwrap();
+        let folder = dir.display().to_string();
+        let chosen = |url: String| {
+            openai::OpenAi::chosen(&crate::model::TextModel {
+                service: "ollama".into(),
+                url,
+                model: "qwen3".into(),
+            })
+            .unwrap()
+        };
+        // What the server gets: the question's text.
+        let asked = |rx: std::sync::mpsc::Receiver<(String, String)>| {
+            let (_, body) = rx.recv().unwrap();
+            let sent: serde_json::Value = serde_json::from_str(&body).unwrap();
+            sent["messages"][0]["content"].as_str().unwrap().to_string()
+        };
+
+        let (url, rx) = openai::tests::server(
+            "200 OK",
+            r#"{"choices":[{"message":{"content":"```json\n{\"status\":\"active\",\"done\":[\"Le paquet est prêt\"]}\n```"}}]}"#,
+        );
+        let (fill, by) =
+            ask_fill(&folder, Some(false), None, Some(&chosen(url)), "Cartes\n- [ ] Jeu : distribuer")
+                .unwrap();
+        assert_eq!(by, "Ollama");
+        assert_eq!(fill.done, ["Le paquet est prêt"]);
+        let prompt = asked(rx);
+        assert!(prompt.contains("Un jeu de cartes en ligne"), "{prompt}");
+        assert!(prompt.contains("Jeu : distribuer") && prompt.contains("JSON"), "{prompt}");
+
+        let (url, rx) = openai::tests::server(
+            "200 OK",
+            r#"{"choices":[{"message":{"content":"- Jeu : ajouter les scores (README.md)"}}]}"#,
+        );
+        let steps = ask_tasks(&folder, &[], None, Some(&chosen(url)), "").unwrap();
+        assert_eq!(steps, ["Jeu : ajouter les scores (README.md)"]);
+        assert!(asked(rx).contains("Un jeu de cartes en ligne"));
+
+        // From a pasted text: that text alone, nothing of the folder.
+        let (url, rx) = openai::tests::server(
+            "200 OK",
+            r#"{"choices":[{"message":{"content":"- Salle : réserver le gymnase"}}]}"#,
+        );
+        let steps =
+            text_to_tasks(&folder, "penser au gymnase", &[], None, Some(&chosen(url))).unwrap();
+        assert_eq!(steps, ["Salle : réserver le gymnase"]);
+        let prompt = asked(rx);
+        assert!(prompt.contains("penser au gymnase"), "{prompt}");
+        assert!(!prompt.contains("cartes") && !prompt.contains("<projet>"), "{prompt}");
+
+        // The model failing is said, and no agent answers in its place.
+        let (url, _rx) = openai::tests::server("500 Internal Server Error", r#"{"error":"panne"}"#);
+        let error = ask_tasks(&folder, &[], None, Some(&chosen(url)), "").unwrap_err();
+        assert!(error.contains("panne"), "{error}");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// The command line of a question, from its parts.
+    fn ask_args(
+        tool: Tool,
+        prompt: String,
+        tools: &str,
+        max_turns: u32,
+        images: &[String],
+        weight: Weight,
+        model: Option<&str>,
+    ) -> Vec<String> {
+        let request = Request {
+            tools,
+            max_turns,
+            images,
+            weight,
+            ..Request::new("/tmp/x", &prompt)
+        };
+        cli_args(tool, &request, model).unwrap()
+    }
+
+    /// The command line of a reply on a conversation.
+    fn followup_args(tool: Tool, session: &str, reply: &str) -> Option<Vec<String>> {
+        cli_args(tool, &followup_request("/tmp/x", session, reply), None)
+    }
 
     /// Only the keys that were set are handed over; subscription mode hands none.
     #[test]
@@ -1845,7 +1943,7 @@ mod tests {
     #[test]
     fn a_reply_resumes_the_same_claude_conversation() {
         let id = "0199a2b3-c4d5-7e6f-8a9b-0c1d2e3f4a5b";
-        let a = followup_args(Tool::ClaudeCode, id, "  et pour le reste ?  ").unwrap();
+        let a = followup_args(Tool::ClaudeCode, id, "et pour le reste ?").unwrap();
         assert_eq!(a[0], "-p");
         assert_eq!(a[1], "et pour le reste ?");
         let i = a.iter().position(|x| x == "--resume").unwrap();
@@ -1855,7 +1953,7 @@ mod tests {
         assert!(followup_args(Tool::ClaudeCode, "abc;ls", "x").is_none());
         assert!(ask_followup(&Resume::default(), Tool::ClaudeCode, "  ").is_err());
         // Codex: same conversation through `exec resume`, still read-only.
-        let c = followup_args(Tool::Codex, id, " et ensuite ? ").unwrap();
+        let c = followup_args(Tool::Codex, id, "et ensuite ?").unwrap();
         let i = c.iter().position(|x| x == "resume").unwrap();
         assert_eq!(c[i + 1], id);
         assert_eq!(c.last().map(String::as_str), Some("et ensuite ?"));
@@ -1952,14 +2050,17 @@ mod tests {
     fn prompt_and_args_stay_read_only() {
         let p = prompt("/x/y");
         assert!(p.contains("get_project_state") && p.contains("SANS RIEN MODIFIER"));
-        let a = agent_args(Tool::ClaudeCode, &p).join(" ");
+        let request = sync_request("/x/y", &p);
+        let a = cli_args(Tool::ClaudeCode, &request, None).unwrap().join(" ");
         assert!(
             a.contains("--allowedTools")
+                && a.contains("--disallowedTools mcp__orchestra__add_steps")
                 && !a.contains("Edit")
                 && !a.contains("Write")
                 && !a.contains("skip-permissions")
         );
-        assert!(agent_args(Tool::Codex, &p).join(" ").contains("read-only"));
+        let c = cli_args(Tool::Codex, &request, None).unwrap().join(" ");
+        assert!(c.contains("read-only"));
     }
 
     #[test]
@@ -1985,12 +2086,11 @@ mod tests {
         let r = run_one(
             &agents[0],
             &base.join("proj").display().to_string(),
-            &path,
             &AtomicBool::new(false),
         );
         assert!(r.unwrap().contains("3 échanges"));
         assert_eq!(
-            run_one(&agents[0], "/nope/nope", &path, &AtomicBool::new(false)),
+            run_one(&agents[0], "/nope/nope", &AtomicBool::new(false)),
             Err("dossier introuvable".into())
         );
         let _ = std::fs::remove_dir_all(base);

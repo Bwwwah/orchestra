@@ -75,9 +75,12 @@ pub struct SessionInfo {
 
 /// How the prompts of Orchestra's own calls start, in both languages: the project card, the
 /// outside view, proposed steps, a text turned into tasks, commit and release texts, the
-/// responder and the cross review. Orchestra reads their answer itself, nobody resumes them.
-/// Quick questions are not here: the person asked them and may carry them on.
-const INTERNAL_PROMPTS: [&str; 16] = [
+/// responder, the cross review and each message of a project's conversation. Orchestra reads
+/// their answer itself, nobody resumes them. Quick questions are not here: the person asked
+/// them and may carry them on.
+const INTERNAL_PROMPTS: [&str; 18] = [
+    "Tu es l'assistant d'un projet dans Orchestra",
+    "You are the assistant of a project in Orchestra",
     "Tu es connecté au tableau de bord « orchestra » par MCP.",
     "You are connected to the « orchestra » dashboard through MCP.",
     "Remplis la fiche du projet du dossier « ",

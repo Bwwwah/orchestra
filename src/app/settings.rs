@@ -176,7 +176,7 @@ pub(super) fn row(
 }
 
 /// Drop-down list: the current choice with a chevron; a menu of choices. Returns the new index.
-fn dropdown(
+pub(super) fn dropdown(
     ui: &mut egui::Ui,
     id: &str,
     choices: &[&str],
@@ -303,7 +303,7 @@ fn lerp_color(a: Color32, b: Color32, k: f32) -> Color32 {
 }
 
 /// Text field with Notion's soft fill and border.
-fn field<'a>(
+pub(super) fn field<'a>(
     text: &'a mut String,
     hint: &str,
     width: f32,
@@ -1419,6 +1419,185 @@ impl NotesApp {
         );
     }
 
+    /// Who fills projects in, suggests their steps and talks with the person about a project
+    /// without code: Claude Code or Codex, else a model behind an OpenAI-compatible address,
+    /// with its name, address and key.
+    fn text_model_settings(&mut self, ui: &mut egui::Ui, t: &Tone, l: &Look) {
+        use crate::sync::openai::{OpenAi, Service};
+        section(
+            ui,
+            crate::tr!("Remplir, suggérer des étapes et discuter", "Filling in, suggesting steps and chatting"),
+            t,
+            l,
+        );
+        let before = self.ws.settings.text_model.clone();
+        let mut choice = before.clone();
+        let service = Service::from_id(&choice.service);
+        let mut choices = vec![crate::tr!("Claude Code ou Codex", "Claude Code or Codex")];
+        choices.extend(Service::ALL.map(|s| match s {
+            Service::Ollama => crate::tr!("Ollama (modèle local)", "Ollama (local model)"),
+            Service::Mistral => crate::tr!("Mistral (clé API)", "Mistral (API key)"),
+            Service::Other => crate::tr!("Autre serveur compatible OpenAI", "Other OpenAI-compatible server"),
+        }));
+        let current = service
+            .and_then(|s| Service::ALL.iter().position(|x| *x == s))
+            .map_or(0, |i| i + 1);
+        row(
+            ui,
+            crate::tr!("IA utilisée", "AI used"),
+            crate::tr!(
+                "Pour « Remplir avec l'IA » (aussi à l'ajout d'un projet), « Suggérer des étapes » et la conversation d'un projet sans code (volet de droite). Claude Code et Codex lisent le dossier. Un autre modèle ne le peut pas : Orchestra envoie à son serveur le titre et les étapes du projet, les noms des fichiers, l'état de git, le début du README et de quelques fichiers (jamais les fichiers cachés), ou le texte et les images que vous donnez. Pour la conversation, il reçoit aussi vos messages, l'état des lieux et le texte de la page du projet.",
+                "For « Fill in with the AI » (also when a project is added), « Suggest steps » and the conversation of a project without code (right-hand panel). Claude Code and Codex read the folder. Another model can't: Orchestra sends its server the project's title and steps, the file names, the git state, the beginning of the README and of a few files (never hidden ones), or the text and images you give. For the conversation, it also gets your messages, the state of play and the text of the project's page."
+            ),
+            t,
+            |ui| {
+                if let Some(i) = dropdown(ui, "text-model", &choices, current, t, l)
+                    && i != current
+                {
+                    // The model and address typed were the other service's.
+                    choice = crate::model::TextModel {
+                        service: i
+                            .checked_sub(1)
+                            .map(|i| Service::ALL[i].id().to_string())
+                            .unwrap_or_default(),
+                        ..Default::default()
+                    };
+                }
+            },
+        );
+        if let Some(service) = service.filter(|_| choice.service == before.service) {
+            row(
+                ui,
+                crate::tr!("Modèle", "Model"),
+                match service {
+                    Service::Ollama => crate::tr!(
+                        "Son nom, tel que « ollama list » l'affiche. Pour une image jointe, il doit savoir les lire. Sa fenêtre de contexte est souvent petite : Orchestra ne lui envoie qu'un court résumé du projet.",
+                        "Its name, as « ollama list » shows it. For a joined image, it has to be able to read them. Its context window is often small: Orchestra only sends it a short summary of the project."
+                    ),
+                    _ => crate::tr!(
+                        "Son nom, tel que le serveur l'attend.",
+                        "Its name, as the server expects it."
+                    ),
+                },
+                t,
+                |ui| {
+                    let hint = match service {
+                        Service::Ollama => "qwen3",
+                        Service::Mistral => "mistral-small-latest",
+                        Service::Other => "",
+                    };
+                    ui.add(field(&mut choice.model, hint, 240.0, t, l));
+                },
+            );
+            if service != Service::Mistral {
+                row(
+                    ui,
+                    crate::tr!("Adresse", "Address"),
+                    match service {
+                        Service::Ollama => crate::tr!(
+                            "Vide : Ollama sur cet ordinateur.",
+                            "Empty: Ollama on this computer."
+                        ),
+                        _ => crate::tr!(
+                            "L'adresse qui précède « /chat/completions ».",
+                            "The address that comes before « /chat/completions »."
+                        ),
+                    },
+                    t,
+                    |ui| {
+                        let hint = match service.default_url() {
+                            "" => "http://localhost:1234/v1",
+                            url => url,
+                        };
+                        ui.add(field(&mut choice.url, hint, 240.0, t, l));
+                    },
+                );
+            }
+            if let Some(var) = service.key_var() {
+                self.model_key_row(ui, var, service, t, l);
+            }
+            // What would stop a request, said here rather than at the first one.
+            if let Some(model) = OpenAi::chosen(&choice)
+                && let Err(why) = model.check()
+            {
+                ui.label(RichText::new(why).size(13.0).color(super::style::ORANGE));
+            }
+        }
+        if choice != before {
+            self.ws.settings.text_model = choice;
+            self.dirty_since.get_or_insert_with(Instant::now);
+        }
+    }
+
+    /// The API key of a model's service: typed once, then kept out of sight in the Keychain.
+    fn model_key_row(
+        &mut self,
+        ui: &mut egui::Ui,
+        var: &str,
+        service: crate::sync::openai::Service,
+        t: &Tone,
+        l: &Look,
+    ) {
+        use crate::sync::openai::Service;
+        let kept = !crate::secret::api_key(var).is_empty();
+        let desc = match (service, kept) {
+            (_, false) if service == Service::Mistral => crate::tr!(
+                "Gardée dans le trousseau, jamais dans vos données.",
+                "Kept in the Keychain, never in your data."
+            ),
+            (_, false) => crate::tr!(
+                "Seulement si le serveur en demande une. Gardée dans le trousseau.",
+                "Only if the server asks for one. Kept in the Keychain."
+            ),
+            (Service::Mistral, true) => crate::tr!(
+                "Une clé est enregistrée. Elle n'est envoyée qu'à Mistral.",
+                "A key is saved. It is only sent to Mistral."
+            ),
+            (_, true) => crate::tr!(
+                "Une clé est enregistrée. Elle est envoyée à l'adresse ci-dessus.",
+                "A key is saved. It is sent to the address above."
+            ),
+        };
+        let id = egui::Id::unique(("model-key", var));
+        let mut typed: String = ui.ctx().data(|d| d.get_temp(id)).unwrap_or_default();
+        let mut done = None;
+        row(ui, crate::tr!("Clé API", "API key"), desc, t, |ui| {
+            if kept {
+                if button(ui, crate::tr!("Retirer la clé", "Remove the key"), t, l).clicked() {
+                    done = Some(crate::secret::remove_api_key(var));
+                }
+            } else {
+                // In a narrow window the row runs left to right: the field stays first.
+                let save = |ui: &mut egui::Ui| {
+                    button(ui, crate::tr!("Enregistrer", "Save"), t, l).clicked()
+                };
+                let input = |ui: &mut egui::Ui, typed: &mut String| {
+                    ui.add(field(typed, "", 200.0, t, l).password(true));
+                };
+                let clicked = if ui.layout().main_dir() == egui::Direction::RightToLeft {
+                    let clicked = save(ui);
+                    input(ui, &mut typed);
+                    clicked
+                } else {
+                    input(ui, &mut typed);
+                    save(ui)
+                };
+                if clicked && !typed.trim().is_empty() {
+                    done = Some(crate::secret::set_api_key(var, &typed));
+                }
+            }
+        });
+        match done {
+            Some(Ok(())) => typed.clear(),
+            Some(Err(e)) => self.fail(crate::trf!(
+                "Clé API non enregistrée dans le trousseau : {e}",
+                "The API key couldn't be changed in the Keychain: {e}"
+            )),
+            None => {}
+        }
+        ui.ctx().data_mut(|d| d.insert_temp(id, typed));
+    }
+
     /// One row per known AI: where it stands, and the button that plugs it in.
     fn ai_list(&mut self, ui: &mut egui::Ui, t: &Tone, l: &Look) {
         use crate::setup::Ai;
@@ -1430,6 +1609,8 @@ impl NotesApp {
         let mut term: Option<(String, String, Option<String>)> = None;
         let mut install: Option<Ai> = None;
         let installing = self.ais.installing.map(|(a, ..)| a);
+        let signing_in = self.ais.signing_in.is_some();
+        let mut sign_in = false;
         for ai in Ai::ALL {
             let st = states
                 .as_ref()
@@ -1452,7 +1633,18 @@ impl NotesApp {
                 .to_string(),
             };
             let plugged_in = st.as_ref().is_some_and(|x| x.plugged);
-            let desc = format!("{} · {state}", ai.what());
+            let mut desc = format!("{} · {state}", ai.what());
+            if let Some(account) = st.as_ref().and_then(|x| x.account.as_ref()) {
+                desc.push_str(" · ");
+                if ai == Ai::ClaudeCode && signing_in {
+                    desc.push_str(crate::tr!(
+                        "connexion en cours : terminez-la dans votre navigateur",
+                        "signing in: finish in your browser"
+                    ));
+                } else {
+                    desc.push_str(&account.describe());
+                }
+            }
             row(ui, ai.label(), &desc, t, |ui| {
                 if busy.as_deref() == Some(ai.key()) {
                     ui.add(egui::Spinner::new().size(16.0));
@@ -1473,10 +1665,21 @@ impl NotesApp {
                     } else if button(ui, crate::tr!("Brancher", "Plug in"), t, l).clicked() {
                         toggle = Some((ai, true));
                     }
-                    if let Some((cmd, input)) = ai.login()
-                        && button(ui, crate::tr!("Se connecter", "Sign in"), t, l).on_hover_text(crate::tr!("Ouvre l'IA dans le terminal intégré pour vous connecter à votre compte", "Opens the AI in the built-in terminal so you can sign in to your account")).clicked()
-                    {
-                        term = Some((ai.label().to_string(), cmd.to_string(), (!input.is_empty()).then(|| input.to_string())));
+                    if let Some((cmd, input)) = x.login() {
+                        let label = if x.account.as_ref().is_some_and(|a| a.signed_in()) {
+                            crate::tr!("Changer de compte", "Switch account")
+                        } else {
+                            crate::tr!("Se connecter", "Sign in")
+                        };
+                        let hover = if x.account.is_some() {
+                            crate::trf!("Lance « {cmd} » dans le terminal intégré : la connexion à votre compte se fait dans votre navigateur. Orchestra ne voit ni mot de passe ni jeton.", "Runs « {cmd} » in the built-in terminal: you sign in to your account in your browser. Orchestra sees no password or token.")
+                        } else {
+                            crate::tr!("Ouvre l'IA dans le terminal intégré pour vous connecter à votre compte", "Opens the AI in the built-in terminal so you can sign in to your account").to_string()
+                        };
+                        if button(ui, label, t, l).on_hover_text(hover).clicked() {
+                            sign_in = x.account.is_some();
+                            term = Some((ai.label().to_string(), cmd.to_string(), (!input.is_empty()).then(|| input.to_string())));
+                        }
                     }
                 } else {
                     match &x.install {
@@ -1487,7 +1690,14 @@ impl NotesApp {
                                 crate::tr!("Installer", "Install")
                             };
                             if button(ui, label, t, l)
-                                .on_hover_text(crate::trf!("Lance « {cmd} » dans le terminal intégré ({how}). Orchestra la branche dès qu'elle est installée.", "Runs « {cmd} » in the built-in terminal ({how}). Orchestra plugs it in as soon as it is installed."))
+                                .on_hover_text({
+                                    let mut hover = crate::trf!("Lance « {cmd} » dans le terminal intégré ({how}). Orchestra la branche dès qu'elle est installée.", "Runs « {cmd} » in the built-in terminal ({how}). Orchestra plugs it in as soon as it is installed.");
+                                    if ai == Ai::ClaudeCode {
+                                        hover.push(' ');
+                                        hover.push_str(crate::tr!("La connexion à votre compte s'ouvre ensuite dans votre navigateur.", "Signing in to your account then opens in your browser."));
+                                    }
+                                    hover
+                                })
                                 .clicked()
                             {
                                 term = Some((crate::trf!("Installation · {}", "Installing · {}", ai.label()), cmd.clone(), None));
@@ -1543,6 +1753,7 @@ impl NotesApp {
                 }
             },
         );
+        self.text_model_settings(ui, t, l);
         self.session_settings(ui, t, l);
         // Subscription or API key, for each AI that bills by key.
         section(ui, crate::tr!("Abonnement ou clé API", "Subscription or API key"), t, l);
@@ -1652,6 +1863,9 @@ impl NotesApp {
         }
         if let Some(ai) = install {
             self.watch_install(ai);
+        }
+        if sign_in {
+            self.watch_sign_in();
         }
         if let Some((title, cmd, input)) = term {
             let home = dirs::home_dir()

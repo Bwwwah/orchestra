@@ -294,8 +294,12 @@ pub fn ordered(sel: ((u16, u16), (u16, u16))) -> ((u16, u16), (u16, u16)) {
 
 /// What to run to bring a saved terminal back: agents resume their conversation
 /// (`claude --resume <id>` keeps its id; a plain `claude` continues the folder's latest one).
+/// None: a plain shell, also for a command meant to run once.
 pub fn restore_cmd(cmd: Option<&str>) -> Option<String> {
     let c = cmd?.trim();
+    if runs_once(c) {
+        return None;
+    }
     let first = c.split_whitespace().next().unwrap_or("");
     Some(match first {
         "claude" if c.contains("--resume") || c.contains("--continue") => c.to_string(),
@@ -304,6 +308,22 @@ pub fn restore_cmd(cmd: Option<&str>) -> Option<String> {
         "codex" => "codex resume --last".to_string(),
         _ => c.to_string(),
     })
+}
+
+/// Signing in or installing: running it again at the next start would open the browser or
+/// reinstall unasked (and `claude auth login` isn't a conversation to continue).
+fn runs_once(cmd: &str) -> bool {
+    cmd == crate::claude_account::LOGIN_COMMAND
+        || cmd == "codex login"
+        || [
+            "gh auth login",
+            "curl ",
+            "brew install ",
+            "npm install ",
+            "uv tool install ",
+        ]
+        .iter()
+        .any(|start| cmd.starts_with(start))
 }
 
 impl Term {
@@ -623,6 +643,24 @@ mod tests {
     #[test]
     fn restore() {
         assert_eq!(restore_cmd(None), None);
+        // Signing in and installing aren't done again: a plain shell comes back.
+        for once in [
+            crate::claude_account::LOGIN_COMMAND,
+            "codex login",
+            "gh auth login",
+        ] {
+            assert_eq!(restore_cmd(Some(once)), None, "{once}");
+        }
+        // Every install Orchestra can start, whatever the machine has.
+        for ai in crate::setup::Ai::ALL {
+            for tool in ["npm", "brew", "uv", ""] {
+                if let Some(crate::setup::Install::Run(cmd, _)) =
+                    crate::setup::install_plan(ai, |c| c == tool)
+                {
+                    assert_eq!(restore_cmd(Some(&cmd)), None, "{cmd}");
+                }
+            }
+        }
         assert_eq!(
             restore_cmd(Some("claude")).as_deref(),
             Some("claude --continue")

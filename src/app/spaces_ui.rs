@@ -77,6 +77,8 @@ impl NotesApp {
             return;
         }
         self.detect_changes();
+        // While this space is still the one used: its versions stay in its own folder.
+        self.history.flush(&crate::history::dir(), &self.ws);
         self.save_now();
         self.stop_live();
         let settings = self.ws.settings.clone();
