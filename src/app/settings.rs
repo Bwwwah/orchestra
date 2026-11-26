@@ -1558,10 +1558,25 @@ impl NotesApp {
                 "A key is saved. It is sent to the address above."
             ),
         };
+        self.key_field(ui, var, kept, crate::tr!("Clé API", "API key"), desc, t, l);
+    }
+
+    /// The field that types the API key `var` into the Keychain, or removes the one kept there.
+    #[allow(clippy::too_many_arguments)]
+    fn key_field(
+        &mut self,
+        ui: &mut egui::Ui,
+        var: &str,
+        kept: bool,
+        name: &str,
+        desc: &str,
+        t: &Tone,
+        l: &Look,
+    ) {
         let id = egui::Id::unique(("model-key", var));
         let mut typed: String = ui.ctx().data(|d| d.get_temp(id)).unwrap_or_default();
         let mut done = None;
-        row(ui, crate::tr!("Clé API", "API key"), desc, t, |ui| {
+        row(ui, name, desc, t, |ui| {
             if kept {
                 if button(ui, crate::tr!("Retirer la clé", "Remove the key"), t, l).clicked() {
                     done = Some(crate::secret::remove_api_key(var));
@@ -1778,6 +1793,24 @@ impl NotesApp {
                     }
                 },
             );
+            // The key that mode uses: the variable `sync::api_env` hands to this AI.
+            let var = match agent {
+                crate::auto::Agent::ClaudeCode => "ANTHROPIC_API_KEY",
+                _ => "OPENAI_API_KEY",
+            };
+            let kept = !crate::secret::api_key(var).is_empty();
+            let desc = if kept {
+                crate::tr!(
+                    "Une clé est enregistrée. Elle n'est utilisée que si le mode clé API est activé.",
+                    "A key is saved. It is only used when the API key mode is on."
+                )
+            } else {
+                crate::tr!(
+                    "Utilisée seulement si le mode clé API est activé. Gardée dans le trousseau.",
+                    "Used only when the API key mode is on. Kept in the Keychain."
+                )
+            };
+            self.key_field(ui, var, kept, crate::tr!("Clé API", "API key"), desc, t, l);
         }
         // The Claude subscription.
         section(
