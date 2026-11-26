@@ -119,6 +119,13 @@ impl OpenAi {
         Service::from_id(&choice.service).map(|s| Self::new(s, &choice.url, &choice.model))
     }
 
+    /// What would stop a request to the model `choice` names with `key` ("": none), before
+    /// that key is saved anywhere. Ok when it names no model.
+    pub fn check_choice(choice: &TextModel, key: &str) -> Result<(), String> {
+        Service::from_id(&choice.service)
+            .map_or(Ok(()), |s| Self::with_key(s, &choice.url, &choice.model, key).check())
+    }
+
     fn with_key(service: Service, url: &str, model: &str, key: &str) -> Self {
         OpenAi {
             service,

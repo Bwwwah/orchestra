@@ -176,7 +176,7 @@ pub(super) fn row(
 }
 
 /// Drop-down list: the current choice with a chevron; a menu of choices. Returns the new index.
-fn dropdown(
+pub(super) fn dropdown(
     ui: &mut egui::Ui,
     id: &str,
     choices: &[&str],
@@ -303,7 +303,7 @@ fn lerp_color(a: Color32, b: Color32, k: f32) -> Color32 {
 }
 
 /// Text field with Notion's soft fill and border.
-fn field<'a>(
+pub(super) fn field<'a>(
     text: &'a mut String,
     hint: &str,
     width: f32,

@@ -76,6 +76,10 @@ pub struct NotesApp {
     toasts: Vec<notices::Toast>,
     /// The tutorial in progress (see tutorial.rs).
     tour: Option<tutorial::Tour>,
+    /// The first use's question about the AI to use, while it is on screen (first_run.rs).
+    first_run: Option<first_run::Choice>,
+    /// That question is answered: the tutorial starts as soon as the terminal is done.
+    tour_waits: bool,
     /// Messages raised while the workspace is borrowed, shown at the end of the frame.
     said: Vec<notices::Notice>,
     toast_seq: u64,
@@ -220,6 +224,8 @@ impl NotesApp {
             search_sel: 0,
             toasts: vec![],
             tour: None,
+            first_run: None,
+            tour_waits: false,
             said: vec![],
             toast_seq: 0,
             snapshot: HashMap::new(),
@@ -331,19 +337,23 @@ impl NotesApp {
         if let Some(id) = open.filter(|id| alive(id)) {
             app.navigate(id);
         }
-        // First use: the tutorial starts by itself, once.
-        if !app.ws.settings.tutorial_seen
-            && std::env::var_os("ORCHESTRA_DEMO").is_none()
-            && std::env::var_os("ORCHESTRA_NO_SESSIONS").is_none()
-            && app.shot.is_none()
-        {
+        // First use: Orchestra asks which AI to use, then the tutorial starts by itself, once.
+        let unattended = std::env::var_os("ORCHESTRA_DEMO").is_some()
+            || std::env::var_os("ORCHESTRA_NO_SESSIONS").is_some()
+            || app.shot.is_some();
+        if !app.ws.settings.tutorial_seen && !unattended {
             app.ws.settings.tutorial_seen = true;
+            app.ws.settings.ai_choice_pending = true;
             app.dirty_since = Some(Instant::now());
-            app.start_tour();
         }
-        // Developer aid for screenshots: ORCHESTRA_DEMO=settings | ai | collab | slash[:text].
+        if app.ws.settings.ai_choice_pending && !unattended {
+            app.first_run = Some(Default::default());
+        }
+        // Developer aid for screenshots:
+        // ORCHESTRA_DEMO=first-run | settings | ai | collab | slash[:text].
         if let Ok(demo) = std::env::var("ORCHESTRA_DEMO") {
             match demo.split(':').next().unwrap_or("") {
+                "first-run" => app.first_run = Some(Default::default()),
                 "settings" => app.settings_tab = Some(SettingsTab::Preferences),
                 "sidebar-settings" => app.settings_tab = Some(SettingsTab::Sidebar),
                 "ai" => app.settings_tab = Some(SettingsTab::Ai),
@@ -1770,6 +1780,7 @@ impl eframe::App for NotesApp {
             self.notice(m);
         }
         self.toasts_ui(&ctx, fab);
+        self.first_run_ui(&ctx);
         self.tutorial_ui(&ctx);
         self.search_window(&ctx, &mut actions);
         self.settings_window(&ctx, &mut actions);
@@ -3110,6 +3121,7 @@ mod ai_fill;
 mod ai_ui;
 mod chrome;
 mod conductor;
+mod first_run;
 mod live_ui;
 mod members_ui;
 mod notices;

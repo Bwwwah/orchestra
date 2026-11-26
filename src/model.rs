@@ -501,6 +501,10 @@ pub struct Settings {
     /// The tutorial has been offered once (it starts by itself on the first use only).
     #[serde(default)]
     pub tutorial_seen: bool,
+    /// Set on the first use until the person answers which AI to use (app/first_run.rs), so
+    /// the question comes back if Orchestra is quit before. Never set for older files.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub ai_choice_pending: bool,
     #[serde(default)]
     pub sidebar_width: f32,
     /// Start with no tabs restored (the original's onStartup "default_page").
