@@ -9,6 +9,7 @@
 
 use super::*;
 use crate::auto::{self, Agent, Screen, Signal};
+use crate::project::StepIssue;
 use crate::terminal::Term;
 use std::collections::HashMap;
 use std::time::Duration;
@@ -628,6 +629,49 @@ fn holder_of(agent: Agent, computer: &str) -> String {
     }
 }
 
+/// Forget the planned restarts of a project's sessions; returns those that had one.
+fn cancel_resumes(
+    runs: &mut [crate::model::RunRecord],
+    project: &str,
+) -> Vec<crate::model::RunRecord> {
+    let mut left = vec![];
+    for x in runs.iter_mut().filter(|x| x.project == project) {
+        if x.resume_at > 0 {
+            left.push(x.clone());
+            x.resume_at = 0;
+        }
+    }
+    left
+}
+
+/// The AI of a recorded session, named by its label.
+fn agent_of(rec: &crate::model::RunRecord) -> Agent {
+    Agent::ALL
+        .into_iter()
+        .find(|a| a.label() == rec.tool)
+        .unwrap_or(Agent::ClaudeCode)
+}
+
+/// What the end of a session on one step makes of that step, from why it stopped (`why`),
+/// whether it starts again by itself (`resumes`) and whether a question it asked still
+/// waits (`asked`: « done » is then not taken from its word). None: the step stays « doing ».
+fn step_issue(why: &str, resumes: bool, asked: bool) -> Option<StepIssue> {
+    if let Some(rest) = why.strip_prefix(blocked_text()) {
+        let said = rest.trim_start_matches(|c: char| c == ':' || c.is_whitespace());
+        return Some(StepIssue::Blocked(match said {
+            "" => crate::tr!("l'IA n'a pas dit pourquoi", "the AI didn't say why").into(),
+            said => said.to_string(),
+        }));
+    }
+    if why == Stop::MissionDone.text() && !asked {
+        Some(StepIssue::Finished)
+    } else if resumes {
+        None
+    } else {
+        Some(StepIssue::Interrupted)
+    }
+}
+
 fn default_mission() -> &'static str {
     crate::tr!(
         "Avance sur les étapes ouvertes du projet, dans l'ordre, en vérifiant ton travail.",
@@ -1090,9 +1134,7 @@ impl NotesApp {
             ..Default::default()
         };
         // A new session replaces any planned restart of this project.
-        for x in self.ws.runs.iter_mut().filter(|x| x.project == project) {
-            x.resume_at = 0;
-        }
+        let replaced = cancel_resumes(&mut self.ws.runs, project);
         self.ws.runs.push(rec);
         self.ws.settings.screen_granted_version = granted_version;
         self.dirty_since.get_or_insert_with(Instant::now);
@@ -1138,6 +1180,12 @@ impl NotesApp {
             paused_screen: 0,
             budget_micro: o.budget_micro(self.ws.settings.api_mode(agent.ai().key())),
         });
+        // The step a replaced restart was waiting on is released.
+        for left in replaced {
+            if Some(left.step.as_str()) != step {
+                self.end_run_step(&left, &StepIssue::Interrupted);
+            }
+        }
         // Now that the session exists: its step shows « doing », under the name its own MCP
         // server reserves with, which its update_step then renews.
         if let Some(id) = step
@@ -1197,6 +1245,7 @@ impl NotesApp {
         if !self.orch.started {
             self.orch.started = true;
             // Sessions that were running when Orchestra closed.
+            let mut cut = vec![];
             for r in self.ws.runs.iter_mut().filter(|r| r.outcome.is_empty()) {
                 r.outcome = crate::tr!(
                     "interrompue (Orchestra fermé)",
@@ -1204,6 +1253,10 @@ impl NotesApp {
                 )
                 .into();
                 r.ended = r.ended.max(r.started);
+                cut.push(r.clone());
+            }
+            for r in cut {
+                self.end_run_step(&r, &StepIssue::Interrupted);
             }
             // The history only grows: the oldest sessions nothing needs any more go.
             if auto::trim_runs(&mut self.ws.runs, auto::KEEP_RUNS, |w| {
@@ -1667,10 +1720,7 @@ impl NotesApp {
             // The same ceiling as before (the window has reset since); older records without
             // one: the same share, from the window's figure now.
             // The same AI as before (named by its label in the record).
-            let agent = Agent::ALL
-                .into_iter()
-                .find(|a| a.label() == rec.tool)
-                .unwrap_or(Agent::ClaudeCode);
+            let agent = agent_of(&rec);
             let five = self.agent_figures(agent).five;
             let o = &self.ws.settings.orch;
             let ceiling = if rec.ceiling > 0.0 {
@@ -1688,13 +1738,16 @@ impl NotesApp {
                     crate::tr!("Le quota est revenu : la session autonome repart avec la même mission.", "The quota is back: the autonomous session starts again with the same mission."),
                     None,
                 ),
-                Err(e) => self.ws.notify(
-                    "erreur",
-                    &rec.project,
-                    &crate::trf!("Reprise automatique impossible sur {}", "Couldn't restart {} automatically", rec.title),
-                    &e,
-                    None,
-                ),
+                Err(e) => {
+                    self.end_run_step(&rec, &StepIssue::Interrupted);
+                    self.ws.notify(
+                        "erreur",
+                        &rec.project,
+                        &crate::trf!("Reprise automatique impossible sur {}", "Couldn't restart {} automatically", rec.title),
+                        &e,
+                        None,
+                    );
+                }
             }
         }
     }
@@ -1931,6 +1984,14 @@ impl NotesApp {
             .map(crate::model::resume_time)
             .unwrap_or(0);
         let before = r.steps_at_start.clone();
+        let asked = crate::model::question_pending(&self.ws.inbox, &project, r.started_wall);
+        // A session on one step: the step follows how it ended, before the report lists
+        // what was finished.
+        if let Some(rec) = self.ws.runs.iter().find(|x| x.id == id).cloned()
+            && let Some(issue) = step_issue(&why, resume_at > 0, asked)
+        {
+            self.end_run_step(&rec, &issue);
+        }
         let newly: Vec<String> = self
             .ws
             .page(&project)
@@ -2010,6 +2071,19 @@ impl NotesApp {
             "Autonomous session finished on {}: {why}.",
             rec.title
         ));
+    }
+
+    /// The step the session `rec` was sent on, if any, once `rec` is over.
+    fn end_run_step(&mut self, rec: &crate::model::RunRecord, issue: &StepIssue) {
+        if rec.step.is_empty() {
+            return;
+        }
+        let holder = holder_of(agent_of(rec), &crate::store::computer_id());
+        if let Some(pr) = self.ws.page_mut(&rec.project).and_then(|p| p.project.as_mut())
+            && pr.end_step(&rec.step, &holder, issue)
+        {
+            self.dirty_since.get_or_insert_with(Instant::now);
+        }
     }
 
     /// A page under "Rapports des IA › <project> › <day>" (`project` None: the daily
@@ -3095,8 +3169,8 @@ impl NotesApp {
             }
         });
         if let Some(p) = cancel {
-            for x in self.ws.runs.iter_mut().filter(|x| x.project == p) {
-                x.resume_at = 0;
+            for left in cancel_resumes(&mut self.ws.runs, &p) {
+                self.end_run_step(&left, &StepIssue::Interrupted);
             }
             self.dirty_since.get_or_insert_with(Instant::now);
         }
@@ -7625,6 +7699,25 @@ mod tests {
         let (q, a) = super::split_analysis("Quoi faire ?\n\n— Analyse du répondeur :\nOption C.");
         assert_eq!((q, a), ("Quoi faire ?", Some("Option C.")));
         assert_eq!(super::split_analysis("Sans analyse"), ("Sans analyse", None));
+    }
+
+    #[test]
+    fn a_step_session_says_what_becomes_of_its_step() {
+        use super::{Stop, StepIssue, step_issue};
+        let done = Stop::MissionDone.text();
+        assert_eq!(step_issue(&done, false, false), Some(StepIssue::Finished));
+        // A question still waits: not finished on its word.
+        assert_eq!(step_issue(&done, false, true), Some(StepIssue::Interrupted));
+        let why = Stop::Blocked("il manque la clé".into()).text();
+        assert_eq!(
+            step_issue(&why, false, true),
+            Some(StepIssue::Blocked("il manque la clé".into()))
+        );
+        let silent = step_issue(&Stop::Blocked(String::new()).text(), false, false);
+        assert!(matches!(silent, Some(StepIssue::Blocked(w)) if !w.is_empty()));
+        let limit = Stop::GlobalLimit(60.0).text();
+        assert_eq!(step_issue(&limit, true, false), None, "it starts again");
+        assert_eq!(step_issue(&limit, false, false), Some(StepIssue::Interrupted));
     }
 
     #[test]

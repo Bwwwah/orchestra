@@ -2203,6 +2203,11 @@ fn steps_card(ui: &mut egui::Ui, cx: &mut Cx, extra: f32) -> f32 {
                     chip(ui, ag.short_name(), Color32::from_rgb(r, g, b), egui::Sense::hover())
                         .on_hover_text(crate::trf!("Confiée à {}", "Entrusted to {}", ag.label()));
                 }
+                // The last session sent on it stopped blocked: why, on hover and open.
+                if !s.blocked.is_empty() {
+                    chip(ui, crate::tr!("Bloquée", "Blocked"), ORANGE, egui::Sense::hover())
+                        .on_hover_text(&s.blocked);
+                }
                 // « Lancer »: a session on this step alone, with its AI. Not on the step a
                 // running session is already doing.
                 let offer = !ro
@@ -2220,6 +2225,10 @@ fn steps_card(ui: &mut egui::Ui, cx: &mut Cx, extra: f32) -> f32 {
                     ui.vertical(|ui| {
                         ui.set_max_width(room);
                         let r = ui.add(egui::Label::new(job).wrap().sense(egui::Sense::click()));
+                        if !s.blocked.is_empty() {
+                            let why = crate::trf!("Bloquée : {}", "Blocked: {}", s.blocked);
+                            ui.add(egui::Label::new(RichText::new(why).size(12.0).color(ORANGE)).wrap());
+                        }
                         // Another computer's AI has reserved it (shared project).
                         let held =
                             s.held_by_other_computer(&crate::store::computer_id(), crate::model::now_ms());

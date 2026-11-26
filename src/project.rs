@@ -195,6 +195,25 @@ pub struct Step {
     /// who is no longer, or not yet, among `Project::members`.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub assignee: String,
+    /// What blocks the step, as said by the AI of a session sent on it alone (empty: not
+    /// blocked). A field rather than a status, so that older versions still read the
+    /// project; cleared as soon as the step changes status or an AI takes it again.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub blocked: String,
+}
+
+/// Longest reason kept in `Step::blocked`.
+const BLOCKED_MAX: usize = 300;
+
+/// How an autonomous session sent on one step ended, for that step (`Project::end_step`).
+#[derive(Debug, Clone, PartialEq)]
+pub enum StepIssue {
+    /// The AI said its mission, this step, is done.
+    Finished,
+    /// The AI can't go on, with why.
+    Blocked(String),
+    /// Stopped before either, with no restart planned.
+    Interrupted,
 }
 
 /// `source` of a step typed by the person in the window.
@@ -522,6 +541,7 @@ impl Project {
                     s.held_by = ts.held_by.clone();
                     s.held_at = ts.held_at;
                     s.assignee = received_person(&ts.assignee);
+                    s.blocked = crate::richtext::one_line(&ts.blocked, BLOCKED_MAX);
                     changed = true;
                 }
                 Some(_) => {}
@@ -530,6 +550,7 @@ impl Project {
                     s.title = clean(ts);
                     s.received = true;
                     s.assignee = received_person(&ts.assignee);
+                    s.blocked = crate::richtext::one_line(&ts.blocked, BLOCKED_MAX);
                     // Decided on each computer: another's AIs and models aren't ours.
                     s.model.clear();
                     s.agent = None;
@@ -585,6 +606,7 @@ impl Project {
             model: String::new(),
             agent: None,
             assignee: String::new(),
+            blocked: String::new(),
         };
         let id = s.id.clone();
         self.steps.push(s);
@@ -598,6 +620,7 @@ impl Project {
         };
         if s.status != status {
             s.status = status;
+            s.blocked.clear();
             s.updated = now_ms();
             self.last_activity = s.updated;
             if status != StepStatus::Doing {
@@ -669,6 +692,7 @@ impl Project {
             ));
         }
         s.status = StepStatus::Doing;
+        s.blocked.clear();
         s.held_by = me.to_string();
         s.held_at = now;
         s.updated = now;
@@ -867,6 +891,40 @@ impl Project {
             s.held_by.clear();
         }
         self.claim_step(id, holder).is_ok()
+    }
+
+    /// The session on step `id` alone, reserved for `holder`, ended on `issue`: the step
+    /// is finished, blocked (back to « to do », with why) or, interrupted, released. A step
+    /// already finished or that another computer's AI holds is left alone; so is one no
+    /// longer « doing » (the person or the AI moved it), unless the AI says it is blocked.
+    /// An interrupted session releases only its own reservation. Returns true when the
+    /// step changed.
+    pub fn end_step(&mut self, id: &str, holder: &str, issue: &StepIssue) -> bool {
+        let computer = holder.split('#').next().unwrap_or_default();
+        let Some(s) = self.steps.iter().find(|s| s.id == id) else {
+            return false;
+        };
+        if s.status == StepStatus::Done || s.held_by_other_computer(computer, now_ms()) {
+            return false;
+        }
+        let doing = s.status == StepStatus::Doing;
+        let ours = s.held_by == holder;
+        match issue {
+            StepIssue::Finished => doing && self.set_step_status(id, StepStatus::Done),
+            StepIssue::Interrupted => {
+                doing && ours && self.set_step_status(id, StepStatus::Todo)
+            }
+            StepIssue::Blocked(why) => {
+                self.set_step_status(id, StepStatus::Todo);
+                let Some(s) = self.steps.iter_mut().find(|s| s.id == id) else {
+                    return false;
+                };
+                s.blocked = crate::richtext::one_line(why, BLOCKED_MAX);
+                s.updated = now_ms();
+                self.last_activity = s.updated;
+                true
+            }
+        }
     }
 
     /// Add a session, or refresh it if already known (same tool and id).
@@ -1531,8 +1589,14 @@ pub fn project_to_markdown(page: &Page) -> String {
                 .to_string(),
             }
         };
+        // What stopped the last session sent on it: quoted, it is information.
+        let blocked = if s.blocked.is_empty() {
+            String::new()
+        } else {
+            crate::trf!(" — bloquée : « {} »", " — blocked: « {} »", s.blocked)
+        };
         out.push_str(&format!(
-            "- [{mark}] {} (step_id: {}){src}{from}{who}{held}\n",
+            "- [{mark}] {} (step_id: {}){src}{from}{who}{held}{blocked}\n",
             s.title, s.id
         ));
     }
@@ -1950,6 +2014,43 @@ mod tests {
             "no folder, nothing forced: no kind"
         );
         let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn a_step_follows_how_its_session_ended() {
+        let mut pr = Project::new("");
+        let a = pr.add_step("A", "moi");
+
+        // Interrupted: only its own reservation is released.
+        pr.start_step(&a, "ici#codex");
+        assert!(!pr.end_step(&a, "ici", &StepIssue::Interrupted));
+        assert_eq!(pr.steps[0].status, StepStatus::Doing);
+        assert!(pr.end_step(&a, "ici#codex", &StepIssue::Interrupted));
+        assert_eq!(pr.steps[0].status, StepStatus::Todo);
+        assert!(pr.steps[0].held_by.is_empty());
+        // No longer « doing »: the end of a session doesn't finish it.
+        assert!(!pr.end_step(&a, "ici", &StepIssue::Finished));
+
+        // Blocked: to do again, with why, until an AI takes it again.
+        pr.start_step(&a, "ici");
+        let blocked = StepIssue::Blocked("il manque la clé".into());
+        assert!(pr.end_step(&a, "ici", &blocked));
+        assert_eq!(pr.steps[0].status, StepStatus::Todo);
+        assert_eq!(pr.steps[0].blocked, "il manque la clé");
+        assert!(pr.start_step(&a, "ici"));
+        assert!(pr.steps[0].blocked.is_empty());
+
+        assert!(pr.end_step(&a, "ici", &StepIssue::Finished));
+        assert_eq!(pr.steps[0].status, StepStatus::Done);
+        assert!(!pr.end_step(&a, "ici", &blocked), "finished stays finished");
+
+        // Another computer's AI has it: left alone.
+        let b = pr.add_step("B", "moi");
+        pr.claim_step(&b, "ailleurs").unwrap();
+        for issue in [StepIssue::Finished, StepIssue::Interrupted, blocked] {
+            assert!(!pr.end_step(&b, "ici", &issue));
+        }
+        assert_eq!(pr.steps[1].held_by, "ailleurs");
     }
 
     /// The author of a step is said in words: a bare « — moi » read as « kept for the
