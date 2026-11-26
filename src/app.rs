@@ -53,6 +53,8 @@ enum Action {
     LaunchStep(String, String),
     /// Show the Orchestration page.
     ShowOrchestra,
+    /// « Regarder » on a step's live line: the Orchestration page, on that session's terminal.
+    WatchRun(String),
     /// Open a project's « Réglages de lancement ».
     LaunchSettings(String),
     /// « Gérer les membres… » on a team project's page: the space's administration window.
@@ -965,6 +967,7 @@ impl NotesApp {
                 }
                 Action::LaunchAuto(_) | Action::LaunchStep(..) => {}
                 Action::ShowOrchestra => self.view = View::Orchestra,
+                Action::WatchRun(run) => self.watch_run(run),
                 Action::LaunchSettings(id) => self.launch_settings = Some(id),
                 Action::ManageMembers => {
                     self.admin_open = true;
@@ -1129,6 +1132,14 @@ impl NotesApp {
                     ui.vertical(|ui| {
                         ui.set_width(width);
                         let t = tone(ui.visuals().dark_mode);
+                        // The sessions on this project's steps (read before the page is
+                        // borrowed to be edited).
+                        let step_sessions = self
+                            .ws
+                            .page(&cur)
+                            .and_then(|p| p.project.as_ref())
+                            .map(|pr| self.orch.step_sessions(&cur, &pr.steps, &self.ws.runs))
+                            .unwrap_or_default();
                         let page = self.ws.page_mut(&cur).unwrap();
                         let header_key = egui::Id::unique(("page-header", &page.id));
                         let header_hovered = ui
@@ -1268,6 +1279,7 @@ impl NotesApp {
                                         msg: None,
                                         reviewing,
                                         running,
+                                        step_sessions,
                                         can_launch,
                                         peers,
                                         vers: &mut self.versions,

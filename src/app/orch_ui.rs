@@ -134,6 +134,17 @@ fn fresh_after_pause(paused_ms: u64) -> bool {
 }
 
 impl LiveRun {
+    /// Where the session stands, in a word or two.
+    fn state_text(&self) -> String {
+        match self.phase {
+            Phase::Starting(_) => crate::tr!("démarre", "starting").to_string(),
+            Phase::Summary(_) => crate::tr!("compte rendu", "summary").to_string(),
+            Phase::Closing(_) => crate::tr!("se ferme", "closing").to_string(),
+            Phase::Waiting => crate::tr!("en pause", "paused").to_string(),
+            _ => crate::trf!("tour {}", "turn {}", self.turns + 1),
+        }
+    }
+
     /// Give the AI its next prompt: typed into its terminal, or for an agent driven turn by
     /// turn in headless mode (Mistral Vibe), handed to the loop running its turns
     /// (`Agent::send_turn`), which starts the run at once (no Enter to press).
@@ -248,8 +259,7 @@ impl LiveRun {
             }
             Wait::Permission => {
                 self.phase = Phase::Working(now);
-                self.last_line =
-                    crate::trf!("Tour {} en cours…", "Turn {} running…", self.turns + 1);
+                self.last_line = turn_running(self.turns);
             }
             // Past the cache's life, the history would be paid again in full: a new
             // conversation, from get_project_state (where the answer now is).
@@ -598,6 +608,63 @@ pub struct Orch {
     screen_dismissed: bool,
 }
 
+impl Orch {
+    /// The running sessions of `project`, each with the step it is on, for that step's row.
+    pub(super) fn step_sessions(
+        &self,
+        project: &str,
+        steps: &[crate::project::Step],
+        records: &[crate::model::RunRecord],
+    ) -> Vec<super::projects::StepSession> {
+        let me = crate::store::computer_id();
+        self.runs
+            .iter()
+            .filter(|r| r.project == project)
+            .filter_map(|r| {
+                let step = session_step(sent_on(records, &r.id), steps, &holder_of(r.agent, &me))?;
+                Some(super::projects::StepSession {
+                    run: r.id.clone(),
+                    step: step.id.clone(),
+                    state: r.state_text(),
+                    // « Tour 2 en cours… » only says the state again.
+                    detail: if r.last_line == turn_running(r.turns) {
+                        String::new()
+                    } else {
+                        r.last_line.clone()
+                    },
+                    waiting: r.waiting.is_some(),
+                })
+            })
+            .collect()
+    }
+}
+
+/// The only step the session `run` was sent on (« Lancer » on its line); empty: none.
+fn sent_on<'a>(records: &'a [crate::model::RunRecord], run: &str) -> &'a str {
+    records
+        .iter()
+        .find(|x| x.id == run)
+        .map_or("", |x| x.step.as_str())
+}
+
+/// The step a session is on: the one it was sent on, else the one it is doing (`holder`:
+/// see `current_step`).
+fn session_step<'a>(
+    sent_on: &str,
+    steps: &'a [crate::project::Step],
+    holder: &str,
+) -> Option<&'a crate::project::Step> {
+    if sent_on.is_empty() {
+        current_step(steps, holder)
+    } else {
+        steps.iter().find(|s| s.id == sent_on)
+    }
+}
+
+fn turn_running(turns: u32) -> String {
+    crate::trf!("Tour {} en cours…", "Turn {} running…", turns + 1)
+}
+
 /// An endless session whose work goes into main by itself: hours of unreviewed commits
 /// land on the main branch. Worth a warning before it starts.
 fn endless_on_main(endless: bool, to_main: bool) -> bool {
@@ -687,6 +754,12 @@ fn hash(s: &str) -> u64 {
 }
 
 impl NotesApp {
+    /// The Orchestration page, with the terminal of the running session `run` open.
+    pub(super) fn watch_run(&mut self, run: String) {
+        self.orch.watching = Some(run);
+        self.view = View::Orchestra;
+    }
+
     /// The project's effort level (economy slider) as the launch card shows it: the draft
     /// of the card and the choices kept in the project change together.
     pub(super) fn project_saving(&self, pid: &str) -> crate::model::Saving {
@@ -1392,7 +1465,7 @@ impl NotesApp {
                         r.last_line = if r.summarizing {
                             crate::tr!("Rédige son compte rendu…", "Writing its summary…").into()
                         } else {
-                            crate::trf!("Tour {} en cours…", "Turn {} running…", r.turns + 1)
+                            turn_running(r.turns)
                         };
                     }
                 }
@@ -2818,9 +2891,9 @@ impl NotesApp {
             .filter_map(|r| {
                 let steps = &self.ws.page(&r.project)?.project.as_ref()?.steps;
                 // Under the name of this session's AI, so two sessions each show their own step.
-                let holder = r.agent.holder();
-                let who = if holder.is_empty() { me.clone() } else { format!("{me}#{holder}") };
-                Some((r.id.clone(), current_step(steps, &who)?.to_string()))
+                let who = holder_of(r.agent, &me);
+                let step = session_step(sent_on(&self.ws.runs, &r.id), steps, &who)?;
+                Some((r.id.clone(), step.title.clone()))
             })
             .collect();
         // Each session's model, and why it was chosen (its record, written at launch).
@@ -2936,15 +3009,7 @@ impl NotesApp {
                                 .allocate_exact_size(egui::vec2(12.0, 18.0), egui::Sense::hover());
                             super::projects::pulse_dot(ui, dot.center(), super::projects::GREEN);
                             ui.label(RichText::new(&r.title).font(semibold(14.5)).color(t.text));
-                            let state = match r.phase {
-                                Phase::Starting(_) => crate::tr!("démarre", "starting").to_string(),
-                                Phase::Summary(_) => {
-                                    crate::tr!("compte rendu", "summary").to_string()
-                                }
-                                Phase::Closing(_) => crate::tr!("se ferme", "closing").to_string(),
-                                Phase::Waiting => crate::tr!("en pause", "paused").to_string(),
-                                _ => format!("tour {}", r.turns + 1),
-                            };
+                            let state = r.state_text();
                             let state_color = if r.waiting.is_some() {
                                 super::projects::ORANGE
                             } else {
@@ -4579,9 +4644,12 @@ fn steps_since(before: &[(String, bool)], steps: &[crate::project::Step]) -> Ste
     }
 }
 
-/// The step a session is on: « doing » and reserved by this computer (`me`), or not
+/// The step a session is doing: « doing » and reserved by this computer (`me`), or not
 /// reserved at all; the most recently changed when there are several.
-fn current_step<'a>(steps: &'a [crate::project::Step], me: &str) -> Option<&'a str> {
+fn current_step<'a>(
+    steps: &'a [crate::project::Step],
+    me: &str,
+) -> Option<&'a crate::project::Step> {
     steps
         .iter()
         .filter(|s| {
@@ -4589,7 +4657,6 @@ fn current_step<'a>(steps: &'a [crate::project::Step], me: &str) -> Option<&'a s
                 && (s.held_by.is_empty() || s.held_by == me)
         })
         .max_by_key(|s| s.updated)
-        .map(|s| s.title.as_str())
 }
 
 /// Open steps the person added (typed, accepted, received) since the turn began: `at_turn`
@@ -7643,25 +7710,30 @@ mod tests {
         use crate::project::{Project, StepStatus};
         let mut p = Project::default();
         let a = p.add_step("A faire", "moi");
-        assert_eq!(super::current_step(&p.steps, "ici"), None);
+        assert!(super::current_step(&p.steps, "ici").is_none());
         let b = p.add_step("Chez un autre", "moi");
         p.set_step_status(&b, StepStatus::Doing);
         p.steps.iter_mut().find(|s| s.id == b).unwrap().held_by = "ailleurs".into();
-        assert_eq!(
-            super::current_step(&p.steps, "ici"),
-            None,
+        assert!(
+            super::current_step(&p.steps, "ici").is_none(),
             "reserved by another computer"
         );
         p.set_step_status(&a, StepStatus::Doing);
         p.steps.iter_mut().find(|s| s.id == a).unwrap().held_by = "ici".into();
-        assert_eq!(super::current_step(&p.steps, "ici"), Some("A faire"));
+        let title = |p: &Project| super::current_step(&p.steps, "ici").map(|s| s.title.clone());
+        assert_eq!(title(&p).as_deref(), Some("A faire"));
+        // Sent on one step, that one is shown whatever the others are; gone, none.
+        let on = |id: &str| super::session_step(id, &p.steps, "ici").map(|s| s.id.clone());
+        assert_eq!(on(&b), Some(b.clone()));
+        assert_eq!(on(""), Some(a.clone()));
+        assert_eq!(on("disparue"), None);
         let c = p.add_step("Plus récente", "moi");
         p.set_step_status(&c, StepStatus::Doing);
         p.steps.iter_mut().find(|s| s.id == c).unwrap().updated = u64::MAX;
-        assert_eq!(super::current_step(&p.steps, "ici"), Some("Plus récente"));
+        assert_eq!(title(&p).as_deref(), Some("Plus récente"));
         p.set_step_status(&c, StepStatus::Done);
         p.set_step_status(&a, StepStatus::Done);
-        assert_eq!(super::current_step(&p.steps, "ici"), None);
+        assert!(super::current_step(&p.steps, "ici").is_none());
     }
 
     /// Steps the person adds during a turn reach the AI on the next one, even after a [[FINI]].

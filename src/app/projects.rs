@@ -1141,6 +1141,8 @@ pub(super) struct Cx<'a> {
     pub reviewing: bool,
     /// An autonomous session runs on this project now.
     pub running: bool,
+    /// The steps those sessions are on, with where each stands, for their rows.
+    pub step_sessions: Vec<StepSession>,
     /// An AI able to work alone is plugged in (Claude Code): « Lancer une IA » can start.
     pub can_launch: bool,
     /// Who else is in this (shared) project right now, and whether their AI is at work.
@@ -1156,6 +1158,55 @@ pub(super) struct Cx<'a> {
     pub answered: &'a mut Option<(String, String)>,
     /// The team space of a project with members (`Project::members`), for their card.
     pub team: super::members_ui::TeamCx,
+}
+
+/// A running autonomous session, as the row of the step it is on says it.
+#[derive(Clone, Debug, Default)]
+pub(super) struct StepSession {
+    pub run: String,
+    pub step: String,
+    /// « tour 2 », « démarre »…
+    pub state: String,
+    /// What it last said or does; paused: why. May be empty.
+    pub detail: String,
+    /// Paused, waiting for the person.
+    pub waiting: bool,
+}
+
+/// Under a step's row, the session at work on it, live: a breathing dot, where it stands
+/// and the way to its terminal. True when that is asked.
+fn step_session_line(ui: &mut egui::Ui, live: &StepSession, indent: f32, t: &Tone) -> bool {
+    let color = if live.waiting { ORANGE } else { GREEN };
+    let text = if live.waiting && !live.detail.is_empty() {
+        // The reason says it is paused.
+        live.detail.clone()
+    } else {
+        [live.state.as_str(), live.detail.as_str()]
+            .into_iter()
+            .filter(|x| !x.is_empty())
+            .collect::<Vec<_>>()
+            .join(" · ")
+    };
+    let mut watch = false;
+    ui.horizontal(|ui| {
+        ui.add_space(indent);
+        let (dot, _) = ui.allocate_exact_size(egui::vec2(12.0, 18.0), egui::Sense::hover());
+        pulse_dot(ui, dot.center(), color);
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            watch = link(ui, crate::tr!("Regarder", "Watch"));
+            ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
+                let color = if live.waiting { ORANGE } else { t.secondary };
+                let mut job = egui::text::LayoutJob::single_section(
+                    text.clone(),
+                    egui::TextFormat::simple(FontId::proportional(12.5), color),
+                );
+                job.wrap = egui::text::TextWrapping::truncate_at_width(ui.available_width());
+                let r = cut_label(ui, job).on_hover_text(&text);
+                r.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Label, true, &text));
+            });
+        });
+    });
+    watch
 }
 
 #[derive(Clone, Copy)]
@@ -2082,6 +2133,7 @@ fn steps_card(ui: &mut egui::Ui, cx: &mut Cx, extra: f32) -> f32 {
     let me = cx.team.me.as_str();
     let (running, can_launch) = (cx.running, cx.can_launch);
     let actions = &mut *cx.actions;
+    let sessions = cx.step_sessions.as_slice();
     // ---- Steps: open ones first, one line each; done ones folded.
     let (done, total) = pr.progress();
     let (start, width) = (ui.cursor().min, ui.available_width());
@@ -2213,7 +2265,8 @@ fn steps_card(ui: &mut egui::Ui, cx: &mut Cx, extra: f32) -> f32 {
                 let offer = !ro
                     && s.agent.is_some()
                     && s.status != StepStatus::Done
-                    && !(running && s.status == StepStatus::Doing);
+                    && !(running && s.status == StepStatus::Doing)
+                    && !sessions.iter().any(|x| x.step == s.id);
                 let room = ui.available_width() - if offer { 26.0 + STEP_LAUNCH_W } else { 26.0 };
                 let mut job = super::rich::inline_job(text, TEXT, color, false, t);
                 if s.status == StepStatus::Done {
@@ -2343,10 +2396,20 @@ fn steps_card(ui: &mut egui::Ui, cx: &mut Cx, extra: f32) -> f32 {
                 });
                 resp
             });
+            // The sessions at work on this step, right under it: part of its row.
+            let mut row_rect = row.response.rect;
+            for live in sessions.iter().filter(|x| x.step == s.id) {
+                let indent = if ro { 4.0 } else { 26.0 };
+                let line = ui.scope(|ui| step_session_line(ui, live, indent, t));
+                row_rect = row_rect.union(line.response.rect);
+                if line.inner {
+                    actions.push(Action::WatchRun(live.run.clone()));
+                }
+            }
             hover_end(
                 ui,
                 bg,
-                row.response.rect,
+                row_rect,
                 egui::Id::unique(("step-row", &s.id)),
                 t,
             );
@@ -2359,15 +2422,15 @@ fn steps_card(ui: &mut egui::Ui, cx: &mut Cx, extra: f32) -> f32 {
             });
             if moving {
                 ui.painter().rect_filled(
-                    row.response.rect.expand2(egui::vec2(6.0, 2.0)),
+                    row_rect.expand2(egui::vec2(6.0, 2.0)),
                     6.0,
                     BLUE.gamma_multiply(0.08),
                 );
             }
             if s.status != StepStatus::Done {
-                open_rows.push((g, s.id.clone(), row.response.rect));
+                open_rows.push((g, s.id.clone(), row_rect));
                 if let Some((_, block)) = blocks.last_mut().filter(|b| b.0 == g) {
-                    *block = block.union(row.response.rect);
+                    *block = block.union(row_rect);
                 }
             }
             if row.inner.clicked() {
@@ -3171,6 +3234,50 @@ mod new_step_field_tests {
         assert!(h.query_by_label("Lancer").is_none(), "finished");
     }
 
+    /// A session at work on a step shows live under its row, folded or not: where it
+    /// stands, its terminal one click away, and no second « Lancer » meanwhile.
+    #[test]
+    fn a_step_shows_the_session_at_work_on_it() {
+        let mut h = harness(|ui, cx| {
+            steps_card(ui, cx, 0.0);
+        });
+        let pr = &mut h.state_mut().pr;
+        pr.folder = "/tmp/projet".into();
+        let id = pr.add_step("Tester", "moi");
+        pr.set_step_agent(&id, Some(crate::auto::Agent::Codex));
+        h.run();
+        h.get_by_label("Lancer");
+        assert!(h.query_by_label("Regarder").is_none(), "no session, no line");
+        h.state_mut().sessions = vec![StepSession {
+            run: "r1".into(),
+            step: id.clone(),
+            state: "tour 2".into(),
+            detail: "Lance les tests".into(),
+            waiting: false,
+        }];
+        // The dot breathes: the card never settles, so a few frames rather than `run`.
+        h.run_steps(3);
+        h.get_by_label("tour 2 · Lance les tests");
+        assert!(h.query_by_label("Lancer").is_none(), "already at work");
+        h.get_by_label("Regarder").click();
+        h.run_steps(3);
+        assert!(h.state().actions.iter().any(
+            |a| matches!(a, Action::WatchRun(r) if r == "r1")
+        ));
+        // Paused: the reason alone.
+        let live = &mut h.state_mut().sessions[0];
+        live.waiting = true;
+        live.state = "en pause".into();
+        live.detail = "En pause : Claude Code demande une autorisation.".into();
+        h.run_steps(3);
+        h.get_by_label("En pause : Claude Code demande une autorisation.");
+        // On another step, nothing here.
+        h.state_mut().sessions[0].step = "ailleurs".into();
+        h.run_steps(3);
+        assert!(h.query_by_label("Regarder").is_none());
+        h.get_by_label("Lancer");
+    }
+
     /// Without a team there is nobody to name: no « Responsable » menu.
     #[test]
     fn a_project_without_members_offers_no_responsible_person() {
@@ -3192,6 +3299,7 @@ mod new_step_field_tests {
         vers: super::super::versions::Versions,
         ai: super::super::ai_fill::AiJobs,
         actions: Vec<Action>,
+        sessions: Vec<StepSession>,
         answered: Option<(String, String)>,
         /// Drawn only once the app's fonts are in (the card's labels need them).
         draw: bool,
@@ -3222,6 +3330,7 @@ mod new_step_field_tests {
                     msg: None,
                     reviewing: false,
                     running: false,
+                    step_sessions: s.sessions.clone(),
                     can_launch: true,
                     peers: vec![],
                     vers: &mut s.vers,
