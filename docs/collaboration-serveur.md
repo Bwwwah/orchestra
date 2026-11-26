@@ -1,7 +1,7 @@
 # Collaboration : espaces et serveur auto-hébergeable
 
-Plan de la version collaborative (branche `collaboratif`, dépôt privé). Rien de tout cela n'est
-dans `main` tant que ce n'est pas prêt.
+Plan de la version collaborative : espaces d'équipe, serveur auto-hébergeable et écriture
+simultanée.
 
 ## Ce qu'il y avait avant
 
