@@ -53,6 +53,8 @@ enum Action {
     ShowOrchestra,
     /// Open a project's « Réglages de lancement ».
     LaunchSettings(String),
+    /// « Gérer les membres… » on a team project's page: the space's administration window.
+    ManageMembers,
 }
 
 pub struct NotesApp {
@@ -962,6 +964,10 @@ impl NotesApp {
                 Action::LaunchAuto(_) => {}
                 Action::ShowOrchestra => self.view = View::Orchestra,
                 Action::LaunchSettings(id) => self.launch_settings = Some(id),
+                Action::ManageMembers => {
+                    self.admin_open = true;
+                    self.send_admin(crate::team::AdminOp::List);
+                }
                 Action::LocalCopy(id) => {
                     if let Some(n) = self.ws.local_copy(&id) {
                         self.info(crate::tr!("Copie locale créée : elle reste privée et ne suit plus le projet partagé.", "Local copy created: it stays private and no longer follows the shared project."));
@@ -1239,7 +1245,17 @@ impl NotesApp {
                                     let can_launch = self.ais.plugged().contains(&crate::setup::Ai::ClaudeCode);
                                     let peers = peers.clone();
                                     let launchers = self.ais.launchers();
+                                    let team = if pr.members.is_empty() {
+                                        Default::default()
+                                    } else {
+                                        let connected = self
+                                            .live
+                                            .as_ref()
+                                            .is_some_and(|l| l.status().connected);
+                                        members_ui::team_cx(ui.ctx(), connected)
+                                    };
                                     let mut cx = projects::Cx {
+                                        team,
                                         page_id: &page_id,
                                         pr,
                                         new_step: &mut self.new_step,
@@ -3075,6 +3091,7 @@ mod ai_ui;
 mod chrome;
 mod conductor;
 mod live_ui;
+mod members_ui;
 mod notices;
 mod orch_ui;
 mod projects;

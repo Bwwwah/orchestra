@@ -178,7 +178,7 @@ fn person_color(name: &str) -> Color32 {
     COLORS[(h % 8) as usize]
 }
 
-fn face(ui: &mut egui::Ui, name: &str) {
+pub(super) fn face(ui: &mut egui::Ui, name: &str) {
     let (r, _) = ui.allocate_exact_size(egui::vec2(26.0, 26.0), egui::Sense::hover());
     ui.painter()
         .circle_filled(r.center(), 13.0, person_color(name));

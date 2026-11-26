@@ -1154,6 +1154,8 @@ pub(super) struct Cx<'a> {
     pub questions: &'a [crate::model::InboxMsg],
     /// An answer typed in the Questions card: (inbox message id, text), saved by the caller.
     pub answered: &'a mut Option<(String, String)>,
+    /// The team space of a project with members (`Project::members`), for their card.
+    pub team: super::members_ui::TeamCx,
 }
 
 #[derive(Clone, Copy)]
@@ -1168,6 +1170,8 @@ enum CardKind {
     /// Known vulnerabilities of the dependencies (code projects).
     Watch,
     Questions,
+    /// The people and AIs of the team space (team projects).
+    Members,
 }
 
 fn draw(ui: &mut egui::Ui, cx: &mut Cx, k: CardKind, extra: f32) -> f32 {
@@ -1175,7 +1179,7 @@ fn draw(ui: &mut egui::Ui, cx: &mut Cx, k: CardKind, extra: f32) -> f32 {
     let order = match k {
         CardKind::Summary(_) => 0.0,
         CardKind::Steps | CardKind::Questions => 1.0,
-        CardKind::NewSession | CardKind::Sessions | CardKind::Pages => 2.0,
+        CardKind::NewSession | CardKind::Sessions | CardKind::Pages | CardKind::Members => 2.0,
         CardKind::Versions | CardKind::Watch => 3.0,
     };
     let t0: f64 = ui
@@ -1225,6 +1229,14 @@ fn draw_card(ui: &mut egui::Ui, cx: &mut Cx, k: CardKind, extra: f32) -> f32 {
         CardKind::Sessions => sessions_card(ui, cx, extra),
         CardKind::Pages => pages_card(ui, cx, extra),
         CardKind::Questions => questions_card(ui, cx, extra),
+        CardKind::Members => {
+            let (h, manage) =
+                super::members_ui::members_card(ui, &cx.pr.members, &cx.team, cx.t, extra);
+            if manage {
+                cx.actions.push(Action::ManageMembers);
+            }
+            h
+        }
         CardKind::Watch => {
             let folder = cx.pr.folder.trim().to_string();
             super::watch::watch_card(ui, cx.page_id, &folder, &mut cx.pr.cve_watch, cx.t, extra)
@@ -1250,6 +1262,7 @@ fn card_key(page_id: &str, k: CardKind) -> egui::Id {
         CardKind::Versions => "versions",
         CardKind::Watch => "watch",
         CardKind::Questions => "questions",
+        CardKind::Members => "members",
     };
     egui::Id::unique(("card-h", page_id, name))
 }
@@ -1265,6 +1278,7 @@ fn card_key_name(k: CardKind) -> &'static str {
         CardKind::Versions => "card:versions",
         CardKind::Watch => "card:watch",
         CardKind::Questions => "card:questions",
+        CardKind::Members => "card:members",
     }
 }
 
@@ -1495,7 +1509,7 @@ pub(super) fn project_panel(ui: &mut egui::Ui, cx: &mut Cx) -> Option<super::not
     // The rest in tabs: the overview (where it stands, what is left, the sessions) is what
     // one comes for; versions, the watch, the pages and the outside view are a click away.
     let code = shows_git(ui.ctx(), cx.pr);
-    let tabs = project_tabs(code);
+    let tabs = project_tabs(code, !cx.pr.members.is_empty());
     let tab_key = egui::Id::unique(("project-tab", cx.page_id));
     let mut tab: ProjectTab = ui.ctx().data(|d| d.get_temp(tab_key)).unwrap_or_default();
     // A tour pointing at a card shows its tab.
@@ -1555,6 +1569,9 @@ pub(super) fn project_panel(ui: &mut egui::Ui, cx: &mut Cx) -> Option<super::not
             columns(ui, cx, &[vec![Pages]], gap);
         }
         ProjectTab::Review => review_card(ui, cx),
+        ProjectTab::Members => {
+            columns(ui, cx, &[vec![Members]], gap);
+        }
     }
     cx.msg.take()
 }
@@ -1729,6 +1746,7 @@ pub(super) enum ProjectTab {
     Watch,
     Pages,
     Review,
+    Members,
 }
 
 impl ProjectTab {
@@ -1739,17 +1757,22 @@ impl ProjectTab {
             ProjectTab::Watch => crate::tr!("Veille CVE", "CVE watch"),
             ProjectTab::Pages => crate::tr!("Pages", "Pages"),
             ProjectTab::Review => crate::tr!("Regard extérieur", "Outside view"),
+            ProjectTab::Members => crate::tr!("Membres", "Members"),
         }
     }
 }
 
-/// The tabs shown: versions and the vulnerability watch only for code projects.
-pub(super) fn project_tabs(code: bool) -> Vec<ProjectTab> {
+/// The tabs shown: versions and the vulnerability watch only for code projects, the
+/// members only for a project of a team space.
+pub(super) fn project_tabs(code: bool, team: bool) -> Vec<ProjectTab> {
     let mut v = vec![ProjectTab::Overview];
     if code {
         v.extend([ProjectTab::Versions, ProjectTab::Watch]);
     }
     v.extend([ProjectTab::Pages, ProjectTab::Review]);
+    if team {
+        v.push(ProjectTab::Members);
+    }
     v
 }
 
@@ -1761,6 +1784,7 @@ pub(super) fn tab_of_mark(mark: &str) -> Option<ProjectTab> {
         "card:versions" => ProjectTab::Versions,
         "card:watch" => ProjectTab::Watch,
         "card:pages" => ProjectTab::Pages,
+        "card:members" => ProjectTab::Members,
         _ => return None,
     })
 }
@@ -2940,6 +2964,7 @@ mod new_step_field_tests {
                     ai: &mut s.ai,
                     questions: &[],
                     answered: &mut s.answered,
+                    team: Default::default(),
                 };
                 draw(ui, &mut cx);
             },
@@ -3050,8 +3075,10 @@ mod card_layout_tests {
     #[test]
     fn project_tabs_follow_the_kind_of_project() {
         use ProjectTab::*;
-        assert_eq!(project_tabs(true), [Overview, Versions, Watch, Pages, Review]);
-        assert_eq!(project_tabs(false), [Overview, Pages, Review]);
+        assert_eq!(project_tabs(true, false), [Overview, Versions, Watch, Pages, Review]);
+        assert_eq!(project_tabs(false, false), [Overview, Pages, Review]);
+        assert_eq!(project_tabs(false, true), [Overview, Pages, Review, Members]);
+        assert_eq!(tab_of_mark("card:members"), Some(Members));
         assert_eq!(ProjectTab::default(), Overview);
         assert_eq!(tab_of_mark("card:versions"), Some(Versions));
         assert_eq!(tab_of_mark("card:sessions"), Some(Overview));
