@@ -240,7 +240,7 @@ pub const RECEIVED_STEP_MAX: usize = 300;
 const RECEIVED_PERSON_MAX: usize = 200;
 
 /// A person's id as received: dropped unless it could be a person's.
-fn received_person(id: &str) -> String {
+pub(crate) fn received_person(id: &str) -> String {
     let ok = id.len() <= RECEIVED_PERSON_MAX
         && !id.chars().any(char::is_control)
         && !id.starts_with(crate::space::AI_MEMBER_PREFIX);
@@ -1511,10 +1511,17 @@ impl Workspace {
                     pr.shared = false;
                 }
             }
+            let mut moved = std::collections::HashMap::new();
             for b in p.blocks.iter_mut() {
-                b.id = new_id();
+                moved.insert(std::mem::replace(&mut b.id, new_id()), b.id.clone());
                 if let Some(n) = map.get(&b.extra) {
                     b.extra = n.clone();
+                }
+            }
+            // The comments follow their blocks.
+            for c in p.comments.values_mut() {
+                if let Some(n) = moved.get(&c.block) {
+                    c.block = n.clone();
                 }
             }
             p.deleted_blocks.clear();

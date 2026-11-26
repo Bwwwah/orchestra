@@ -393,6 +393,10 @@ pub struct Page {
     /// by several people at once are all moved. None elsewhere.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub order_crdt: Option<String>,
+    /// The comment threads of the page's blocks (see `Comment`): comment id -> comment,
+    /// deleted ones included so a merge doesn't bring them back.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub comments: BTreeMap<String, Comment>,
     /// Set when this page is an AI project (see `Project`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub project: Option<Project>,
@@ -418,6 +422,7 @@ impl Page {
             updated: t,
             deleted_blocks: BTreeMap::new(),
             order_crdt: None,
+            comments: BTreeMap::new(),
             project: None,
             source: None,
         }
@@ -1299,6 +1304,372 @@ mod agent_limit_tests {
     }
 }
 
+/// One comment on a block of a page. A thread is a first comment, anchored on the block, and
+/// its replies; resolving or deleting the first one is about the whole thread. A thread
+/// whose block is gone is kept (the block may come back with a merge).
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct Comment {
+    pub id: String,
+    /// First comment: the id of the block it is anchored on. Reply: empty.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub block: String,
+    /// Reply: the id of the thread's first comment. First comment: empty.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub reply_to: String,
+    /// The author's name when it was written, and their member id in a team space: as on a
+    /// message of the discussion (`ChatMsg`).
+    pub author: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub author_id: String,
+    pub text: String,
+    pub at: u64,
+    /// Its last change (written, text edited, resolved, reopened, deleted): when two copies
+    /// differ, the latest one wins.
+    pub updated: u64,
+    /// First comment: the thread is resolved.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub resolved: bool,
+    /// Deleted, for good: what is left (without its text) keeps it from coming back.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub deleted: bool,
+}
+
+impl Comment {
+    /// Whether another copy of this comment replaces this one. A deletion always wins; then
+    /// the latest change; two changes of the same time are settled alike on every computer.
+    fn gives_way_to(&self, other: &Comment) -> bool {
+        (other.deleted, other.updated, other.resolved, &other.text)
+            > (self.deleted, self.updated, self.resolved, &self.text)
+    }
+
+    /// As received from another computer: cut to the size of a discussion message, the
+    /// author on one short line.
+    fn received(&self) -> Comment {
+        use crate::project::{RECEIVED_AUTHOR_MAX, RECEIVED_CHAT_MAX};
+        let mut c = self.clone();
+        if c.text.chars().count() > RECEIVED_CHAT_MAX {
+            c.text = c.text.chars().take(RECEIVED_CHAT_MAX).collect::<String>() + "…";
+        }
+        c.author = crate::richtext::one_line(&c.author, RECEIVED_AUTHOR_MAX);
+        c.author_id = crate::project::received_person(&c.author_id);
+        c
+    }
+
+    #[allow(dead_code)] // Until the page shows the comments.
+    fn change(&mut self) {
+        self.updated = now_ms().max(self.updated + 1);
+    }
+}
+
+/// A thread as it is shown: its first comment and the replies, oldest first.
+#[derive(Debug)]
+#[allow(dead_code)] // Until the page shows the comments.
+pub struct CommentThread<'a> {
+    pub first: &'a Comment,
+    pub replies: Vec<&'a Comment>,
+}
+
+#[allow(dead_code)] // Until the page shows the comments.
+impl Page {
+    /// The comment threads of the page, oldest first, without what was deleted. Those of a
+    /// block that is gone are there too (`first.block` names no block of the page).
+    pub fn threads(&self) -> Vec<CommentThread<'_>> {
+        let mut replies: BTreeMap<&str, Vec<&Comment>> = BTreeMap::new();
+        let mut firsts: Vec<&Comment> = vec![];
+        for c in self.comments.values().filter(|c| !c.deleted) {
+            if c.reply_to.is_empty() {
+                firsts.push(c);
+            } else {
+                replies.entry(c.reply_to.as_str()).or_default().push(c);
+            }
+        }
+        firsts.sort_by_key(|c| (c.at, &c.id));
+        firsts
+            .into_iter()
+            .map(|first| {
+                let mut replies = replies.remove(first.id.as_str()).unwrap_or_default();
+                replies.sort_by_key(|c| (c.at, &c.id));
+                CommentThread { first, replies }
+            })
+            .collect()
+    }
+
+    /// Start a thread on a block of the page. Returns the comment's id; None for a block the
+    /// page doesn't have or an empty text.
+    pub fn add_comment(
+        &mut self,
+        block: &str,
+        text: &str,
+        author: &str,
+        author_id: &str,
+    ) -> Option<String> {
+        if !self.blocks.iter().any(|b| b.id == block) {
+            return None;
+        }
+        self.push_comment(block, "", text, author, author_id)
+    }
+
+    /// Answer a thread (`first`: the id of its first comment). A resolved thread stays so.
+    pub fn reply_comment(
+        &mut self,
+        first: &str,
+        text: &str,
+        author: &str,
+        author_id: &str,
+    ) -> Option<String> {
+        self.thread_start(first)?;
+        self.push_comment("", first, text, author, author_id)
+    }
+
+    /// Resolve a thread, or reopen it. Returns true when it changed.
+    pub fn set_thread_resolved(&mut self, first: &str, resolved: bool) -> bool {
+        if self.thread_start(first).is_none_or(|c| c.resolved == resolved) {
+            return false;
+        }
+        if let Some(c) = self.comments.get_mut(first) {
+            c.resolved = resolved;
+            c.change();
+        }
+        self.touch();
+        true
+    }
+
+    /// Change a comment's text. Returns true when it changed.
+    pub fn edit_comment(&mut self, id: &str, text: &str) -> bool {
+        let text = text.trim();
+        let Some(c) = self.comments.get_mut(id) else {
+            return false;
+        };
+        if c.deleted || text.is_empty() || c.text == text {
+            return false;
+        }
+        c.text = text.to_string();
+        c.change();
+        self.touch();
+        true
+    }
+
+    /// Delete a comment; the first one of a thread takes its replies with it. Returns true
+    /// when something was deleted.
+    pub fn delete_comment(&mut self, id: &str) -> bool {
+        let mut any = false;
+        if self.comments.get(id).is_none_or(|c| c.deleted) {
+            return any;
+        }
+        for c in self
+            .comments
+            .values_mut()
+            .filter(|c| !c.deleted && (c.id == id || c.reply_to == id))
+        {
+            c.deleted = true;
+            c.text.clear();
+            c.change();
+            any = true;
+        }
+        if any {
+            self.touch();
+        }
+        any
+    }
+
+    /// Bring another copy's comments into ours, comment by comment: new ones come in, each
+    /// keeps its latest change, deleted ones stay deleted. What comes in is cleaned.
+    pub fn merge_comments(&mut self, theirs: &BTreeMap<String, Comment>) {
+        for (id, c) in theirs {
+            if id.is_empty() || *id != c.id {
+                continue;
+            }
+            match self.comments.get_mut(id) {
+                Some(ours) => {
+                    if *ours != *c && ours.gives_way_to(c) {
+                        *ours = c.received();
+                    }
+                }
+                None => {
+                    self.comments.insert(id.clone(), c.received());
+                }
+            }
+        }
+    }
+
+    /// The first comment of a thread that still exists.
+    fn thread_start(&self, id: &str) -> Option<&Comment> {
+        self.comments
+            .get(id)
+            .filter(|c| !c.deleted && c.reply_to.is_empty())
+    }
+
+    fn push_comment(
+        &mut self,
+        block: &str,
+        reply_to: &str,
+        text: &str,
+        author: &str,
+        author_id: &str,
+    ) -> Option<String> {
+        let text = text.trim();
+        if text.is_empty() {
+            return None;
+        }
+        let at = now_ms();
+        let id = new_id();
+        self.comments.insert(
+            id.clone(),
+            Comment {
+                id: id.clone(),
+                block: block.into(),
+                reply_to: reply_to.into(),
+                author: author.into(),
+                author_id: author_id.into(),
+                text: text.into(),
+                at,
+                updated: at,
+                resolved: false,
+                deleted: false,
+            },
+        );
+        self.touch();
+        Some(id)
+    }
+}
+
+#[cfg(test)]
+mod comment_tests {
+    use super::{Page, Workspace};
+
+    fn texts(p: &Page) -> Vec<(String, Vec<String>, bool)> {
+        p.threads()
+            .iter()
+            .map(|t| {
+                (
+                    t.first.text.clone(),
+                    t.replies.iter().map(|r| r.text.clone()).collect(),
+                    t.first.resolved,
+                )
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_thread_is_anchored_answered_resolved_and_saved() {
+        let mut p = Page::new("P", None);
+        let block = p.blocks[0].id.clone();
+        assert!(p.add_comment("ailleurs", "non", "Moi", "").is_none());
+        assert!(p.add_comment(&block, "  ", "Moi", "").is_none());
+        p.updated = 0;
+        let first = p.add_comment(&block, " Question ? ", "Moi", "m1").unwrap();
+        assert!(p.updated > 0, "a comment is an edit of its page");
+        let reply = p.reply_comment(&first, "Réponse", "Camille", "").unwrap();
+        // Only a first comment is answered or resolved.
+        assert!(p.reply_comment(&reply, "non", "Moi", "").is_none());
+        assert!(!p.set_thread_resolved(&reply, true));
+        assert!(p.set_thread_resolved(&first, true));
+        assert!(!p.set_thread_resolved(&first, true));
+        assert_eq!(
+            texts(&p),
+            [("Question ?".into(), vec!["Réponse".to_string()], true)]
+        );
+        assert_eq!(p.threads()[0].first.block, block);
+        assert!(p.edit_comment(&reply, "Réponse précisée"));
+        let back: Page = serde_json::from_str(&serde_json::to_string(&p).unwrap()).unwrap();
+        assert_eq!(back.comments, p.comments);
+        // The thread outlives its block.
+        p.blocks.clear();
+        assert_eq!(p.threads().len(), 1);
+        // A page written before comments has none, and writes none.
+        let plain = serde_json::to_string(&Page::new("Vieille", None)).unwrap();
+        assert!(!plain.contains("comments"));
+        assert!(serde_json::from_str::<Page>(&plain).unwrap().comments.is_empty());
+    }
+
+    #[test]
+    fn deleting_the_first_comment_deletes_the_thread() {
+        let mut p = Page::new("P", None);
+        let block = p.blocks[0].id.clone();
+        let first = p.add_comment(&block, "un", "Moi", "").unwrap();
+        let reply = p.reply_comment(&first, "deux", "Moi", "").unwrap();
+        p.reply_comment(&first, "trois", "Moi", "").unwrap();
+        assert!(p.delete_comment(&reply));
+        assert_eq!(texts(&p), [("un".into(), vec!["trois".to_string()], false)]);
+        assert!(p.delete_comment(&first));
+        assert!(!p.delete_comment(&first));
+        assert!(p.threads().is_empty());
+        assert!(p.comments.values().all(|c| c.deleted && c.text.is_empty()));
+        assert!(!p.edit_comment(&first, "de retour"));
+    }
+
+    /// Two people comment the same page before seeing each other's changes: both copies end
+    /// up the same, whichever page was edited last.
+    #[test]
+    fn two_copies_merge_comment_by_comment() {
+        let mut base = Page::new("P", None);
+        let block = base.blocks[0].id.clone();
+        let first = base.add_comment(&block, "Question", "Moi", "").unwrap();
+        let old = base.reply_comment(&first, "à effacer", "Moi", "").unwrap();
+        let (mut a, mut b) = (base.clone(), base.clone());
+        a.reply_comment(&first, "de A", "A", "").unwrap();
+        a.set_thread_resolved(&first, true);
+        b.reply_comment(&first, "de B", "B", "").unwrap();
+        b.delete_comment(&old);
+        // A's later edit of what B deleted doesn't bring it back.
+        a.comments.get_mut(&old).unwrap().updated = u64::MAX - 1;
+        let (a0, b0) = (a.clone(), b.clone());
+        assert!(crate::collab::merge_page(&mut a, &b0));
+        assert!(crate::collab::merge_page(&mut b, &a0));
+        let want = [(
+            "Question".to_string(),
+            vec!["de A".to_string(), "de B".to_string()],
+            true,
+        )];
+        assert_eq!(texts(&a), want);
+        assert_eq!(texts(&b), want);
+        assert_eq!(a.comments, b.comments);
+        assert!(!crate::collab::merge_page(&mut a, &b));
+    }
+
+    #[test]
+    fn received_comments_are_cleaned() {
+        let mut theirs = Page::new("P", None);
+        let block = theirs.blocks[0].id.clone();
+        let long = "x".repeat(crate::project::RECEIVED_CHAT_MAX + 50);
+        let id = theirs
+            .add_comment(&block, &long, "Nom\nsur deux lignes", "pas\nun id")
+            .unwrap();
+        let mut stray = theirs.comments[&id].clone();
+        stray.id = "autre".into();
+        theirs.comments.insert("clé".into(), stray);
+        let mut merged = theirs.clone();
+        merged.comments.clear();
+        crate::collab::merge_page(&mut merged, &theirs);
+        let new = crate::collab::received_new(theirs);
+        for p in [&merged, &new] {
+            assert_eq!(p.comments.len(), 1);
+            let c = &p.comments[&id];
+            assert_eq!(c.text.chars().count(), crate::project::RECEIVED_CHAT_MAX + 1);
+            assert!(!c.author.contains('\n') && c.author_id.is_empty());
+        }
+    }
+
+    #[test]
+    fn copies_of_pages_and_projects() {
+        let mut ws = Workspace::default();
+        let id = ws.create_project("Projet", "");
+        let p = ws.page_mut(&id).unwrap();
+        let block = p.blocks[0].id.clone();
+        p.add_comment(&block, "ici", "Moi", "").unwrap();
+        // A duplicate starts without the discussion…
+        let twin = ws.duplicate(&id).unwrap();
+        assert!(ws.page(&twin).unwrap().comments.is_empty());
+        // …a local copy of a project keeps it, on the copied block.
+        let copy = ws.local_copy(&id).unwrap();
+        let c = ws.page(&copy).unwrap();
+        let t = c.threads();
+        assert_eq!(t.len(), 1);
+        assert_eq!(t[0].first.block, c.blocks[0].id);
+        assert_ne!(t[0].first.block, block);
+    }
+}
+
 /// One message of a project's team discussion.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub struct ChatMsg {
@@ -1910,6 +2281,8 @@ Cmd/Ctrl+P or K to search all pages.").into();
         for b in copy.blocks.iter_mut() {
             b.id = new_id();
         }
+        // The discussion stays on the original.
+        copy.comments.clear();
         let t = now_ms();
         copy.created = t;
         copy.updated = t;
