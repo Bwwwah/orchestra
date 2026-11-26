@@ -1430,6 +1430,8 @@ impl NotesApp {
         let mut term: Option<(String, String, Option<String>)> = None;
         let mut install: Option<Ai> = None;
         let installing = self.ais.installing.map(|(a, ..)| a);
+        let signing_in = self.ais.signing_in.is_some();
+        let mut sign_in = false;
         for ai in Ai::ALL {
             let st = states
                 .as_ref()
@@ -1452,7 +1454,18 @@ impl NotesApp {
                 .to_string(),
             };
             let plugged_in = st.as_ref().is_some_and(|x| x.plugged);
-            let desc = format!("{} · {state}", ai.what());
+            let mut desc = format!("{} · {state}", ai.what());
+            if let Some(account) = st.as_ref().and_then(|x| x.account.as_ref()) {
+                desc.push_str(" · ");
+                if ai == Ai::ClaudeCode && signing_in {
+                    desc.push_str(crate::tr!(
+                        "connexion en cours : terminez-la dans votre navigateur",
+                        "signing in: finish in your browser"
+                    ));
+                } else {
+                    desc.push_str(&account.describe());
+                }
+            }
             row(ui, ai.label(), &desc, t, |ui| {
                 if busy.as_deref() == Some(ai.key()) {
                     ui.add(egui::Spinner::new().size(16.0));
@@ -1473,10 +1486,21 @@ impl NotesApp {
                     } else if button(ui, crate::tr!("Brancher", "Plug in"), t, l).clicked() {
                         toggle = Some((ai, true));
                     }
-                    if let Some((cmd, input)) = ai.login()
-                        && button(ui, crate::tr!("Se connecter", "Sign in"), t, l).on_hover_text(crate::tr!("Ouvre l'IA dans le terminal intégré pour vous connecter à votre compte", "Opens the AI in the built-in terminal so you can sign in to your account")).clicked()
-                    {
-                        term = Some((ai.label().to_string(), cmd.to_string(), (!input.is_empty()).then(|| input.to_string())));
+                    if let Some((cmd, input)) = x.login() {
+                        let label = if x.account.as_ref().is_some_and(|a| a.signed_in()) {
+                            crate::tr!("Changer de compte", "Switch account")
+                        } else {
+                            crate::tr!("Se connecter", "Sign in")
+                        };
+                        let hover = if x.account.is_some() {
+                            crate::trf!("Lance « {cmd} » dans le terminal intégré : la connexion à votre compte se fait dans votre navigateur. Orchestra ne voit ni mot de passe ni jeton.", "Runs « {cmd} » in the built-in terminal: you sign in to your account in your browser. Orchestra sees no password or token.")
+                        } else {
+                            crate::tr!("Ouvre l'IA dans le terminal intégré pour vous connecter à votre compte", "Opens the AI in the built-in terminal so you can sign in to your account").to_string()
+                        };
+                        if button(ui, label, t, l).on_hover_text(hover).clicked() {
+                            sign_in = x.account.is_some();
+                            term = Some((ai.label().to_string(), cmd.to_string(), (!input.is_empty()).then(|| input.to_string())));
+                        }
                     }
                 } else {
                     match &x.install {
@@ -1487,7 +1511,14 @@ impl NotesApp {
                                 crate::tr!("Installer", "Install")
                             };
                             if button(ui, label, t, l)
-                                .on_hover_text(crate::trf!("Lance « {cmd} » dans le terminal intégré ({how}). Orchestra la branche dès qu'elle est installée.", "Runs « {cmd} » in the built-in terminal ({how}). Orchestra plugs it in as soon as it is installed."))
+                                .on_hover_text({
+                                    let mut hover = crate::trf!("Lance « {cmd} » dans le terminal intégré ({how}). Orchestra la branche dès qu'elle est installée.", "Runs « {cmd} » in the built-in terminal ({how}). Orchestra plugs it in as soon as it is installed.");
+                                    if ai == Ai::ClaudeCode {
+                                        hover.push(' ');
+                                        hover.push_str(crate::tr!("La connexion à votre compte s'ouvre ensuite dans votre navigateur.", "Signing in to your account then opens in your browser."));
+                                    }
+                                    hover
+                                })
                                 .clicked()
                             {
                                 term = Some((crate::trf!("Installation · {}", "Installing · {}", ai.label()), cmd.clone(), None));
@@ -1652,6 +1683,9 @@ impl NotesApp {
         }
         if let Some(ai) = install {
             self.watch_install(ai);
+        }
+        if sign_in {
+            self.watch_sign_in();
         }
         if let Some((title, cmd, input)) = term {
             let home = dirs::home_dir()

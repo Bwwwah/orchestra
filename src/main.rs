@@ -13,6 +13,7 @@ mod audit;
 mod auto;
 mod awake;
 mod catalog;
+mod claude_account;
 mod clip;
 mod collab;
 mod crdt;

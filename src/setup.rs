@@ -8,6 +8,7 @@
 //! An entry that already points to this program is left alone; one that points to an older
 //! copy (moved or rebuilt elsewhere) is updated. Nothing else in those files is touched.
 
+use crate::claude_account::Account;
 use crate::sessions::Tool;
 use crate::sync::{Agent, detect, shell_path};
 use serde_json::{Value, json};
@@ -442,6 +443,22 @@ pub struct AiState {
     pub plugged: bool,
     /// How to install it here, when it isn't (None: installed, or nothing to offer).
     pub install: Option<Install>,
+    /// The account Claude Code is signed in with. None for the other AIs, and when Claude
+    /// Code can't tell.
+    pub account: Option<Account>,
+}
+
+impl AiState {
+    /// What to type in a terminal to sign in (see `Ai::login`). A Claude Code that tells its
+    /// account has its own sign-in command, which goes straight to the browser; an older one
+    /// is started and asked with `/login`.
+    pub fn login(&self) -> Option<(&'static str, &'static str)> {
+        if self.account.is_some() {
+            Some((crate::claude_account::LOGIN_COMMAND, ""))
+        } else {
+            self.ai.login()
+        }
+    }
 }
 
 /// How to install an AI on this machine.
@@ -580,9 +597,27 @@ pub fn states() -> Vec<AiState> {
                 installed,
                 plugged: installed && plugged(ai, &path),
                 install,
+                account: if installed {
+                    account(ai, &path)
+                } else {
+                    None
+                },
             }
         })
         .collect()
+}
+
+/// The account `ai` is signed in with, for the one that tells it (Claude Code).
+fn account(ai: Ai, path: &str) -> Option<Account> {
+    match ai {
+        Ai::ClaudeCode => crate::claude_account::read(&ai.agent(path)?.bin, path),
+        _ => None,
+    }
+}
+
+/// Claude Code's account now (starts it: call it off the UI thread).
+pub fn claude_account_now() -> Option<Account> {
+    account(Ai::ClaudeCode, &shell_path())
 }
 
 /// Plug one AI into the dashboard.
@@ -815,6 +850,28 @@ mod tests {
                 .iter()
                 .all(|a| install_plan(*a, |_| false).is_some())
         );
+    }
+
+    #[test]
+    fn sign_in_uses_claude_codes_command_when_it_tells_its_account() {
+        let state = |ai, account| AiState {
+            ai,
+            installed: true,
+            plugged: true,
+            install: None,
+            account,
+        };
+        assert_eq!(
+            state(Ai::ClaudeCode, Some(Account::SignedOut)).login(),
+            Some(("claude auth login", ""))
+        );
+        // One too old to tell: started, then asked inside.
+        assert_eq!(
+            state(Ai::ClaudeCode, None).login(),
+            Some(("claude", "/login"))
+        );
+        assert_eq!(state(Ai::Codex, None).login(), Some(("codex login", "")));
+        assert_eq!(state(Ai::Cursor, None).login(), None);
     }
 
     #[test]

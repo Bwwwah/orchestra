@@ -83,10 +83,11 @@ impl NotesApp {
             return;
         }
         // The space's own AI for this agent: its settings in the environment, its options
-        // after the program's name.
+        // after the program's name. Signing in to one's own account takes none of them.
         let space_ai = r
             .cmd
             .as_deref()
+            .filter(|c| *c != crate::claude_account::LOGIN_COMMAND)
             .and_then(super::ai_ui::ai_of_command)
             .and_then(|ai| crate::space::ai_run(ai.key()));
         let cmd = match (&space_ai, r.cmd.as_deref()) {
